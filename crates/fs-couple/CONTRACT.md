@@ -17,6 +17,55 @@
 
 ## New sections (newest first)
 
+### The bows' omitted modes compose with geometric stretching and longitudinal waves (`MultipleTrial::stage`, `NonlinearInternalStorage::numerical_loss_j`)
+
+`with_friction_residual_ports` binds the bows' omitted-mode compliance `G` on their fixed ports (the example's `bow-residual-flexibility exact-static-green`). It
+refused any bound nonlinear storage, so the all-options violin cards were staged without the record (bead frankensim-zrvrx). No omitted endpoint velocity is
+involved: the tail is a static compliance on the ports' tractions, storing `F G F / 2` at the tractions `F` and declaring `dF G dF / 2` a step as numerical loss,
+which the linear ledger (`stage_multiple_once`) books. The nonlinear trial's joint balance lacked both terms: `MultipleTrial::stage` took its internal storage from
+the shear layers, Mindlin contacts and series drives only, and `stage_with_nonlinear`'s starting energy left the tail out.
+
+With the tail bound, the starting energy now adds `FrictionResidual::energy_j` at the accepted tractions, and each trial's internal storage adds the frame's
+`friction_residual_energy_j` at its staged tractions and carries `friction_residual_loss_j` in the new field `NonlinearInternalStorage::numerical_loss_j`. `iterate`
+adds that loss to the balance and to the energy scale, each only when it is nonzero, so a step without the tail keeps its bits. Beside fixed stops bound with the
+same residual flexibility (a9c5f2e777), the stops' own tail and the stop/bow cross part `-R G_sb t` were already in the trial's contact energy
+(`ObstacleSet::energy`, and the staged frames), so the joint form closes once the bow block is added. `admit_friction_residual` now refuses bound nonlinear material
+histories instead of any nonlinear storage; histories bound after the tail keep their own refusal (`with_mapped_material_histories`). Moving maps, Mindlin contacts
+and dry-interface source histories are refused as before. The old clause also refused a fiber ribbon with axial-transverse strain, which is bound before the tail
+like the string's strain laws; the bank's `with_bow_residual_flexibility` now refuses that ribbon by name ("bow residual flexibility does not carry nonlinear
+fiber strain"), since the tail has not been assessed against it.
+
+Three approximations are stated in the docs of `with_friction_residual_ports` and `with_bow_residual_flexibility` and in the example's README. The tail's compliance
+stays the static tension's while the tension moves. The nonlinear reaction acts on the retained modes only. The tail's own deflection adds nothing to the string's
+stretch. The record order is unchanged: `bow-residual-flexibility` goes right after `residual-flexibility` and before the strain-law record, and the other order
+does not parse. The README no longer lists fixed normal stops, the quasistatic `bow_compliance` ribbon or linear receiving fibers as refused: the stops are
+admitted since a9c5f2e777, the fibers since 80e7fea8a3, and the bin's `quasistatic_hair_and_omitted_string_bending_compose_without_retuning` composes the ribbon
+with the tail.
+
+Evidence (2026-11-21: a `git archive` export of 925f971b6e with the six files, `--locked --offline --jobs 2`, tests at one thread with CI's
+`RUST_MIN_STACK=33554432`). Three tests in the bin's tests/residual.rs play 1-sample blocks of `bowed()` with `longitudinal-waves`, and hold every step to the
+nonlinear owner with `|energy_residual_j| <= energy_tolerance_j` and the bow storage to the bound tail's `t G t / 2`. On a point bow
+(`the_bow_tail_beside_longitudinal_waves_closes_every_nonlinear_step_and_changes_the_sound`) the tail's loss exceeds the step's tolerance on 120 of 256 steps and
+its storage moves past it on 134. Beside a fixed stop held at 0.5 N from the static preload (`..._a_held_stop_and_longitudinal_waves_closes_the_joint_form_every_step`)
+the counts are 97 and 116, with the cross part past the tolerance on 137. On all--violin-B6's quasistatic `bow_compliance` ribbon over three cells
+(`..._a_compliant_ribbon_and_longitudinal_waves_closes_every_nonlinear_step`, a 3 x 3 tail) they are 93 and 126, with a series hair dashpot dissipating on 187. No
+frame field holds the hair springs' storage, so that test reads it only through the dissipation. Without the record, each card sounds different.
+`cargo test -p fs-couple --bin material_strings -- tests::residual::`: 12 passed. Five changes fail these tests:
+- the tail's storage and loss out of the nonlinear balance: all three refused for their energy balance at sample 69;
+- only the loss out: the same, each residual half the first change's, as a step from zero traction has `dF = F`;
+- the old refusal of any nonlinear storage: all three refused at bind;
+- the cross part out of the starting energy: the held stop, at sample 70;
+- the bank's fiber-strain refusal removed: `material_multi_bow`'s
+  `fiber_ribbon::residual::receiving_residual_uses_source_string_tail_without_replacing_fiber_or_bridge_work`.
+
+In the same run the base and the package fail the same tests of `modal_multi_friction` (1 of 38, bead frankensim-kva2b), `material_string_nonlinear` (7 of 49) and
+`material_multi_bow` (11 of 116; both bead frankensim-5telw). The bin's `fibers`, `shear_layers`, `normal_sources`, `nonlinear` and `longitudinal` modules (91
+tests) and `material_string_torsion`'s `polarization::` (26) pass on the package. Clippy, paired by place with the base: `iterate` grows from 192 to 195 lines, the
+storage struct gains `struct_field_names` (all its fields end in `_j`), and the bin's tests gain one `range_plus_one`. Viola D4 at `--workers 7`, a card that
+does not take this lane, on this package's binary (md5 aeeac387) against one built from 925f971b6e's source (39e992ed): the first 89472 frames, all that this
+package's 600 s render wrote, are byte-equal; both computed their shell modes (BrightOsprey's P8K and P7C, 2026-11-21), at different times, so they give no
+timing. Not tested: geometric stretching beside the tail, and linear receiving fibers under a card (only the library's `material_multi_bow` tests).
+
 ### The held air force's rounding bound is computed only past the tolerance (`upper_rows::held_force_defect`); `losses` continues the kept state sums
 
 With two-way air, `advance` holds each step's two port forces, the one the mechanics were held at and the one the air's own step implies, to

@@ -296,6 +296,125 @@ fn a_fixed_stop_and_the_bow_share_one_omitted_compliance_and_close_the_ledger() 
     });
 }
 
+// Bead zrvrx (MagentaBadger 36437, 36451): the bows' omitted modes beside bound longitudinal waves,
+// alone, beside a fixed stop held loaded from a static preload (the route of all--violin-B6, whose
+// finger stop is pressed by a held load at its station), and on all-B6's quasistatic
+// `bow_compliance` ribbon, whose three hair drives are series springs. The records go in the parser's order,
+// the bow tail right after the support tail and before the strain law; the other order does not
+// parse. Every nonlinear step books the bow tail's F G F / 2 and dF G dF / 2, and the stop's share
+// of the joint form, in its own balance. On some steps the tail's loss, the change of its storage
+// and the stop's cross part each exceed the step's energy tolerance: a balance missing the loss,
+// the storage at both ends, or the cross part at the start refuses that step.
+const LONGITUDINAL: &str = "longitudinal-waves 0.2 0.01 128 100000 1e-11 1e-10 2 1 2\n";
+fn bowed_longitudinal(bow_tail: bool, strain: bool, held: bool) -> String {
+    let records = format!("residual-flexibility exact-static-green\n{}{}cavity neck",
+        if bow_tail { "bow-residual-flexibility exact-static-green\n" } else { "" }, if strain { LONGITUDINAL } else { "" });
+    let text = bowed().replace("cavity neck", &records);
+    // 0.5 N held at the stop's station from the static preload: no later force rows.
+    if held { text.replace("forces retain 0 0", "forces preload 1 0\nport 0 0.43 centreline 0.5") } else { text }
+}
+fn parsed(text: &str) -> input::Spec { input::Spec::parse(text.as_bytes()).unwrap() }
+// Each sample: the nonlinear balance closes and the bow storage is the bound tail's t G t / 2 (and
+// with one bow port, the stop's R G_ss R / 2 - R G_sb t). Counts the frames whose tail loss, tail
+// storage change and stop/bow cross part exceed the frame's energy tolerance, the sticking and
+// sliding frames of port 0, and the frames where a series hair dashpot dissipates.
+fn tail_ledger(ready: &mut Ready, g: &[f64], stop: Option<(f64, f64)>) -> ([usize; 6], Vec<f64>) {
+    let (mut counts, mut stored) = ([0; 6], 0.0);
+    let mut out = vec![0.0; ready.spec.samples as usize];
+    for sample in 0..out.len() {
+        ready.performance.block(&mut out[sample..sample+1]).unwrap_or_else(|e| panic!("sample {sample}: {e:?}"));
+        let system = ready.performance.bank().system();
+        let frame = system.last_frame().unwrap();
+        assert!(frame.nonlinear.is_some(), "sample {sample}: the step left the nonlinear owner");
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j, "sample {sample}: {frame:?}");
+        let (t, tolerance): (Vec<f64>, f64) = (frame.ports.iter().map(|p| p.traction_n).collect(), frame.energy_tolerance_j);
+        let terms = || (0..t.len()).flat_map(|i| (0..t.len()).map(move |j| (i, j))).map(|(i, j)| 0.5*t[i]*g[i*t.len()+j]*t[j]);
+        let (bow, scale) = (terms().sum::<f64>(), terms().map(f64::abs).sum::<f64>());
+        assert!((frame.friction_residual_energy_j-bow).abs() <= 1e-12*scale+1e-300,
+            "sample {sample}: bow storage {:e} against {bow:e}", frame.friction_residual_energy_j);
+        if frame.friction_residual_loss_j > tolerance { counts[0] += 1; }
+        if (frame.friction_residual_energy_j-stored).abs() > tolerance { counts[1] += 1; }
+        stored = frame.friction_residual_energy_j;
+        if let Some((g_ss, g_sb)) = stop {
+            let stop = system.last_obstacle_frames().unwrap()[0];
+            let (r, got) = (stop.normal_force_n, stop.residual_energy_j);
+            let (own, cross) = (0.5*r*(g_ss*r), r*(g_sb*t[0]));
+            assert!((got-(own-cross)).abs() <= 1e-12*(own.abs()+cross.abs())+1e-300,
+                "sample {sample}: stop storage {got:e} against {:e}", own-cross);
+            if cross.abs() > tolerance && got != 0.0 && bow > 0.0 { counts[2] += 1; }
+        }
+        match format!("{:?}", frame.ports[0].regime).as_str() { "Sticking" => counts[3] += 1, "Sliding" => counts[4] += 1, _ => {} }
+        if frame.ports.iter().any(|port| port.series_drive_dissipation_j > 0.0) { counts[5] += 1; }
+    }
+    assert!(out.iter().any(|p| p.abs() > 1e-12));
+    (counts, out)
+}
+
+#[test]
+fn the_bow_tail_beside_longitudinal_waves_closes_every_nonlinear_step_and_changes_the_sound() {
+    scoped(|cx, gate| {
+        let swapped = bowed().replace("cavity neck", &format!(
+            "residual-flexibility exact-static-green\n{LONGITUDINAL}bow-residual-flexibility exact-static-green\ncavity neck"));
+        assert!(input::Spec::parse(swapped.as_bytes()).is_err(), "the bow tail after the strain law parsed");
+        let mut ready = compile(cx, gate, parsed(&bowed_longitudinal(true, true, false)), 7800.0);
+        assert!(ready.performance.bank().source().bank().longitudinal_waves().is_some());
+        let g = ready.performance.bank().system().friction_residual_compliance().unwrap().to_vec();
+        let (g_bb, (counts, sound)) = (g[0], tail_ledger(&mut ready, &g, None));
+        eprintln!("G_bb {g_bb:e}: loss past the tolerance {}, storage moved past it {}, sticking {}, sliding {}",
+            counts[0], counts[1], counts[3], counts[4]);
+        assert!(g_bb > 0.0 && counts[0] > 0 && counts[1] > 0 && counts[3] > 0 && counts[4] > 0, "{counts:?}");
+        // Removing either record changes the sound.
+        for (bow_tail, strain) in [(false, true), (true, false)] {
+            let other = pressure(&mut compile(cx, gate, parsed(&bowed_longitudinal(bow_tail, strain, false)), 7800.0), 1);
+            assert!(sound.iter().zip(&other).any(|(a, b)| (a-b).abs() > 1e-12), "bow tail {bow_tail}, strain {strain}");
+        }
+    });
+}
+
+#[test]
+fn the_bow_tail_beside_a_held_stop_and_longitudinal_waves_closes_the_joint_form_every_step() {
+    scoped(|cx, gate| {
+        let mut ready = stopped(cx, gate, parsed(&bowed_longitudinal(true, true, true))).unwrap();
+        let (g_ss, g_sb, g_bb) = {
+            let system = ready.performance.bank().system();
+            let report = *system.nonlinear_preload_diagnostics().unwrap();
+            assert!(report.force_residual <= report.force_tolerance);
+            (system.obstacle_residual_compliance().unwrap()[0], system.obstacle_port_residual_compliance().unwrap()[0],
+                system.friction_residual_compliance().unwrap()[0])
+        };
+        let (counts, sound) = tail_ledger(&mut ready, &[g_bb], Some((g_ss, g_sb)));
+        eprintln!("G_ss {g_ss:e} G_sb {g_sb:e} G_bb {g_bb:e}: loss past the tolerance {}, storage moved past it {}, \
+            cross part past it {}, sticking {}, sliding {}", counts[0], counts[1], counts[2], counts[3], counts[4]);
+        assert!(g_ss > 0.0 && g_sb != 0.0 && g_bb > 0.0 && counts[0] > 0 && counts[1] > 0 && counts[2] > 0, "{counts:?}");
+        let plain = pressure(&mut stopped(cx, gate, parsed(&bowed_longitudinal(false, true, true))).unwrap(), 1);
+        assert!(sound.iter().zip(&plain).any(|(a, b)| (a-b).abs() > 1e-12), "the bow tail leaves the stopped sound");
+    });
+}
+
+#[test]
+fn the_bow_tail_beside_a_compliant_ribbon_and_longitudinal_waves_closes_every_nonlinear_step() {
+    scoped(|cx, gate| {
+        // The string (16 modes: four per contact cell), ribbon and hair rows of compliant-ribbon.material-strings,
+        // with fibers.rs's synthetic hair pack.
+        let card = include_str!("../compliant-ribbon.material-strings");
+        let row = |head: &str| card.lines().find(|line| line.starts_with(head)).unwrap();
+        let make = |bow_tail| parsed(&bowed_longitudinal(bow_tail, true, false)
+            .replace("string wire.fsmatpk 0.5 0.0003 20 4 3 0.8 3000 0.1", row("string "))
+            .replace("forces retain 0 0", &format!("{}\n{}\nforces retain 0 0", row("bow_ribbon"), row("bow_compliance"))))
+            .compile(cx, gate, |name| Ok(if name.starts_with("bow-hair-") { super::fibers::quasistatic_pack(7e9, Some(1e6)) }
+                else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let mut ready = make(true);
+        assert!(ready.performance.bank().source().compliant_ribbon().is_some());
+        let g = ready.performance.bank().system().friction_residual_compliance().unwrap().to_vec();
+        let (counts, sound) = tail_ledger(&mut ready, &g, None);
+        eprintln!("G {g:?}: loss past the tolerance {}, storage moved past it {}, hair dashpot dissipating {}",
+            counts[0], counts[1], counts[5]);
+        assert!(g.len() == 9 && counts[0] > 0 && counts[1] > 0 && counts[5] > 0, "{counts:?}");
+        let plain = pressure(&mut make(false), 1);
+        assert!(sound.iter().zip(&plain).any(|(a, b)| (a-b).abs() > 1e-12), "the bow tail leaves the hair's sound");
+    });
+}
+
 #[test]
 fn bow_residual_requires_the_matching_support_tail_and_refuses_moving_stops() {
     scoped(|cx,gate| {

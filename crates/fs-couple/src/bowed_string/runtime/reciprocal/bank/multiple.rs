@@ -154,8 +154,12 @@ impl MultiBowStringBank {
     /// opposite traction while the same condensed bridge correction loads the
     /// retained body. Only the string's omitted bending modes enter this tail;
     /// fiber-span and width refinement remain independent. Moving normal contacts,
-    /// migrating bows, nonlinear stretching, Mindlin contacts and dry-interface
-    /// source histories remain outside this lane.
+    /// migrating bows, nonlinear material histories, Mindlin contacts and
+    /// dry-interface source histories remain outside this lane. Bound geometric
+    /// stretching or longitudinal waves keep the tail: each nonlinear step books
+    /// its storage and numerical loss, its compliance held at the static tension.
+    /// A fiber ribbon with axial-transverse strain refuses: the tail is not
+    /// assessed against nonlinear fiber strain.
     ///
     /// Beside FIXED string stops bound earlier with the same residual flexibility,
     /// the bows and stops share one omitted-mode compliance: the stop/bow block
@@ -169,6 +173,11 @@ impl MultiBowStringBank {
         poll(gate)?;
         if !self.source.bank.residual_flexibility() || self.bow_stations.is_some() {
             return Err(invalid("bow residual flexibility requires condensed bridges and fixed bow maps"));
+        }
+        // The friction owner admits nonlinear storage beside the tail, as the
+        // string's strain laws need; a strained ribbon's storage is refused here.
+        if self.source.fiber_ribbon.as_ref().is_some_and(|fiber| fiber.model().strain().is_some()) {
+            return Err(invalid("bow residual flexibility does not carry nonlinear fiber strain"));
         }
         let strings = self.source.bank.strings();
         let bows: Vec<_> = self.source.bows.iter().map(|bow| residual::ResidualStop {

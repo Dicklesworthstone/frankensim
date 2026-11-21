@@ -2504,12 +2504,22 @@ slips and attacks. It does not correct omitted torsional modes or external
 point-load response, and the bridge dashpot retains the first-order support
 approximation stated above.
 
-This lane admits fixed point bows and a fixed uniform ribbon on the linear
-material bank. It refuses normal stops (their bow/stop cross-compliance is not
-yet carried), moving bows, material compliant ribbons, receiving fibers,
-nonlinear stretching and source-bound friction histories (their omitted endpoint velocities are not
-resolved). Existing performances without this record are unchanged. These
-limits do not establish recording-level accuracy or a complete physical bow.
+This lane admits fixed point bows and a fixed uniform ribbon, its quasistatic
+`bow_compliance` included, beside fixed stops (the bows and stops share one
+omitted-mode compliance) and beside bound
+`geometric-stretching` or `longitudinal-waves`. With either strain law each
+step books the tail's `F G F / 2` and `delta_F G delta_F / 2`, and the stops'
+cross part, in its nonlinear energy balance. The tail's compliance is held at
+the static tension while the tension moves, and the tail's own deflection adds
+nothing to the string's stretch. The record still goes immediately after
+`residual-flexibility`, before the strain-law record. Linear receiving fibers
+keep the tail (the library's `material_multi_bow` tests; no card here tests
+them); a fiber ribbon with axial-transverse strain is refused by name. The lane
+refuses moving stops, stop-loaded bows, moving bows, nonlinear material
+histories and source-bound friction histories (their omitted endpoint
+velocities are not resolved). Existing performances without
+this record are unchanged. These limits do not establish recording-level
+accuracy or a complete physical bow.
 
 ## Nonlinear stretching with the same bow, body and gas memory
 

@@ -33,8 +33,14 @@ impl NonlinearTrial for MultipleTrial<'_> {
                     .zip(&self.inner.staged_stretch)
                     .filter_map(|(drive, &stretch)| drive.map(|drive| drive.spring_energy_j(stretch)))
                     .sum();
-                NonlinearInternalStorage { before_energy_j,
-                    after_energy_j: frame.shear_layer_energy_j + frame.mindlin_energy_j + series_energy }
+                let after_energy_j = frame.shear_layer_energy_j + frame.mindlin_energy_j + series_energy;
+                // The bows' omitted modes hold F G F / 2 at the staged tractions, and the step's
+                // dF G dF / 2 is their declared numerical loss, as in the linear ledger.
+                if self.inner.friction_residual.is_some() {
+                    NonlinearInternalStorage { before_energy_j,
+                        after_energy_j: after_energy_j + frame.friction_residual_energy_j,
+                        numerical_loss_j: frame.friction_residual_loss_j }
+                } else { NonlinearInternalStorage { before_energy_j, after_energy_j, numerical_loss_j: 0.0 } }
             }),
             contacts: match (&self.inner.obstacles, self.initial_contact_energy_j) {
                 (Some(obstacles), Some(before_energy_j)) => {
@@ -95,18 +101,23 @@ impl MultiFrictionModalSystem {
         let initial_contact_energy_j = self.obstacles.as_ref()
             .map(|obstacles| obstacles.energy(self.components())).transpose()?;
         // Every outer trial starts from the same accepted layer strain and
-        // compliant-drive stretch. stage_multiple only replaces their scratch;
+        // compliant-drive stretch, and the bows' omitted modes from the accepted
+        // tractions. stage_multiple only replaces their scratch;
         // publish_step commits them once after the complete DG solve succeeds.
         let initial_internal_energy_j = if self.shear_layers.iter().any(Option::is_some)
             || self.mindlin_contacts.iter().any(Option::is_some)
-            || self.series_drives.iter().any(Option::is_some) {
+            || self.series_drives.iter().any(Option::is_some) || self.friction_residual.is_some() {
             let layer_energy: f64 = self.shear_layers.iter().flatten()
                 .map(layer::MaterialShearLayer::energy_j).sum();
             let series_energy: f64 = self.series_drives.iter().flatten()
                 .map(|drive| drive.spring_energy_j(drive.stretch_m())).sum();
             let mindlin_energy: f64 = self.mindlin_contacts.iter().flatten()
                 .map(mindlin::MaterialMindlinContact::energy_j).sum();
-            Some(finite(layer_energy + mindlin_energy + series_energy)?)
+            let stored = finite(layer_energy + mindlin_energy + series_energy)?;
+            Some(match &self.friction_residual {
+                Some(residual) => finite(stored + residual.energy_j()?)?,
+                None => stored,
+            })
         } else { None };
         let mut state = self.core.nonlinear.take()
             .ok_or_else(|| invalid("nonlinear trial requires retained constitutive storage"))?;

@@ -218,10 +218,15 @@ pub(super) struct NonlinearTrialWork {
 /// Original contact mechanisms may store energy outside the modal coordinates.
 /// Their dissipation and supplied work already belong to the trial's friction
 /// accounts; only accepted/staged storage must be added to the joint DG balance.
+/// The bows' omitted modes are the exception: their declared numerical loss
+/// dF G dF / 2 is in no friction account, so it is carried here.
 #[derive(Clone, Copy)]
 pub(super) struct NonlinearInternalStorage {
     pub before_energy_j: f64,
     pub after_energy_j: f64,
+    /// Declared numerical loss of this storage over the step [J], never a
+    /// constitutive loss; zero without the bows' omitted modes.
+    pub numerical_loss_j: f64,
 }
 /// Already evaluated by the original normal-contact owner at this same trial.
 /// For x=N^T q-s, -R N^T delta_q = -delta_U-loss-R delta_s. Thus normal
@@ -843,6 +848,9 @@ impl NonlinearFrictionState {
                     - external_work
                     - frame.drive_work_j,
             )? };
+            // And the internal storage's declared numerical loss (the bows' omitted modes).
+            let numerical_loss = frame.internal_storage.map_or(0.0, |storage| storage.numerical_loss_j);
+            let balance = if numerical_loss == 0.0 { balance } else { finite(balance + numerical_loss)? };
             let mut energy_scale = total_before
                 .max(total_after)
                 .max(network_dissipation)
@@ -853,6 +861,7 @@ impl NonlinearFrictionState {
             if let Some(contact) = frame.contacts {
                 energy_scale = energy_scale.max(contact.dissipation_j).max(contact.absolute_work_j);
             }
+            if numerical_loss != 0.0 { energy_scale = energy_scale.max(numerical_loss); }
             let energy_tolerance = finite(
                 inner.network.config.energy_absolute_tolerance_j
                     + inner.network.config.energy_relative_tolerance * energy_scale,

@@ -125,12 +125,16 @@ impl MultiFrictionModalSystem {
     /// Fixed material shear films and series compliant drives share the actual
     /// slip increment on this load line. Film plastic/relaxation loss may enter
     /// finite heat cells; the residual's numerical loss never does.
+    /// Bound nonlinear storage keeps the tail: each nonlinear trial books its
+    /// F G F / 2 and dF G dF / 2 in the joint balance. Its compliance stays the
+    /// static tension's while the tension moves, and its own deflection adds
+    /// nothing to the string's stretch.
     ///
     /// # Errors
-    /// Playback/rebinding, moving maps, normal contacts, nonlinear storage or
-    /// Mindlin or dry-interface source histories (whose omitted endpoint
-    /// velocities are not reconstructed), invalid maps/matrix, budget or
-    /// cancellation. Fixed material films use interval slip and are admitted.
+    /// Playback/rebinding, moving maps, normal contacts, nonlinear material
+    /// histories, or Mindlin or dry-interface source histories (whose omitted
+    /// endpoint velocities are not reconstructed), invalid maps/matrix, budget
+    /// or cancellation. Fixed material films use interval slip and are admitted.
     pub fn with_friction_residual_ports(self, geometry: Vec<FrictionGeometry>,
         compliance: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
@@ -268,11 +272,13 @@ impl MultiFrictionModalSystem {
         self.friction_residual.as_ref().map(FrictionResidual::compliance)
     }
     pub(super) fn admit_friction_residual(&self) -> Result<(), ModalFrictionError> {
-        if self.core.has_nonlinear_potentials()
+        // Nonlinear storage is admitted (its trials book the tail); its material histories are not,
+        // in either binding order (`with_mapped_material_histories`).
+        if !self.core.nonlinear_material_memory().is_empty()
             || self.endpoint_controls.is_some()
             || self.mindlin_contacts.iter().any(Option::is_some)
             || (0..self.port_count()).any(|i| self.interface(i).is_some()) {
-            return Err(invalid("friction residual compliance requires fixed ports without nonlinear storage, Mindlin or dry-interface histories").into());
+            return Err(invalid("friction residual compliance requires fixed ports without nonlinear material, Mindlin or dry-interface histories").into());
         }
         // Normal contacts only as fixed ones carrying their own residual, joined
         // to the ports by the stop/port block (`with_friction_residual_ports_beside_obstacles`).
