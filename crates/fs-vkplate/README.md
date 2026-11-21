@@ -821,7 +821,10 @@ hi-hat rims) are solved four at a time, interleaved, each with the same operatio
 alone, so the result is the one-at-a-time result bit for bit. A snare wire's solve stops when a
 Newton step lands exactly on its own iterate (an exact fixed point) instead of bisecting away from
 it: about 3 iterations per solve instead of 10, and the applied force is within a few ulps of the
-root rather than 1e-13.
+root rather than 1e-13. A head radiation load's SAV column sums and modal-space products run eight
+sums at a time, each adding its terms in the order it would alone (`src/ordered_sums.rs`). A step reads
+`U' w` and `U' wp` from the projections the previous step made of the same vectors, after a check that
+their bits are equal. Neither changes a bit of the result.
 
 ## Hi-hat
 

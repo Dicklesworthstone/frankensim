@@ -567,12 +567,32 @@ pub struct ModalAirLoad {
     pub(crate) w2: Vec<f64>,
     za: Vec<f64>,
     zb: Vec<f64>,
+    /// Scratch for `solve_body_response`: each node's `g D^-1`, the weights of the SAV gradient's projection.
+    pub(crate) ga: Vec<f64>,
+    /// The last step's projections, read by the next step in place of summing them again.
+    kept: KeptProjections,
     /// One line per retained mode, then the summary and stated scope.
     pub receipt: Vec<String>,
     /// Largest first-order share of the dropped in-family coupling, relative
     /// to the retained resistance and to the retained air mass.
     pub dropped_loss_share: f64,
     pub dropped_mass_share: f64,
+}
+
+/// `U' w` from the last `load_rhs` and `U' wn` from the last `radiated`, each with the vector it projects.
+/// The leapfrog's swap makes the next step's `wp` this step's `w` and its `w` this step's `wn`, so `load_rhs`
+/// reads a projection here when its vector has the kept one's length and bits: `crate::dot` of the same
+/// column and the same bits is the same sum. Any other vector is summed.
+#[derive(Clone, Debug, Default)]
+struct KeptProjections {
+    w: Vec<f64>,
+    p_w: Vec<f64>,
+    wn: Vec<f64>,
+    p_wn: Vec<f64>,
+}
+
+fn same_bits(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 #[derive(Clone, Debug)]
@@ -1406,6 +1426,8 @@ impl ModalAirLoad {
             w2: vec![0.0; n + 1],
             za: vec![0.0; n],
             zb: vec![0.0; n],
+            ga: Vec::with_capacity(nodes),
+            kept: KeptProjections::default(),
             receipt,
             dropped_loss_share: loss_share,
             dropped_mass_share: mass_share,
@@ -1416,18 +1438,19 @@ impl ModalAirLoad {
         self.cols.len()
     }
 
-    /// `out = M v` for a modal-space matrix stored row-major.
+    /// `out = M v` for a modal-space matrix stored row-major: each row's `.sum()` in ascending column, eight
+    /// rows at a time (`ordered_sums`), the same bits as one row at a time.
     pub(crate) fn apply(matrix: &[f64], v: &[f64], out: &mut [f64]) {
         let n = v.len();
-        for i in 0..n {
-            out[i] = (0..n).map(|j| matrix[i * n + j] * v[j]).sum();
-        }
+        crate::ordered_sums::sums_of_products(|i| &matrix[i * n..(i + 1) * n], v, &mut out[..n]);
     }
 
     /// The modal part of a step's right-hand side,
     /// `rhs = U (A (2 P_w - P_wp) / k^2 + B P_wp / (2 k))` with `P = U' w`.
     /// The unknown `U B U' wn / (2 k)` is in the prepared system, so the full
     /// force is `-U B U' (wn - wp) / (2 k)`. Leaves `U' wp` in `p_wp` for heat.
+    /// `P_wp` and `P_w` are read from `KeptProjections` when `wp` and `w` have the bits of the last call's `w`
+    /// and the last `radiated`'s `wn`, as after the leapfrog's swap; otherwise they are summed.
     pub(crate) fn load_rhs(&mut self, w: &[f64], wp: &[f64], k: f64) {
         // Each prediction has a newly evaluated SAV gradient. This function
         // also reuses b below, so no cached projection may survive it.
@@ -1435,12 +1458,20 @@ impl ModalAirLoad {
             prepared.sav_schur = None;
         }
         let n = self.cols.len();
+        let kept = &mut self.kept;
+        let wp_kept = kept.p_w.len() == n && same_bits(wp, &kept.w);
+        let w_kept = kept.p_wn.len() == n && same_bits(w, &kept.wn);
+        kept.p_w.resize(n, 0.0);
         for r in 0..n {
-            let (pw, pwp) = (crate::dot(&self.cols[r], w), crate::dot(&self.cols[r], wp));
+            let pwp = if wp_kept { kept.p_w[r] } else { crate::dot(&self.cols[r], wp) };
+            let pw = if w_kept { kept.p_wn[r] } else { crate::dot(&self.cols[r], w) };
+            kept.p_w[r] = pw;
             self.p_wp[r] = pwp;
             self.y[r] = (2.0 * pw - pwp) / (k * k);
             self.b[r] = pwp / (2.0 * k);
         }
+        kept.w.clear();
+        kept.w.extend_from_slice(w);
         ModalAirLoad::apply(&self.mass, &self.y[..n], &mut self.za);
         ModalAirLoad::apply(&self.damping, &self.b[..n], &mut self.zb);
         self.rhs.fill(0.0);
@@ -1453,12 +1484,18 @@ impl ModalAirLoad {
     }
 
     /// Energy the modal damping removes over one step at centred velocity
-    /// `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`.
+    /// `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`. Keeps `U' wn` and `wn` for the next `load_rhs`.
     pub(crate) fn radiated(&mut self, wn: &[f64], k: f64) -> f64 {
         let n = self.cols.len();
+        let kept = &mut self.kept;
+        kept.p_wn.resize(n, 0.0);
         for r in 0..n {
-            self.y[r] = crate::dot(&self.cols[r], wn) - self.p_wp[r];
+            let pwn = crate::dot(&self.cols[r], wn);
+            kept.p_wn[r] = pwn;
+            self.y[r] = pwn - self.p_wp[r];
         }
+        kept.wn.clear();
+        kept.wn.extend_from_slice(wn);
         ModalAirLoad::apply(&self.damping, &self.y[..n], &mut self.zb);
         crate::dot(&self.y[..n], &self.zb) / (4.0 * k)
     }
@@ -1568,6 +1605,8 @@ pub(crate) mod centered_tests {
             w2: vec![0.0; n + 1],
             za: vec![0.0; n],
             zb: vec![0.0; n],
+            ga: Vec::with_capacity(nodes),
+            kept: KeptProjections::default(),
             receipt: vec![],
             dropped_loss_share: 0.0,
             dropped_mass_share: 0.0,
@@ -1887,6 +1926,55 @@ pub(crate) mod centered_tests {
                 (wp, w) = (w, wn);
             }
             assert!(worst < 5e-12, "relative energy closure {worst}");
+        }
+    }
+
+    /// A load stepped with the leapfrog's swap reads `U' wp` and `U' w` from the projections it kept; a clone
+    /// that forgets them before each call sums every one. Both give the same bits, also on the steps whose `w`
+    /// or `wp` is not the kept vector (those are summed). The SAV column's `b` sums, eight columns at a time and
+    /// then the three after them, have the bits of each column's `.sum()`.
+    #[test]
+    fn kept_projections_and_eight_column_sums_keep_every_bit() {
+        let (shapes, nodes) = (11, 23);
+        let entry = |r: usize, i: usize| ((r * 37 + i * 101 + r * i * 7) % 113) as f64 / 113.0 - 0.45;
+        let cols: Vec<Vec<f64>> = (0..shapes)
+            .map(|r| (0..nodes).map(|i| entry(r, i) * if i == r { 3.0 } else { 1.0 }).collect())
+            .collect();
+        let air: Vec<f64> = (0..shapes).map(|r| 0.1 + 0.02 * r as f64).collect();
+        let resistance: Vec<f64> = (0..shapes).map(|r| 5.0 + r as f64).collect();
+        let mut kept = manufactured_load(cols, air, resistance);
+        let k = 1.0 / 96_000.0;
+        let cf: Vec<[f64; 4]> =
+            (0..nodes).map(|i| [k * k / (1e-3 * (1.0 + 0.01 * i as f64)), 0.0, 0.0, 0.0]).collect();
+        kept.prepare(k, &cf.iter().map(|a| a[0]).collect::<Vec<_>>(), None).unwrap();
+        let g: Vec<f64> = (0..nodes).map(|i| entry(i, 3) * 1e3).collect();
+        let mut summed = kept.clone();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let mut wp = vec![0.0; nodes];
+        let mut w: Vec<f64> = (0..nodes).map(|i| 1e-6 * entry(i, 5)).collect();
+        for step in 0..7 {
+            match step {
+                3 => w[7] += 1e-9,  // not the last wn: summed
+                5 => wp[2] -= 1e-9, // not the last w: summed
+                _ => {}
+            }
+            kept.load_rhs(&w, &wp, k);
+            summed.kept = KeptProjections::default();
+            summed.load_rhs(&w, &wp, k);
+            assert_eq!(bits(&kept.rhs), bits(&summed.rhs), "rhs at step {step}");
+            assert_eq!(bits(&kept.p_wp), bits(&summed.p_wp), "U' wp at step {step}");
+            let mut wn: Vec<f64> = (0..nodes).map(|i| 2.0 * w[i] - wp[i] + kept.rhs[i] * cf[i][0]).collect();
+            let mut other = wn.clone();
+            crate::solve_body_response(&cf, &g, true, 1.0, 0.0, Some(&mut kept), &mut wn, k);
+            crate::solve_body_response(&cf, &g, true, 1.0, 0.0, Some(&mut summed), &mut other, k);
+            assert_eq!(bits(&wn), bits(&other), "response at step {step}");
+            for (r, col) in kept.cols.iter().enumerate() {
+                let plain: f64 = col.iter().zip(&g).zip(&cf).map(|((u, g), a)| u * (g * a[0])).sum();
+                assert_eq!(kept.b[r].to_bits(), plain.to_bits(), "b of column {r} at step {step}");
+            }
+            summed.kept = KeptProjections::default();
+            assert_eq!(kept.radiated(&wn, k).to_bits(), summed.radiated(&wn, k).to_bits(), "heat at step {step}");
+            (wp, w) = (w, wn);
         }
     }
 }

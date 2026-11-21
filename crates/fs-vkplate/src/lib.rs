@@ -54,6 +54,8 @@ pub use reference_inertia::PlateReferenceDensity;
 
 /// Baked exterior modal loading of drum heads' motion beyond their compact volume model.
 pub mod radiation;
+/// Row sums in `Iterator::sum`'s order, eight rows at a time (the radiation load's column and modal products).
+mod ordered_sums;
 
 /// Full reciprocal narrowband resistance between work-conjugate body ports.
 pub mod mutual_radiation;
@@ -2327,10 +2329,13 @@ fn solve_body_response(
         }
         for (r, col) in load.cols.iter().enumerate() {
             load.y[off + r] = dot(col, response);
-            if sav && !cached_sav {
-                load.b[off + r] = col.iter().zip(g).zip(cf)
-                    .map(|((u, g), a)| u * (g * a[0])).sum();
-            }
+        }
+        if sav && !cached_sav {
+            // b_r = sum_i u_ri (g_i D^-1_i), each column's `.sum()` in ascending node, eight columns at a time
+            load.ga.clear();
+            load.ga.extend(g.iter().zip(cf).map(|(g, a)| g * a[0]));
+            let cols = &load.cols;
+            ordered_sums::sums_of_products(|r| cols[r].as_slice(), &load.ga, &mut load.b[off..size]);
         }
         radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
         let cg = if sav {
