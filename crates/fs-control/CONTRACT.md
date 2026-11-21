@@ -1,5 +1,43 @@
 # CONTRACT: fs-control
 
+## Sampled speed policy on the composition kernel
+
+The optional `component` feature exposes `SampledSpeedController`, an adapter
+over the original `SpeedController` rather than another PI implementation.
+Its signal inputs are relative-speed reference, torque feedforward, and the
+two absolute shaft speeds; its output commands an ideal torque source. The
+existing directional torque/power envelope and tracking anti-windup are used
+unchanged, with achieved command equal to the bounded torque request. This
+adapter does not perform a real machine's torque/current allocation or promise
+electrical, thermal, voltage, or transient power protection.
+
+Measurements are accepted start-of-step values, such as a rotational
+`fs_system::elements::Mass::publishing` velocity signal. Each sample is
+committed with its first accepted plant substep. Subsequent substeps hold the
+command and integral state; a proposed interval cannot cross the next sample.
+The compensated phase and sample count are caller-owned Component state and
+roll back with the plant. Refusal and cancellation leave candidate outputs
+unchanged. A strict step cap that would strand a clock-rounding remainder is
+shortened into two resolvable intervals, never exceeded to reach the event.
+
+The adapter supplies no adaptive error chart or time-order claim. Generic kernel
+callers must establish an appropriate metric and order for adaptive integration;
+CLI speed-controller scenes use fixed `step_s`. Trial purity and restoration
+remain obligations even when an adaptive estimate is refused.
+
+The state codec retains integral torque, held command, both phase words and
+sample count, and the identity binds all gains, period and capabilities.
+Runtime proposals and tangents allocate no heap memory. `Class::NonSmooth`
+declares saturation; JVP/VJP supply the active-branch derivative for the kernel,
+with a limited-side Newton representative at clipping boundaries. No unique
+derivative or closed-loop stability is claimed there.
+
+`tests/component.rs` checks Component and tangent conformance, held intervals,
+state codec and cancellation, and closes the real kernel loop through an ideal
+source and inertia against an independent discrete PI/mechanics recurrence.
+Saturation recovery, reversal, physical work, subdivisions and checkpoint replay
+are exercised. The PI state contributes no physical stored energy.
+
 ## Fixed-period synchronous current regulation
 
 `fs-control` is an L3 sampled policy runtime. Its first production owner,

@@ -12,8 +12,10 @@
 //! supplies outer-loop anti-windup. Both proposed controller states are accepted
 //! only with the successful plant interval. Authored sampled thermal derating
 //! adjusts command capability; it does not provide hardware protection.
-//! Sample scheduling, observers, gain synthesis and closed-loop stability
-//! certification remain separate capabilities.
+//! The optional `component` feature schedules the speed policy on the shared
+//! composition kernel, holding each command across plant substeps. It assumes
+//! an ideal torque actuator. Observers, gain synthesis and closed-loop
+//! stability certification remain separate capabilities.
 
 #![deny(unsafe_code)]
 
@@ -25,6 +27,10 @@ pub mod speed;
 
 /// Authored sampled thermal command derating with an explicit trip latch.
 pub mod thermal;
+
+/// Sampled speed regulation and held commands on the composition kernel.
+#[cfg(feature = "component")]
+pub mod component;
 
 /// A refused controller construction or sample. No proposal is published on an
 /// error, and no caller-owned state is modified.

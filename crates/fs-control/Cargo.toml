@@ -10,11 +10,23 @@ description = "Sampled synchronous current control with physical three-phase vol
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Executable sampled policies on the shared composition contract.
+component = ["dep:fs-exec", "dep:fs-ports"]
+
 [dependencies]
 fs-math = { path = "../fs-math" }
+fs-exec = { path = "../fs-exec", optional = true }
+fs-ports = { path = "../fs-ports", optional = true }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-phs = { path = "../fs-phs" }
+fs-system = { path = "../fs-system" }
+
+[[test]]
+name = "component"
+required-features = ["component"]
 
 [lints]
 workspace = true
