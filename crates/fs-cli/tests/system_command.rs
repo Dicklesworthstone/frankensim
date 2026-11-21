@@ -90,6 +90,279 @@ fn scene_context(body: impl FnOnce(&fs_exec::Cx<'_>, &fs_exec::CancelGate)) {
 }
 
 #[test]
+fn controlled_sources_drive_mechanical_and_electrical_states_with_signed_work() {
+    let path = example("controlled_sources.json");
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    // Independent midpoint recurrence on the authored piecewise affine commands.
+    // The nominal step crosses a knot, so the actual schedule must resolve it.
+    let mut time = 0.0_f64;
+    let (mut position, mut velocity, mut charge) = (0.0, 1.0, 0.25);
+    let force = |t: f64| 4.0 - 16.0 * (t - 0.25).clamp(0.0, 0.5);
+    let current = |t: f64| -0.5 + 1.5 * (t - 0.25).clamp(0.0, 0.5);
+    let mut steps = 0_u32;
+    while time < 1.25 {
+        let event = [0.25, 0.75, 1.25]
+            .into_iter()
+            .find(|knot| *knot > time)
+            .unwrap();
+        let dt = 0.375_f64.min(event - time);
+        let next = time + dt;
+        let next_velocity = velocity + dt * 0.5 * (force(time) + force(next)) / 2.0;
+        position += dt * 0.5 * (velocity + next_velocity);
+        charge -= dt * 0.5 * (current(time) + current(next));
+        (time, velocity) = (next, next_velocity);
+        steps += 1;
+    }
+    let drive_work = 1.0 - velocity * velocity;
+    let supply_work = 0.25_f64.powi(2) - charge * charge;
+    assert!(
+        drive_work > 0.0,
+        "the drive recovered the block's kinetic energy"
+    );
+    assert!(
+        supply_work < 0.0,
+        "the current source supplied stored electrical energy"
+    );
+    for (name, field, expected) in [
+        ("block", "position_m", position),
+        ("block", "velocity_m_s", velocity),
+        ("capacitor", "charge_c", charge),
+        ("drive", "energy_in_j", drive_work),
+        ("supply", "energy_in_j", supply_work),
+        ("drive", "force_n", -4.0),
+        ("supply", "current_a", 0.25),
+    ] {
+        let actual = value(&json, &element(name), field);
+        assert!(
+            (actual - expected).abs() < 1e-11,
+            "{name}.{field}: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(value(&json, "\"schema\"", "steps"), f64::from(steps));
+    assert!(value(&json, "\"totals\"", "energy_residual_j").abs() < 1e-11);
+    assert!(json.contains("scalar commands carry no energy"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut native = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    assert_eq!(native.probe("drive.force_n").unwrap(), None);
+    assert_eq!(native.probe("supply.energy_in_j").unwrap(), Some(0.0));
+    scene_context(|cx, _| native.run(cx).unwrap());
+    assert_eq!(native.render_json(), json);
+}
+
+#[test]
+fn controlled_sources_have_adaptive_work_accounts_and_restore_the_accepted_prefix() {
+    let text = std::fs::read_to_string(example("controlled_sources.json"))
+        .unwrap()
+        .replace(
+            "\"step_s\": 0.375,",
+            r#""step_s": 0.375,
+  "adaptive": {"order": 2, "tolerances": {
+    "block.position_m": {"absolute": 1e-7, "relative": 0},
+    "block.velocity_m_s": {"absolute": 1e-7, "relative": 0},
+    "capacitor.charge_c": {"absolute": 1e-7, "relative": 0},
+    "drive.energy_in_j": {"absolute": 1e-7, "relative": 0},
+    "supply.energy_in_j": {"absolute": 1e-7, "relative": 0}
+  }},"#,
+        );
+    let path = scratch("adaptive_controlled_sources.json", &text);
+    let mut uninterrupted = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    scene_context(|cx, _| {
+        assert!(uninterrupted.advance(f64::MAX, cx).unwrap());
+        assert!(uninterrupted.time_s() > 0.0 && !uninterrupted.is_finished());
+        let (bytes, root) = uninterrupted.checkpoint().unwrap();
+        resumed.resume_checkpoint(&bytes, root).unwrap();
+        assert_eq!(resumed.render_json(), uninterrupted.render_json());
+        uninterrupted.run(cx).unwrap();
+        resumed.run(cx).unwrap();
+    });
+    assert_eq!(resumed.render_json(), uninterrupted.render_json());
+    // Exact integrals of the authored commands, independent of the adaptive schedule.
+    assert!((resumed.probe("block.velocity_m_s").unwrap().unwrap() - 0.5).abs() < 1e-10);
+    assert!((resumed.probe("block.position_m").unwrap().unwrap() - 79.0 / 48.0).abs() < 1e-5);
+    assert!((resumed.probe("capacitor.charge_c").unwrap().unwrap() - 0.3125).abs() < 1e-10);
+    assert!((resumed.probe("drive.energy_in_j").unwrap().unwrap() - 0.75).abs() < 1e-10);
+    assert!((resumed.probe("supply.energy_in_j").unwrap().unwrap() + 0.03515625).abs() < 1e-10);
+    assert!(resumed.ledger().energy_residual_j().abs() < 1e-10);
+    let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json, uninterrupted.render_json());
+
+    let missing_work = text.replace(
+        "\"drive.energy_in_j\": {\"absolute\": 1e-7, \"relative\": 0},",
+        "",
+    );
+    let error = fs_cli::SystemScene::from_text(&missing_work, "missing-work.json")
+        .err()
+        .unwrap();
+    assert!(error.message.contains("drive.energy_in_j"), "{error}");
+}
+
+#[test]
+fn controlled_sources_refuse_unknown_domains_wrong_commands_and_missing_wiring() {
+    let text = std::fs::read_to_string(example("controlled_sources.json")).unwrap();
+    for (name, from, to, reason) in [
+        (
+            "domain.json",
+            "\"domain\": \"translation\"",
+            "\"domain\": \"temperature\"",
+            "elements.drive: domain",
+        ),
+        (
+            "field.json",
+            "\"domain\": \"translation\"",
+            "\"domain\": \"translation\", \"force_n\": 4",
+            "unsupported field",
+        ),
+        (
+            "effort-unit.json",
+            "\"force_n\": {\"table\"",
+            "\"voltage_v\": {\"table\"",
+            "this port takes exactly one quantity, force_n",
+        ),
+        (
+            "flow-unit.json",
+            "\"current_a\": {\"table\"",
+            "\"temperature_k\": {\"table\"",
+            "this port takes exactly one quantity, current_a",
+        ),
+    ] {
+        let changed = text.replace(from, to);
+        assert_ne!(changed, text);
+        let (code, message) = refused(name, &changed);
+        assert_eq!(code, i32::from(fs_cli::exit::INPUT), "{message}");
+        assert!(message.contains(reason), "{message}");
+    }
+    let disconnected = text.replace(
+        "    {\"prescribe\": \"drive.command\", \"force_n\": {\"table\": [[0, 4], [0.25, 4], [0.75, -4], [1.25, -4]]}},\n",
+        "",
+    );
+    assert_ne!(disconnected, text);
+    let (code, message) = refused("missing-command.json", &disconnected);
+    assert_eq!(code, i32::from(fs_cli::exit::REFUSED), "{message}");
+    assert!(message.contains("drive.command"), "{message}");
+}
+
+#[test]
+fn speed_controller_closes_the_loop_with_substep_invariant_sampling_and_signed_work() {
+    let example = std::fs::read_to_string(example("closed_loop_speed.json")).unwrap();
+    // The authored step is four controller periods; the second run takes four
+    // plant substeps per period. Both must follow the same digital recurrence.
+    for (name, step, substeps) in [
+        ("speed_coarse.json", "0.5", 1_u32),
+        ("speed_fine.json", "0.03125", 4_u32),
+    ] {
+        let text = example.replace("\"step_s\": 0.5", &format!("\"step_s\": {step}"));
+        let path = scratch(name, &text);
+        let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        let (mut angle, mut speed, mut integral, mut work) = (0.0_f64, 0.0, 0.0, 0.0);
+        let mut supplied = false;
+        let mut recovered = false;
+        scene_context(|cx, _| {
+            for sample in 0..120_u32 {
+                let time = f64::from(sample) * 0.125;
+                let target = if time < 2.0 {
+                    10.0
+                } else if time < 4.0 {
+                    10.0 - 4.0 * (time - 2.0)
+                } else if time < 8.0 {
+                    2.0
+                } else if time < 10.0 {
+                    2.0 - 1.5 * (time - 8.0)
+                } else {
+                    -1.0
+                };
+                // Independent fixed-period PI and exact constant-torque inertia
+                // recurrence; do not call the controller or plant owners here.
+                let error = target - speed;
+                let predicted = integral + 0.25 * error;
+                let unlimited = error + predicted;
+                let torque = unlimited.clamp(-2.0, 3.0);
+                integral = predicted + (torque - unlimited) / 3.0;
+                assert!((torque * speed).abs() < 100.0, "power limits are inactive");
+                let next_speed = speed + 0.125 * (torque - 0.25);
+                let displacement = 0.125 * 0.5 * (speed + next_speed);
+                angle += displacement;
+                speed = next_speed;
+                let source_work = -torque * displacement;
+                work += source_work;
+                supplied |= source_work < -1e-6;
+                recovered |= source_work > 1e-6;
+                for _ in 0..substeps {
+                    assert!(scene.advance(f64::MAX, cx).unwrap());
+                }
+                for (coordinate, expected) in [
+                    ("rotor.angle_rad", angle),
+                    ("rotor.angular_velocity_rad_s", speed),
+                    ("control.integral_torque_nm", integral),
+                    ("control.held_torque_nm", torque),
+                    ("control.sample_count", f64::from(sample + 1)),
+                    ("control.sample_phase_s", 0.0),
+                    ("drive.energy_in_j", work),
+                    ("load.energy_in_j", 0.25 * angle),
+                ] {
+                    let actual = scene.probe(coordinate).unwrap().unwrap();
+                    assert!(
+                        (actual - expected).abs() < 2e-10,
+                        "{name} sample {sample}: {coordinate}: {actual} vs {expected}"
+                    );
+                }
+                assert!(scene.ledger().energy_residual_j().abs() < 2e-10);
+            }
+        });
+        assert!(
+            supplied && recovered,
+            "the physical drive supplies and recovers work"
+        );
+        assert!(scene.is_finished());
+        assert_eq!(scene.steps(), u64::from(120 * substeps));
+        assert!(
+            (speed + 1.0).abs() < 0.08,
+            "reversal settles toward the command"
+        );
+        assert!((0.5 * speed * speed + work + 0.25 * angle).abs() < 2e-10);
+        let (code, json, stderr) = run_binary(&["--json", "system", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(json, scene.render_json());
+    }
+}
+
+#[test]
+fn speed_controller_refuses_invalid_parameters_units_and_adaptive_policy() {
+    let text = std::fs::read_to_string(example("closed_loop_speed.json")).unwrap();
+    for (from, to, reason) in [
+        (
+            "\"publish_state\": true",
+            "\"publish_state\": 1",
+            "publish_state: expected a boolean",
+        ),
+        (
+            "\"sample_period_s\": 0.125",
+            "\"sample_period_s\": 0",
+            "sample period must be finite and positive",
+        ),
+        (
+            "\"relative_speed_rad_s\":",
+            "\"angular_velocity_rad_s\":",
+            "this port takes exactly one quantity, relative_speed_rad_s",
+        ),
+        (
+            "\"duration_s\": 15.0,",
+            "\"duration_s\": 15.0, \"adaptive\": {\"tolerances\": {}},",
+            "discrete policy, not a continuous error coordinate",
+        ),
+    ] {
+        let changed = text.replace(from, to);
+        assert_ne!(changed, text);
+        let error = fs_cli::SystemScene::from_text(&changed, "invalid-controller.json")
+            .err()
+            .unwrap();
+        assert!(error.message.contains(reason), "{error}");
+    }
+}
+
+#[test]
 fn native_scene_runs_match_cli_and_incremental_mechanical_and_phase_runs() {
     for name in ["variable_transmission.json", "phase_change_store.json"] {
         let path = example(name);

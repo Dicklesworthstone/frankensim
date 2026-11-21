@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.25,
+  "step_s": 0.375,
+  "sample_every_s": 0.125,
+  "elements": {
+    "block": {"kind": "mass", "mass_kg": 2.0, "velocity_m_s": 1.0},
+    "drive": {"kind": "controlled_effort", "domain": "translation"},
+    "capacitor": {"kind": "node_capacitor", "capacitance_f": 0.5, "charge_c": 0.25},
+    "supply": {"kind": "controlled_flow", "domain": "electrical"}
+  },
+  "connections": [
+    {"join": ["block.p", "drive.p"]},
+    {"common_effort": ["capacitor.p", "supply.p"]},
+    {"prescribe": "drive.command", "force_n": {"table": [[0, 4], [0.25, 4], [0.75, -4], [1.25, -4]]}},
+    {"prescribe": "supply.command", "current_a": {"table": [[0, -0.5], [0.25, -0.5], [0.75, 0.25], [1.25, 0.25]]}}
+  ]
+}

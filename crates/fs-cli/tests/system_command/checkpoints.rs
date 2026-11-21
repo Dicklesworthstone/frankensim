@@ -68,6 +68,8 @@ fn checkpoint_continuation_at(scene: &std::path::Path, text: &str, until_s: f64)
 #[test]
 fn saved_fixed_adaptive_and_material_scenes_continue_with_identical_reports() {
     for name in [
+        "controlled_sources.json",
+        "closed_loop_speed.json",
         "variable_transmission.json",
         "adaptive_oscillator.json",
         "phase_change_store.json",

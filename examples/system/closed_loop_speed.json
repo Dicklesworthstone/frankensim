@@ -1,0 +1,30 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 15.0,
+  "step_s": 0.5,
+  "sample_every_s": 0.125,
+  "elements": {
+    "rotor": {"kind": "inertia", "inertia_kg_m2": 1.0, "publish_state": true},
+    "control": {
+      "kind": "speed_controller",
+      "sample_period_s": 0.125,
+      "proportional_gain_nm_s_per_rad": 1.0,
+      "integral_gain_nm_per_rad": 2.0,
+      "anti_windup_time_s": 0.25,
+      "positive_torque_limit_nm": 3.0,
+      "negative_torque_limit_nm": 2.0,
+      "motoring_power_w": 100.0,
+      "regeneration_power_w": 100.0
+    },
+    "drive": {"kind": "controlled_effort", "domain": "rotation"},
+    "load": {"kind": "torque", "torque_n_m": -0.25}
+  },
+  "connections": [
+    {"join": ["rotor.p", "drive.p", "load.p"]},
+    {"signal": "rotor.velocity", "to": ["control.rotor_speed"]},
+    {"signal": "control.torque", "to": ["drive.command"]},
+    {"prescribe": "control.reference", "relative_speed_rad_s": {"table": [[0, 10], [2, 10], [4, 2], [8, 2], [10, -1], [15, -1]]}},
+    {"prescribe": "control.feedforward", "torque_n_m": 0},
+    {"prescribe": "control.stator_speed", "angular_velocity_rad_s": 0}
+  ]
+}

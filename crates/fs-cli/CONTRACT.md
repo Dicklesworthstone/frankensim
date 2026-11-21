@@ -765,6 +765,56 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 
 ### Devices described as data (`system <scene.json>`)
 
+`controlled_effort` and `controlled_flow` lower directly to
+`fs_system::elements::ControlledSource`. Each declares `domain` as
+`translation`, `rotation` or `electrical`; physical port `p` exchanges power,
+while scalar signal input `command` sets the source's effort or flow. A command
+can come from the existing `signal` connection or from `prescribe` using the
+selected SI quantity: `force_n`, `torque_n_m`, `voltage_v`, `velocity_m_s`,
+`angular_velocity_rad_s` or `current_a`. Wrong quantity names refuse. Signal
+values must already have the declared unit; no conversion or controller is
+inferred. Prescribed table knots use the existing scheduled-boundary path.
+
+Effort is positive in the connected node's positive direction. Flow is positive
+into the source, so negative commanded current supplies a connected capacitor.
+The source reports its signed `energy_in_j` (negative when supplying energy)
+and last commanded effort or flow (`null` before the first accepted step).
+Adaptive scenes must include its source-work increment tolerance. Native source
+codecs retain clock and work across checkpoints. The source is ideal: no supply,
+saturation, quantization, control stability or hardware safety claim follows
+from a command. Tests execute `examples/system/controlled_sources.json` through
+the real CLI and native facade against independent mechanical/electrical
+recurrences, verify signed work and first-law balance, and exercise adaptive
+integration, source-work admission and accepted-prefix checkpoint continuation.
+
+`speed_controller` lowers to `fs_control::component::SampledSpeedController`.
+Its required fields retain the owner's SI parameter names: `sample_period_s`,
+`proportional_gain_nm_s_per_rad`, `integral_gain_nm_per_rad`, `anti_windup_time_s`,
+`positive_torque_limit_nm`, `negative_torque_limit_nm`, `motoring_power_w` and
+`regeneration_power_w`. Optional `integral_torque_nm` initializes the integral
+contribution (default zero). Scalar inputs `reference`, `feedforward`,
+`rotor_speed` and `stator_speed` take relative speed, torque and the two absolute
+shaft speeds; `torque` publishes the held command. Prescribed inputs use
+`relative_speed_rad_s`, `torque_n_m` and `angular_velocity_rad_s` respectively
+and evaluate the waveform at the sample's start, preserving digital sampling
+when the plant subdivides a period. The owner limits each step at its next
+sample and retains the command between samples. No CLI integrator is added.
+
+`mass`, `inertia` and `inductor` accept `publish_state: true` to expose scalar
+`position` and `velocity` signals in the corresponding domain's SI coordinates.
+These signals publish accepted start-of-step state; physical port `p` retains
+its work-conjugate mean flow. Controller reports expose `integral_torque_nm`,
+`held_torque_nm`, `sample_count` and `sample_phase_s`; native codecs preserve
+their accepted history. Controller scenes require fixed `step_s`: adaptive
+step doubling refuses this discrete policy rather than inventing a continuous
+error account. `examples/system/closed_loop_speed.json` connects measured
+inertia speed to the controller and its torque command to a controlled source.
+Real CLI/native tests compare coarse and subdivided plant steps to an
+independent sampled PI/inertia recurrence, including saturation, reversal,
+signed drive work, first-law balance and checkpoint continuation. The limits
+constrain sampled command power; no machine allocation, sensor dynamics or
+stability guarantee is implied.
+
 `fs_cli::SystemScene` exposes the same scene lowering, step driver and report
 projection to native callers. `from_text` and `from_bytes` admit a retained
 UTF-8 snapshot under the existing 1 MiB scene limit and keep an explicit

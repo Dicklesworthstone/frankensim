@@ -22,6 +22,7 @@ fs-airflow = { path = "../fs-airflow" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-checker = { path = "../fs-checker" }
 fs-conduction = { path = "../fs-conduction", features = ["component"] }
+fs-control = { path = "../fs-control", features = ["component"] }
 fs-convection = { path = "../fs-convection" }
 fs-couple = { path = "../fs-couple" }
 fs-cutfem = { path = "../fs-cutfem", optional = true }

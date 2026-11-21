@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use fs_conduction::transient::enthalpy::material::MaterialEnthalpyTransport;
+use fs_control::component::{SampledSpeedController, SampledSpeedState};
+use fs_control::speed::{ShaftPowerLimits, SpeedControllerParameters};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_gas::component::ClosedGasParcel;
 use fs_material::conductor::component::{OhmicResistor, Terminals};
@@ -66,9 +68,9 @@ use fs_system::constitutive::{
     NonlinearCapacitor, NonlinearInductor,
 };
 use fs_system::elements::{
-    Admittance, Conductance, Damper, FlowSource, Force, GasContents, GasVolume, Gyrator,
-    HeatCapacity, HeatNode, Heater, Mass, ModulatedTransformer, Motion, Resistance, Restriction,
-    Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
+    Admittance, Conductance, ControlledSource, Damper, FlowSource, Force, GasContents, GasVolume,
+    Gyrator, HeatCapacity, HeatNode, Heater, Mass, ModulatedTransformer, Motion, Resistance,
+    Restriction, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
@@ -186,6 +188,10 @@ source uncertainty is retained but not propagated. At most 64 declarations,
 
 Elements (ports in brackets; SI units in every field name):
   mass           mass_kg, position_m = 0, velocity_m_s = 0            [p]
+                 mass, inertia and inductor also accept publish_state = false;
+                 true adds scalar outputs position and velocity with their accepted
+                 start-of-step values in the declared domain's SI units.
+                 These are sampled measurements, not the mean flow at p.
   spring         stiffness_n_m, cubic_n_m3 = 0, extension_m = 0       [a, b]
   damper         damping_n_s_m                                        [a, b, heat]
   resistance_matrix domain, matrix (square, 1 to 64 rows)              [u, heat]
@@ -194,6 +200,36 @@ Elements (ports in brackets; SI units in every field name):
                  (N s/m, N m s/rad or ohm). u receives a flow vector and
                  returns matrix times that vector; heat must be connected.
   force          force_n (waveform)                                   [p]
+  controlled_effort domain (translation | rotation | electrical)      [p, command]
+  controlled_flow domain (translation | rotation | electrical)        [p, command]
+                 command is a scalar signal in the domain's SI effort or
+                 flow unit. Connect a signal or prescribe force_n, torque_n_m
+                 or voltage_v for controlled_effort; velocity_m_s,
+                 angular_velocity_rad_s or current_a for controlled_flow.
+                 Positive effort drives the connected node positively;
+                 flow is positive INTO the source (negative current charges
+                 a connected node_capacitor). Reports the last commanded
+                 effort/flow and signed energy_in_j, negative when supplying
+                 energy. Ideal sources: no saturation, supply or controller
+                 model is inferred from the command.
+  speed_controller sample_period_s, proportional_gain_nm_s_per_rad,
+                 integral_gain_nm_per_rad, anti_windup_time_s,
+                 positive_torque_limit_nm, negative_torque_limit_nm,
+                 motoring_power_w, regeneration_power_w,
+                 integral_torque_nm = 0
+                 [reference, feedforward, rotor_speed, stator_speed, torque]
+                 fs-control's sampled PI policy for rotor-minus-stator speed;
+                 torque drives a rotational controlled_effort.command. Its
+                 four inputs are scalar signals: reference in relative rad/s,
+                 feedforward in N m, both measured shaft speeds in rad/s.
+                 Prescribe them with relative_speed_rad_s, torque_n_m and
+                 angular_velocity_rad_s respectively, or connect signals.
+                 Prescribed signals are sampled at the interval's start.
+                 The kernel stops at each sample; torque is held across plant
+                 substeps. Reports integral_torque_nm, held_torque_nm,
+                 sample_phase_s and sample_count. Fixed step_s only: adaptive
+                 refuses this discrete policy. No physical actuator, sensor
+                 dynamics, current allocation or stability claim is inferred.
   velocity_source velocity_m_s (waveform)                             [p, span]
                  (prescribed motion: span publishes its start/end velocities;
                  join p to a slider end and signal span to that end's span input)
@@ -675,7 +711,8 @@ Connections, ports written element.port:
                           copy a signal output (heat_capacity.temperature or
                           velocity_source.span) to matching signal inputs
                           (a network's temperature<e>, slider.span_a/span_b,
-                          or modulated_transformer.ratio);
+                          modulated_transformer.ratio or a controlled source's
+                          command, already expressed in its declared SI unit);
                           it carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
@@ -703,7 +740,8 @@ Connections, ports written element.port:
                           restriction's end held from outside, contents
                           (pressure [Pa], specific enthalpy [J/kg], then each
                           carried mass fraction); ratio for a
-                          modulated_transformer's ratio signal
+                          modulated_transformer's ratio signal; the declared
+                          effort or flow unit for a controlled source's command
   On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
   moving that end; its two endpoint values are supplied, not its step mean.
   Prescribed table knots are scheduled automatically, including vector and
@@ -1318,6 +1356,12 @@ enum Kind {
     ResistanceMatrix,
     /// A prescribed effort (force, torque, voltage).
     Source(Domain),
+    /// An ideal effort selected by a scalar signal in its domain's SI unit.
+    ControlledEffort,
+    /// An ideal flow, positive into the source, selected by a scalar signal.
+    ControlledFlow,
+    /// A sampled speed policy with owner-defined PI and command limits.
+    SpeedController,
     /// Prescribed translation, publishing the velocities at the step's ends.
     VelocitySource,
     /// Constant-coefficient dry friction on the kernel's load line.
@@ -1389,12 +1433,15 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 47] = [
+    const TABLE: [(&'static str, Self); 50] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
         ("resistance_matrix", Self::ResistanceMatrix),
         ("force", Self::Source(Domain::Translation)),
+        ("controlled_effort", Self::ControlledEffort),
+        ("controlled_flow", Self::ControlledFlow),
+        ("speed_controller", Self::SpeedController),
         ("velocity_source", Self::VelocitySource),
         ("slider", Self::Slider),
         ("friction_interface", Self::FrictionInterface),
@@ -1509,6 +1556,25 @@ struct Element {
     laminar: Option<MaterialLaminarPipe>,
 }
 
+/// A controlled source's scalar command uses the SI unit of what its physical
+/// port returns. Signal connections carry those authored numbers unchanged.
+fn controlled_quantity(element: &Element) -> Option<&'static str> {
+    let flow = match element.kind {
+        Kind::ControlledEffort => false,
+        Kind::ControlledFlow => true,
+        _ => return None,
+    };
+    let domain = element.ports.iter().find_map(|port| match port.carrier() {
+        Carrier::Power(kind) => Domain::of(kind),
+        _ => None,
+    })?;
+    Some(if flow {
+        domain.names().flow
+    } else {
+        domain.names().effort
+    })
+}
+
 struct Device {
     system: System,
     elements: Vec<Element>,
@@ -1619,6 +1685,9 @@ fn no_error_account(element: &Element) -> String {
     let why = match element.kind {
         Kind::SlidingInterface => "its law's state is not given as numbers",
         Kind::ThermalTimeline => "its cells are born and joined at events",
+        Kind::SpeedController => {
+            "its sample count, phase and held command form a discrete policy, not a continuous error coordinate"
+        }
         // A slider, a friction interface, a Hertz patch, a contact interface.
         _ => {
             "its force jumps where it sticks, slips or strikes, and an estimate by step \
@@ -2876,6 +2945,47 @@ fn viscoelastic_network(
     })
 }
 
+fn speed_controller(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(
+        definition,
+        &[
+            "kind",
+            "sample_period_s",
+            "proportional_gain_nm_s_per_rad",
+            "integral_gain_nm_per_rad",
+            "anti_windup_time_s",
+            "positive_torque_limit_nm",
+            "negative_torque_limit_nm",
+            "motoring_power_w",
+            "regeneration_power_w",
+            "integral_torque_nm",
+        ],
+        what,
+    )?;
+    let parameters = SpeedControllerParameters {
+        sample_period_s: number(definition, "sample_period_s", what)?,
+        proportional_gain_nm_s_per_rad: number(definition, "proportional_gain_nm_s_per_rad", what)?,
+        integral_gain_nm_per_rad: number(definition, "integral_gain_nm_per_rad", what)?,
+        anti_windup_time_s: number(definition, "anti_windup_time_s", what)?,
+    };
+    let limits = ShaftPowerLimits {
+        positive_torque_limit_nm: number(definition, "positive_torque_limit_nm", what)?,
+        negative_torque_limit_nm: number(definition, "negative_torque_limit_nm", what)?,
+        motoring_power_w: number(definition, "motoring_power_w", what)?,
+        regeneration_power_w: number(definition, "regeneration_power_w", what)?,
+    };
+    let invalid = |error: fs_control::ControlError| Refusal::Input(format!("{what}: {error}"));
+    let controller = SampledSpeedController::new(parameters, limits).map_err(invalid)?;
+    let initial = SampledSpeedState::new(number_or(definition, "integral_torque_nm", 0.0, what)?)
+        .map_err(invalid)?;
+    add(builder, name, controller, initial)
+}
+
 fn element(
     builder: &mut SystemBuilder,
     name: &str,
@@ -2910,7 +3020,11 @@ fn element(
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
-            fields(definition, &["kind", names.inertance, names.displacement, names.flow], &what)?;
+            fields(
+                definition,
+                &["kind", names.inertance, names.displacement, names.flow, "publish_state"],
+                &what,
+            )?;
             let state = Motion {
                 position_m: number_or(definition, names.displacement, 0.0, &what)?,
                 velocity_m_s: number_or(definition, names.flow, 0.0, &what)?,
@@ -2925,6 +3039,12 @@ fn element(
             let inertance = number(definition, names.inertance, &what)?;
             let node = Mass::in_domain(domain.port_kind(), inertance)
                 .map_err(|_| format!("{what}: {} must be positive", names.inertance))?;
+            let publish = match definition.get("publish_state") {
+                None => false,
+                Some(J::Bool(publish)) => *publish,
+                _ => return Err(format!("{what}.publish_state: expected a boolean").into()),
+            };
+            let node = if publish { node.publishing() } else { node };
             add(builder, name, node, state)?
         }
         Kind::Compliance(domain) => compliance(builder, name, definition, domain, &what)?,
@@ -2956,6 +3076,22 @@ fn element(
             );
             add(builder, name, source, SourceAccount::default())?
         }
+        Kind::ControlledEffort | Kind::ControlledFlow => {
+            fields(definition, &["kind", "domain"], &what)?;
+            let domain = definition
+                .str_field("domain")
+                .and_then(Domain::parse)
+                .ok_or_else(|| {
+                    format!("{what}: domain is one of translation, rotation, electrical")
+                })?;
+            let source = if kind == Kind::ControlledEffort {
+                ControlledSource::effort(domain.port_kind())
+            } else {
+                ControlledSource::flow(domain.port_kind())
+            };
+            add(builder, name, source, SourceAccount::default())?
+        }
+        Kind::SpeedController => speed_controller(builder, name, definition, &what)?,
         Kind::VelocitySource => {
             fields(definition, &["kind", "velocity_m_s"], &what)?;
             let wave = definition
@@ -3834,23 +3970,37 @@ fn prescribe(
         Carrier::Power(kind) => Domain::of(kind),
         _ => None,
     };
-    let quantity = match (target.carrier, target.role, domain) {
-        (Carrier::Signal, PortRole::SignalIn, _)
+    let element = &elements[target.element];
+    let sampled = element.kind == Kind::SpeedController;
+    let signal_quantity = if sampled {
+        Some(if builder.port(element.node, "reference").ok() == Some(target.port) {
+            "relative_speed_rad_s"
+        } else if builder.port(element.node, "feedforward").ok() == Some(target.port) {
+            "torque_n_m"
+        } else {
+            "angular_velocity_rad_s"
+        })
+    } else {
+        controlled_quantity(element)
+    };
+    let quantity = match (target.carrier, target.role, domain, signal_quantity) {
+        (Carrier::Signal, PortRole::SignalIn, _, Some(quantity)) => quantity,
+        (Carrier::Signal, PortRole::SignalIn, _, _)
             if elements[target.element].kind == Kind::ModulatedTransformer => "ratio",
-        // Slider spans and transformer ratios were handled above; remaining
+        // Spans, source commands and ratios were handled above; remaining
         // signal inputs are the temperatures a network's shift is read at.
-        (Carrier::Heat, PortRole::EffortIn, _) | (Carrier::Signal, PortRole::SignalIn, _) => {
+        (Carrier::Heat, PortRole::EffortIn, _, _) | (Carrier::Signal, PortRole::SignalIn, _, _) => {
             "temperature_k"
         }
-        (Carrier::Heat, PortRole::FlowIn, _) => "heat_rate_w",
-        (Carrier::Power(_), PortRole::EffortIn, Some(domain)) => domain.names().effort,
-        (Carrier::Power(_), PortRole::FlowIn, Some(domain)) => domain.names().flow,
+        (Carrier::Heat, PortRole::FlowIn, _, _) => "heat_rate_w",
+        (Carrier::Power(_), PortRole::EffortIn, Some(domain), _) => domain.names().effort,
+        (Carrier::Power(_), PortRole::FlowIn, Some(domain), _) => domain.names().flow,
         // What crosses into a gas volume: mass rate [kg/s], enthalpy rate
         // [W] and the rate of each carried quantity [kg/s].
-        (Carrier::Stream, PortRole::FlowIn, _) => "stream",
+        (Carrier::Stream, PortRole::FlowIn, _, _) => "stream",
         // What a restriction's end is held at: pressure [Pa], specific
         // enthalpy [J/kg] and the mass fraction of each carried quantity.
-        (Carrier::Stream, PortRole::EffortIn, _) => "contents",
+        (Carrier::Stream, PortRole::EffortIn, _, _) => "contents",
         _ => return Err(format!("{what}: this port cannot be prescribed").into()),
     };
     fields(connection, &["prescribe", quantity], what)
@@ -3902,7 +4052,15 @@ fn prescribe(
             target.port,
             Box::new(move |t0, dt, values| {
                 for (value, wave) in values.iter_mut().zip(&waves) {
-                    *value = sign * wave.mean(t0, dt);
+                    // A digital policy samples a boundary at the beginning of
+                    // its period; using the interval mean changes the command
+                    // when an unrelated plant event subdivides that interval.
+                    *value = sign
+                        * if sampled {
+                            wave.value_at(t0)
+                        } else {
+                            wave.mean(t0, dt)
+                        };
                 }
             }),
             events,
@@ -3971,7 +4129,12 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
-            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource(_) | Kind::Heater => {
+            Kind::Source(_)
+            | Kind::ControlledEffort
+            | Kind::ControlledFlow
+            | Kind::VelocitySource
+            | Kind::CurrentSource(_)
+            | Kind::Heater => {
                 vec![("energy_in_j", Coordinate::SourceWork)]
             }
             Kind::Resistance(_)
@@ -4040,7 +4203,8 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::SlidingInterface
             | Kind::HertzPatch
             | Kind::ContactInterface
-            | Kind::ThermalTimeline => return Err(no_error_account(element)),
+            | Kind::ThermalTimeline
+            | Kind::SpeedController => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
             expected.push((format!("{}.{field}", element.name), element.node, coordinate));
@@ -4465,6 +4629,30 @@ impl Device {
                 "{base}; layer conductors integrate authored bounded k(T) charts with fixed \
                  planar or radial geometry and areal contact resistance; no verified \
                  material-pack provenance, internal layer storage or source extrapolation"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::SpeedController)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; speed_controller executes fs-control's sampled PI policy \
+                 with authored torque and power limits and holds each command until the \
+                 next sample; ideal sampled measurements and torque actuation, with no \
+                 machine current allocation, sensor dynamics or stability claim"
+            ));
+        }
+        if self
+            .elements
+            .iter()
+            .any(|element| matches!(element.kind, Kind::ControlledEffort | Kind::ControlledFlow))
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; controlled sources exchange signed physical work while their \
+                 scalar commands carry no energy and are held over each step in the \
+                 declared SI unit; no saturation, power-supply or controller stability \
+                 model is inferred"
             ));
         }
         if self
@@ -4994,13 +5182,43 @@ impl Device {
                     ("bulk_density_kg_m3", state.map_or(f64::NAN, |s| s.bulk_density_kg_m3())),
                 ]
             }
-            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource(_) | Kind::Heater => {
-                vec![(
+            Kind::Source(_)
+            | Kind::ControlledEffort
+            | Kind::ControlledFlow
+            | Kind::VelocitySource
+            | Kind::CurrentSource(_)
+            | Kind::Heater => {
+                let mut values = vec![(
                     "energy_in_j",
                     system
                         .state::<SourceAccount>(element.node)
                         .map_or(f64::NAN, |account| account.energy_in_j),
-                )]
+                )];
+                if let Some(quantity) = controlled_quantity(element) {
+                    values.push((quantity, output("p")));
+                }
+                values
+            }
+            Kind::SpeedController => {
+                let state = system.state::<SampledSpeedState>(element.node);
+                vec![
+                    (
+                        "integral_torque_nm",
+                        state.map_or(f64::NAN, SampledSpeedState::integral_torque_nm),
+                    ),
+                    (
+                        "held_torque_nm",
+                        state.map_or(f64::NAN, SampledSpeedState::held_torque_nm),
+                    ),
+                    (
+                        "sample_phase_s",
+                        state.map_or(f64::NAN, SampledSpeedState::phase_s),
+                    ),
+                    (
+                        "sample_count",
+                        state.map_or(f64::NAN, |state| state.samples() as f64),
+                    ),
+                ]
             }
             Kind::Resistance(domain) => {
                 let mut values = vec![

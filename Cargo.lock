@@ -1185,6 +1185,7 @@ dependencies = [
  "fs-blake3",
  "fs-checker",
  "fs-conduction",
+ "fs-control",
  "fs-convection",
  "fs-couple",
  "fs-cutfem",
