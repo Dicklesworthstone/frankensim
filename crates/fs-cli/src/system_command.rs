@@ -68,9 +68,10 @@ use fs_system::constitutive::{
     NonlinearCapacitor, NonlinearInductor,
 };
 use fs_system::elements::{
-    Admittance, Conductance, ControlledSource, Damper, FlowSource, Force, GasContents, GasVolume,
-    Gyrator, HeatCapacity, HeatNode, Heater, Mass, ModulatedTransformer, Motion, Resistance,
-    Restriction, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
+    Admittance, AffineSignal, Conductance, ControlledSource, ControllerState, Damper, FlowSource,
+    Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater, Mass,
+    ModulatedTransformer, Motion, Resistance, Restriction, SampledController, SignalClock,
+    SignalSource, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
@@ -102,6 +103,8 @@ const MAX_CARRIED: usize = 16;
 const MAX_NODE_BODIES: usize = 64;
 /// Coordinates in one dense, positive-definite resistance law.
 const MAX_RESISTANCE_COORDINATES: usize = 64;
+/// Each input, output or memory dimension of an authored signal law.
+const MAX_SIGNAL_COORDINATES: usize = 64;
 /// Authored caloric support retained by one uniform enthalpy body.
 const MAX_ENTHALPY_KNOTS: usize = 4096;
 const ADAPTIVE_NO_CLAIM: &str = "step-doubling estimates control the declared state coordinates and source-work increments under the selected order assumption; they are local numerical estimates, not global error bounds or physical validation; dissipated heat and interface balances retain the kernel's separate ledger audits; no material-card resolution, contact, friction or phase change";
@@ -160,6 +163,11 @@ connector<i>.branch<j>.amplitude_sqrt_j for its complete signed memory vector.
 Vector relative scales use initial/refined lengths; orientation uses angular
 motion during the interval. All body and branch accounts are mandatory.
 The default order is 1; choose order 2 only for a smooth second-order model.
+Affine maps, signal sources, published inertance observations and controlled
+commands supplied by signals or point-sampled value admit order 1 only. SI-named controlled-source
+prescriptions retain their interval-mean rules. sampled_controller and
+speed_controller require fixed-step operation; their sample events still cap
+steps exactly, but no adaptive discrete-memory metric is supplied.
 The refined two-half-step state is retained; rejected trials leave no state
 or ledger entries. step_s remains the largest interval.
 The final externally capped interval may be shorter than min_step_s; an
@@ -186,12 +194,14 @@ initial-value freezing or extrapolation. Reports retain content identities, clai
 source uncertainty is retained but not propagated. At most 64 declarations,
 4 MiB per pack and 64 MiB total pack bytes. No phase transition is inferred.
 
-Elements (ports in brackets; SI units in every field name):
+Elements (ports in brackets; physical fields use SI units):
   mass           mass_kg, position_m = 0, velocity_m_s = 0            [p]
-                 mass, inertia and inductor also accept publish_state = false;
-                 true adds scalar outputs position and velocity with their accepted
-                 start-of-step values in the declared domain's SI units.
-                 These are sampled measurements, not the mean flow at p.
+                 publish = false; true adds scalar position and velocity
+                 signals from accepted state at the start of the step.
+                 publish_state is an equivalent alias; if both are supplied
+                 they must agree. Both default to false.
+                 The same option applies to inertia and inductor, with
+                 angle/angular velocity or charge/current in their SI units.
   spring         stiffness_n_m, cubic_n_m3 = 0, extension_m = 0       [a, b]
   damper         damping_n_s_m                                        [a, b, heat]
   resistance_matrix domain, matrix (square, 1 to 64 rows)              [u, heat]
@@ -200,18 +210,36 @@ Elements (ports in brackets; SI units in every field name):
                  (N s/m, N m s/rad or ohm). u receives a flow vector and
                  returns matrix times that vector; heat must be connected.
   force          force_n (waveform)                                   [p]
-  controlled_effort domain (translation | rotation | electrical)      [p, command]
-  controlled_flow domain (translation | rotation | electrical)        [p, command]
-                 command is a scalar signal in the domain's SI effort or
-                 flow unit. Connect a signal or prescribe force_n, torque_n_m
-                 or voltage_v for controlled_effort; velocity_m_s,
-                 angular_velocity_rad_s or current_a for controlled_flow.
-                 Positive effort drives the connected node positively;
-                 flow is positive INTO the source (negative current charges
-                 a connected node_capacitor). Reports the last commanded
-                 effort/flow and signed energy_in_j, negative when supplying
-                 energy. Ideal sources: no saturation, supply or controller
-                 model is inferred from the command.
+  affine_signal  matrix (m by n), bias (m numbers)      [input0..input<n-1>, output]
+                 y = bias + matrix * u; n scalar inputs, one m-wide output.
+  signal_source  waveforms (array of waveforms)                       [output]
+                 One output coefficient per waveform, evaluated at the start
+                 of each step. The source clock and definitions are replayable;
+                 table knots cap steps. Signals carry no physical energy.
+  sampled_controller sample_period_s, a, b, c, d, initial
+                                                     [input0..input<m-1>, output]
+                 Discrete law y = C*x + D*u, x_next = A*x + B*u at t = k*period,
+                 starting at t = 0; output is held between samples. initial
+                 gives n state coordinates; A is n by n, B n by m, C p by n,
+                 D p by m. n may be zero (A and B [], C rows []); m,p >= 1.
+                 Use fixed step_s; sample events cap larger physical steps.
+  controlled_effort domain                                           [p, command]
+  controlled_flow domain                                             [p, command]
+                 domain is translation, rotation or electrical. command is
+                 a scalar held effort or flow in that domain's SI unit.
+                 Prescribe force_n, torque_n_m or voltage_v for effort;
+                 velocity_m_s, angular_velocity_rad_s or current_a for flow.
+                 Those SI-named prescriptions supply the interval mean;
+                 value instead supplies a signed start-of-step point sample.
+                 Flow is positive INTO the source: negative electrical flow
+                 supplies current to a node_capacitor. Reports the declared
+                 SI field, command and signed energy_in_j, negative when
+                 energy is supplied.
+  Signal matrices and vectors contain finite numbers, with at most 64 inputs,
+  outputs or memory coordinates. Signal gains, units and initial memory are
+  authored; no limiting, power-supply model or control stability is inferred.
+  Reports expose output0, output1, ...; sampled controllers also expose x0,
+  x1, ..., sample_count and time_s. signal_source exposes accepted time_s.
   speed_controller sample_period_s, proportional_gain_nm_s_per_rad,
                  integral_gain_nm_per_rad, anti_windup_time_s,
                  positive_torque_limit_nm, negative_torque_limit_nm,
@@ -709,10 +737,10 @@ Connections, ports written element.port:
                           send the heat leaving a port by fraction
   {\"signal\": port, \"to\": [ports]}
                           copy a signal output (heat_capacity.temperature or
-                          velocity_source.span) to matching signal inputs
+                          velocity_source.span, a published mass observation,
+                          or a control element's output) to matching signal inputs
                           (a network's temperature<e>, slider.span_a/span_b,
-                          modulated_transformer.ratio or a controlled source's
-                          command, already expressed in its declared SI unit);
+                          modulated_transformer.ratio, input<i> or command);
                           it carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
@@ -740,8 +768,12 @@ Connections, ports written element.port:
                           restriction's end held from outside, contents
                           (pressure [Pa], specific enthalpy [J/kg], then each
                           carried mass fraction); ratio for a
-                          modulated_transformer's ratio signal; the declared
-                          effort or flow unit for a controlled source's command
+                          modulated_transformer's ratio signal; value for
+                          affine/sampled_controller inputs or controlled-source
+                          commands (the latter also accept their SI field name).
+  A prescribed value and a speed_controller input are point samples at the
+  step's start, matching signal_source. SI-named controlled-source commands
+  and physical prescriptions use interval means.
   On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
   moving that end; its two endpoint values are supplied, not its step mean.
   Prescribed table knots are scheduled automatically, including vector and
@@ -1356,12 +1388,18 @@ enum Kind {
     ResistanceMatrix,
     /// A prescribed effort (force, torque, voltage).
     Source(Domain),
-    /// An ideal effort selected by a scalar signal in its domain's SI unit.
-    ControlledEffort,
-    /// An ideal flow, positive into the source, selected by a scalar signal.
-    ControlledFlow,
+    /// An authored dense affine map over scalar signal inputs.
+    AffineSignal,
+    /// Replayable point-sampled signal waveforms on an accepted clock.
+    SignalSource,
+    /// An authored discrete recurrence with a sampled, held output.
+    SampledController,
     /// A sampled speed policy with owner-defined PI and command limits.
     SpeedController,
+    /// An ideal effort source commanded through a scalar signal.
+    ControlledEffort,
+    /// An ideal flow source, with flow positive into the source.
+    ControlledFlow,
     /// Prescribed translation, publishing the velocities at the step's ends.
     VelocitySource,
     /// Constant-coefficient dry friction on the kernel's load line.
@@ -1433,15 +1471,18 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 50] = [
+    const TABLE: [(&'static str, Self); 53] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
         ("resistance_matrix", Self::ResistanceMatrix),
         ("force", Self::Source(Domain::Translation)),
+        ("affine_signal", Self::AffineSignal),
+        ("signal_source", Self::SignalSource),
+        ("sampled_controller", Self::SampledController),
+        ("speed_controller", Self::SpeedController),
         ("controlled_effort", Self::ControlledEffort),
         ("controlled_flow", Self::ControlledFlow),
-        ("speed_controller", Self::SpeedController),
         ("velocity_source", Self::VelocitySource),
         ("slider", Self::Slider),
         ("friction_interface", Self::FrictionInterface),
@@ -1509,6 +1550,9 @@ struct Element {
     kind: Kind,
     node: NodeId,
     ports: Vec<PortSpec>,
+    /// A controlled source driven by a signal or prescribed through `value`
+    /// uses a held sample; SI-named prescriptions retain interval-mean semantics.
+    point_sampled_command: bool,
     /// Initial temperature of a heat capacity, used as the starting value of
     /// the temperature inputs joined to it.
     temperature_k: Option<f64>,
@@ -1685,6 +1729,9 @@ fn no_error_account(element: &Element) -> String {
     let why = match element.kind {
         Kind::SlidingInterface => "its law's state is not given as numbers",
         Kind::ThermalTimeline => "its cells are born and joined at events",
+        Kind::SampledController => {
+            "its discrete memory and sample events have no step-doubling error metric here"
+        }
         Kind::SpeedController => {
             "its sample count, phase and held command form a discrete policy, not a continuous error coordinate"
         }
@@ -1720,15 +1767,28 @@ fn whole_state_account(element: &Element) -> (&'static str, Coordinate) {
     (name, Coordinate::Network(account))
 }
 
-/// The order of a kind's own step, for the kinds a scene's declared
-/// `adaptive.order` is held to, each measured by halving a fixed step. A
+/// The supported scene order for kinds that bound `adaptive.order`. Physical
+/// owners' step orders are measured by halving a fixed step. A
 /// conduction body steps by backward Euler. A modal structure is exact for a
 /// held effort and holds one that varies within a step, which leaves the
 /// coupled step at order two. A gas volume steps by the trapezoidal rule, and
-/// a gas cavity measures order two. None: the order is the scene's to establish.
-fn step_order(kind: Kind) -> Option<u32> {
-    match kind {
-        Kind::ConductionBody => Some(1),
+/// a gas cavity measures order two. Point-sampled commands and accepted-state
+/// observations conservatively limit control scenes to order one.
+/// None: the order is the scene's to establish.
+fn step_order(element: &Element) -> Option<u32> {
+    if element.point_sampled_command {
+        return Some(1);
+    }
+    match element.kind {
+        Kind::ConductionBody | Kind::AffineSignal | Kind::SignalSource => Some(1),
+        Kind::Inertance(_)
+            if element
+                .ports
+                .iter()
+                .any(|port| port.carrier() == Carrier::Signal) =>
+        {
+            Some(1)
+        }
         Kind::ModalStructure | Kind::GasVolume | Kind::GasCavity => Some(2),
         _ => None,
     }
@@ -1738,7 +1798,20 @@ fn step_order(kind: Kind) -> Option<u32> {
 /// so a scene may not declare an order above that of a kind it accounts.
 fn declared_order_fits(order: f64, elements: &[Element]) -> Result<(), String> {
     for element in elements {
-        if let Some(own) = step_order(element.kind).filter(|own| order > f64::from(*own)) {
+        if let Some(own) = step_order(element).filter(|own| order > f64::from(*own)) {
+            if matches!(
+                element.kind,
+                Kind::AffineSignal
+                    | Kind::SignalSource
+                    | Kind::ControlledEffort
+                    | Kind::ControlledFlow
+                    | Kind::Inertance(_)
+            ) {
+                return Err(format!(
+                    "adaptive.order: {} uses held start-of-step control signals; the supported order is 1, but the scene declares order {order}",
+                    element.name,
+                ));
+            }
             return Err(format!(
                 "adaptive.order: {} is a {}, whose step is of order {own}; the scene declares order {order}",
                 element.name,
@@ -2332,6 +2405,143 @@ fn resistance_matrix(
     let resistance = Resistance::new(domain.port_kind(), matrix)
         .map_err(|error| Refusal::Input(format!("{what}: {error}")))?;
     add(builder, name, resistance, ())
+}
+
+/// The nonempty rectangular shape that admits a bounded signal map.
+fn signal_shape(definition: &J, key: &str, what: &str) -> Result<(usize, usize), String> {
+    let rows = definition
+        .get(key)
+        .and_then(J::as_array)
+        .filter(|rows| (1..=MAX_SIGNAL_COORDINATES).contains(&rows.len()))
+        .ok_or_else(|| {
+            format!("{what}.{key}: expected 1 to {MAX_SIGNAL_COORDINATES} matrix rows")
+        })?;
+    let columns = rows[0]
+        .as_array()
+        .filter(|row| (1..=MAX_SIGNAL_COORDINATES).contains(&row.len()))
+        .ok_or_else(|| {
+            format!("{what}.{key}: expected 1 to {MAX_SIGNAL_COORDINATES} matrix columns")
+        })?
+        .len();
+    Ok((rows.len(), columns))
+}
+
+fn signal_coefficients(value: Option<&J>, count: usize, what: &str) -> Result<Vec<f64>, String> {
+    value
+        .and_then(J::as_array)
+        .filter(|values| values.len() == count)
+        .ok_or_else(|| format!("{what}: expected {count} coefficients"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("{what}[{index}]: expected a finite number"))
+        })
+        .collect()
+}
+
+fn affine_signal(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "matrix", "bias"], what)?;
+    let (outputs, inputs) = signal_shape(definition, "matrix", what)?;
+    let matrix = coefficient_matrix(definition.get("matrix"), outputs, inputs, what)?;
+    let bias = signal_coefficients(definition.get("bias"), outputs, &format!("{what}.bias"))?;
+    let signal = AffineSignal::new(inputs, outputs, matrix, bias)
+        .map_err(|error| format!("{what}: {error}"))?;
+    add(builder, name, signal, ())
+}
+
+fn signal_source(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "waveforms"], what)?;
+    let values = definition
+        .get("waveforms")
+        .and_then(J::as_array)
+        .filter(|values| (1..=MAX_SIGNAL_COORDINATES).contains(&values.len()))
+        .ok_or_else(|| {
+            format!("{what}.waveforms: expected 1 to {MAX_SIGNAL_COORDINATES} waveforms")
+        })?;
+    let waves = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| waveform(value, &format!("{what}.waveforms[{index}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let source = SignalSource::new(waves).map_err(|error| format!("{what}: {error}"))?;
+    add(builder, name, source, SignalClock::default())
+}
+
+fn sampled_controller(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(
+        definition,
+        &["kind", "sample_period_s", "a", "b", "c", "d", "initial"],
+        what,
+    )?;
+    let memory = definition
+        .get("initial")
+        .and_then(J::as_array)
+        .filter(|values| values.len() <= MAX_SIGNAL_COORDINATES)
+        .ok_or_else(|| {
+            format!("{what}.initial: expected 0 to {MAX_SIGNAL_COORDINATES} coordinates")
+        })?
+        .len();
+    let initial = signal_coefficients(
+        definition.get("initial"),
+        memory,
+        &format!("{what}.initial"),
+    )?;
+    let (outputs, inputs) = signal_shape(definition, "d", what)?;
+    let matrix = |key: &str, rows, columns| {
+        coefficient_matrix(definition.get(key), rows, columns, &format!("{what}.{key}"))
+    };
+    let controller = SampledController::new(
+        positive(definition, "sample_period_s", what)?,
+        memory,
+        inputs,
+        outputs,
+        matrix("a", memory, memory)?,
+        matrix("b", memory, inputs)?,
+        matrix("c", outputs, memory)?,
+        matrix("d", outputs, inputs)?,
+    )
+    .map_err(|error| format!("{what}: {error}"))?;
+    let state = ControllerState::new(&controller, initial)
+        .map_err(|error| format!("{what}.initial: {error}"))?;
+    add(builder, name, controller, state)
+}
+
+fn controlled_source(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    kind: Kind,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "domain"], what)?;
+    let domain = definition
+        .str_field("domain")
+        .and_then(Domain::parse)
+        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical"))?;
+    let source = if kind == Kind::ControlledEffort {
+        ControlledSource::effort(domain.port_kind())
+    } else {
+        ControlledSource::flow(domain.port_kind())
+    };
+    add(builder, name, source, SourceAccount::default())
 }
 
 fn gyrator(
@@ -3022,7 +3232,7 @@ fn element(
             let names = domain.names();
             fields(
                 definition,
-                &["kind", names.inertance, names.displacement, names.flow, "publish_state"],
+                &["kind", names.inertance, names.displacement, names.flow, "publish", "publish_state"],
                 &what,
             )?;
             let state = Motion {
@@ -3039,12 +3249,19 @@ fn element(
             let inertance = number(definition, names.inertance, &what)?;
             let node = Mass::in_domain(domain.port_kind(), inertance)
                 .map_err(|_| format!("{what}: {} must be positive", names.inertance))?;
-            let publish = match definition.get("publish_state") {
-                None => false,
-                Some(J::Bool(publish)) => *publish,
-                _ => return Err(format!("{what}.publish_state: expected a boolean").into()),
+            let flag = |key: &str| -> Result<Option<bool>, String> {
+                match definition.get(key) {
+                    None => Ok(None),
+                    Some(J::Bool(value)) => Ok(Some(*value)),
+                    _ => Err(format!("{what}.{key}: expected a boolean")),
+                }
             };
-            let node = if publish { node.publishing() } else { node };
+            let publish = flag("publish")?;
+            let publish_state = flag("publish_state")?;
+            if matches!((publish, publish_state), (Some(a), Some(b)) if a != b) {
+                return Err(format!("{what}: publish and publish_state must agree when both are supplied").into());
+            }
+            let node = if publish.or(publish_state).unwrap_or(false) { node.publishing() } else { node };
             add(builder, name, node, state)?
         }
         Kind::Compliance(domain) => compliance(builder, name, definition, domain, &what)?,
@@ -3064,6 +3281,13 @@ fn element(
             add(builder, name, damper, ())?
         }
         Kind::ResistanceMatrix => resistance_matrix(builder, name, definition, &what)?,
+        Kind::AffineSignal => affine_signal(builder, name, definition, &what)?,
+        Kind::SignalSource => signal_source(builder, name, definition, &what)?,
+        Kind::SampledController => sampled_controller(builder, name, definition, &what)?,
+        Kind::SpeedController => speed_controller(builder, name, definition, &what)?,
+        Kind::ControlledEffort | Kind::ControlledFlow => {
+            controlled_source(builder, name, definition, kind, &what)?
+        }
         Kind::Source(domain) => {
             let names = domain.names();
             fields(definition, &["kind", names.effort], &what)?;
@@ -3076,22 +3300,6 @@ fn element(
             );
             add(builder, name, source, SourceAccount::default())?
         }
-        Kind::ControlledEffort | Kind::ControlledFlow => {
-            fields(definition, &["kind", "domain"], &what)?;
-            let domain = definition
-                .str_field("domain")
-                .and_then(Domain::parse)
-                .ok_or_else(|| {
-                    format!("{what}: domain is one of translation, rotation, electrical")
-                })?;
-            let source = if kind == Kind::ControlledEffort {
-                ControlledSource::effort(domain.port_kind())
-            } else {
-                ControlledSource::flow(domain.port_kind())
-            };
-            add(builder, name, source, SourceAccount::default())?
-        }
-        Kind::SpeedController => speed_controller(builder, name, definition, &what)?,
         Kind::VelocitySource => {
             fields(definition, &["kind", "velocity_m_s"], &what)?;
             let wave = definition
@@ -3310,6 +3518,7 @@ fn element(
         kind,
         node,
         ports,
+        point_sampled_command: false,
         temperature_k,
         port_temperatures_k,
         node_capacity,
@@ -3904,7 +4113,7 @@ fn route(
 /// a network's shift is read at).
 fn signal(
     builder: &mut SystemBuilder,
-    elements: &[Element],
+    elements: &mut [Element],
     connection: &J,
     guesses: &mut Guesses,
     what: &str,
@@ -3925,6 +4134,12 @@ fn signal(
         builder
             .signal(source.port, target.port)
             .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
+        if matches!(
+            elements[target.element].kind,
+            Kind::ControlledEffort | Kind::ControlledFlow
+        ) {
+            elements[target.element].point_sampled_command = true;
+        }
         // The kernel solves a signal with the rest of its block and starts
         // from the publisher's temperature.
         if let Some(kelvin) = source.temperature_k {
@@ -3936,7 +4151,7 @@ fn signal(
 
 fn prescribe(
     builder: &mut SystemBuilder,
-    elements: &[Element],
+    elements: &mut [Element],
     connection: &J,
     what: &str,
 ) -> Result<(), Refusal> {
@@ -3971,24 +4186,39 @@ fn prescribe(
         _ => None,
     };
     let element = &elements[target.element];
-    let sampled = element.kind == Kind::SpeedController;
-    let signal_quantity = if sampled {
-        Some(if builder.port(element.node, "reference").ok() == Some(target.port) {
-            "relative_speed_rad_s"
-        } else if builder.port(element.node, "feedforward").ok() == Some(target.port) {
-            "torque_n_m"
-        } else {
-            "angular_velocity_rad_s"
-        })
+    let controlled = controlled_quantity(element);
+    let value_command = controlled.is_some() && connection.get("value").is_some();
+    let point_sample = target.carrier == Carrier::Signal
+        && (value_command
+            || matches!(
+                element.kind,
+                Kind::AffineSignal | Kind::SampledController | Kind::SpeedController
+            ));
+    let signal_quantity = if element.kind == Kind::SpeedController {
+        Some(
+            if builder.port(element.node, "reference").ok() == Some(target.port) {
+                "relative_speed_rad_s"
+            } else if builder.port(element.node, "feedforward").ok() == Some(target.port) {
+                "torque_n_m"
+            } else {
+                "angular_velocity_rad_s"
+            },
+        )
+    } else if value_command || matches!(element.kind, Kind::AffineSignal | Kind::SampledController)
+    {
+        Some("value")
     } else {
-        controlled_quantity(element)
+        controlled
     };
     let quantity = match (target.carrier, target.role, domain, signal_quantity) {
         (Carrier::Signal, PortRole::SignalIn, _, Some(quantity)) => quantity,
         (Carrier::Signal, PortRole::SignalIn, _, _)
-            if elements[target.element].kind == Kind::ModulatedTransformer => "ratio",
-        // Spans, source commands and ratios were handled above; remaining
-        // signal inputs are the temperatures a network's shift is read at.
+            if element.kind == Kind::ModulatedTransformer =>
+        {
+            "ratio"
+        }
+        // Control signals, spans and ratios were handled above; remaining
+        // signals are temperatures at which a network's shift is read.
         (Carrier::Heat, PortRole::EffortIn, _, _) | (Carrier::Signal, PortRole::SignalIn, _, _) => {
             "temperature_k"
         }
@@ -4052,11 +4282,8 @@ fn prescribe(
             target.port,
             Box::new(move |t0, dt, values| {
                 for (value, wave) in values.iter_mut().zip(&waves) {
-                    // A digital policy samples a boundary at the beginning of
-                    // its period; using the interval mean changes the command
-                    // when an unrelated plant event subdivides that interval.
                     *value = sign
-                        * if sampled {
+                        * if point_sample {
                             wave.value_at(t0)
                         } else {
                             wave.mean(t0, dt)
@@ -4066,6 +4293,9 @@ fn prescribe(
             events,
         )
         .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
+    if value_command && target.carrier == Carrier::Signal {
+        elements[target.element].point_sampled_command = true;
+    }
     Ok(())
 }
 
@@ -4130,14 +4360,16 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
             Kind::Source(_)
-            | Kind::ControlledEffort
-            | Kind::ControlledFlow
             | Kind::VelocitySource
             | Kind::CurrentSource(_)
+            | Kind::ControlledEffort
+            | Kind::ControlledFlow
             | Kind::Heater => {
                 vec![("energy_in_j", Coordinate::SourceWork)]
             }
             Kind::Resistance(_)
+            | Kind::AffineSignal
+            | Kind::SignalSource
             | Kind::ResistanceMatrix
             | Kind::ResistorBranch(_)
             | Kind::CarreauPipe
@@ -4203,8 +4435,9 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::SlidingInterface
             | Kind::HertzPatch
             | Kind::ContactInterface
-            | Kind::ThermalTimeline
-            | Kind::SpeedController => return Err(no_error_account(element)),
+            | Kind::SampledController
+            | Kind::SpeedController
+            | Kind::ThermalTimeline => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
             expected.push((format!("{}.{field}", element.name), element.node, coordinate));
@@ -4331,9 +4564,9 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
         } else if connection.get("route").is_some() {
             route(&mut builder, &elements, connection, &mut guesses, &what)?;
         } else if connection.get("signal").is_some() {
-            signal(&mut builder, &elements, connection, &mut guesses, &what)?;
+            signal(&mut builder, &mut elements, connection, &mut guesses, &what)?;
         } else if connection.get("prescribe").is_some() {
-            prescribe(&mut builder, &elements, connection, &what)?;
+            prescribe(&mut builder, &mut elements, connection, &what)?;
         } else {
             return Err(format!(
                 "{what}: expected join, common_effort, transformer, power_map, route, \
@@ -4670,6 +4903,22 @@ impl Device {
                  or control stability is inferred"
             ));
         }
+        if self.elements.iter().any(|element| {
+            matches!(
+                element.kind,
+                Kind::AffineSignal
+                    | Kind::SignalSource
+                    | Kind::SampledController
+            )
+        }) {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; control gains, units and memory are authored; measurements and \
+                 reference waveforms are sampled from accepted start-of-step state, and sampled \
+                 controllers update only at their declared clock events; ideal actuator commands \
+                 are held and their signed physical work is included in the ledger; no saturation, \
+                 power-supply dynamics or control stability is inferred"
+            ));
+        }
         if self
             .elements
             .iter()
@@ -4936,9 +5185,15 @@ impl Device {
         self.samples.push((self.system.time_s(), values));
     }
 
-    /// The state of an element, and for stateless ones the step-mean values
-    /// of the last step.
+    /// Accepted state and the last step's outputs (means for power ports,
+    /// point samples or held commands for control signals).
     fn values(&self, element: &Element) -> Vec<(String, f64)> {
+        if matches!(
+            element.kind,
+            Kind::AffineSignal | Kind::SignalSource | Kind::SampledController
+        ) {
+            return self.signal_values(element);
+        }
         if matches!(element.kind, Kind::RigidNetwork | Kind::ViscoelasticNetwork) {
             return self.network_values(element);
         }
@@ -5044,6 +5299,46 @@ impl Device {
                     });
                 values.push((format!("connector{connector}.branch{branch}.energy_j"), energy_j));
             }
+        }
+        values
+    }
+
+    /// Control outputs, followed by any accepted clock and discrete memory.
+    fn signal_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let width = element
+            .ports
+            .iter()
+            .find(|port| port.id().as_str() == "output")
+            .map_or(0, PortSpec::output_width);
+        let output = self
+            .system
+            .port(element.node, "output")
+            .filter(|_| self.system.steps() > 0)
+            .map(|port| self.system.last_output(port));
+        let mut values: Vec<_> = (0..width)
+            .map(|index| {
+                (
+                    format!("output{index}"),
+                    output
+                        .and_then(|values| values.get(index))
+                        .copied()
+                        .unwrap_or(f64::NAN),
+                )
+            })
+            .collect();
+        if let Some(clock) = self.system.state::<SignalClock>(element.node) {
+            values.push(("time_s".to_owned(), clock.time_s()));
+        }
+        if let Some(state) = self.system.state::<ControllerState>(element.node) {
+            values.extend(
+                state
+                    .coordinates()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &value)| (format!("x{index}"), value)),
+            );
+            values.push(("sample_count".to_owned(), state.samples() as f64));
+            values.push(("time_s".to_owned(), state.time_s()));
         }
         values
     }
@@ -5182,21 +5477,24 @@ impl Device {
                     ("bulk_density_kg_m3", state.map_or(f64::NAN, |s| s.bulk_density_kg_m3())),
                 ]
             }
-            Kind::Source(_)
-            | Kind::ControlledEffort
-            | Kind::ControlledFlow
-            | Kind::VelocitySource
-            | Kind::CurrentSource(_)
-            | Kind::Heater => {
-                let mut values = vec![(
+            Kind::Source(_) | Kind::VelocitySource | Kind::CurrentSource(_) | Kind::Heater => {
+                vec![(
                     "energy_in_j",
                     system
                         .state::<SourceAccount>(element.node)
+                        .map_or(f64::NAN, |account| account.energy_in_j),
+                )]
+            }
+            Kind::ControlledEffort | Kind::ControlledFlow => {
+                let mut values = vec![(
+                    "energy_in_j",
+                    system.state::<SourceAccount>(element.node)
                         .map_or(f64::NAN, |account| account.energy_in_j),
                 )];
                 if let Some(quantity) = controlled_quantity(element) {
                     values.push((quantity, output("p")));
                 }
+                values.push(("command", output("p")));
                 values
             }
             Kind::SpeedController => {
@@ -5319,6 +5617,9 @@ impl Device {
             }
             // Read by their vector-valued report functions.
             Kind::RigidNetwork
+            | Kind::AffineSignal
+            | Kind::SignalSource
+            | Kind::SampledController
             | Kind::ViscoelasticNetwork
             | Kind::GasVolume
             | Kind::ResistanceMatrix

@@ -771,14 +771,18 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 while scalar signal input `command` sets the source's effort or flow. A command
 can come from the existing `signal` connection or from `prescribe` using the
 selected SI quantity: `force_n`, `torque_n_m`, `voltage_v`, `velocity_m_s`,
-`angular_velocity_rad_s` or `current_a`. Wrong quantity names refuse. Signal
-values must already have the declared unit; no conversion or controller is
-inferred. Prescribed table knots use the existing scheduled-boundary path.
+`angular_velocity_rad_s` or `current_a`; these named physical quantities use
+interval means. An explicit generic `value` prescription instead supplies a
+point sample at the accepted start time and restricts adaptive order to one.
+Other wrong quantity names refuse. Signal values must already have the declared
+unit; no conversion or controller is inferred. Prescribed table knots use the
+existing scheduled-boundary path.
 
 Effort is positive in the connected node's positive direction. Flow is positive
 into the source, so negative commanded current supplies a connected capacitor.
 The source reports its signed `energy_in_j` (negative when supplying energy)
-and last commanded effort or flow (`null` before the first accepted step).
+and last commanded effort or flow, also available as `command` (`null` before
+the first accepted step).
 Adaptive scenes must include its source-work increment tolerance. Native source
 codecs retain clock and work across checkpoints. The source is ideal: no supply,
 saturation, quantization, control stability or hardware safety claim follows
@@ -800,10 +804,12 @@ and evaluate the waveform at the sample's start, preserving digital sampling
 when the plant subdivides a period. The owner limits each step at its next
 sample and retains the command between samples. No CLI integrator is added.
 
-`mass`, `inertia` and `inductor` accept `publish_state: true` to expose scalar
+`mass`, `inertia` and `inductor` accept `publish_state: true` (or its `publish`
+alias) to expose scalar
 `position` and `velocity` signals in the corresponding domain's SI coordinates.
 These signals publish accepted start-of-step state; physical port `p` retains
-its work-conjugate mean flow. Controller reports expose `integral_torque_nm`,
+its work-conjugate mean flow. Both options default to false; contradictory
+publication flags refuse. Controller reports expose `integral_torque_nm`,
 `held_torque_nm`, `sample_count` and `sample_phase_s`; native codecs preserve
 their accepted history. Controller scenes require fixed `step_s`: adaptive
 step doubling refuses this discrete policy rather than inventing a continuous
@@ -1773,6 +1779,44 @@ ratios. The real-binary oracle checks the resulting motion, spring storage,
 port outputs and energy ledger against independent midpoint rotations.
 The ratio must carry the required SI conversion units. No crank/cam geometry,
 displacement constraint, ratio-actuator work or control stability is inferred.
+
+`affine_signal`, `signal_source` and `sampled_controller` compose general
+authored feedback through the same kernel graph. An affine law takes a
+rectangular `matrix` and matching `bias`, with scalar `input0`, `input1`, etc.
+and one vector `output`. A signal source takes a nonempty `waveforms` array and
+emits each waveform's point value at the accepted start time; its native clock
+and table-knot events are replayable. Input, output and controller-memory
+dimensions are each bounded to 64 finite coordinates.
+
+A matrix controller takes `sample_period_s`, row-major nested matrices
+`a`, `b`, `c`, `d`, and `initial`. At each indexed sample time it computes
+`y = C*x + D*u` from pre-update memory and `x_next = A*x + B*u`, holding the
+command between samples while physical steps may be smaller. Zero memory
+dimensions admit sampled gains. The scalar inputs of an affine or matrix
+controller accept signed point samples with `{"prescribe": port, "value": waveform}`.
+Their units and gains are authored. The named `speed_controller` above retains
+its owner's SI fields, limits and tracking anti-windup; the general matrix law
+adds no limiting or gain synthesis.
+
+Reports and probes expose `output<i>` for the generic signal laws and also
+`x<i>`, `sample_count` and `time_s` for matrix controllers. Signal sources
+expose accepted `time_s`; controlled sources retain both their SI field and
+the generic `command` alias. Unavailable initial outputs follow the existing
+null convention. Native snapshots retain complete clock, memory, held output
+and accounting state for continued reports.
+
+Adaptive scenes using these point-sampled laws, generic point-prescribed or
+signal-wired actuators, or published inertance observations admit order one and require
+actuator-work tolerances alongside plant coordinates. SI-mean-only controlled
+source scenes retain their existing higher-order admission. Matrix and speed
+controllers require fixed stepping because this consumer supplies no hybrid
+memory error metric; their sample events still cap physical steps.
+
+The gallery scenes `feedback_position.json`, `sampled_pi_velocity.json` and
+`signal_current_charge.json` exercise the general compositions.
+`tests/system_command/feedback.rs` supplies independent mass and capacitor
+recurrences, signed-work checks, nondividing controller substeps, complete-report
+checkpoint continuation and scene-admission regressions.
 
 `port_hamiltonian` lowers to fs-system's `ExactPortHamiltonianComponent`
 (feature `phs`), built from authored `energy` Q, `structure` J,

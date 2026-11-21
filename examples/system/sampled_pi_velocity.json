@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.03125,
+  "sample_every_s": 0.125,
+  "elements": {
+    "reference": {"kind": "signal_source", "waveforms": [1]},
+    "plant": {"kind": "mass", "mass_kg": 2.0, "publish": true},
+    "controller": {
+      "kind": "sampled_controller", "sample_period_s": 0.125,
+      "a": [[1]], "b": [[0.125, -0.125]],
+      "c": [[2]], "d": [[3, -3]], "initial": [0]
+    },
+    "drive": {"kind": "controlled_effort", "domain": "translation"}
+  },
+  "connections": [
+    {"signal": "reference.output", "to": ["controller.input0"]},
+    {"signal": "plant.velocity", "to": ["controller.input1"]},
+    {"signal": "controller.output", "to": ["drive.command"]},
+    {"join": ["plant.p", "drive.p"]}
+  ]
+}

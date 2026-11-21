@@ -1,0 +1,15 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.5,
+  "step_s": 0.0625,
+  "sample_every_s": 0.125,
+  "elements": {
+    "reference": {"kind": "signal_source", "waveforms": [-2]},
+    "drive": {"kind": "controlled_flow", "domain": "electrical"},
+    "capacitor": {"kind": "node_capacitor", "capacitance_f": 0.5, "charge_c": 0.25}
+  },
+  "connections": [
+    {"signal": "reference.output", "to": ["drive.command"]},
+    {"common_effort": ["capacitor.p", "drive.p"]}
+  ]
+}

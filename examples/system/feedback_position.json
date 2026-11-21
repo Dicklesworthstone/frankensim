@@ -1,0 +1,27 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.015625,
+  "sample_every_s": 0.125,
+  "elements": {
+    "reference": {
+      "kind": "signal_source",
+      "waveforms": [{"table": [[0, 1], [0.5, -0.5], [2, -0.5]]}]
+    },
+    "plant": {
+      "kind": "mass", "mass_kg": 2.0,
+      "position_m": 0.25, "velocity_m_s": -0.5, "publish": true
+    },
+    "controller": {
+      "kind": "affine_signal", "matrix": [[4, -4, -3]], "bias": [0]
+    },
+    "drive": {"kind": "controlled_effort", "domain": "translation"}
+  },
+  "connections": [
+    {"signal": "reference.output", "to": ["controller.input0"]},
+    {"signal": "plant.position", "to": ["controller.input1"]},
+    {"signal": "plant.velocity", "to": ["controller.input2"]},
+    {"signal": "controller.output", "to": ["drive.command"]},
+    {"join": ["plant.p", "drive.p"]}
+  ]
+}

@@ -24,6 +24,8 @@ mod solids;
 mod ohmic;
 #[path = "system_command/laminar_pipe.rs"]
 mod laminar_pipe;
+#[path = "system_command/feedback.rs"]
+mod feedback;
 
 fn example(name: &str) -> String {
     format!(
