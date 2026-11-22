@@ -169,16 +169,16 @@ pub enum AdmissionError {
         /// The rejected signed ratio.
         ratio: f64,
     },
-    /// A dense power map does not have one entry per row and column.
+    /// A dense power or signal map does not have one entry per row and column.
     MapShape {
-        /// Width of the flow-receiving port.
+        /// Width of the mapped input port.
         rows: usize,
-        /// Width of the effort-receiving port.
+        /// Width of the mapped output port.
         columns: usize,
         /// Number of coefficients supplied.
         entries: usize,
     },
-    /// A power-map coefficient is not finite.
+    /// A power- or signal-map coefficient is not finite.
     MapCoefficient {
         /// Row-major index of the rejected coefficient.
         index: usize,
@@ -298,13 +298,10 @@ impl fmt::Display for AdmissionError {
                 entries,
             } => write!(
                 f,
-                "power map needs a {rows} by {columns} row-major matrix (got {entries} entries)"
+                "map needs a {rows} by {columns} row-major matrix (got {entries} entries)"
             ),
             Self::MapCoefficient { index, value } => {
-                write!(
-                    f,
-                    "power-map coefficient {index} must be finite (got {value})"
-                )
+                write!(f, "map coefficient {index} must be finite (got {value})")
             }
             Self::MapAdjoint { a, b, violation } => {
                 write!(
@@ -369,6 +366,13 @@ pub(crate) enum Connection {
     },
     /// A one-way copy of a signal.
     Signal { from: PortRef, to: PortRef },
+    /// A one-way linear map of a signal, with `to.width()` rows and
+    /// `from.width()` columns. It carries no physical power.
+    SignalMap {
+        from: PortRef,
+        to: PortRef,
+        map: Vec<f64>,
+    },
 }
 
 /// One effort-receiving member `a` of a power map.
@@ -403,7 +407,7 @@ impl Connection {
                 out.push(*source);
                 out.extend(sinks.iter().map(|(port, _)| *port));
             }
-            Self::Signal { .. } => {}
+            Self::Signal { .. } | Self::SignalMap { .. } => {}
         }
     }
 }

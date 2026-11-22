@@ -1319,6 +1319,54 @@ impl SystemBuilder {
         Ok(())
     }
 
+    /// Map a signal output to an input of possibly different width.
+    ///
+    /// `map` is row-major with `to.width()` rows and `from.width()`
+    /// columns. Each input receives the corresponding row's weighted sum
+    /// of the output. A row such as `[0, 1, 0]` selects a controller's
+    /// second output for a scalar actuator; multiple connections may read
+    /// the same output. Negative gains, zero rows and rank-deficient maps
+    /// are allowed. The coefficients supply any conversion between the
+    /// authored signal coordinates; no units are inferred.
+    ///
+    /// Signals carry no physical power. This connection adds no storage,
+    /// delay or controller state, and is not a power-port transformer.
+    /// Its fixed coefficients enter the execution plan, including loop
+    /// tangents, and the system's durable problem identity.
+    ///
+    /// # Errors
+    /// Wrong roles, a matrix with the wrong number of entries, a nonfinite
+    /// coefficient, or an input already driven. Refusal leaves the builder
+    /// unchanged.
+    pub fn signal_map(
+        &mut self,
+        from: PortRef,
+        to: PortRef,
+        map: Vec<f64>,
+    ) -> Result<(), AdmissionError> {
+        self.need_role(from, PortRole::SignalOut, "a signal output")?;
+        self.need_role(to, PortRole::SignalIn, "a signal input")?;
+        let rows = self.spec(to).width();
+        let columns = self.spec(from).width();
+        if rows.checked_mul(columns) != Some(map.len()) {
+            return Err(AdmissionError::MapShape {
+                rows,
+                columns,
+                entries: map.len(),
+            });
+        }
+        for (index, &value) in map.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(AdmissionError::MapCoefficient { index, value });
+            }
+        }
+        self.check_free(&[to])?;
+        self.take(&[to]);
+        self.connections
+            .push(Connection::SignalMap { from, to, map });
+        Ok(())
+    }
+
     /// Prescribe the input side of `port` from outside the system.
     ///
     /// # Errors
@@ -1538,6 +1586,19 @@ impl SystemBuilder {
                     let from_out = output_of(*from).start;
                     for (offset, index) in input_of(*to).enumerate() {
                         drivers[index] = Driver::Linear(vec![(from_out + offset, 1.0)]);
+                    }
+                }
+                Connection::SignalMap { from, to, map } => {
+                    let from_out = output_of(*from).start;
+                    let columns = self.spec(*from).width();
+                    for (row, index) in input_of(*to).enumerate() {
+                        let terms = (0..columns)
+                            .filter_map(|column| {
+                                let coefficient = map[row * columns + column];
+                                (coefficient != 0.0).then_some((from_out + column, coefficient))
+                            })
+                            .collect();
+                        drivers[index] = Driver::Linear(terms);
                     }
                 }
             }

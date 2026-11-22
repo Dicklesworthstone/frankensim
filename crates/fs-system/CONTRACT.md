@@ -90,6 +90,17 @@ physics owners below fs-couple can be composed without it.
     the others' rows stay zero. A source belongs to one route, and a
     receiver of a route takes no other connection.
   - `signal(from, to)`: one-way copy.
+  - `signal_map(from, to, map)`: a one-way dense linear signal map, with
+    `to.width()` rows and `from.width()` columns in row-major order. This
+    selects individual outputs of a vector controller for scalar actuators,
+    or mixes signal coordinates. Negative and zero coefficients, zero rows,
+    rectangular and rank-deficient maps are admitted; nonfinite coefficients,
+    wrong shapes/roles and an already-driven input refuse before changing the
+    builder. One output may feed several mapped or ordinary connections.
+    Exact-zero coefficients add no dependency. The fixed map participates in
+    the ordinary execution plan and loop tangent, and in durable problem
+    identity. It contributes no energy, storage, delay or physical transformer
+    law; coordinate units and gains are authored by the caller.
   - Streams (`Carrier::Stream`, crates/fs-ports/CONTRACT.md) need no
     connection of their own. A storage's stream port is the setter of a
     `common_effort` (or one end of a `bond`): every transport element joined

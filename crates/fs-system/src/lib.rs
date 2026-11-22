@@ -14,6 +14,7 @@
 //!              ::common_flow_ratios / common_effort_ratios
 //!                                            a junction whose members each
 //!                                            sit behind their own ratio
+//!              ::signal_map                 select or mix vector signal coordinates
 //!              ::boundary / scheduled_boundary  prescribed inputs and events
 //!              ::seal -> System              admission and plan
 //! System::step                               negotiate, solve, audit, admit, publish
