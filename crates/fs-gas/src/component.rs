@@ -110,39 +110,18 @@ fn identity_bytes(identity: &mut String, bytes: &[u8]) {
     }
 }
 
-/// Bind the immutable thermodynamic catalog, never its live composition/state.
-/// Region card identities already cover the retained coefficients and ranges.
+/// Bind the complete native source catalog, never live composition or state.
 fn stream_basis(parcel: &ClosedGasParcel) -> StreamBasis {
-    let mut medium = String::from("nasa9-gas-v1");
+    let mut catalog = Vec::new();
+    parcel.model().catalog_identity_words(&mut catalog);
+    let mut medium = String::from("native-gas-catalog-v1/");
+    for word in catalog {
+        identity_bytes(&mut medium, &word.to_le_bytes());
+    }
     let mut datum = String::from("nasa9-caloric-reference-v1");
     let mut quantities = Vec::new();
     for model in parcel.model().thermodynamics().components() {
         quantities.push(StreamQuantity::SpeciesMass(model.species().clone()));
-        medium.push('/');
-        identity_bytes(&mut medium, model.species().as_str().as_bytes());
-        let convention = model.convention();
-        match (convention.phase(), convention.eos()) {
-            (
-                fs_thermochem::StandardStatePhaseV1::Gas,
-                fs_thermochem::ReferenceEquationOfStateV1::IdealGas,
-            ) => medium.push_str("/gas/ideal"),
-        }
-        write!(
-            &mut medium,
-            "/{:016x}/{:016x}/",
-            model.molar_mass().value().to_bits(),
-            convention.reference_pressure().value().to_bits(),
-        )
-        .expect("writing to a String");
-        identity_bytes(
-            &mut medium,
-            convention.elemental_reference().as_str().as_bytes(),
-        );
-        for region in model.regions() {
-            medium.push_str("/region/");
-            identity_bytes(&mut medium, region.card_identity());
-        }
-
         datum.push('/');
         identity_bytes(&mut datum, model.species().as_str().as_bytes());
         if let Some(reference) = model.caloric_reference() {
@@ -175,7 +154,8 @@ fn stream_basis(parcel: &ClosedGasParcel) -> StreamBasis {
         StableId::new(medium).expect("hex catalog identity is a stable id"),
         StableId::new(datum).expect("hex caloric identity is a stable id"),
         quantities,
-    ).expect("the admitted mixture has distinct species")
+    )
+    .expect("the admitted mixture has distinct species")
 }
 
 impl StreamPlan {
@@ -341,19 +321,7 @@ impl GasCavity {
 
     /// Depletion may remove species; it may not replace a retained source.
     fn admit_stream_state(&self, state: &ClosedGasParcel) -> Result<(), GasEnergyError> {
-        let catalog = self.reference.model().thermodynamics().components();
-        for active in state.model().thermodynamics().components() {
-            if catalog
-                .iter()
-                .find(|model| model.species() == active.species())
-                != Some(active)
-            {
-                return Err(invalid(
-                    "streaming state differs from the declared gas catalog",
-                ));
-            }
-        }
-        Ok(())
+        self.reference.admit_inventory_state(state)
     }
 
     /// Compression flow and heat rate of a step: as received, or for an
@@ -776,13 +744,15 @@ impl Component for GasCavity {
         codec_version: 1,
     });
 
-    /// Refuses, writing nothing, for a streaming cavity, whose inventory is
-    /// part of its state, and for a parcel that is not on the reference's
-    /// model, mass and other point axes (the owner's own check of an energy
-    /// increment from the reference).
+    /// A closed cavity retains its three-word codec. An open cavity delegates
+    /// accepted mass and composition to the native inventory codec. Both
+    /// refuse foreign source models or auxiliary axes without writing anything.
     fn encode_state(&self, state: &ClosedGasParcel, words: &mut Vec<u64>) -> bool {
+        if self.stream.is_some() {
+            return self.reference.encode_inventory_state(state, words).is_ok();
+        }
         let on_reference = self.reference.stored_energy_change_to(state, || false);
-        if self.stream.is_some() || on_reference.is_err() {
+        if on_reference.is_err() {
             return false;
         }
         state.state_words(words);
@@ -798,12 +768,12 @@ impl Component for GasCavity {
     /// owner computes for the other two is refused, and only if the cavity
     /// can measure its energy from the reference.
     fn decode_state(&self, words: &[u64]) -> Option<ClosedGasParcel> {
+        if self.stream.is_some() {
+            return self.reference.decode_inventory_state(words).ok();
+        }
         let &[volume, temperature, _] = words else {
             return None;
         };
-        if self.stream.is_some() {
-            return None;
-        }
         let mut rebuilt = Vec::with_capacity(words.len());
         self.reference.state_words(&mut rebuilt);
         let state = if rebuilt == words {
@@ -820,7 +790,8 @@ impl Component for GasCavity {
         (rebuilt == words && held.is_ok()).then_some(state)
     }
 
-    /// Nothing at all for a streaming cavity, which has no codec.
+    /// The reference, solve controls and port mode bind durable state. Closed
+    /// identities remain unchanged; open identities also bind mass tolerance.
     fn identity_words(&self, words: &mut Vec<u64>) {
         let Self {
             reference,
@@ -836,14 +807,18 @@ impl Component for GasCavity {
             energy_tolerance_j_kg,
             maximum_iterations,
         } = controls;
-        if stream.is_some() {
-            return;
-        }
-        words.push(u64::from_le_bytes(*b"gascavty"));
+        words.push(u64::from_le_bytes(if stream.is_some() {
+            *b"gasopen1"
+        } else {
+            *b"gascavty"
+        }));
         reference.identity_words(words);
         words.extend([minimum_temperature_k, maximum_temperature_k].map(|x| x.to_bits()));
         words.push(energy_tolerance_j_kg.to_bits());
         words.extend([*maximum_iterations as u64, u64::from(*insulated)]);
+        if let Some(stream) = stream {
+            words.push(stream.mass_tolerance_kg.to_bits());
+        }
     }
 }
 

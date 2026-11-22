@@ -23,6 +23,8 @@ pub mod midpoint;
 pub mod discrete_gradient;
 /// Conservative paired gas mass, species and enthalpy transfer at fixed volumes.
 pub mod transfer;
+/// Source-bound durable states whose mass and species inventory may change.
+pub mod snapshot;
 
 use super::entropy::{GasEntropyError, GasEntropySolve, map_context};
 use super::{GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,

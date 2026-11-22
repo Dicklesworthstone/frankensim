@@ -144,14 +144,37 @@ impl ThermochemicalGasModel {
     /// water component, and every pack receipt with its four fields. Two
     /// models with the same words evaluate alike at every point.
     pub fn identity_words(&self, words: &mut Vec<u64>) {
+        self.thermodynamics.identity_words(words);
+        self.source_identity_words(words);
+    }
+
+    /// Append the immutable catalog identity without composition or live state.
+    ///
+    /// Retains every species' complete caloric model, transport card and
+    /// selection policy, explicit water identity and original pack receipts in
+    /// canonical species order. Different mixtures of the same catalog share
+    /// these words; different source laws or bindings do not. Material query
+    /// axes belong to each parcel and are not part of a stream's catalog.
+    pub fn catalog_identity_words(&self, words: &mut Vec<u64>) {
+        words.push(u64::from_le_bytes(*b"gascat01"));
+        let components = self.thermodynamics.components();
+        words.push(components.len() as u64);
+        for component in components {
+            component.identity_words(words);
+        }
+        self.source_identity_words(words);
+    }
+
+    // Shared suffix of the original model identity and catalog identity. Keep
+    // the original word order so existing closed-parcel identities do not move.
+    fn source_identity_words(&self, words: &mut Vec<u64>) {
         use fs_thermochem::byte_words;
         let Self {
-            thermodynamics,
+            thermodynamics: _,
             transport,
             water_component,
             source_packs,
         } = self;
-        thermodynamics.identity_words(words);
         words.push(transport.len() as u64);
         for assigned in transport {
             let SpeciesTransportMaterial {

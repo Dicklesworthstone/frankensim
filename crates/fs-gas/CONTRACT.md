@@ -10263,27 +10263,35 @@ its own roundoff allowance for each measured inventory. Direct users of
 acceptance. No second mass/species equation or local audit is introduced.
 
 The stream declares an explicit `StreamBasis`.
-It binds the ordered species masses, molar masses, phase/EOS/reference
-conventions and original NASA-9 card identities, including every retained
-region. The enthalpy reference binds the raw/reconciled policy and exact
-caloric correction metadata and offset bits. Identifiers use deterministic
-hex encoding of these immutable fields, not display/debug text. Composition,
-mass, pressure, temperature and volume do not enter the identity. Different
-mixtures of the same catalog therefore connect; a same-width catalog with a
-different species, source card, molar mass or energy datum is refused by the
-kernel before any exchange. A transport element copies the basis on both
+It binds the ordered species masses and the complete native catalog through
+`ThermochemicalGasModel::catalog_identity_words`: every NASA-9 model and its
+caloric corrections, transport card and selection policy, explicit water
+identity and original source-pack receipt. The enthalpy reference also binds
+the raw/reconciled policy and exact caloric correction metadata and offset
+bits. Identifiers use deterministic hex encoding of these immutable fields,
+not display/debug text. Composition, mass, pressure, temperature, volume and
+local material query axes do not enter the port identity. Different mixtures
+and local conditions of the same catalog therefore connect; a same-width
+catalog with a different source law, selection, receipt or energy datum is
+refused by the kernel before any exchange. A transport element copies the basis on both
 ports (`Restriction::for_stream`); an unidentified transport is not a
 wildcard. These identities retain the source owner's declarations; they do
 not authenticate the source data or convert a mismatched energy datum.
-Accepted streaming states must retain the declared active caloric models,
-including on a step with no transfer. Species depletion is allowed; source
-substitution refuses before the candidate or port outputs change.
+Accepted streaming states must retain the complete active source catalog and
+their own reference's auxiliary material coordinates, including on a step
+with no transfer. Species depletion is allowed; source substitution refuses
+before the candidate or port outputs change.
 
 Three focused admission regressions exercise changed live mixtures/states,
 equal-width species/source/molar-mass/reference mismatches, and identical
 source cards with different caloric reconciliation. The existing finite
 exchange and flow-reversal comparisons use the identified restriction and
 retain their original physical reference and numerical tolerances.
+
+`tests/component/catalog_identity.rs` additionally refuses equal-caloric
+catalogs with different transport data, selection policies, water labels or
+pack bindings, while admitting changed live composition and local material
+conditions on the same catalog.
 
 The inventory regressions additionally exercise phantom total-mass inflow,
 species inflow with zero declared total mass, atomic System refusal after an
@@ -10362,9 +10370,21 @@ reference parcel whole (fs-material's words: the gas model, the point, the
 mass, the volume), the four limits of its solve and whether it is insulated;
 `ports` follows from the last and from `stream`. Because the reference is
 bound whole, a cavity built on another initial volume or temperature refuses
-a snapshot of this one: the stored energy is measured from the reference. A
-streaming cavity has no codec, no identity words, and is refused a snapshot
-by its node's name: its inventory changes, so its model and mass are state.
+a snapshot of this one: the stored energy is measured from the reference.
+
+A streaming cavity delegates its versioned variable-inventory state to
+`ClosedGasParcel::{encode_inventory_state, decode_inventory_state}`. The
+accepted total mass and original declared mass/mole fractions are stored
+directly, with canonical zero slots for depleted species, plus volume,
+temperature and pressure. The native model is rebuilt from the reference's
+source catalog and evaluated at that exact point; no species masses are
+renormalized to recover the accepted total mass. Density must agree with mass
+and volume to the parcel owner's 64-eps allowance, and every state word must
+round-trip exactly. Open identity has a distinct version tag and includes
+the stream mass tolerance in addition to the complete reference and controls.
+Closed identity and three-word states are unchanged. Streaming source admission
+also uses the native complete catalog check, retaining transport selections,
+pack receipts, active water identity and auxiliary material coordinates.
 
 Tests in `tests/component.rs`: a parcel two steps from the reference is
 written as its three words by the two-port and by the insulated cavity, and
@@ -10375,8 +10395,11 @@ pressure on the number line and no volume are not read; a parcel of another
 model and one
 of another mass are not written; the identity is equal for a cavity built
 again and differs for each limit of the solve, an insulating wall, another
-gas and a reference at another volume and temperature; a streaming cavity
-has no identity words, writes nothing and reads nothing. The kernel's own
+gas and a reference at another volume and temperature. Streaming tests cover
+exact native replay through mixing, heat and motion, mass-basis preservation,
+depleted-species zero slots and re-entry, changed mass-tolerance identity,
+foreign caloric/transport/selection/water/auxiliary sources, and malformed
+state words with atomic refusal. The kernel's own
 save and resume of a piston on a cavity is fs-cli's test on
 `examples/system/n2_gas_spring.json`, through the binary; fs-gas's tests
 cannot seal a snapshot, since fs-blake3 is not among its test dependencies.

@@ -17,6 +17,38 @@
 
 ## New sections (newest first)
 
+## Durable variable-inventory gas states
+
+`ClosedGasParcel::{admit_inventory_state, encode_inventory_state,
+decode_inventory_state}` (`thermochemical_gas/energy/parcel/snapshot.rs`)
+bind an open state to a reference's complete native source catalog. Admission
+uses the existing species-boundary source check for calorics, transport cards,
+selection policy, pack receipts and the active water label, and also retains
+every auxiliary material coordinate and quantity convention.
+
+`ThermochemicalGasModel::catalog_identity_words` supplies the corresponding
+composition-independent port identity: the native NASA-9 owners' complete
+words and the original transport/selection/water/pack-receipt suffix. Local
+material query axes belong to each parcel, so they do not enter that shared
+catalog identity. The existing complete model identity retains exactly its
+original word sequence.
+
+The versioned state stores accepted total mass, volume, temperature, pressure,
+the original declared mass/mole basis, and exact fraction bits in reference
+catalog order. A depleted species occupies a canonical positive-zero slot.
+It never recovers accepted mass or composition from rounded species inventories.
+The native `with_composition` constructor retains the original source models;
+`model.evaluate` reconstructs all resolved fields at the stored point. Native
+density must agree with stored mass / volume to 64 eps, and encoding the result
+must reproduce every supplied word. The enclosing component binds reference
+identity and solve controls. Invalid counts, versions, source identities,
+coordinates, fractions, density or noncanonical zero slots refuse atomically.
+The existing closed-parcel three-word codec remains unchanged.
+
+Regression coverage in `fs-gas/tests/component.rs` checks exact native replay
+through mixing, heat and motion, original mass-basis preservation, depletion
+and re-entry, source/auxiliary substitution, and malformed state words.
+
 ## Identity and state words of a thermochemical gas parcel
 
 For the durable snapshots of fs-gas's cavity, the gas model and its closed

@@ -31,6 +31,9 @@ use fs_thermochem::{
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R, required_nasa9_parameter_dims,
 };
 
+#[path = "component/catalog_identity.rs"]
+mod catalog_identity;
+
 const T0: f64 = 400.0;
 const P0: f64 = 100_000.0;
 const V0: f64 = 0.001;
@@ -1264,6 +1267,8 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
         assert_eq!([held[4].to_bits(), held[5].to_bits()], [0.0_f64.to_bits(), 1.0_f64.to_bits()]);
         let mut mixed = stale.clone();
         cavity.propose(&light, 1.0e-3, &arriving, &mut mixed, &mut six, cx).unwrap();
+        let saved = encoded(&cavity, &mixed).expect("streaming inventory codec");
+        assert_eq!(cavity.decode_state(&saved), Some(mixed.clone()));
         assert_eq!(mixed.model().thermodynamics().components().len(), 2);
         close(heavy_kg(&mixed), 2.0e-7, 1.0e-20);
         close(mixed.mass_kg(), light.mass_kg() + 2.0e-7, 1.0e-18);
@@ -1284,11 +1289,15 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
         assert_eq!(depleted.model().thermodynamics().components().len(), 1);
         assert_eq!(cavity.stored_carried_quantity(&depleted, 0).unwrap(), Some(0.0));
         assert_eq!(cavity.stored_carried_quantity(&depleted, 1).unwrap(), Some(depleted.mass_kg()));
+        let saved = encoded(&cavity, &depleted).expect("depleted inventory codec");
+        assert_eq!(cavity.decode_state(&saved), Some(depleted.clone()));
         let case = Case { state: &depleted, stale: &stale, dt_s: 1.0e-3, inputs: &arriving };
         assert!(matches!(check_component(&cavity, &case, cx), Ok(Observed::Stepped { .. })));
         let mut restored = stale.clone();
         cavity.propose(&depleted, 1.0e-3, &arriving, &mut restored, &mut six, cx).unwrap();
         close(cavity.stored_carried_quantity(&restored, 0).unwrap().unwrap(), 2.0e-7, 1.0e-20);
+        let saved = encoded(&cavity, &restored).expect("re-entered inventory codec");
+        assert_eq!(cavity.decode_state(&saved), Some(restored));
 
         // Cancellation, last: the gate stays requested.
         cx.cancel_gate().request();
@@ -1433,7 +1442,7 @@ fn the_same_source_cards_with_another_caloric_datum_do_not_connect() {
     let corrected = streaming(catalog_parcel(vec![corrected], vec![1.0], P0));
     let a = raw.ports()[2].stream_basis().unwrap();
     let b = corrected.ports()[2].stream_basis().unwrap();
-    assert_eq!(a.medium(), b.medium());
+    assert_ne!(a.medium(), b.medium());
     assert_ne!(a.enthalpy_reference(), b.enthalpy_reference());
     assert!(matches!(
         connect_streams(raw, corrected),
@@ -1592,8 +1601,8 @@ fn the_cavity_writes_three_words_and_reads_back_the_parcel_that_goes_on_alike() 
 /// Claims, declared before the first run: the cavity's identity is equal for
 /// a cavity built again, and different for each limit of its solve, an
 /// insulating wall, another gas and a reference at another volume and
-/// temperature. A streaming cavity has no identity words, writes no state
-/// and reads none.
+/// temperature. A streaming cavity binds its mode and mass tolerance while
+/// preserving the reference source catalog in its inventory codec.
 #[test]
 fn the_cavitys_identity_follows_its_reference_its_solve_and_its_wall() {
     let reference = parcel(1.0e-4, 0.0);
@@ -1634,7 +1643,156 @@ fn the_cavitys_identity_follows_its_reference_its_solve_and_its_wall() {
         seen.push(named);
     }
     let streaming = cavity.streaming(1.0e-15).unwrap();
-    assert!(cavity_identity(&streaming).is_empty());
-    assert_eq!(encoded(&streaming, &moved), None);
+    let identity = cavity_identity(&streaming);
+    assert!(!identity.is_empty() && !seen.contains(&identity));
+    assert_ne!(
+        identity,
+        cavity_identity(&streaming.clone().streaming(2.0e-15).unwrap())
+    );
+    let saved = encoded(&streaming, &moved).expect("streaming codec");
+    assert_eq!(streaming.decode_state(&saved), Some(moved.clone()));
     assert!(streaming.decode_state(&state_of(&moved)).is_none());
+}
+
+#[test]
+fn streaming_inventory_snapshots_replay_native_mixing_heat_and_motion_exactly() {
+    let reference = mixture(0.6, 1.5e5);
+    let cavity = streaming(reference.clone());
+    let rebuilt_cavity = streaming(reference.clone());
+    let mut state = reference.clone();
+    let mut replay = None;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for step in 0..24 {
+            let rate = if step < 12 { 1.0e-4 } else { -7.0e-5 };
+            let fraction = if rate > 0.0 {
+                0.2
+            } else {
+                heavy_kg(&state) / state.mass_kg()
+            };
+            let inputs = [
+                1.0e-4,
+                5.0,
+                rate,
+                rate * state.state().specific_enthalpy_j_kg(),
+                rate * fraction,
+                rate * (1.0 - fraction),
+            ];
+            let mut next = reference.clone();
+            let mut outputs = [0.0; 6];
+            let proposal = cavity
+                .propose(&state, 1.0e-3, &inputs, &mut next, &mut outputs, cx)
+                .unwrap();
+            assert!(matches!(proposal, Proposal::Step(_)));
+            if let Some(previous) = &replay {
+                let mut resumed = reference.clone();
+                let mut resumed_outputs = [0.0; 6];
+                let result = rebuilt_cavity
+                    .propose(
+                        previous,
+                        1.0e-3,
+                        &inputs,
+                        &mut resumed,
+                        &mut resumed_outputs,
+                        cx,
+                    )
+                    .unwrap();
+                assert!(matches!(result, Proposal::Step(_)));
+                assert_eq!(resumed, next);
+                assert_eq!(resumed_outputs.map(f64::to_bits), outputs.map(f64::to_bits));
+            }
+            let words = encoded(&cavity, &next).unwrap();
+            let restored = rebuilt_cavity.decode_state(&words).unwrap();
+            assert_eq!(
+                restored, next,
+                "every native model, point and resolved-state field"
+            );
+            assert_eq!(encoded(&rebuilt_cavity, &restored), Some(words));
+            replay = Some(restored);
+            state = next;
+        }
+    });
+    assert_ne!(state.mass_kg(), reference.mass_kg());
+    assert_ne!(
+        state.model().thermodynamics().mole_composition(),
+        reference.model().thermodynamics().mole_composition()
+    );
+    assert_ne!(state.volume_m3(), reference.volume_m3());
+
+    // The original declared basis is part of the model's retained receipts.
+    let single = parcel(0.0, 0.0);
+    let model = single
+        .model()
+        .with_composition(Composition::new(CompositionBasis::MassFraction, vec![1.0]).unwrap())
+        .unwrap();
+    let by_mass = ClosedGasParcel::new(model, single.point().clone(), V0).unwrap();
+    let source = streaming(by_mass.clone());
+    assert_eq!(
+        source.decode_state(&encoded(&source, &by_mass).unwrap()),
+        Some(by_mass)
+    );
+}
+
+#[test]
+fn streaming_inventory_codec_and_admission_refuse_foreign_sources_and_bad_words() {
+    use MaterialPropertySelection::{PreferObservationBacked, SingleClaimOnly};
+    let reference = parcel(0.0, 0.0);
+    let cavity = streaming(reference.clone());
+    let original = encoded(&cavity, &reference).unwrap();
+    for foreign in [
+        parcel(1.0e-4, 0.0),
+        parcel_of(0.0, 0.0, 3.0e-5, SingleClaimOnly, false),
+        parcel_of(0.0, 0.0, 2.0e-5, PreferObservationBacked, false),
+        parcel_of(0.0, 0.0, 2.0e-5, SingleClaimOnly, true),
+        ClosedGasParcel::new(
+            reference.model().clone(),
+            reference.point().clone().with("material-lot", 7.0).unwrap(),
+            V0,
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(encoded(&cavity, &foreign), None);
+        assert!(cavity.stored_mass_kg(&foreign).is_err());
+        assert!(cavity.stored_carried_quantity(&foreign, 0).is_err());
+        let mut target = reference.clone();
+        let mut output = [17.0; 5];
+        with_cx(&CancelGate::new_clock_free(), |cx| {
+            assert!(
+                cavity
+                    .propose(&foreign, 1.0e-3, &[0.0; 5], &mut target, &mut output, cx)
+                    .is_err()
+            );
+        });
+        assert_eq!(target, reference);
+        assert_eq!(output, [17.0; 5]);
+    }
+    for (index, bad) in [
+        (0, 0),
+        (1, 0),
+        (2, (-1.0_f64).to_bits()),
+        (3, f64::NAN.to_bits()),
+        (4, (2.0 * P0).to_bits()),
+        (5, 2),
+        (6, 0.5_f64.to_bits()),
+        (6, f64::INFINITY.to_bits()),
+    ] {
+        let mut words = original.clone();
+        words[index] = bad;
+        assert!(cavity.decode_state(&words).is_none(), "word {index}");
+    }
+    assert!(cavity.decode_state(&[]).is_none());
+    assert!(
+        cavity
+            .decode_state(&original[..original.len() - 1])
+            .is_none()
+    );
+    let mut extra = original.clone();
+    extra.push(0);
+    assert!(cavity.decode_state(&extra).is_none());
+    assert_eq!(encoded(&cavity, &reference), Some(original));
+
+    let catalog = streaming(mixture(0.6, 1.5e5));
+    let mut absent = encoded(&catalog, &mixture(0.0, P0)).unwrap();
+    assert_eq!(absent[6], 0.0_f64.to_bits());
+    absent[6] = (-0.0_f64).to_bits();
+    assert!(catalog.decode_state(&absent).is_none());
 }
