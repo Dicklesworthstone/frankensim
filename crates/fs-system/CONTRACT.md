@@ -3539,3 +3539,33 @@ source work and the energy residual from the composition kernel. The seven
 regressions in `tests/electrical_switches.rs` cover constitutive and energy
 conformance, analytic resistive circuits, event boundaries, refusal and replay,
 native codecs, and independent midpoint RC charge and thermal-work balances.
+
+## Signal-controlled stream restriction
+
+`Restriction::modulated()` adds a scalar, zero-power `opening` signal to
+any existing anonymous, identified or gas-aware restriction. The two stream
+ports and their exact material/source, caloric-reference and carried-quantity
+identities are retained. Inputs are the two native stream value vectors followed
+by opening; outputs remain the two native mass/enthalpy/carried-rate vectors.
+A finite opening in [0, 1] multiplies the authored conductance. Zero closes
+transport exactly and one reproduces the ordinary law. The original donor rule
+and, for `for_gas`, its original throttle-entropy calculation are retained.
+There is no mass, energy or species storage and no alternate stepping scheme.
+
+The analytic JVP and VJP include the command derivative as well as both stream
+inputs. At zero opening the donor for the right derivative is selected by the
+pressure difference, including reverse pressure; at equal pressures the existing
+donor kink remains. Endpoint derivatives in opening are one-sided. Commands
+outside [0, 1], wrong vector extents, nonfinite inputs/directions, invalid steps
+and unrepresentable rates refuse. Calls poll cancellation before work and while
+checking carried data. Evaluation allocates no storage. The empty state codec
+is retained; a mode tag distinguishes a modulated restriction, while ordinary
+restriction identities and valid-input arithmetic are retained.
+
+`tests/modulated_restriction.rs` adds conformance and directional/transpose
+checks, full-open parity, closed-valve one-sided derivatives, source-basis and
+codec checks, refusals, and a scheduled two-vessel graph with conserved mass,
+energy and species and checkpoint replay. These authored tests are numerical
+evidence only when executed on the corresponding revision. The signal source
+owns sampling and event resolution. This is an ideal linear valve; it supplies
+no actuator work, choking, leakage, geometric valve law or experimental claim.

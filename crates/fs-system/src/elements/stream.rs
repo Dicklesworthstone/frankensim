@@ -13,6 +13,8 @@
 //! The gas has constant heat capacities. A gas whose properties come from
 //! sources belongs to its physics owner (`fs_gas::component::GasCavity`).
 
+use core::num::NonZeroUsize;
+
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
@@ -611,7 +613,7 @@ impl PortTangent for GasVolume {
 pub struct Restriction {
     conductance_kg_s_pa: f64,
     carried: usize,
-    ports: [PortSpec; 2],
+    ports: Vec<PortSpec>,
     /// The gas whose state function gives the entropy of the pressure drop.
     gas: Option<GasVolume>,
 }
@@ -665,7 +667,7 @@ impl Restriction {
         Ok(Self {
             conductance_kg_s_pa: positive("conductance_kg_s_pa", conductance_kg_s_pa)?,
             carried,
-            ports: [
+            ports: vec![
                 stream("a", PortRole::EffortIn, carried),
                 stream("b", PortRole::EffortIn, carried),
             ],
@@ -673,17 +675,79 @@ impl Restriction {
         })
     }
 
+    /// Add a dimensionless scalar signal port `opening` after `a` and `b`.
+    ///
+    /// The held opening lies in [0, 1] and multiplies the authored conductance.
+    /// Zero closes the stream exactly; one retains the ordinary restriction.
+    /// Material/source identities and the optional native throttle entropy
+    /// remain unchanged. Repeated calls add no further ports.
+    ///
+    /// The controller owns sampling and transition resolution. This ideal
+    /// linear valve models no actuator work, leakage, choking or valve geometry.
+    #[must_use]
+    pub fn modulated(mut self) -> Self {
+        if !self.is_modulated() {
+            self.ports.push(PortSpec::signal_in(
+                StableId::new("opening").expect("static restriction signal name"),
+                NonZeroUsize::MIN,
+            ));
+        }
+        self
+    }
+
+    fn is_modulated(&self) -> bool {
+        self.ports.len() == 3
+    }
+
     fn width(&self) -> usize {
         STREAM_CARRIED + self.carried
     }
 
-    /// Mass rate from `a` to `b` [kg/s] and where the side it leaves starts
-    /// in the input vector.
-    fn flow(&self, inputs: &[f64]) -> (f64, usize) {
+    fn extent(name: &'static str, actual: usize, expected: usize) -> Result<(), ElementError> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(ElementError::Parameter { name, value: actual as f64 })
+        }
+    }
+
+    fn validate(&self, dt_s: f64, inputs: &[f64], output_len: usize) -> Result<(), ElementError> {
         let n = self.width();
-        let rate =
-            self.conductance_kg_s_pa * (inputs[STREAM_PRESSURE] - inputs[n + STREAM_PRESSURE]);
-        (rate, if rate >= 0.0 { 0 } else { n })
+        Self::extent(
+            "restriction input width",
+            inputs.len(),
+            2 * n + usize::from(self.is_modulated()),
+        )?;
+        Self::extent("restriction output width", output_len, 2 * n)?;
+        positive("restriction timestep [s]", dt_s)?;
+        inputs_finite(inputs)?;
+        if self.is_modulated() && !(0.0..=1.0).contains(&inputs[2 * n]) {
+            return Err(ElementError::Parameter {
+                name: "restriction opening in [0, 1]",
+                value: inputs[2 * n],
+            });
+        }
+        Ok(())
+    }
+
+    /// Rate, donor offset, effective conductance, and pressure difference.
+    fn flow(&self, inputs: &[f64]) -> Result<(f64, usize, f64, f64), ElementError> {
+        let n = self.width();
+        let drop = finite(
+            "restriction pressure difference [Pa]",
+            inputs[STREAM_PRESSURE] - inputs[n + STREAM_PRESSURE],
+        )?;
+        let conductance = if self.is_modulated() {
+            self.conductance_kg_s_pa * inputs[2 * n]
+        } else {
+            self.conductance_kg_s_pa
+        };
+        let rate = finite("restriction mass rate [kg/s]", conductance * drop)?;
+        // A closed valve's right derivative in opening still uses the side
+        // that will supply material. Rate alone loses that sign at zero.
+        // Retain the ordinary restriction's exact donor choice otherwise.
+        let forward = if self.is_modulated() { drop >= 0.0 } else { rate >= 0.0 };
+        Ok((rate, if forward { 0 } else { n }, conductance, drop))
     }
 
     /// Entropy [J/K] the pressure drop makes in a step of `dt_s` at mass
@@ -755,23 +819,36 @@ impl Component for Restriction {
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
-        inputs_finite(inputs)?;
+        self.validate(dt_s, inputs, outputs.len())?;
         let n = self.width();
-        let (rate, upstream) = self.flow(inputs);
+        let (rate, upstream, _, _) = self.flow(inputs)?;
+        let mut receipt = Receipt::lossless(
+            0.0,
+            finite(
+                "restriction energy allowance [J]",
+                roundoff(dt_s * (rate * inputs[upstream + STREAM_SPECIFIC_ENTHALPY]).abs()),
+            )?,
+        );
+        if let Some(gas) = &self.gas {
+            receipt.entropy_generated_j_per_k = finite(
+                "restriction throttle entropy [J/K]",
+                Self::throttled(gas, dt_s, rate, upstream, n - upstream, inputs)?,
+            )?;
+        }
+        // Validate all carried rates before exposing any output.
+        for index in STREAM_SPECIFIC_ENTHALPY..n {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            finite("restriction carried rate", rate * inputs[upstream + index])?;
+        }
+        cx.checkpoint()?;
         outputs[STREAM_MASS_RATE] = rate;
         outputs[n + STREAM_MASS_RATE] = -rate;
-        // Position 1 is the specific enthalpy and the enthalpy rate; the
-        // carried values and their rates follow in the same places.
         for index in STREAM_SPECIFIC_ENTHALPY..n {
             let crossing = rate * inputs[upstream + index];
             outputs[index] = crossing;
             outputs[n + index] = -crossing;
-        }
-        let scale = dt_s * outputs[STREAM_ENTHALPY_RATE].abs();
-        let mut receipt = Receipt::lossless(0.0, roundoff(scale));
-        if let Some(gas) = &self.gas {
-            receipt.entropy_generated_j_per_k =
-                Self::throttled(gas, dt_s, rate, upstream, n - upstream, inputs)?;
         }
         Ok(Proposal::Step(receipt))
     }
@@ -792,8 +869,8 @@ impl Component for Restriction {
         words.is_empty().then_some(())
     }
 
-    /// The conductance, as bits, and the number of carried quantities;
-    /// then 0, or 1 and the words of the gas whose entropy it reports.
+    /// The original conductance, carried count and optional gas identity.
+    /// A modulated restriction appends its mode tag; ordinary identities are unchanged.
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.extend([self.conductance_kg_s_pa.to_bits(), self.carried as u64]);
         match &self.gas {
@@ -803,6 +880,9 @@ impl Component for Restriction {
                 gas.identity_words(words);
             }
         }
+        if self.is_modulated() {
+            words.push(u64::from_le_bytes(*b"valve-v1"));
+        }
     }
 }
 
@@ -810,16 +890,34 @@ impl PortTangent for Restriction {
     fn jvp(
         &self,
         (): &(),
-        _dt_s: f64,
+        dt_s: f64,
         inputs: &[f64],
         d_inputs: &[f64],
         d_outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        self.validate(dt_s, inputs, d_outputs.len())?;
+        Self::extent("restriction input direction width", d_inputs.len(), inputs.len())?;
+        inputs_finite(d_inputs)?;
         let n = self.width();
-        let (rate, upstream) = self.flow(inputs);
-        let d_rate =
-            self.conductance_kg_s_pa * (d_inputs[STREAM_PRESSURE] - d_inputs[n + STREAM_PRESSURE]);
+        let (rate, upstream, conductance, drop) = self.flow(inputs)?;
+        let mut d_rate = conductance
+            * (d_inputs[STREAM_PRESSURE] - d_inputs[n + STREAM_PRESSURE]);
+        if self.is_modulated() {
+            d_rate += (self.conductance_kg_s_pa * d_inputs[2 * n]) * drop;
+        }
+        finite("restriction mass rate direction", d_rate)?;
+        for index in STREAM_SPECIFIC_ENTHALPY..n {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            finite(
+                "restriction carried rate direction",
+                inputs[upstream + index] * d_rate + rate * d_inputs[upstream + index],
+            )?;
+        }
+        cx.checkpoint()?;
         d_outputs[STREAM_MASS_RATE] = d_rate;
         d_outputs[n + STREAM_MASS_RATE] = -d_rate;
         for index in STREAM_SPECIFIC_ENTHALPY..n {
@@ -833,24 +931,51 @@ impl PortTangent for Restriction {
     fn vjp(
         &self,
         (): &(),
-        _dt_s: f64,
+        dt_s: f64,
         inputs: &[f64],
         bar_outputs: &[f64],
         bar_inputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        self.validate(dt_s, inputs, bar_outputs.len())?;
+        Self::extent("restriction input covector width", bar_inputs.len(), inputs.len())?;
+        inputs_finite(bar_outputs)?;
         let n = self.width();
-        let (rate, upstream) = self.flow(inputs);
-        bar_inputs.fill(0.0);
-        // Each crossing rate enters `a` and leaves `b`.
+        let (rate, upstream, conductance, drop) = self.flow(inputs)?;
         let mut bar_rate = bar_outputs[STREAM_MASS_RATE] - bar_outputs[n + STREAM_MASS_RATE];
         for index in STREAM_SPECIFIC_ENTHALPY..n {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
             let bar_crossing = bar_outputs[index] - bar_outputs[n + index];
             bar_rate += inputs[upstream + index] * bar_crossing;
-            bar_inputs[upstream + index] = rate * bar_crossing;
+            finite("restriction carried value covector", rate * bar_crossing)?;
         }
-        bar_inputs[STREAM_PRESSURE] += self.conductance_kg_s_pa * bar_rate;
-        bar_inputs[n + STREAM_PRESSURE] -= self.conductance_kg_s_pa * bar_rate;
+        finite("restriction mass rate covector", bar_rate)?;
+        let bar_pressure = finite(
+            "restriction pressure covector",
+            conductance * bar_rate,
+        )?;
+        let bar_opening = if self.is_modulated() {
+            finite(
+                "restriction opening covector",
+                self.conductance_kg_s_pa * (drop * bar_rate),
+            )?
+        } else {
+            0.0
+        };
+        cx.checkpoint()?;
+        bar_inputs.fill(0.0);
+        for index in STREAM_SPECIFIC_ENTHALPY..n {
+            bar_inputs[upstream + index] =
+                rate * (bar_outputs[index] - bar_outputs[n + index]);
+        }
+        bar_inputs[STREAM_PRESSURE] += bar_pressure;
+        bar_inputs[n + STREAM_PRESSURE] -= bar_pressure;
+        if self.is_modulated() {
+            bar_inputs[2 * n] = bar_opening;
+        }
         Ok(())
     }
 }
