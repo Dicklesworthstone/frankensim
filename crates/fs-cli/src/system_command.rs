@@ -3853,8 +3853,8 @@ fn member(value: &J, what: &str) -> Result<(String, Option<f64>), String> {
     }
 }
 
-/// Starting values for temperature inputs inside loops.
-type Guesses = Vec<(PortRef, f64)>;
+/// Starting values for inputs inside loops, in each port's coefficient order.
+type Guesses = Vec<(PortRef, Vec<f64>)>;
 
 /// A trace contact was computed for two traces. Its port `a` is joined to
 /// the first and its port `b` to the second, each alone: any other trace,
@@ -3967,7 +3967,11 @@ fn join(
     };
     result.map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
     if let (Carrier::Heat, Some(kelvin)) = (ports[setter].carrier, ports[setter].temperature_k) {
-        guesses.extend(members.iter().map(|&member| (member, kelvin)));
+        guesses.extend(
+            members
+                .iter()
+                .map(|&member| (member, vec![kelvin; ports[setter].width])),
+        );
     }
     Ok(())
 }
@@ -4103,14 +4107,14 @@ fn route(
         RouteTemperature::SinkEquivalent => None,
     };
     if let Some(kelvin) = start {
-        guesses.push((source.port, kelvin));
+        guesses.push((source.port, vec![kelvin]));
     }
     Ok(())
 }
 
-/// `{"signal": output, "to": [inputs]}`: copy a signal output (a heat
-/// capacity's start-of-step temperature) to signal inputs (the temperatures
-/// a network's shift is read at).
+/// `{"signal": output, "to": [inputs], "matrix": [[...]]}`: copy a signal,
+/// or apply the same finite rectangular map to it at each destination.
+/// Rows follow the receiving port and columns follow the source port.
 fn signal(
     builder: &mut SystemBuilder,
     elements: &mut [Element],
@@ -4118,7 +4122,7 @@ fn signal(
     guesses: &mut Guesses,
     what: &str,
 ) -> Result<(), Refusal> {
-    fields(connection, &["signal", "to"], what)?;
+    fields(connection, &["signal", "to", "matrix"], what)?;
     let source = resolve(
         builder,
         elements,
@@ -4131,19 +4135,42 @@ fn signal(
         .ok_or_else(|| format!("{what}: to is an array of the ports that read the signal"))?;
     for target in targets {
         let target = resolve(builder, elements, &port_text(target, what)?)?;
-        builder
-            .signal(source.port, target.port)
-            .map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
+        let map = connection
+            .get("matrix")
+            .map(|value| coefficient_matrix(Some(value), target.width, source.width, what))
+            .transpose()?;
+        // Keep temperature-informed starts consistent with the connection.
+        // A rectangular map may give each receiving coefficient a different
+        // value, so the old uniform broadcast is only the copy case.
+        let initial = source.temperature_k.map(|kelvin| {
+            if let Some(map) = &map {
+                map.chunks_exact(source.width)
+                    .map(|row| row.iter().map(|&coefficient| coefficient * kelvin).sum())
+                    .collect::<Vec<f64>>()
+            } else {
+                vec![kelvin; target.width]
+            }
+        });
+        if initial
+            .as_ref()
+            .is_some_and(|values| values.iter().any(|value| !value.is_finite()))
+        {
+            return Err(format!("{what}: initial mapped signal must be finite").into());
+        }
+        let wired = if let Some(map) = map {
+            builder.signal_map(source.port, target.port, map)
+        } else {
+            builder.signal(source.port, target.port)
+        };
+        wired.map_err(|e| Refusal::Admission(format!("{what}: {e}")))?;
         if matches!(
             elements[target.element].kind,
             Kind::ControlledEffort | Kind::ControlledFlow
         ) {
             elements[target.element].point_sampled_command = true;
         }
-        // The kernel solves a signal with the rest of its block and starts
-        // from the publisher's temperature.
-        if let Some(kelvin) = source.temperature_k {
-            guesses.push((target.port, kelvin));
+        if let Some(initial) = initial {
+            guesses.push((target.port, initial));
         }
     }
     Ok(())
@@ -4581,10 +4608,8 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     if let Some(definition) = root.get("solver") {
         system.set_config(solver(definition)?);
     }
-    for (port, kelvin) in guesses {
-        // A trace takes the node's temperature at every one of its points.
-        let width = system.last_input(port).len();
-        system.guess(port, &vec![kelvin; width]);
+    for (port, values) in guesses {
+        system.guess(port, &values);
     }
     let adaptive = root.get("adaptive")
         .map(|definition| adaptive(definition, &elements, step_s)).transpose()?;

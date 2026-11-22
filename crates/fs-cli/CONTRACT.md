@@ -1788,6 +1788,18 @@ emits each waveform's point value at the accepted start time; its native clock
 and table-knot events are replayable. Input, output and controller-memory
 dimensions are each bounded to 64 finite coordinates.
 
+Signal connections optionally take a finite nested `matrix`, with one row per
+receiving coefficient and one column per source coefficient. For example,
+`{"signal":"controller.output","to":["drive.command"],"matrix":[[0,1]]}`
+selects the second controller output for a scalar actuator. Each listed target
+receives the same map; use separate connections for different selections or
+combinations. The kernel owns the mapping, loop equations and snapshot identity.
+Omitting `matrix` retains the equal-width copy connection. Wrong shapes, nonfinite
+coefficients, physical ports and duplicate input writers refuse at admission.
+These maps carry no physical energy; authored coefficients must provide the
+required conversion between signal coordinates. Temperature-informed initial
+guesses are mapped coefficient by coefficient as well.
+
 A matrix controller takes `sample_period_s`, row-major nested matrices
 `a`, `b`, `c`, `d`, and `initial`. At each indexed sample time it computes
 `y = C*x + D*u` from pre-update memory and `x_next = A*x + B*u`, holding the
@@ -1812,11 +1824,15 @@ source scenes retain their existing higher-order admission. Matrix and speed
 controllers require fixed stepping because this consumer supplies no hybrid
 memory error metric; their sample events still cap physical steps.
 
-The gallery scenes `feedback_position.json`, `sampled_pi_velocity.json` and
-`signal_current_charge.json` exercise the general compositions.
+The gallery scenes `feedback_position.json`, `sampled_pi_velocity.json`,
+`signal_current_charge.json` and `sampled_two_axis.json` exercise the general
+compositions. The last uses one vector reference and a two-output sampled PI
+controller with a rectangular actuator allocation onto two independently
+accounted force sources and masses.
 `tests/system_command/feedback.rs` supplies independent mass and capacitor
 recurrences, signed-work checks, nondividing controller substeps, complete-report
-checkpoint continuation and scene-admission regressions.
+checkpoint continuation and scene-admission regressions, including changed-map
+snapshot refusal and identity-map equivalence to an ordinary copy.
 
 `port_hamiltonian` lowers to fs-system's `ExactPortHamiltonianComponent`
 (feature `phs`), built from authored `energy` Q, `structure` J,

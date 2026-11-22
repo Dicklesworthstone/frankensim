@@ -1,0 +1,37 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.046875,
+  "sample_every_s": 0.125,
+  "elements": {
+    "reference": {"kind": "signal_source", "waveforms": [1, -0.5]},
+    "plant_x": {
+      "kind": "mass", "mass_kg": 2.0,
+      "position_m": 0.2, "velocity_m_s": -0.25, "publish": true
+    },
+    "plant_y": {
+      "kind": "mass", "mass_kg": 4.0,
+      "position_m": -0.1, "velocity_m_s": 0.5, "publish": true
+    },
+    "controller": {
+      "kind": "sampled_controller", "sample_period_s": 0.125,
+      "a": [[1, 0], [0, 1]],
+      "b": [[0.125, 0, -0.125, 0], [0, 0.125, 0, -0.125]],
+      "c": [[2, 0], [0, 3]],
+      "d": [[3, 0, -3, 0], [0, 4, 0, -4]],
+      "initial": [0.1, -0.2]
+    },
+    "drive_x": {"kind": "controlled_effort", "domain": "translation"},
+    "drive_y": {"kind": "controlled_effort", "domain": "translation"}
+  },
+  "connections": [
+    {"signal": "reference.output", "to": ["controller.input0"], "matrix": [[1, 0]]},
+    {"signal": "reference.output", "to": ["controller.input1"], "matrix": [[0, 1]]},
+    {"signal": "plant_x.velocity", "to": ["controller.input2"]},
+    {"signal": "plant_y.velocity", "to": ["controller.input3"]},
+    {"signal": "controller.output", "to": ["drive_x.command"], "matrix": [[1, 0.5]]},
+    {"signal": "controller.output", "to": ["drive_y.command"], "matrix": [[-0.25, 1]]},
+    {"join": ["plant_x.p", "drive_x.p"]},
+    {"join": ["plant_y.p", "drive_y.p"]}
+  ]
+}

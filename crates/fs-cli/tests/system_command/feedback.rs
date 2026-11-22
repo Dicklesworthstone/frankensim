@@ -145,6 +145,138 @@ fn controlled_current_charges_with_the_declared_sign_and_point_sampled_commands(
     }
 }
 
+#[test]
+fn mapped_controller_outputs_drive_two_axes_with_independent_work_accounts() {
+    let path = example("sampled_two_axis.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    let mut position = [0.2, -0.1];
+    let mut velocity = [-0.25, 0.5];
+    let mass = [2.0, 4.0];
+    let initial_energy = [0.0625, 0.5];
+    let mut integral = [0.1, -0.2];
+    let mut output = [0.0; 2];
+    let mut samples = 0_u32;
+    let mut saved = None;
+    scene_context(|cx, _| {
+        while !scene.is_finished() {
+            let start = scene.time_s();
+            if start >= f64::from(samples) * 0.125 {
+                let error = [1.0 - velocity[0], -0.5 - velocity[1]];
+                // Independent sampled PI laws in controller coordinates,
+                // followed by the authored two-axis actuator allocation.
+                output = [
+                    2.0 * integral[0] + 3.0 * error[0],
+                    3.0 * integral[1] + 4.0 * error[1],
+                ];
+                for axis in 0..2 {
+                    integral[axis] += 0.125 * error[axis];
+                }
+                samples += 1;
+            }
+            let forces = [output[0] + 0.5 * output[1], -0.25 * output[0] + output[1]];
+            assert!(scene.advance(f64::MAX, cx).unwrap());
+            let dt = scene.time_s() - start;
+            for (axis, name) in ["x", "y"].into_iter().enumerate() {
+                let next = velocity[axis] + dt * forces[axis] / mass[axis];
+                position[axis] += 0.5 * dt * (velocity[axis] + next);
+                velocity[axis] = next;
+                close(
+                    probe(&scene, &format!("plant_{name}.position_m")),
+                    position[axis],
+                );
+                close(probe(&scene, &format!("plant_{name}.velocity_m_s")), next);
+                close(
+                    probe(&scene, &format!("drive_{name}.command")),
+                    forces[axis],
+                );
+                close(
+                    probe(&scene, &format!("drive_{name}.energy_in_j")),
+                    initial_energy[axis] - 0.5 * mass[axis] * next * next,
+                );
+                close(
+                    probe(&scene, &format!("controller.output{axis}")),
+                    output[axis],
+                );
+                close(
+                    probe(&scene, &format!("controller.x{axis}")),
+                    integral[axis],
+                );
+            }
+            assert_eq!(probe(&scene, "controller.sample_count"), f64::from(samples));
+            assert!(scene.ledger().energy_residual_j().abs() < 2e-9);
+            if saved.is_none() && scene.time_s() >= 0.5 {
+                saved = Some(scene.checkpoint().unwrap());
+            }
+        }
+        assert_eq!(samples, 16);
+        let (bytes, root) = saved.unwrap();
+        let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        resumed.resume_checkpoint(&bytes, root).unwrap();
+        resumed.run(cx).unwrap();
+        assert_eq!(resumed.render_json(), scene.render_json());
+
+        let changed_map = text.replace("[[1, 0.5]]", "[[1, 0.25]]");
+        let mut changed = fs_cli::SystemScene::from_text(&changed_map, &path).unwrap();
+        assert!(changed.resume_checkpoint(&bytes, root).is_err());
+        assert_eq!(changed.time_s(), 0.0);
+    });
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json, scene.render_json());
+}
+
+#[test]
+fn signal_projection_admission_preserves_copy_connections_and_rejects_invalid_maps() {
+    let path = example("sampled_pi_velocity.json");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let projected = original.replace(
+        r#"{"signal": "controller.output", "to": ["drive.command"]}"#,
+        r#"{"signal": "controller.output", "to": ["drive.command"], "matrix": [[1]]}"#,
+    );
+    assert_ne!(projected, original);
+    let mut copied = fs_cli::SystemScene::from_text(&original, &path).unwrap();
+    let mut mapped = fs_cli::SystemScene::from_text(&projected, &path).unwrap();
+    scene_context(|cx, _| {
+        copied.run(cx).unwrap();
+        mapped.run(cx).unwrap();
+    });
+    assert_eq!(mapped.render_json(), copied.render_json());
+
+    let text = std::fs::read_to_string(example("sampled_two_axis.json")).unwrap();
+    for (changed, expected) in [
+        (
+            text.replace("[[1, 0.5]]", "[[1, 0.5], [0, 1]]"),
+            "row count",
+        ),
+        (text.replace("[[1, 0.5]]", "[[1]]"), "column count"),
+        (text.replace("[[1, 0.5]]", "[[1, null]]"), "finite number"),
+        (
+            text.replace("\"drive_x.command\"", "\"plant_x.p\""),
+            "signal input",
+        ),
+    ] {
+        let error = fs_cli::SystemScene::from_text(&changed, "invalid-signal-map.json")
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains(expected),
+            "expected {expected}: {error}"
+        );
+    }
+    // Vector-to-scalar wiring must remain explicit, and the same command
+    // input may never have two writers even when both use the same map.
+    for changed in [
+        text.replace(", \"matrix\": [[1, 0.5]]", ""),
+        text.replace(
+            "[\"drive_x.command\"]",
+            "[\"drive_x.command\", \"drive_x.command\"]",
+        ),
+    ] {
+        assert!(fs_cli::SystemScene::from_text(&changed, "invalid-signal-wiring.json").is_err());
+    }
+}
+
 fn adaptive(text: &str, order: u32, source_work: bool) -> String {
     let work = if source_work {
         r#", "drive.energy_in_j": {"absolute": 0.001, "relative": 0}"#
