@@ -385,7 +385,8 @@ physics owners below fs-couple can be composed without it.
   compensated sum like the kernel's, so they read the time a boundary
   receives bit for bit; their stored energy is the energy that entered them
   (negative when they deliver), so a driven device closes its first law.
-  `Waveform` is a constant, a sine or a piecewise-linear table with
+  `Waveform` is a constant, a sine, a piecewise-linear table or a
+  piecewise-constant held table with
   validating constructors (parameters finite and at most 1e150 in size);
   `mean(t0, dt)` is the step average in closed form, over the interval the
   two floating-point ends span, and NaN at a time that is not finite, which
@@ -400,6 +401,11 @@ physics owners below fs-couple can be composed without it.
   source publishing its span can therefore carry a stuck slider across a change of
   acceleration without an artificial catch-up force or friction heat.
   Constants, sine waves and one-knot tables have no scheduled event.
+  `Waveform::held_table` takes each new value at its knot and holds it
+  until the next knot; its first value also applies before the first knot.
+  Its events start at the second knot, and its mean weights the constant
+  intervals without interpolating across jumps. The interpolation law has
+  its own identity tag, so the same knots as a ramp describe another problem.
   Raw boundary closures still require the caller to cap steps at their
   own input events; a span alone does not locate an interior change.
   `Mass`, `Spring`, `Damper` and `Force` have `in_domain(kind, ..)`
@@ -3368,7 +3374,10 @@ gains, units, filtering, saturation and stability remain authored choices.
 behavior and physical capacitor work against independent calculations, checks
 analytic transpose actions, and exercises refusal, cancellation and replay.
 `tests/signal_source.rs` checks point sampling, table event clipping, codec
-identity and refusal without publication. `feedback_control --sampled-pi`
+identity and refusal without publication. It also checks held-command jumps,
+interval means, distinct interpolation identities and a switched force's
+trajectory and physical work against piecewise constant-acceleration formulas,
+including checkpoint replay. `feedback_control --sampled-pi`
 composes a replayable reference, a 50 ms PI controller, a measured inertance
 and a controlled actuator while stepping the physical system at most 10 ms.
 
@@ -3455,8 +3464,9 @@ with no scheduled boundaries retain their previous identities. Boundary
 callback captures remain external to snapshots and must reproduce on replay.
 
 `Waveform::event_times_s` exposes all knots of a table with at least two rows,
-including its transitions to and from held endpoint values. Constants, sines
-and one-knot tables expose none. A vector input uses the sorted, deduplicated
+including its transitions to and from held endpoint values. A held table
+exposes every knot after the first, where its value may jump. Constants,
+sines and one-knot tables expose none. A vector input uses the sorted, deduplicated
 union of its waveforms' event times. Raw unscheduled callbacks remain supported;
 the kernel does not infer their events, and knowing event times supplies no
 accuracy bound between them or guarantee that the declared schedule is complete.

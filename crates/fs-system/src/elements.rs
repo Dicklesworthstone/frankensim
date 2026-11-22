@@ -276,6 +276,9 @@ enum Shape {
     /// Linear between `(time [s], value)` knots with increasing times, and
     /// the end values held before the first knot and after the last.
     Table(Vec<(f64, f64)>),
+    /// The value at a knot is held until the next knot. At a knot, use its
+    /// new value; before the first knot, hold the first value.
+    HeldTable(Vec<(f64, f64)>),
 }
 
 fn bounded(name: &'static str, value: f64) -> Result<f64, ElementError> {
@@ -307,8 +310,13 @@ impl Waveform {
                 phase_rad.to_bits(),
                 offset.to_bits(),
             ]),
-            Shape::Table(knots) => {
-                words.extend([2, knots.len() as u64]);
+            Shape::Table(knots) | Shape::HeldTable(knots) => {
+                let tag = if matches!(&self.0, Shape::HeldTable(_)) {
+                    3
+                } else {
+                    2
+                };
+                words.extend([tag, knots.len() as u64]);
                 for &(time_s, value) in knots {
                     words.extend([time_s.to_bits(), value.to_bits()]);
                 }
@@ -357,6 +365,25 @@ impl Waveform {
     /// An empty table, a value or time that is not finite, or times that do
     /// not strictly increase.
     pub fn table(knots: Vec<(f64, f64)>) -> Result<Self, ElementError> {
+        Self::validate_knots(&knots)?;
+        Ok(Self(Shape::Table(knots)))
+    }
+
+    /// Piecewise-constant values, with each `(time [s], value)` taking
+    /// effect at its time and held until the next knot. The first and last
+    /// values extend outside the table. This is a right-continuous command
+    /// schedule: unlike [`Self::table`], it never interpolates a switch's
+    /// off/on values. Every knot after the first is a scheduled event.
+    ///
+    /// # Errors
+    /// The same finite, bounded, strictly increasing knots as [`Self::table`]
+    /// are required, including at least one knot.
+    pub fn held_table(knots: Vec<(f64, f64)>) -> Result<Self, ElementError> {
+        Self::validate_knots(&knots)?;
+        Ok(Self(Shape::HeldTable(knots)))
+    }
+
+    fn validate_knots(knots: &[(f64, f64)]) -> Result<(), ElementError> {
         if knots.is_empty() {
             return Err(ElementError::Table {
                 what: "it has no knots",
@@ -373,7 +400,7 @@ impl Waveform {
                 what: "times do not strictly increase",
             });
         }
-        Ok(Self(Shape::Table(knots)))
+        Ok(())
     }
 
     /// The lowest value the waveform takes at any time.
@@ -393,7 +420,7 @@ impl Waveform {
                     offset - amplitude.abs()
                 }
             }
-            Shape::Table(knots) => knots
+            Shape::Table(knots) | Shape::HeldTable(knots) => knots
                 .iter()
                 .map(|knot| knot.1)
                 .fold(f64::INFINITY, f64::min),
@@ -415,11 +442,14 @@ impl Waveform {
                 offset,
             } => offset + amplitude * (2.0 * PI * frequency_hz * t_s + phase_rad).sin(),
             Shape::Table(knots) => table_value(knots, t_s),
+            Shape::HeldTable(knots) => held_table_value(knots, t_s),
         }
     }
 
-    /// Absolute times at which a table's slope may change, in increasing
-    /// order. Constants, sine waves and one-knot tables have no such events.
+    /// Absolute times at which a table's slope or held value may change,
+    /// in increasing order. A held table's first knot is not an event:
+    /// its first value already applies before that time. Constants, sine
+    /// waves and one-knot tables have no such events.
     ///
     /// A prescribed input can pass these times to
     /// [`crate::SystemBuilder::scheduled_boundary`]. For a vector of
@@ -427,6 +457,7 @@ impl Waveform {
     pub fn event_times_s(&self) -> impl Iterator<Item = f64> + '_ {
         let knots = match &self.0 {
             Shape::Table(knots) if knots.len() > 1 => knots.as_slice(),
+            Shape::HeldTable(knots) => &knots[1..],
             _ => &[],
         };
         knots.iter().map(|knot| knot.0)
@@ -444,6 +475,10 @@ impl Waveform {
         match &self.0 {
             Shape::Table(knots) if knots.len() > 1 => {
                 let next = knots.partition_point(|knot| knot.0 <= t_s);
+                knots.get(next).map(|knot| clock_s.interval_to(knot.0))
+            }
+            Shape::HeldTable(knots) => {
+                let next = knots.partition_point(|knot| knot.0 <= t_s).max(1);
                 knots.get(next).map(|knot| clock_s.interval_to(knot.0))
             }
             Shape::Constant(_) | Shape::Sine { .. } | Shape::Table(_) => None,
@@ -498,8 +533,40 @@ impl Waveform {
                     table_value(knots, t0_s)
                 }
             }
+            Shape::HeldTable(knots) => held_table_mean(knots, t0_s, t0_s + dt_s),
         }
     }
+}
+
+fn held_table_value(knots: &[(f64, f64)], time_s: f64) -> f64 {
+    let upper = knots.partition_point(|knot| knot.0 <= time_s);
+    knots[upper.saturating_sub(1)].1
+}
+
+/// Weight each constant interval before summing, so a finite mean does
+/// not overflow merely because the time integral would be too large.
+fn held_table_mean(knots: &[(f64, f64)], start: f64, end: f64) -> f64 {
+    let span = end - start;
+    if !end.is_finite() || !span.is_finite() {
+        return f64::NAN;
+    }
+    if span <= 0.0 {
+        return held_table_value(knots, start);
+    }
+    let mut value = held_table_value(knots, start);
+    let mut from = start;
+    let mut total = Sum::default();
+    let next = knots.partition_point(|knot| knot.0 <= start);
+    for &(time_s, next_value) in &knots[next..] {
+        if time_s >= end {
+            break;
+        }
+        total.add(value * ((time_s - from) / span));
+        from = time_s;
+        value = next_value;
+    }
+    total.add(value * ((end - from) / span));
+    total.value()
 }
 
 fn table_value(knots: &[(f64, f64)], t: f64) -> f64 {
