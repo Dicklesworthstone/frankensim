@@ -75,7 +75,7 @@ use fs_system::elements::{
     Admittance, AffineSignal, Conductance, ControlledSource, ControllerState, Damper, FlowSource,
     Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater, IdealDiode, IdealSwitch, Mass,
     ModulatedTransformer, Motion, Resistance, Restriction, SampledController, SignalClock,
-    SignalSource, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
+    SignalLimiter, SignalSource, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
@@ -170,9 +170,9 @@ connector<i>.branch<j>.amplitude_sqrt_j for its complete signed memory vector.
 Vector relative scales use initial/refined lengths; orientation uses angular
 motion during the interval. All body and branch accounts are mandatory.
 The default order is 1; choose order 2 only for a smooth second-order model.
-Affine maps, signal sources, modulated restrictions, published inertance
-observations and controlled commands supplied by signals or point-sampled
-value admit order 1 only. SI-named controlled-source prescriptions retain
+Affine maps, signal sources, signal limiters, modulated restrictions, published
+inertance or gas observations and controlled commands supplied by signals or
+point-sampled value admit order 1 only. SI-named controlled-source prescriptions retain
 their interval-mean rules. sampled_controller and
 speed_controller require fixed-step operation; their sample events still cap
 steps exactly, but no adaptive discrete-memory metric is supplied. ideal_diode
@@ -221,6 +221,12 @@ Elements (ports in brackets; physical fields use SI units):
   force          force_n (waveform)                                   [p]
   affine_signal  matrix (m by n), bias (m numbers)      [input0..input<n-1>, output]
                  y = bias + matrix * u; n scalar inputs, one m-wide output.
+  signal_limiter lower, upper (equal nonempty arrays)                [input, output]
+                 Clamp each signal coordinate to its authored finite bounds.
+                 lower[i] <= upper[i]; equality fixes that coordinate.
+                 Connect a vector signal or prescribe value (one waveform per
+                 coordinate). Bounds carry the signal's units; no physical
+                 energy or actuator dynamics are added. Adaptive order 1 only.
   signal_source  waveforms (array of waveforms)                       [output]
                  One output coefficient per waveform, evaluated at the start
                  of each step. The source clock and definitions are replayable;
@@ -246,7 +252,8 @@ Elements (ports in brackets; physical fields use SI units):
                  energy is supplied.
   Signal matrices and vectors contain finite numbers, with at most 64 inputs,
   outputs or memory coordinates. Signal gains, units and initial memory are
-  authored; no limiting, power-supply model or control stability is inferred.
+  authored; limiting requires signal_limiter. No power-supply model or control
+  stability is inferred.
   Reports expose output0, output1, ...; sampled controllers also expose x0,
   x1, ..., sample_count and time_s. signal_source exposes accepted time_s.
   speed_controller sample_period_s, proportional_gain_nm_s_per_rad,
@@ -562,8 +569,13 @@ gas, the calorics of its NASA-9 packs):
                  temperature_min_k, temperature_max_k (the bracket of the
                  owner's caloric solve), energy_tolerance_j_kg = 1e-7,
                  max_iterations = 128, insulated = false,
-                 stream_mass_tolerance_kg (optional; enables material flow)
+                 stream_mass_tolerance_kg (optional; enables material flow),
+                 publish = false (accepted pressure, temperature, mass, volume)
                                         [p, heat unless insulated, stream if enabled]
+  publish adds scalar signals pressure [Pa], temperature [K], mass [kg] and
+  volume [m3] from accepted state at the start of each step. It works with
+  closed, insulated and streaming cavities; published cavities admit adaptive
+  order 1 only. These observations carry no energy and change no gas law.
   p receives the compression flow [m3/s], positive when the cavity
   shrinks, and returns the step's work pressure [Pa]: prescribe flow_m3_s
   on it, or join it to a mass as {\"port\": cavity.p, \"ratio\": area_m2},
@@ -829,7 +841,8 @@ Connections, ports written element.port:
                           carried mass fraction); ratio for a
                           modulated_transformer's ratio signal; opening for
                           modulated_restriction.opening; value for
-                          affine/sampled_controller inputs, ideal_switch.closed
+                          affine/sampled_controller inputs, signal_limiter.input,
+                          ideal_switch.closed
                           or controlled-source commands (the latter also accept
                           their SI field name).
   A prescribed value, valve opening and speed_controller input are point
@@ -1451,6 +1464,8 @@ enum Kind {
     Source(Domain),
     /// An authored dense affine map over scalar signal inputs.
     AffineSignal,
+    /// Authored coordinate bounds on a zero-power signal.
+    SignalLimiter,
     /// Replayable point-sampled signal waveforms on an accepted clock.
     SignalSource,
     /// An authored discrete recurrence with a sampled, held output.
@@ -1540,13 +1555,14 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 57] = [
+    const TABLE: [(&'static str, Self); 58] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
         ("resistance_matrix", Self::ResistanceMatrix),
         ("force", Self::Source(Domain::Translation)),
         ("affine_signal", Self::AffineSignal),
+        ("signal_limiter", Self::SignalLimiter),
         ("signal_source", Self::SignalSource),
         ("sampled_controller", Self::SampledController),
         ("speed_controller", Self::SpeedController),
@@ -1891,8 +1907,8 @@ fn whole_state_account(element: &Element) -> (&'static str, Coordinate) {
 /// conduction body steps by backward Euler. A modal structure is exact for a
 /// held effort and holds one that varies within a step, which leaves the
 /// coupled step at order two. A gas volume steps by the trapezoidal rule, and
-/// a closed gas cavity measures order two. The native streaming cavity's
-/// explicit material transfer and subsequent heat/work solve are first order.
+/// an unpublished closed gas cavity measures order two. The native streaming
+/// cavity's explicit material transfer and subsequent heat/work solve are first order.
 /// Point-sampled commands and accepted-state observations conservatively limit
 /// control scenes to order one.
 /// None: the order is the scene's to establish.
@@ -1903,6 +1919,7 @@ fn step_order(element: &Element) -> Option<u32> {
     match element.kind {
         Kind::ConductionBody
         | Kind::AffineSignal
+        | Kind::SignalLimiter
         | Kind::SignalSource
         | Kind::ModulatedRestriction => Some(1),
         Kind::Inertance(_)
@@ -1913,11 +1930,18 @@ fn step_order(element: &Element) -> Option<u32> {
         {
             Some(1)
         }
-        Kind::GasCavity => Some(if gas::stream_basis(&element.ports).is_some() {
-            1
-        } else {
-            2
-        }),
+        Kind::GasCavity => Some(
+            if gas::stream_basis(&element.ports).is_some()
+                || element
+                    .ports
+                    .iter()
+                    .any(|port| port.role() == PortRole::SignalOut)
+            {
+                1
+            } else {
+                2
+            },
+        ),
         Kind::ModalStructure | Kind::GasVolume => Some(2),
         _ => None,
     }
@@ -2613,6 +2637,25 @@ fn signal_source(
         .collect::<Result<Vec<_>, _>>()?;
     let source = SignalSource::new(waves).map_err(|error| format!("{what}: {error}"))?;
     add(builder, name, source, SignalClock::default())
+}
+
+fn signal_limiter(
+    builder: &mut SystemBuilder,
+    name: &str,
+    definition: &J,
+    what: &str,
+) -> Result<(NodeId, Vec<PortSpec>), Refusal> {
+    fields(definition, &["kind", "lower", "upper"], what)?;
+    let count = definition
+        .get("lower")
+        .and_then(J::as_array)
+        .filter(|values| (1..=MAX_SIGNAL_COORDINATES).contains(&values.len()))
+        .ok_or_else(|| format!("{what}.lower: expected 1 to {MAX_SIGNAL_COORDINATES} bounds"))?
+        .len();
+    let lower = signal_coefficients(definition.get("lower"), count, &format!("{what}.lower"))?;
+    let upper = signal_coefficients(definition.get("upper"), count, &format!("{what}.upper"))?;
+    let limiter = SignalLimiter::new(lower, upper).map_err(|error| format!("{what}: {error}"))?;
+    add(builder, name, limiter, ())
 }
 
 fn sampled_controller(
@@ -3418,6 +3461,7 @@ fn element(
         }
         Kind::ResistanceMatrix => resistance_matrix(builder, name, definition, &what)?,
         Kind::AffineSignal => affine_signal(builder, name, definition, &what)?,
+        Kind::SignalLimiter => signal_limiter(builder, name, definition, &what)?,
         Kind::SignalSource => signal_source(builder, name, definition, &what)?,
         Kind::SampledController => sampled_controller(builder, name, definition, &what)?,
         Kind::SpeedController => speed_controller(builder, name, definition, &what)?,
@@ -4341,7 +4385,13 @@ fn signal(
         // Keep temperature-informed starts consistent with the connection.
         // A rectangular map may give each receiving coefficient a different
         // value, so the old uniform broadcast is only the copy case.
-        let initial = source.temperature_k.map(|kelvin| {
+        let initial_temperature = source.temperature_k.filter(|_| {
+            let owner = &elements[source.element];
+            // Gas observations other than temperature have different units.
+            owner.kind != Kind::GasCavity
+                || builder.port(owner.node, "temperature").ok() == Some(source.port)
+        });
+        let initial = initial_temperature.map(|kelvin| {
             if let Some(map) = &map {
                 map.chunks_exact(source.width)
                     .map(|row| row.iter().map(|&coefficient| coefficient * kelvin).sum())
@@ -4419,6 +4469,7 @@ fn prescribe(
             || matches!(
                 element.kind,
                 Kind::AffineSignal
+                    | Kind::SignalLimiter
                     | Kind::SampledController
                     | Kind::SpeedController
                     | Kind::IdealSwitch
@@ -4439,7 +4490,7 @@ fn prescribe(
     } else if value_command
         || matches!(
             element.kind,
-            Kind::AffineSignal | Kind::SampledController | Kind::IdealSwitch
+            Kind::AffineSignal | Kind::SignalLimiter | Kind::SampledController | Kind::IdealSwitch
         )
     {
         Some("value")
@@ -4609,6 +4660,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             }
             Kind::Resistance(_)
             | Kind::AffineSignal
+            | Kind::SignalLimiter
             | Kind::SignalSource
             | Kind::ResistanceMatrix
             | Kind::ResistorBranch(_)
@@ -5185,6 +5237,14 @@ impl Device {
                  power-supply dynamics or control stability is inferred"
             ));
         }
+        if self.elements.iter().any(|element| element.kind == Kind::SignalLimiter) {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; signal_limiter enforces authored coordinate bounds with no \
+                 physical storage, actuator dynamics or anti-windup; its port tangent selects \
+                 the saturated-side derivative at a bound, and bound crossings are not \
+                 separately located in time"
+            ));
+        }
         if self
             .elements
             .iter()
@@ -5468,7 +5528,7 @@ impl Device {
     fn values(&self, element: &Element) -> Vec<(String, f64)> {
         if matches!(
             element.kind,
-            Kind::AffineSignal | Kind::SignalSource | Kind::SampledController
+            Kind::AffineSignal | Kind::SignalLimiter | Kind::SignalSource | Kind::SampledController
         ) {
             return self.signal_values(element);
         }
@@ -5939,6 +5999,7 @@ impl Device {
             // Read by their vector-valued report functions.
             Kind::RigidNetwork
             | Kind::AffineSignal
+            | Kind::SignalLimiter
             | Kind::SignalSource
             | Kind::SampledController
             | Kind::ViscoelasticNetwork

@@ -807,3 +807,145 @@ fn modulated_stream_refuses_invalid_opening_quantity_basis_and_order() {
         "{error}"
     );
 }
+
+#[test]
+fn pressure_regulated_source_scene_uses_accepted_gas_feedback_and_resumes() {
+    let path = example("pressure_regulated_n2.json");
+    let authored = std::fs::read_to_string(&path).unwrap();
+    // Also use steps that do not divide either reference-change time.
+    for step in ["0.025", "0.037"] {
+        let text = authored.replace(r#""step_s": 0.025"#, &format!(r#""step_s": {step}"#));
+        let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        assert_eq!(scene.probe("limit.output0").unwrap(), None);
+        let totals = |scene: &fs_cli::SystemScene| {
+            ["mass_kg", "species0_mass_kg", "energy_j"].map(|coordinate| {
+                probe(scene, &format!("supply.{coordinate}"))
+                    + probe(scene, &format!("receiver.{coordinate}"))
+            })
+        };
+        let initial = totals(&scene);
+        let mut regimes = [0; 3];
+        let mut events = [false; 2];
+        let mut saved = None;
+        scene_context(|cx, _| {
+            while !scene.is_finished() {
+                let start = scene.time_s();
+                let reference = if start < 3.0 {
+                    88_000.0
+                } else if start < 4.0 {
+                    84_000.0
+                } else {
+                    90_000.0
+                };
+                let pressure = probe(&scene, "receiver.pressure_pa");
+                let command = 0.00025 * (reference - pressure);
+                let opening = command.clamp(0.0, 1.0);
+                let expected_rate = CONDUCTANCE
+                    * opening
+                    * (probe(&scene, "supply.pressure_pa") - pressure);
+                let old_mass = probe(&scene, "receiver.mass_kg");
+                let donor_enthalpy = probe(&scene, "supply.specific_internal_energy_j_kg")
+                    + probe(&scene, "supply.pressure_pa") * probe(&scene, "supply.volume_m3")
+                        / probe(&scene, "supply.mass_kg");
+                assert!(scene.advance(f64::MAX, cx).unwrap());
+                let dt = scene.time_s() - start;
+                close(probe(&scene, "reference.output0"), reference, 1.0e-8);
+                close(probe(&scene, "controller.output0"), command, 2.0e-9);
+                close(probe(&scene, "limit.output0"), opening, 2.0e-9);
+                close(probe(&scene, "valve.opening"), opening, 2.0e-9);
+                close(probe(&scene, "valve.mass_rate_kg_s"), expected_rate, 2.0e-11);
+                close(
+                    probe(&scene, "valve.enthalpy_rate_w"),
+                    expected_rate * donor_enthalpy,
+                    2.0e-7,
+                );
+                close(probe(&scene, "valve.carried0_rate_kg_s"), expected_rate, 2.0e-11);
+                close(
+                    probe(&scene, "receiver.mass_kg"),
+                    old_mass + dt * probe(&scene, "valve.mass_rate_kg_s"),
+                    2.0e-15,
+                );
+                let regime = if opening == 0.0 {
+                    close(probe(&scene, "valve.mass_rate_kg_s"), 0.0, 0.0);
+                    close(probe(&scene, "receiver.pressure_pa"), pressure, 1.0e-7);
+                    0
+                } else if opening == 1.0 {
+                    2
+                } else {
+                    1
+                };
+                regimes[regime] += 1;
+                for (index, knot) in [3.0, 4.0].into_iter().enumerate() {
+                    assert!(!(start < knot && scene.time_s() > knot + 1.0e-13));
+                    events[index] |= (scene.time_s() - knot).abs() < 1.0e-13;
+                }
+                if saved.is_none() && scene.time_s() >= 3.0 {
+                    saved = Some(scene.checkpoint().unwrap());
+                }
+            }
+            let (bytes, root) = saved.unwrap();
+            let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+            resumed.resume_checkpoint(&bytes, root).unwrap();
+            resumed.run(cx).unwrap();
+            assert_eq!(resumed.render_json(), scene.render_json());
+            assert_eq!(resumed.checkpoint().unwrap(), scene.checkpoint().unwrap());
+        });
+        assert!(regimes.into_iter().all(|count| count > 0), "{regimes:?}");
+        assert!(events.into_iter().all(|seen| seen), "{events:?}");
+        let pressure = probe(&scene, "receiver.pressure_pa");
+        assert!(pressure > 87_000.0 && pressure < 90_000.0, "{pressure}");
+        let final_totals = totals(&scene);
+        close(final_totals[0], initial[0], 2.0e-14);
+        close(final_totals[1], initial[1], 2.0e-14);
+        close(final_totals[2], initial[2], 2.0e-6);
+        close(scene.ledger().mass_residual_kg().unwrap(), 0.0, 2.0e-14);
+        close(scene.ledger().carried_residual(0).unwrap(), 0.0, 2.0e-14);
+        close(scene.ledger().energy_residual_j(), 0.0, 2.0e-6);
+        if step == "0.025" {
+            let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+            assert_eq!(code, 0, "{stderr}");
+            assert_eq!(json, scene.render_json());
+        }
+    }
+}
+
+#[test]
+fn gas_publication_is_explicit_and_bounds_feedback_order() {
+    let path = example("pressure_regulated_n2.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    for value in ["false", "1", r#""true""#] {
+        let changed = text.replace(r#""publish": true"#, &format!(r#""publish": {value}"#));
+        assert_ne!(changed, text);
+        let error = fs_cli::SystemScene::from_text(&changed, &path).err().unwrap();
+        assert!(
+            error.message.contains(if value == "false" { "pressure" } else { "publish" }),
+            "{error}"
+        );
+    }
+    let closed = r#"{
+        "schema": "frankensim.system.v0", "duration_s": 0.01, "step_s": 0.005,
+        "adaptive": {"order": 2, "tolerances": {
+            "cavity.volume_m3": {"absolute": 1e-10, "relative": 1e-5},
+            "cavity.temperature_k": {"absolute": 1e-5, "relative": 1e-5}
+        }},
+        "elements": {"cavity": {
+            "kind": "gas_cavity", "gas": "thermochemical 300 90000 mole 1 N2 1",
+            "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack", "transport": "n2/transport.fsmcdpk"}],
+            "volume_m3": 0.001, "temperature_min_k": 200, "temperature_max_k": 900,
+            "publish": true
+        }},
+        "connections": [
+            {"prescribe": "cavity.p", "flow_m3_s": 0},
+            {"prescribe": "cavity.heat", "heat_rate_w": 1}
+        ]
+    }"#;
+    let error = fs_cli::SystemScene::from_text(closed, &path).err().unwrap();
+    assert!(error.message.contains("adaptive.order") && error.message.contains("cavity"), "{error}");
+    let first_order = closed.replace(r#""order": 2"#, r#""order": 1"#);
+    let mut published = fs_cli::SystemScene::from_text(&first_order, &path).unwrap();
+    scene_context(|cx, _| published.run(cx).unwrap());
+    let plain = closed.replace(r#""publish": true"#, r#""publish": false"#);
+    let mut unpublished = fs_cli::SystemScene::from_text(&plain, &path).unwrap();
+    scene_context(|cx, _| unpublished.run(cx).unwrap());
+    close(probe(&published, "cavity.temperature_k"), probe(&unpublished, "cavity.temperature_k"), 1.0e-8);
+}

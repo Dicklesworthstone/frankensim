@@ -1855,6 +1855,20 @@ emits each waveform's point value at the accepted start time; its native clock
 and table-knot events are replayable. Input, output and controller-memory
 dimensions are each bounded to 64 finite coordinates.
 
+`signal_limiter` supplies explicit coordinate bounds between a controller
+and an actuator. Equal, nonempty `lower` and `upper` arrays hold 1 to 64
+finite values, with `lower[i] <= upper[i]`. Its vector ports `input` and
+`output` have that width, and its native `SignalLimiter` clamps each input
+coordinate to the corresponding interval; equal bounds fix a coordinate.
+Use an ordinary or mapped signal connection, or prescribe `value` as one
+waveform per input coordinate (one waveform directly for a scalar).
+Prescriptions are held start-of-step samples and table knots remain events.
+Reports expose accepted `output<i>`, initially null, and checkpoints bind
+the exact bounds. This is an authored zero-power control law: it adds no
+actuator dynamics or anti-windup and never changes physical-state admission.
+The native tangent uses the saturated-side generalized derivative at a bound;
+bound crossings are not separately located. Adaptive order is limited to one.
+
 Signal connections optionally take a finite nested `matrix`, with one row per
 receiving coefficient and one column per source coefficient. For example,
 `{"signal":"controller.output","to":["drive.command"],"matrix":[[0,1]]}`
@@ -2490,7 +2504,9 @@ the element's name, its kind, the kind's order and the declared one:
 - `conduction_body`: 1. It steps by backward Euler.
 - `modal_structure`: 2. Its step is exact for a held force, and a force that
   varies within a step is held, which leaves the coupled step at order 2.
-- `gas_volume`: 2, the trapezoidal rule. A closed `gas_cavity`: 2, as measured.
+- `gas_volume`: 2, the trapezoidal rule. A closed `gas_cavity` without
+  published observations: 2, as measured. A cavity with `publish: true`: 1,
+  because feedback reads its accepted start-of-step state.
 - Streaming `gas_cavity`: 1. Its native step transports species and enthalpy
   from the initial state, then applies heat and volume work. Declaring order
   2 is refused even if the particular scene happens to exchange no material.
@@ -2707,7 +2723,7 @@ species, NASA-9 and transport packs (`xtask matdb-pack`). The scene gives the
 one `sources` triple of pack paths per species (relative to the scene),
 `volume_m3`, the caloric bracket `temperature_min_k` and `temperature_max_k`,
 and optionally `energy_tolerance_j_kg` (1e-7), `max_iterations` (1 to 128),
-`insulated`, and `stream_mass_tolerance_kg`. Port `p` receives the compression flow [m3/s], positive when
+`insulated`, `publish` (false), and `stream_mass_tolerance_kg`. Port `p` receives the compression flow [m3/s], positive when
 the cavity shrinks, and returns the step's work pressure. `prescribe` takes
 `flow_m3_s` with that sign, like an accumulator's. As a `join` member
 `{"port": "cavity.p", "ratio": area_m2}`, a mass moving the positive way
@@ -2727,6 +2743,25 @@ temperature, pressure) on a reference bound whole, so `--checkpoint` saves it:
 and resumes it in another process to the report of a run that pauses there,
 and its checkpoint is refused by the scene with another gas temperature,
 volume or temperature bracket.
+
+`publish: true` opts into the native owner's scalar signal outputs
+`pressure` [Pa], `temperature` [K], `mass` [kg] and `volume` [m3]. They read
+accepted state at the beginning of a proposed step, including on retries,
+and carry no physical energy. Publication works for closed, insulated and
+streaming cavities and changes neither their physical port law nor their
+state update. The published layout participates in checkpoint identity.
+Reports retain the accepted end-state coordinates (`pressure_pa`, etc.);
+a controller consumes the start-state signals instead. Published cavities
+conservatively limit adaptive order to one.
+
+`examples/system/pressure_regulated_n2.json` composes two source-backed
+nitrogen cavities, a pressure reference, an affine feedback law, an explicit
+signal limiter and a modulated restriction. The valve command follows measured
+receiver pressure through full-open, partial and closed operation. The CLI
+regression calculates each command and transport from the old accepted gas
+state, checks scheduled reference changes and total inventory/energy closure,
+and resumes the same graph through a durable checkpoint. The scene and loader
+introduce no controller-specific or gas-specific integration code.
 
 Setting the finite positive `stream_mass_tolerance_kg` opts into the native
 owner's material-stream mode. It adds `stream`, carrying mass rate,

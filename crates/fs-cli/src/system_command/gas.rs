@@ -49,6 +49,7 @@ pub(super) fn cavity(
             "max_iterations",
             "insulated",
             "stream_mass_tolerance_kg",
+            "publish",
         ],
         what,
     )?;
@@ -143,6 +144,11 @@ pub(super) fn cavity(
         cavity = cavity
             .insulated()
             .map_err(|error| format!("{what}: {error}"))?;
+    }
+    match definition.get("publish") {
+        None | Some(J::Bool(false)) => {}
+        Some(J::Bool(true)) => cavity = cavity.publishing(),
+        Some(_) => return Err(format!("{what}.publish: expected a boolean").into()),
     }
     let added = if let Some(tolerance) = stream_mass_tolerance_kg {
         cavity = cavity

@@ -1,0 +1,36 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 8,
+  "step_s": 0.025,
+  "sample_every_s": 0.125,
+  "elements": {
+    "valve": {"kind": "modulated_restriction", "conductance_kg_s_pa": 2e-9, "stream_basis": "supply.stream"},
+    "reference": {"kind": "signal_source", "waveforms": [{"held_table": [[0, 88000], [3, 84000], [4, 90000]]}]},
+    "controller": {"kind": "affine_signal", "matrix": [[0.00025, -0.00025]], "bias": [0]},
+    "limit": {"kind": "signal_limiter", "lower": [0], "upper": [1]},
+    "supply": {
+      "kind": "gas_cavity", "gas": "thermochemical 300 96000 mole 1 N2 1",
+      "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack", "transport": "n2/transport.fsmcdpk"}],
+      "volume_m3": 0.004, "stream_mass_tolerance_kg": 1e-15,
+      "temperature_min_k": 200, "temperature_max_k": 900
+    },
+    "receiver": {
+      "kind": "gas_cavity", "gas": "thermochemical 300 80000 mole 1 N2 1",
+      "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack", "transport": "n2/transport.fsmcdpk"}],
+      "volume_m3": 0.001, "stream_mass_tolerance_kg": 1e-15, "publish": true,
+      "temperature_min_k": 200, "temperature_max_k": 900
+    }
+  },
+  "connections": [
+    {"signal": "reference.output", "to": ["controller.input0"]},
+    {"signal": "receiver.pressure", "to": ["controller.input1"]},
+    {"signal": "controller.output", "to": ["limit.input"]},
+    {"signal": "limit.output", "to": ["valve.opening"]},
+    {"join": ["supply.stream", "valve.a"]},
+    {"join": ["receiver.stream", "valve.b"]},
+    {"prescribe": "supply.p", "flow_m3_s": 0},
+    {"prescribe": "receiver.p", "flow_m3_s": 0},
+    {"prescribe": "supply.heat", "heat_rate_w": 0},
+    {"prescribe": "receiver.heat", "heat_rate_w": 0}
+  ]
+}

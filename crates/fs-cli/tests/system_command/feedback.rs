@@ -602,3 +602,124 @@ fn hydraulic_scene_commands_and_domains_refuse_wrong_units_and_unknown_names() {
         assert!(error.message.contains("electrical, hydraulic"), "{error}");
     }
 }
+
+const SIGNAL_LIMITS: &str = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 1, "step_s": 0.19,
+  "sample_every_s": 1,
+  "elements": {
+    "reference": {"kind": "signal_source", "waveforms": [
+      {"held_table": [[0, -1], [0.25, 0.5], [0.5, 2], [0.75, 0]]},
+      {"table": [[0, -4], [1, 4]]}, 9
+    ]},
+    "limits": {"kind": "signal_limiter", "lower": [0, -2, 3], "upper": [1, 2, 3]}
+  },
+  "connections": [{"signal": "reference.output", "to": ["limits.input"]}]
+}"#;
+
+#[test]
+fn signal_limiter_scenes_bound_vector_inputs_and_replay_prescribed_events() {
+    for prescribed in [false, true] {
+        let text = if prescribed {
+            SIGNAL_LIMITS.replace(
+                r#"{"signal": "reference.output", "to": ["limits.input"]}"#,
+                r#"{"prescribe": "limits.input", "value": [
+                    {"held_table": [[0, -1], [0.25, 0.5], [0.5, 2], [0.75, 0]]},
+                    {"table": [[0, -4], [1, 4]]}, 9
+                ]}"#,
+            )
+        } else {
+            SIGNAL_LIMITS.to_owned()
+        };
+        let path = "signal-limits.json";
+        let mut scene = fs_cli::SystemScene::from_text(&text, path).unwrap();
+        for index in 0..3 {
+            assert_eq!(scene.probe(&format!("limits.output{index}")).unwrap(), None);
+        }
+        let mut events = [false; 3];
+        let mut saved = None;
+        scene_context(|cx, _| {
+            while !scene.is_finished() {
+                let start = scene.time_s();
+                let first = if start < 0.25 || start >= 0.75 {
+                    0.0
+                } else if start < 0.5 {
+                    0.5
+                } else {
+                    1.0
+                };
+                // A varying prescribed signal is sampled at the left end,
+                // exactly as a connected SignalSource is; it is not averaged.
+                let second = (-4.0 + 8.0 * start).clamp(-2.0, 2.0);
+                assert!(scene.advance(f64::MAX, cx).unwrap());
+                close(probe(&scene, "limits.output0"), first);
+                close(probe(&scene, "limits.output1"), second);
+                close(probe(&scene, "limits.output2"), 3.0);
+                for (seen, event) in events.iter_mut().zip([0.25, 0.5, 0.75]) {
+                    assert!(!(start < event && scene.time_s() > event + 1e-13));
+                    *seen |= (scene.time_s() - event).abs() < 1e-13;
+                }
+                if saved.is_none() && scene.time_s() >= 0.5 {
+                    saved = Some(scene.checkpoint().unwrap());
+                }
+            }
+            let (bytes, root) = saved.unwrap();
+            let mut resumed = fs_cli::SystemScene::from_text(&text, path).unwrap();
+            resumed.resume_checkpoint(&bytes, root).unwrap();
+            resumed.run(cx).unwrap();
+            assert_eq!(resumed.render_json(), scene.render_json());
+            assert_eq!(resumed.checkpoint().unwrap(), scene.checkpoint().unwrap());
+            for (from, to) in [
+                (r#""lower": [0, -2, 3]"#, r#""lower": [0.1, -2, 3]"#),
+                (r#""upper": [1, 2, 3]"#, r#""upper": [0.9, 2, 3]"#),
+            ] {
+                let changed_text = text.replace(from, to);
+                assert_ne!(changed_text, text);
+                let mut changed = fs_cli::SystemScene::from_text(&changed_text, path).unwrap();
+                let before = changed.render_json();
+                assert!(changed.resume_checkpoint(&bytes, root).is_err());
+                assert_eq!(changed.time_s(), 0.0);
+                assert_eq!(changed.render_json(), before);
+            }
+        });
+        assert!(events.into_iter().all(|seen| seen), "{events:?}");
+        assert_eq!(scene.ledger().energy_residual_j(), 0.0);
+    }
+}
+
+#[test]
+fn signal_limiter_scene_admission_rejects_bad_bounds_and_input_shapes() {
+    for (from, to, expected) in [
+        (r#""lower": [0, -2, 3]"#, r#""lower": []"#, "lower"),
+        (r#""upper": [1, 2, 3]"#, r#""upper": [1, 2]"#, "upper"),
+        (
+            r#""lower": [0, -2, 3]"#,
+            r#""lower": [2, -2, 3]"#,
+            "lower bound",
+        ),
+        (
+            r#""upper": [1, 2, 3]"#,
+            r#""upper": [1, 2, 1e400]"#,
+            "finite",
+        ),
+        (
+            r#"{"signal": "reference.output", "to": ["limits.input"]}"#,
+            r#"{"prescribe": "limits.input", "value": [0, 1]}"#,
+            "3 waveforms",
+        ),
+        (
+            r#"{"signal": "reference.output", "to": ["limits.input"]}"#,
+            r#"{"prescribe": "limits.input", "temperature_k": [300, 300, 300]}"#,
+            "value",
+        ),
+    ] {
+        let text = SIGNAL_LIMITS.replace(from, to);
+        assert_ne!(text, SIGNAL_LIMITS);
+        let error = fs_cli::SystemScene::from_text(&text, "invalid-signal-limits.json")
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains(expected),
+            "expected {expected}: {error}"
+        );
+    }
+}
