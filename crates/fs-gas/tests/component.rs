@@ -1487,6 +1487,164 @@ fn stepped(reference: &ClosedGasParcel, cx: &Cx<'_>) -> ClosedGasParcel {
     step(&cavity, &first, 1.0e-3, [-0.01, -15.0], cx).0
 }
 
+#[test]
+fn publishing_closed_and_insulated_cavities_preserves_physics_and_exposes_accepted_state() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let reference = parcel(0.002, 7.0e6);
+        let old = stepped(&reference, cx);
+        let closed = GasCavity::new(reference, controls()).unwrap();
+        for insulated in [false, true] {
+            let plain = if insulated { closed.clone().insulated().unwrap() } else { closed.clone() };
+            let published = plain.clone().publishing().publishing();
+            let before_wall = closed.clone().publishing();
+            let before_wall = if insulated {
+                before_wall.insulated().unwrap().insulated().unwrap()
+            } else {
+                before_wall
+            };
+            assert_eq!(before_wall.ports(), published.ports());
+            assert_eq!(cavity_identity(&before_wall), cavity_identity(&published));
+            assert_ne!(cavity_identity(&plain), cavity_identity(&published));
+            assert_eq!(published.class(), Class::Smooth);
+            let inputs = if insulated { vec![0.02] } else { vec![0.02, 15.0] };
+            let physical = inputs.len();
+            let names: Vec<_> = published.ports()[physical..].iter()
+                .map(|port| port.id().as_str()).collect();
+            assert_eq!(names, ["pressure", "temperature", "mass", "volume"]);
+            let case = Case { state: &old, stale: &old, dt_s: 1.0e-3, inputs: &inputs };
+            check_component(&published, &case, cx).unwrap();
+            check_port_tangent(&published, &case, 2.0e-5, 1.0e-5, cx).unwrap();
+
+            let (mut expected, mut next) = (old.clone(), old.clone());
+            let mut original_outputs = vec![f64::NAN; physical];
+            let mut outputs = vec![f64::NAN; physical + 4];
+            let receipt = plain.propose(
+                &old, case.dt_s, &inputs, &mut expected, &mut original_outputs, cx,
+            ).unwrap();
+            assert_eq!(published.propose(
+                &old, case.dt_s, &inputs, &mut next, &mut outputs, cx,
+            ).unwrap(), receipt);
+            assert_eq!(next, expected);
+            assert_eq!(outputs[..physical].iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                original_outputs.iter().map(|value| value.to_bits()).collect::<Vec<_>>());
+            let observed = [old.state().state().pressure, old.state().state().temperature,
+                old.mass_kg(), old.volume_m3()];
+            assert_eq!(outputs[physical..].iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                observed.map(f64::to_bits));
+            assert_ne!(observed[0], next.state().state().pressure);
+            assert_ne!(observed[1], next.state().state().temperature);
+            assert_ne!(observed[3], next.volume_m3());
+            assert_eq!(encoded(&plain, &next), encoded(&published, &next));
+            let saved = encoded(&published, &next).unwrap();
+            assert_eq!(published.decode_state(&saved), Some(next));
+
+            let direction = vec![0.5; physical];
+            let mut jvp = vec![7.0; physical + 4];
+            let mut original_jvp = vec![7.0; physical];
+            published.jvp(&old, case.dt_s, &inputs, &direction, &mut jvp, cx).unwrap();
+            plain.jvp(&old, case.dt_s, &inputs, &direction, &mut original_jvp, cx).unwrap();
+            assert_eq!(&jvp[..physical], original_jvp.as_slice());
+            assert!(jvp[physical..].iter().all(|value| *value == 0.0));
+            let mut weights = vec![0.0; physical + 4];
+            weights[physical..].copy_from_slice(&[3.0, -7.0, 11.0, 13.0]);
+            let mut back = vec![7.0; physical];
+            published.vjp(&old, case.dt_s, &inputs, &weights, &mut back, cx).unwrap();
+            assert!(back.iter().all(|value| *value == 0.0));
+            weights[physical] = f64::NAN;
+            back.fill(7.0);
+            assert!(published.vjp(&old, case.dt_s, &inputs, &weights, &mut back, cx).is_err());
+            assert!(back.iter().all(|value| *value == 7.0));
+        }
+    });
+}
+
+#[test]
+fn publishing_streaming_cavities_preserves_source_catalog_mixing_and_inventory_codec() {
+    let reference = mixture(0.6, 1.5e5);
+    let old = mixture(0.0, 1.0e5);
+    let plain = streaming(reference.clone());
+    let published = plain.clone().publishing().publishing();
+    let before_stream = GasCavity::new(reference.clone(), controls()).unwrap().publishing()
+        .streaming(1.0e-15).unwrap().streaming(1.0e-15).unwrap();
+    assert_eq!(published.ports(), before_stream.ports());
+    assert_eq!(published.ports()[2], plain.ports()[2]);
+    assert_eq!(cavity_identity(&published), cavity_identity(&before_stream));
+    assert_ne!(cavity_identity(&published), cavity_identity(&plain));
+    let names: Vec<_> = published.ports().iter().map(|port| port.id().as_str()).collect();
+    assert_eq!(names, ["p", "heat", "stream", "pressure", "temperature", "mass", "volume"]);
+    // The reference catalog includes a currently absent species. Observations
+    // must use the accepted mixture, not the reference or the incoming candidate.
+    let rate = 2.0e-4;
+    let inputs = [2.0e-4, 15.0, rate, rate * reference.state().specific_enthalpy_j_kg(), rate, 0.0];
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let case = Case { state: &old, stale: &reference, dt_s: 1.0e-3, inputs: &inputs };
+        check_component(&published, &case, cx).unwrap();
+        let (mut expected, mut next) = (reference.clone(), reference.clone());
+        let (mut original, mut outputs) = ([f64::NAN; 6], [f64::NAN; 10]);
+        let receipt = plain.propose(&old, case.dt_s, &inputs, &mut expected, &mut original, cx).unwrap();
+        assert_eq!(published.propose(&old, case.dt_s, &inputs, &mut next, &mut outputs, cx).unwrap(), receipt);
+        assert_eq!(next, expected);
+        assert_eq!(outputs[..6].iter().map(|value| value.to_bits()).collect::<Vec<_>>(), original.map(f64::to_bits));
+        let observed = [old.state().state().pressure, old.state().state().temperature,
+            old.mass_kg(), old.volume_m3()];
+        assert_eq!(outputs[6..].iter().map(|value| value.to_bits()).collect::<Vec<_>>(), observed.map(f64::to_bits));
+        assert_ne!(observed[2], next.mass_kg());
+        assert_ne!(observed[3], next.volume_m3());
+        assert_eq!(published.stored_carried_quantity(&old, 0).unwrap(), Some(0.0));
+        close(published.stored_carried_quantity(&next, 0).unwrap().unwrap(), case.dt_s * rate, 1.0e-20);
+        assert_eq!(encoded(&plain, &next), encoded(&published, &next));
+        let saved = encoded(&published, &next).unwrap();
+        assert_eq!(published.decode_state(&saved), Some(next));
+        assert!(matches!(published.jvp(&old, case.dt_s, &inputs, &[0.0; 6], &mut outputs, cx),
+            Err(GasEnergyError::Invalid(why)) if why.contains("no port tangent")));
+        assert!(matches!(published.vjp(&old, case.dt_s, &inputs, &[0.0; 10], &mut original, cx),
+            Err(GasEnergyError::Invalid(why)) if why.contains("no port tangent")));
+    });
+}
+
+#[test]
+fn published_gas_signals_are_untouched_by_refusal_shortening_or_cancellation() {
+    let old = mixture(0.6, 1.5e5);
+    let stale = mixture(0.3, 1.0e5);
+    let foreign = parcel(0.0, 0.0);
+    for mode in 0..3 {
+        let cavity = GasCavity::new(old.clone(), controls()).unwrap().publishing();
+        let cavity = match mode {
+            0 => cavity,
+            1 => cavity.insulated().unwrap(),
+            _ => cavity.streaming(1.0e-15).unwrap(),
+        };
+        let mut inputs = vec![0.0; match mode { 0 => 2, 1 => 1, _ => 6 }];
+        let mut outputs = vec![7.0; inputs.len() + 4];
+        let mut next = stale.clone();
+        with_cx(&CancelGate::new_clock_free(), |cx| {
+            let last = outputs.len() - 1;
+            assert!(cavity.propose(&old, 1.0e-3, &inputs, &mut next, &mut outputs[..last], cx).is_err());
+            // A physical source refusal after shape admission still publishes nothing.
+            inputs[0] = 2.0;
+            assert!(cavity.propose(&old, 1.0e-3, &inputs, &mut next, &mut outputs, cx).is_err());
+            inputs[0] = 0.0;
+            assert!(cavity.propose(&foreign, 1.0e-3, &inputs, &mut next, &mut outputs, cx).is_err());
+            if mode == 2 {
+                // An overdraw is shortened before any observation can escape.
+                inputs[2] = -10.0;
+                inputs[3] = -10.0 * old.state().specific_enthalpy_j_kg();
+                inputs[5] = -10.0;
+                assert!(matches!(cavity.propose(&old, 1.0e-3, &inputs, &mut next, &mut outputs, cx).unwrap(),
+                    Proposal::Shorten { .. }));
+            }
+            assert_eq!(next, stale);
+            assert!(outputs.iter().all(|value| *value == 7.0));
+            inputs.fill(0.0);
+            cx.cancel_gate().request();
+            assert!(matches!(cavity.propose(&old, 1.0e-3, &inputs, &mut next, &mut outputs, cx),
+                Err(GasEnergyError::Cancelled)));
+            assert_eq!(next, stale);
+            assert!(outputs.iter().all(|value| *value == 7.0));
+        });
+    }
+}
+
 /// Claims, declared before the first run: a parcel's identity words are
 /// equal for a parcel built again, and different for another NASA-9
 /// coefficient, formation datum, transport card, selection policy and water

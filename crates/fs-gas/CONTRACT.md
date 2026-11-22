@@ -10102,7 +10102,29 @@ from the reference, cancelling formation datums before arithmetic and refusing
 a different inventory, source model or auxiliary context. Default library
 features are unchanged.
 
-Both ports receive flow. Pressure port `p` receives compression volume rate
+`GasCavity::publishing()` adds scalar signal outputs `pressure` [Pa],
+`temperature` [K], `mass` [kg] and `volume` [m3], after all physical ports.
+These are the original parcel's accepted values at the start of the proposed
+step. They are neither candidate endpoints nor the work-conjugate means on
+the physical ports, and a rejected or shortened proposal publishes none of
+them. They carry no energy and add no state or separate thermodynamic law.
+Feedback based on them is held over the step and is first order; callers must
+resolve the assembled dynamics. No sensor calibration, lag, noise or control
+stability is inferred.
+
+Publication is idempotent and commutes with `insulated()` and `streaming()`.
+The physical stream remains after `p` and `heat`, with its complete original
+source catalog. Closed and insulated analytic JVPs append zero rows, since
+port derivatives keep the accepted state fixed; their VJPs ignore finite
+observation weights. Streaming cavities retain their no-tangent refusal.
+An insulated cavity with published signals is `Smooth`, because its full map
+has several outputs. The native state codec and physical proposals remain
+unchanged; publication appends a version tag to component identity, and the
+kernel also binds the changed port layout. The focused publication tests in
+`tests/component.rs` cover these laws, native conformance, source-preserving
+mixing, unchanged receipts/codecs and refusal/cancellation atomicity.
+
+Both default physical ports receive flow. Pressure port `p` receives compression volume rate
 [m3/s], positive into the cavity, so `V1 = V0 - dt*f`; it returns absolute
 work pressure [Pa]. Heat port `heat` receives heat rate [W] into the gas and
 returns the entropy-conjugate mean temperature [K]. The original
@@ -10139,9 +10161,9 @@ time refinement and combined energy closure. They were written without being
 compiled; they first compiled and ran on 2026-11-11 (233aa70285) and pass.
 
 `GasCavity::insulated()` is the same cavity behind an insulating wall: its
-one port is `p`, and a step is the two-port cavity's with a heat rate of
+one physical port is `p`, and a step is the two-port cavity's with a heat rate of
 exactly zero. Its one relation, work pressure against compression flow, is
-scalar and rising, so its class is `Monotone1d`, with the 1 by 1 tangent
+scalar and rising, so without published observations its class is `Monotone1d`, with the 1 by 1 tangent
 taken from the two-port cavity's analytic one. The two-port cavity stays
 `Smooth`: with a heat partner in a loop its map has two inputs, and a scalar
 class would be a false claim there. An insulated cavity takes no stream
@@ -10368,7 +10390,7 @@ refused, and only if the cavity can measure its energy from the reference.
 The cavity's identity is a kind word, the
 reference parcel whole (fs-material's words: the gas model, the point, the
 mass, the volume), the four limits of its solve and whether it is insulated;
-`ports` follows from the last and from `stream`. Because the reference is
+`ports` follows from the last, `stream` and publication. Because the reference is
 bound whole, a cavity built on another initial volume or temperature refuses
 a snapshot of this one: the stored energy is measured from the reference.
 

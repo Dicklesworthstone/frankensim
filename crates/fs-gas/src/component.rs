@@ -24,6 +24,10 @@
 //! the heat and wall work on what the cavity then holds. The stream side is
 //! therefore explicit and first order in the step.
 //!
+//! [`GasCavity::publishing`] adds scalar signals for the pressure, temperature,
+//! mass and volume at the accepted start of a step. They carry no energy and
+//! introduce no new gas state; feedback through them is held over the step.
+//!
 //! This component has no reactions, nonideal equation of state or internal
 //! wave field, and without `streaming` no open streams. It does not
 //! know a connected piston's mass or area and therefore cannot enforce the
@@ -81,6 +85,8 @@ pub struct GasCavity {
     stream: Option<StreamPlan>,
     /// Set by [`Self::insulated`]: there is no heat port, and no heat.
     insulated: bool,
+    /// Set by [`Self::publishing`]: accepted-state observations follow the physical ports.
+    published: bool,
 }
 
 /// What a streaming cavity needs besides its parcel: the species of its
@@ -214,16 +220,41 @@ impl GasCavity {
             ],
             stream: None,
             insulated: false,
+            published: false,
         })
     }
 
-    /// The same cavity behind an insulating wall: its one port is `p`, and
+    /// Publish accepted pressure [Pa], temperature [K], mass [kg] and volume
+    /// [m3] as scalar signals `pressure`, `temperature`, `mass` and `volume`.
+    ///
+    /// These observations are held at the start of each proposed step, not
+    /// the endpoint or the work-conjugate mean returned by a physical port.
+    /// They carry no energy. Their input derivatives are zero at fixed accepted
+    /// state; control accuracy and stability remain properties of the assembled
+    /// system and its step size. Publishing is idempotent and may precede or
+    /// follow [`Self::insulated`] or [`Self::streaming`]. Physical ports always
+    /// precede these signals, and publishing changes no native state codec.
+    #[must_use]
+    pub fn publishing(mut self) -> Self {
+        if !self.published {
+            for name in ["pressure", "temperature", "mass", "volume"] {
+                self.ports.push(PortSpec::signal_out(
+                    StableId::new(name).expect("static gas observation name"),
+                    NonZeroUsize::MIN,
+                ));
+            }
+            self.published = true;
+        }
+        self
+    }
+
+    /// The same cavity behind an insulating wall: its one physical port is `p`, and
     /// a step is the two-port cavity's with a heat rate of exactly zero.
     ///
     /// The work pressure it returns rises with the compression flow it
-    /// receives, so its class is [`Class::Monotone1d`]. The two-port
-    /// cavity's stays [`Class::Smooth`]: with a heat partner in a loop its
-    /// map has two inputs, and no scalar class describes it.
+    /// receives, so without published signals its class is [`Class::Monotone1d`].
+    /// With a heat port or published observations the map is vector-valued
+    /// and stays [`Class::Smooth`].
     ///
     /// Two things follow from the class. A kernel that differences only
     /// smooth components (fs-system today) needs this cavity's tangent: in
@@ -239,8 +270,10 @@ impl GasCavity {
         if self.stream.is_some() {
             return Err(invalid("a streaming gas cavity keeps its heat port"));
         }
-        self.ports.truncate(1);
-        self.insulated = true;
+        if !self.insulated {
+            self.ports.remove(1);
+            self.insulated = true;
+        }
         Ok(self)
     }
 
@@ -291,7 +324,8 @@ impl GasCavity {
             .map(|species| species.species().clone())
             .collect();
         if self.stream.is_none() {
-            self.ports.push(
+            self.ports.insert(
+                2,
                 PortSpec::identified_stream(
                     StableId::new("stream").expect("static port name"),
                     PortRole::FlowIn,
@@ -317,6 +351,28 @@ impl GasCavity {
     #[must_use]
     pub const fn controls(&self) -> GasEnergySolve {
         self.controls
+    }
+
+    fn output_width(&self) -> usize {
+        let physical = self.stream.as_ref().map_or_else(
+            || if self.insulated { 1 } else { 2 },
+            |stream| 2 + STREAM_CARRIED + stream.species.len(),
+        );
+        physical + if self.published { 4 } else { 0 }
+    }
+
+    /// Called only after admission and the final cancellation poll. Every
+    /// observation is a native accepted-state value, independent of this trial.
+    fn publish(&self, old: &ClosedGasParcel, outputs: &mut [f64]) {
+        if self.published {
+            let start = outputs.len() - 4;
+            outputs[start..].copy_from_slice(&[
+                old.state().state().pressure,
+                old.state().state().temperature,
+                old.mass_kg(),
+                old.volume_m3(),
+            ]);
+        }
     }
 
     /// Depletion may remove species; it may not replace a retained source.
@@ -449,7 +505,7 @@ impl GasCavity {
         poll(cx)?;
         let width = 2 + STREAM_CARRIED + stream.species.len();
         if inputs.len() != width
-            || outputs.len() != width
+            || outputs.len() != self.output_width()
             || inputs.iter().any(|value| !value.is_finite())
         {
             return Err(invalid(
@@ -540,7 +596,8 @@ impl GasCavity {
         outputs[1] = theta;
         outputs[2 + STREAM_PRESSURE] = pressure_old;
         outputs[2 + STREAM_SPECIFIC_ENTHALPY] = enthalpy_old;
-        outputs[2 + STREAM_CARRIED..].copy_from_slice(&fractions);
+        outputs[2 + STREAM_CARRIED..width].copy_from_slice(&fractions);
+        self.publish(old, outputs);
         Ok(Proposal::Step(receipt))
     }
 
@@ -611,12 +668,12 @@ impl Component for GasCavity {
     }
 
     fn class(&self) -> Class {
-        if self.insulated {
+        if self.insulated && !self.published {
             // One input, and the work pressure rises with the compression.
             return Class::Monotone1d;
         }
-        // There are two coupled nonlinear inputs; the scalar monotone
-        // pressure solve does not classify the complete heat/volume map.
+        // A heat port or published observations make the map vector-valued;
+        // the scalar monotone pressure solve does not classify that map.
         Class::Smooth
     }
 
@@ -677,12 +734,8 @@ impl Component for GasCavity {
         if let Some(stream) = &self.stream {
             return self.propose_streaming(stream, old, dt_s, inputs, new, outputs, cx);
         }
-        if outputs.len() != self.ports.len() {
-            return Err(invalid(if self.insulated {
-                "an insulated gas cavity requires one scalar port output"
-            } else {
-                "gas cavity requires two scalar port outputs"
-            }));
+        if outputs.len() != self.output_width() {
+            return Err(invalid("gas cavity output extent must match its physical and signal ports"));
         }
         let (trial, stored_old) = self.trial(old, dt_s, inputs, cx)?;
         let step = trial.step();
@@ -730,9 +783,10 @@ impl Component for GasCavity {
         outputs[0] = pressure;
         // An insulated cavity has no heat port to return its mean
         // temperature on.
-        if let Some(mean) = outputs.get_mut(1) {
-            *mean = theta;
+        if !self.insulated {
+            outputs[1] = theta;
         }
+        self.publish(old, outputs);
         Ok(Proposal::Step(receipt))
     }
 
@@ -790,16 +844,17 @@ impl Component for GasCavity {
         (rebuilt == words && held.is_ok()).then_some(state)
     }
 
-    /// The reference, solve controls and port mode bind durable state. Closed
-    /// identities remain unchanged; open identities also bind mass tolerance.
+    /// The reference, solve controls and port mode bind durable state.
+    /// Unpublished identities remain unchanged; published ones add a version tag.
     fn identity_words(&self, words: &mut Vec<u64>) {
         let Self {
             reference,
             controls,
-            // Derived from `insulated` and `stream`.
+            // Derived from `insulated`, `stream` and `published`.
             ports: _,
             stream,
             insulated,
+            published,
         } = self;
         let GasEnergySolve {
             minimum_temperature_k,
@@ -819,6 +874,9 @@ impl Component for GasCavity {
         if let Some(stream) = stream {
             words.push(stream.mass_tolerance_kg.to_bits());
         }
+        if *published {
+            words.push(u64::from_le_bytes(*b"gaspub01"));
+        }
     }
 }
 
@@ -835,13 +893,15 @@ impl PortTangent for GasCavity {
         if self.stream.is_some() {
             return Err(invalid(NO_TANGENT));
         }
+        if d_outputs.len() != self.output_width() {
+            return Err(invalid("gas cavity tangent output extent must match its ports"));
+        }
         if self.insulated {
-            return self.insulated_slope(old, dt_s, inputs, d_inputs, d_outputs, cx);
+            self.insulated_slope(old, dt_s, inputs, d_inputs, &mut d_outputs[..1], cx)?;
+            d_outputs[1..].fill(0.0);
+            return Ok(());
         }
         let direction = pair(d_inputs)?;
-        if d_outputs.len() != 2 {
-            return Err(invalid("gas cavity requires two scalar tangent outputs"));
-        }
         let j = self.jacobian(old, dt_s, inputs, cx)?;
         let result = [
             j[0][0] * direction[0] + j[0][1] * direction[1],
@@ -849,7 +909,8 @@ impl PortTangent for GasCavity {
         ];
         pair(&result)?;
         poll(cx)?;
-        d_outputs.copy_from_slice(&result);
+        d_outputs[..2].copy_from_slice(&result);
+        d_outputs[2..].fill(0.0);
         Ok(())
     }
 
@@ -865,11 +926,16 @@ impl PortTangent for GasCavity {
         if self.stream.is_some() {
             return Err(invalid(NO_TANGENT));
         }
+        if bar_outputs.len() != self.output_width()
+            || bar_outputs.iter().any(|value| !value.is_finite())
+        {
+            return Err(invalid("gas cavity requires one finite tangent weight per output"));
+        }
         if self.insulated {
             // One by one: the transpose is the slope itself.
-            return self.insulated_slope(old, dt_s, inputs, bar_outputs, bar_inputs, cx);
+            return self.insulated_slope(old, dt_s, inputs, &bar_outputs[..1], bar_inputs, cx);
         }
-        let weights = pair(bar_outputs)?;
+        let weights = pair(&bar_outputs[..2])?;
         if bar_inputs.len() != 2 {
             return Err(invalid("gas cavity requires two scalar tangent inputs"));
         }
