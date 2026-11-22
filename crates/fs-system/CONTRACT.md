@@ -3403,28 +3403,35 @@ and a controlled actuator while stepping the physical system at most 10 ms.
 
 ## Executable general Dirac junctions
 
-`elements::DiracJunction::new(schema)` executes the admitted scalar
-`fs_ports::JunctionLaw::Dirac` relation as a stateless, exact-linear Component.
-Its ports retain the schema's identifiers and order, receive effort, and return
-`J * effort`. The schema endpoints denote attached owners: their outward flows
-enter the junction, and ordinary bonds negate those flows into the owners.
-No matrix inversion, storage, dissipation or integration rule is introduced;
+`elements::DiracJunction::new(schema)` executes an admitted scalar or
+Euclidean-vector `fs_ports::JunctionLaw::Dirac` relation as a stateless,
+exact-linear Component. Its ports retain the schema's identifiers and order,
+receive effort, and return `J * effort`. For a common vector width `d`, the
+relation is `J ⊗ I_d`: each coordinate is coupled independently across the
+ports. Runtime arrays are port-major, with a port's `d` coordinates contiguous.
+The schema endpoints denote attached owners: their outward flows enter the
+junction, and ordinary bonds negate those flows into the owners. No matrix
+inversion, storage, dissipation or integration rule is introduced;
 odd-dimensional, singular and zero skew matrices are valid.
 
-The existing `JunctionSchema` owns structural admission. The adapter refuses
-other junction laws and non-scalar endpoints. JVP applies `J`; VJP applies
-`J^T = -J`. Finite vector extents, positive steps and representable arithmetic
-are checked, and evaluation polls cancellation by row. The energy allowance
-uses the magnitudes of the individual work terms before cancellation.
+The existing `JunctionSchema` owns structural admission, including equal
+endpoint shape, basis, frame, orientation, clock and power pairing. The adapter
+refuses other junction laws, tensor and field endpoints, and an unrepresentable
+packed extent. JVP applies `J ⊗ I_d`; VJP applies `-J ⊗ I_d`. Finite vector
+extents, positive steps and representable arithmetic are checked, and
+evaluation polls cancellation. The energy allowance counts the magnitudes of
+individual work terms across every coordinate before cancellation. Scalar
+evaluation retains its original arithmetic order and problem identity; vector
+shape and coordinates are already bound by the retained schema.
 
-`tests/dirac_junction.rs` checks exact relations and tangent duality, and a
-three-capacitor network against an independent midpoint rotation, total charge,
-energy and the kernel ledger. It also covers malformed source laws, unsupported
+`tests/dirac_junction.rs` covers exact scalar and vector relations, power
+cancellation, tangent duality, and closed storage networks against independent
+midpoint-rotation oracles. It also covers malformed source laws, unsupported
 shapes, invalid calls and cancellation. The retained schema exposes the common
 coordinate/frame/clock declarations, but runtime `PortSpec` power ports do not
 enforce those labels: attached owners must already use the same coordinates.
-This scalar relation supplies no field metric, coordinate conversion, material
-law or hardware validity claim.
+This relation supplies no field metric, coordinate conversion, material law or
+hardware validity claim.
 
 ## Signal-modulated lossless transformer
 

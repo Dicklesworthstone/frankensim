@@ -11,15 +11,24 @@ use fs_ports::{JunctionLaw, JunctionSchema, PortValueShape};
 
 use super::roundoff;
 
-/// Why an admitted junction cannot run as a scalar Dirac component.
+/// Why an admitted junction cannot run as a scalar or vector Dirac component.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiracError {
     /// The supplied schema describes common effort or common flow instead.
     NotDirac,
-    /// This endpoint is not scalar; no field or coordinate map is inferred.
-    NonScalar {
+    /// A tensor or field needs an explicit coordinate or metric adapter.
+    UnsupportedShape {
         /// Zero-based endpoint in the retained schema order.
         port: usize,
+        /// The unsupported endpoint shape.
+        shape: PortValueShape,
+    },
+    /// The complete port-major input/output extent cannot fit in `usize`.
+    WidthOverflow {
+        /// Number of endpoints.
+        ports: usize,
+        /// Coordinates at each endpoint.
+        width: usize,
     },
     /// A port, step, vector extent or arithmetic result violates the contract.
     Contract(ContractViolation),
@@ -31,7 +40,14 @@ impl fmt::Display for DiracError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotDirac => write!(f, "the junction schema does not describe a Dirac law"),
-            Self::NonScalar { port } => write!(f, "Dirac endpoint {port} is not scalar"),
+            Self::UnsupportedShape { port, shape } => write!(
+                f,
+                "Dirac endpoint {port} has unsupported shape {shape:?}; expected scalar or vector"
+            ),
+            Self::WidthOverflow { ports, width } => write!(
+                f,
+                "Dirac junction with {ports} endpoints of width {width} overflows its layout"
+            ),
             Self::Contract(error) => write!(f, "{error}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -52,8 +68,10 @@ impl From<Cancelled> for DiracError {
     }
 }
 
-/// A stateless, lossless relation `flows = J * efforts` with any admitted
-/// number of scalar endpoints, including singular and zero skew matrices.
+/// A stateless, lossless relation with any admitted number of scalar or
+/// compatible Euclidean vector endpoints, including singular and zero skew
+/// matrices. Each vector coordinate obeys `flows = J * efforts`: the
+/// port-major operator is `J tensor I`, with no mixing between coordinates.
 ///
 /// Ports retain the schema's identifiers and order and receive effort.
 /// The schema endpoints describe the attached owners: a flow outward from
@@ -65,39 +83,59 @@ impl From<Cancelled> for DiracError {
 /// Its basis, frame and clock are retained, not converted. Ordinary runtime
 /// power ports do not carry those labels: the caller must attach owners in
 /// these same coordinates, using explicit power charts where needed. This
-/// scalar law does not implement a field metric or cross-domain chart.
+/// law does not flatten tensors or implement a field metric or cross-domain chart.
 #[derive(Debug, Clone)]
 pub struct DiracJunction {
     schema: JunctionSchema,
     ports: Vec<PortSpec>,
+    width: usize,
+    coordinates: usize,
 }
 
 impl DiracJunction {
-    /// Execute an already admitted scalar [`JunctionLaw::Dirac`].
+    /// Execute an already admitted scalar or vector [`JunctionLaw::Dirac`].
     ///
     /// Structural admission (finite exact-skew matrix, distinct identities
     /// and compatible endpoint coordinates) belongs to `JunctionSchema`.
+    /// Its endpoints have the same shape and pairing; vector endpoints use
+    /// the Euclidean dot product in their declared common coordinates.
     ///
     /// # Errors
-    /// Refuses another law or a non-scalar endpoint. No matrix is repaired,
-    /// symmetrized, inverted or independently re-admitted here.
+    /// Refuses another law, a tensor or field endpoint, or an overflowing
+    /// total extent. No matrix is repaired, symmetrized, inverted or
+    /// independently re-admitted here.
     pub fn new(schema: JunctionSchema) -> Result<Self, DiracError> {
         if !matches!(schema.law(), JunctionLaw::Dirac { .. }) {
             return Err(DiracError::NotDirac);
         }
+        // An admitted schema has at least two endpoints, with identical
+        // shapes. Check the complete extent before creating runtime ports.
+        let width = match schema.ports()[0].shape() {
+            PortValueShape::Scalar => NonZeroUsize::MIN,
+            PortValueShape::Vector(width) => width,
+            shape => return Err(DiracError::UnsupportedShape { port: 0, shape }),
+        };
+        let coordinates = schema.ports().len().checked_mul(width.get()).ok_or(
+            DiracError::WidthOverflow {
+                ports: schema.ports().len(),
+                width: width.get(),
+            },
+        )?;
         let mut ports = Vec::with_capacity(schema.ports().len());
-        for (index, port) in schema.ports().iter().enumerate() {
-            if port.shape() != PortValueShape::Scalar {
-                return Err(DiracError::NonScalar { port: index });
-            }
+        for port in schema.ports() {
             ports.push(PortSpec::power(
                 port.id().clone(),
                 port.kind(),
                 PortRole::EffortIn,
-                NonZeroUsize::MIN,
+                width,
             )?);
         }
-        Ok(Self { schema, ports })
+        Ok(Self {
+            schema,
+            ports,
+            width: width.get(),
+            coordinates,
+        })
     }
 
     /// The original admitted relation, endpoint identities and coordinates.
@@ -114,7 +152,7 @@ impl DiracJunction {
     }
 
     fn extent(&self, vector: &'static str, actual: usize) -> Result<(), DiracError> {
-        let expected = self.ports.len();
+        let expected = self.coordinates;
         if actual != expected {
             return Err(ContractViolation::VectorLength {
                 vector,
@@ -126,12 +164,12 @@ impl DiracJunction {
         Ok(())
     }
 
-    fn validate(&self, dt_s: f64, inputs: &[f64]) -> Result<(), DiracError> {
+    fn validate(&self, dt_s: f64, inputs: &[f64], cx: &Cx<'_>) -> Result<(), DiracError> {
         if !(dt_s.is_finite() && dt_s > 0.0) {
             return Err(ContractViolation::Step { dt_s }.into());
         }
         self.extent("Dirac inputs", inputs.len())?;
-        finite(inputs, "Dirac inputs")
+        finite(inputs, "Dirac inputs", cx)
     }
 
     fn apply(
@@ -143,21 +181,38 @@ impl DiracJunction {
     ) -> Result<(), DiracError> {
         self.extent("Dirac operand", inputs.len())?;
         self.extent("Dirac result", outputs.len())?;
-        finite(inputs, "Dirac operand")?;
-        for (row, output) in self.matrix().chunks_exact(self.ports.len()).zip(outputs) {
-            cx.checkpoint()?;
-            let value: f64 = row.iter().zip(inputs).map(|(j, effort)| j * effort).sum();
-            finite(&[value], "Dirac result")?;
-            // Exact skew admission gives J^T = -J, including singular J.
-            *output = if transpose { -value } else { value };
+        finite(inputs, "Dirac operand", cx)?;
+        for (row, output) in self
+            .matrix()
+            .chunks_exact(self.ports.len())
+            .zip(outputs.chunks_exact_mut(self.width))
+        {
+            for (coordinate, value_out) in output.iter_mut().enumerate() {
+                // One dot is bounded by the schema's endpoint ceiling,
+                // regardless of the vector width.
+                cx.checkpoint()?;
+                let value: f64 = row
+                    .iter()
+                    .zip(inputs.chunks_exact(self.width))
+                    .map(|(j, effort)| j * effort[coordinate])
+                    .sum();
+                finite(&[value], "Dirac result", cx)?;
+                // Exact skew admission gives J^T = -J, including singular J.
+                *value_out = if transpose { -value } else { value };
+            }
         }
         Ok(())
     }
 }
 
-fn finite(values: &[f64], quantity: &'static str) -> Result<(), DiracError> {
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err(ContractViolation::NonFinite { quantity }.into());
+fn finite(values: &[f64], quantity: &'static str, cx: &Cx<'_>) -> Result<(), DiracError> {
+    // Validate before writing output, while bounding cancellation latency
+    // even when a vector endpoint has many coordinates.
+    for chunk in values.chunks(1024) {
+        cx.checkpoint()?;
+        if chunk.iter().any(|value| !value.is_finite()) {
+            return Err(ContractViolation::NonFinite { quantity }.into());
+        }
     }
     Ok(())
 }
@@ -219,19 +274,23 @@ impl Component for DiracJunction {
         cx: &Cx<'_>,
     ) -> Result<Proposal, DiracError> {
         cx.checkpoint()?;
-        self.validate(dt_s, inputs)?;
+        self.validate(dt_s, inputs, cx)?;
         self.apply(inputs, outputs, false, cx)?;
         let mut scale_j = 0.0;
         for (i, row) in self.matrix().chunks_exact(self.ports.len()).enumerate() {
-            cx.checkpoint()?;
-            for (j, effort) in row.iter().zip(inputs) {
-                scale_j += (inputs[i] * (j * effort)).abs() * dt_s;
+            for coordinate in 0..self.width {
+                cx.checkpoint()?;
+                let own_effort = inputs[i * self.width + coordinate];
+                for (j, effort) in row.iter().zip(inputs.chunks_exact(self.width)) {
+                    scale_j += (own_effort * (j * effort[coordinate])).abs() * dt_s;
+                }
             }
         }
-        // Each dot has n products; power sums add n more terms. Bound
-        // rounding by term magnitudes, never by the cancelling net power.
-        let tolerance_j = roundoff((self.ports.len() as f64 + 2.0) * scale_j);
-        finite(&[tolerance_j], "Dirac energy allowance")?;
+        // Each dot has n products; power sums span all n * width
+        // coordinates. Bound rounding by term magnitudes, never by the
+        // cancelling net power. Width one retains the scalar arithmetic.
+        let tolerance_j = roundoff((self.coordinates as f64 + 2.0) * scale_j);
+        finite(&[tolerance_j], "Dirac energy allowance", cx)?;
         cx.checkpoint()?;
         Ok(Proposal::Step(Receipt::lossless(0.0, tolerance_j)))
     }
@@ -248,7 +307,7 @@ impl PortTangent for DiracJunction {
         cx: &Cx<'_>,
     ) -> Result<(), DiracError> {
         cx.checkpoint()?;
-        self.validate(dt_s, inputs)?;
+        self.validate(dt_s, inputs, cx)?;
         self.apply(d_inputs, d_outputs, false, cx)
     }
 
@@ -262,7 +321,7 @@ impl PortTangent for DiracJunction {
         cx: &Cx<'_>,
     ) -> Result<(), DiracError> {
         cx.checkpoint()?;
-        self.validate(dt_s, inputs)?;
+        self.validate(dt_s, inputs, cx)?;
         self.apply(bar_outputs, bar_inputs, true, cx)
     }
 }
