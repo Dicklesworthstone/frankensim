@@ -2,6 +2,9 @@
 //! analytic thermal paths and a piston assembled without pairing code.
 #![cfg(feature = "component")]
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -15,7 +18,7 @@ use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_D
 use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferSolve;
 use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGasModel};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortTangent, Proposal};
+use fs_ports::component::{Class, Component, ContractViolation, PortTangent, Proposal};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{DynViscosity, MolarMass, Pressure, QuantitySpec, Temperature};
 use fs_system::elements::{Force, Mass, Motion, Restriction, SourceAccount, Waveform};
@@ -974,6 +977,31 @@ fn exchange(
             worst[5] = worst[5].max(gap(returned(&system, "p"), work_pa) / work_pa);
         }
     });
+    // Both native cavities now expose independent inventories to the same
+    // audits as the transport. Coverage must include every accepted step;
+    // an unavailable inventory must not look like a closed balance.
+    let ledger = system.ledger();
+    close(ledger.mass_residual_kg().unwrap(), 0.0, 1.0e-16);
+    for coordinate in 0..2 {
+        close(ledger.carried_residual(coordinate).unwrap(), 0.0, 1.0e-16);
+    }
+    for account in &ledger.nodes {
+        assert_eq!(account.mass.as_ref().unwrap().audited_steps, u64::from(steps));
+        for carried in &account.carried {
+            assert_eq!(carried.as_ref().unwrap().audited_steps, u64::from(steps));
+        }
+    }
+    let final_mass: f64 = nodes.iter()
+        .map(|node| system.state::<ClosedGasParcel>(*node).unwrap().mass_kg()).sum();
+    close(final_mass, start.iter().map(ClosedGasParcel::mass_kg).sum(), 1.0e-16);
+    for species in start[0].model().thermodynamics().components() {
+        let initial: f64 = start.iter()
+            .map(|gas| gas.species_mass_kg(species.species()).unwrap()).sum();
+        let final_inventory: f64 = nodes.iter()
+            .map(|node| system.state::<ClosedGasParcel>(*node).unwrap()
+                .species_mass_kg(species.species()).unwrap()).sum();
+        close(final_inventory, initial, 1.0e-16);
+    }
     Exchange {
         worst,
         steps: directions,
@@ -1046,6 +1074,89 @@ fn a_heated_and_compressed_cavity_turns_the_flow_round_and_keeps_the_owners_orde
     // The ledger closes on the heat supplied and the wall's work. Measured
     // 9.1e-13 J of the 32 J of heat.
     close(run.ledger_j, 0.0, 1.0e-10);
+}
+
+#[test]
+fn stream_mass_mismatch_is_refused_before_a_system_publishes() {
+    let gas = mixture(0.6, 1.5e5);
+    let cavity = streaming(gas.clone());
+    let rate = 1.0e-4;
+    let fraction = heavy_kg(&gas) / gas.mass_kg();
+    let enthalpy = gas.state().specific_enthalpy_j_kg();
+    let valid = [rate, rate * enthalpy, rate * fraction, rate * (1.0 - fraction)];
+    let prescribed = Rc::new(Cell::new(valid));
+    let mut builder = SystemBuilder::new();
+    let node = builder.add("cavity", cavity, gas).unwrap();
+    for name in ["p", "heat"] {
+        builder.boundary(
+            builder.port(node, name).unwrap(), Box::new(|_, _, values| values.fill(0.0)),
+        ).unwrap();
+    }
+    let stream = builder.port(node, "stream").unwrap();
+    let boundary = Rc::clone(&prescribed);
+    builder.boundary(stream, Box::new(move |_, _, values| {
+        values.copy_from_slice(&boundary.get());
+    })).unwrap();
+    let mut system = builder.seal().unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        system.step(1.0e-3, cx).unwrap();
+        let before = system.state::<ClosedGasParcel>(node).unwrap().clone();
+        let ledger = system.ledger().clone();
+        let time = system.time_s().to_bits();
+        let steps = system.steps();
+        let input = system.last_input(stream).to_vec();
+        let output = system.last_output(stream).to_vec();
+        // A phantom total-mass inflow and real species inflow with no total
+        // mass on the wire both used to pass the energy-only cavity audit.
+        for invalid in [
+            [rate, 0.0, 0.0, 0.0],
+            [0.0, valid[1], valid[2], valid[3]],
+        ] {
+            prescribed.set(invalid);
+            let result = system.step(1.0e-3, cx);
+            assert!(matches!(
+                result,
+                Err(SystemError::Contract {
+                    ref node, violation: ContractViolation::MassBalance { .. },
+                }) if node == "cavity"
+            ), "{result:?}");
+            assert_eq!(system.state::<ClosedGasParcel>(node).unwrap(), &before);
+            assert_eq!(system.ledger(), &ledger);
+            assert_eq!(system.time_s().to_bits(), time);
+            assert_eq!(system.steps(), steps);
+            assert_eq!(system.last_input(stream), input);
+            assert_eq!(system.last_output(stream), output);
+        }
+        prescribed.set(valid);
+        system.step(1.0e-3, cx).unwrap();
+        assert_eq!(system.steps(), steps + 1);
+        assert_eq!(system.ledger().nodes[node.index()].mass.as_ref().unwrap().audited_steps, steps + 1);
+    });
+}
+
+#[test]
+fn cavity_inventory_measurements_preserve_source_admission_and_catalog_order() {
+    let gas = mixture(0.6, 1.5e5);
+    let closed = GasCavity::new(gas.clone(), controls()).unwrap();
+    assert_eq!(closed.stored_mass_kg(&gas).unwrap(), Some(gas.mass_kg()));
+    assert_eq!(closed.stored_carried_quantity(&gas, 0).unwrap(), None);
+    let cavity = closed.clone().streaming(1.0e-15).unwrap();
+    // The active mixture may store the same original models in a different
+    // order. Stream coordinates always name the reference catalog's order.
+    let reordered = catalog_parcel(
+        gas.model().thermodynamics().components().iter().rev().cloned().collect(),
+        vec![0.4, 0.6],
+        1.5e5,
+    );
+    for (index, species) in gas.model().thermodynamics().components().iter().enumerate() {
+        assert_eq!(cavity.stored_carried_quantity(&reordered, index).unwrap(),
+            Some(reordered.species_mass_kg(species.species()).unwrap()));
+    }
+    assert_eq!(cavity.stored_carried_quantity(&gas, 2).unwrap(), None);
+    let foreign = parcel(0.0, 0.0);
+    assert!(closed.stored_mass_kg(&foreign).is_err());
+    assert!(cavity.stored_mass_kg(&foreign).is_err());
+    assert!(cavity.stored_carried_quantity(&foreign, 0).is_err());
 }
 
 #[test]
@@ -1142,6 +1253,9 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
         // catalog. Pure light gas, with heavy gas arriving.
         let light = mixture(0.0, 1.0e5);
         assert_eq!(light.model().thermodynamics().components().len(), 1);
+        assert_eq!(cavity.stored_mass_kg(&light).unwrap(), Some(light.mass_kg()));
+        assert_eq!(cavity.stored_carried_quantity(&light, 0).unwrap(), Some(0.0));
+        assert_eq!(cavity.stored_carried_quantity(&light, 1).unwrap(), Some(light.mass_kg()));
         let arriving = [0.0, 0.0, 2.0e-4, 2.0e-4 * enthalpy, 2.0e-4, 0.0];
         let case = Case { state: &light, stale: &stale, dt_s: 1.0e-3, inputs: &arriving };
         let Ok(Observed::Stepped { outputs: held, .. }) = check_component(&cavity, &case, cx) else {
@@ -1153,6 +1267,28 @@ fn a_streaming_cavity_conforms_with_gas_entering_and_leaving_and_refuses_what_it
         assert_eq!(mixed.model().thermodynamics().components().len(), 2);
         close(heavy_kg(&mixed), 2.0e-7, 1.0e-20);
         close(mixed.mass_kg(), light.mass_kg() + 2.0e-7, 1.0e-18);
+
+        // Remove the newly introduced species completely, with the native
+        // source's partial enthalpy, and then introduce it again. Its slot
+        // remains measured zero while absent, never unavailable or shifted.
+        let heavy = SpeciesId::new("heavy").unwrap();
+        let held_kg = mixed.species_mass_kg(&heavy).unwrap();
+        let partial_h = mixed.model().species_specific_enthalpy_j_kg(
+            &heavy, mixed.state().state().temperature,
+        ).unwrap();
+        let draining = [0.0, 0.0, -held_kg, -held_kg * partial_h, -held_kg, 0.0];
+        let case = Case { state: &mixed, stale: &stale, dt_s: 1.0, inputs: &draining };
+        assert!(matches!(check_component(&cavity, &case, cx), Ok(Observed::Stepped { .. })));
+        let mut depleted = stale.clone();
+        cavity.propose(&mixed, 1.0, &draining, &mut depleted, &mut six, cx).unwrap();
+        assert_eq!(depleted.model().thermodynamics().components().len(), 1);
+        assert_eq!(cavity.stored_carried_quantity(&depleted, 0).unwrap(), Some(0.0));
+        assert_eq!(cavity.stored_carried_quantity(&depleted, 1).unwrap(), Some(depleted.mass_kg()));
+        let case = Case { state: &depleted, stale: &stale, dt_s: 1.0e-3, inputs: &arriving };
+        assert!(matches!(check_component(&cavity, &case, cx), Ok(Observed::Stepped { .. })));
+        let mut restored = stale.clone();
+        cavity.propose(&depleted, 1.0e-3, &arriving, &mut restored, &mut six, cx).unwrap();
+        close(cavity.stored_carried_quantity(&restored, 0).unwrap().unwrap(), 2.0e-7, 1.0e-20);
 
         // Cancellation, last: the gate stays requested.
         cx.cancel_gate().request();

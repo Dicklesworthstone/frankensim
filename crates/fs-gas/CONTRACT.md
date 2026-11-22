@@ -10229,8 +10229,8 @@ returns the pressure, specific enthalpy and species mass fractions the cavity
 had when the step began. One step is the parcel's
 `exchange_species_boundary` at the old volume with what crossed (the species
 rates change the inventory; the whole enthalpy is supplied on one row, which
-the owner sums; the mass rate is not read), then the same discrete-gradient
-heat and volume step on what the cavity then holds. So the stream side is
+the owner sums; the total mass rate is audited after the solve), then the same
+discrete-gradient heat and volume step on what the cavity then holds. So the stream side is
 explicit and first order in the step, while heat and wall work keep their
 rule. The reference's model is the catalog: a species the cavity runs out of
 may come back, and a cavity holding none of a species returns a zero fraction
@@ -10244,8 +10244,25 @@ controls' per-kilogram tolerance times the larger of the masses before and
 after. With nothing crossing, the step is the closed cavity's to the bit.
 
 The total mass rate is not compared with the sum of the species rates inside
-the component: a system differences this cavity one input at a time, which
-such a guard would refuse. The stream does declare an explicit `StreamBasis`.
+a proposal: a system differences this cavity one input at a time, which
+such a guard would refuse. Instead, `Component::stored_mass_kg` exposes the
+native parcel's total mass and `stored_carried_quantity` measures each
+catalog species through `ClosedGasParcel::species_mass_kg`. Both retain the
+same source admission as the component's energy measurement. Species keep
+their reference-catalog coordinates when the active mixture is reordered or
+depleted; an absent species is measured zero, not unavailable. Closed
+cavities expose their unchanged total mass and no carried coordinates.
+
+The shared fs-ports audits and System driver compare those independently
+measured endpoint inventories with the total and species transfers on the
+wire. An inconsistent mass rate is a named `MassBalance` refusal before
+any state, clock, accepted port value or ledger entry is published. The
+native exchange's mass tolerance does not relax this audit: the kernel uses
+its own roundoff allowance for each measured inventory. Direct users of
+`propose` must likewise perform the Component contract audits before
+acceptance. No second mass/species equation or local audit is introduced.
+
+The stream declares an explicit `StreamBasis`.
 It binds the ordered species masses, molar masses, phase/EOS/reference
 conventions and original NASA-9 card identities, including every retained
 region. The enthalpy reference binds the raw/reconciled policy and exact
@@ -10267,6 +10284,13 @@ equal-width species/source/molar-mass/reference mismatches, and identical
 source cards with different caloric reconciliation. The existing finite
 exchange and flow-reversal comparisons use the identified restriction and
 retain their original physical reference and numerical tolerances.
+
+The inventory regressions additionally exercise phantom total-mass inflow,
+species inflow with zero declared total mass, atomic System refusal after an
+accepted step, source substitution refusal, active-catalog reordering,
+complete species depletion and re-entry. The existing finite-exchange and
+flow-reversal cases require a measured total and species account on every
+accepted step and compare final native inventories with the starting totals.
 
 A streaming cavity's stored energy is its internal energy in the species'
 datum (mass times specific internal energy), not the increment from the

@@ -272,10 +272,14 @@ impl GasCavity {
     /// species' own datum and each species' mass rate [kg/s], and returns
     /// the pressure [Pa], specific enthalpy [J/kg] and species mass
     /// fractions the cavity had when the step began. The species rates are
-    /// what changes the inventory; the mass rate is not read, and nothing
-    /// checks that it is their sum. A species increment too small to change
-    /// what is held is dropped. A step that would draw more of a species
-    /// than is held, or all of the gas, is shortened.
+    /// what changes the inventory. The component exposes the native total
+    /// and species masses for the kernel's independent endpoint audits, so
+    /// inconsistent total/species transport cannot publish an accepted step.
+    /// Proposals themselves allow independent port probes for the interface
+    /// Jacobian. A species increment too small to change what is held is
+    /// dropped within the shared audit's rounding allowance. A step that
+    /// would draw more of a species than is held, or all of the gas, is
+    /// shortened.
     ///
     /// The stream declares its ordered species, source cards, molar masses
     /// and caloric conventions. Connections refuse a different catalog or
@@ -661,6 +665,36 @@ impl Component for GasCavity {
             };
         }
         self.reference.stored_energy_change_to(state, || false)
+    }
+
+    fn stored_mass_kg(&self, state: &ClosedGasParcel) -> Result<Option<f64>, GasEnergyError> {
+        if self.stream.is_some() {
+            self.admit_stream_state(state)?;
+        } else {
+            // The native endpoint check retains the closed parcel's mass,
+            // complete source model and auxiliary material coordinates.
+            self.reference.stored_energy_change_to(state, || false)?;
+        }
+        Ok(Some(state.mass_kg()))
+    }
+
+    fn stored_carried_quantity(
+        &self,
+        state: &ClosedGasParcel,
+        carried: usize,
+    ) -> Result<Option<f64>, GasEnergyError> {
+        let Some(species) = self
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.species.get(carried))
+        else {
+            return Ok(None);
+        };
+        self.admit_stream_state(state)?;
+        // The stream keeps its reference catalog order even after depletion
+        // removes a species from the active mixture. The native inventory
+        // owner measures that species as zero until it enters again.
+        state.species_mass_kg(species).map(Some)
     }
 
     fn propose(
