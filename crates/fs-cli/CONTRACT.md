@@ -2666,6 +2666,40 @@ chamber's carried mass is refused by that account's name. Limits: one gas for al
 volumes, unchecked; constant heat capacities. Source-backed closed and
 streaming gas instead use `gas_cavity` below.
 
+`modulated_restriction` lowers to the same native `Restriction` with
+`modulated()`: an ideal linear gas valve, with stream ends `a` and `b` and
+a dimensionless scalar signal input `opening`. Its definition accepts the
+same `conductance_kg_s_pa`, `carried` or `stream_basis` fields as `restriction`.
+The mass rate from `a` to `b` is `conductance_kg_s_pa * opening * (p_a - p_b)`;
+its enthalpy and carried rates use the donor selected by that pressure
+difference, including flow reversal. Zero opening shuts all material and
+enthalpy transport; one gives full conductance. The native proposal refuses
+nonfinite openings and values outside `[0, 1]` at runtime, before exposing
+outputs or accepting a step; it does not clamp the command.
+
+Connect an ordinary signal source or control law to `valve.opening`, or use
+`{"prescribe": "valve.opening", "opening": waveform}`. Prescribed opening is
+a point sample at the start of each proposed step, held for that step, with
+table knots registered as events. A different quantity key is refused at
+scene construction. The valve has no stored state or adaptive error account;
+its attached storages retain all their required accounts. Its held opening
+limits `adaptive.order` to 1, even if the rest of the scene admits order 2.
+The native stream law, source identity and ordinary kernel connections own
+all transport; the CLI adds no valve-specific integration rule.
+
+Reports give the actual accepted `opening`, `mass_rate_kg_s`,
+`enthalpy_rate_w` and `carried<i>_rate_kg_s` in the immutable stream catalog
+order, with positive rates from `a` to `b`. Before the first accepted step
+these observations are `null`. Ordinary `restriction` retains its existing
+two reported rates. Checkpoints include the native modulated-law identity
+and the ordinary signal or prescribed-waveform identity. Scene
+`examples/system/modulated_n2_stream_exchange.json` switches a source-backed
+N2 exchange through shut, full and partial openings, with pressure reversal;
+the companion CLI tests check native constitutive rates and donor enthalpy,
+mass/species/energy closure, prescribed and connected command parity,
+checkpoint continuation and refusal without output mutation. This valve
+models linear conductance, not actuator mechanics or a choked nozzle.
+
 `gas_cavity` lowers to `fs_gas::component::GasCavity`: a uniform,
 frozen ideal-gas mixture, closed by default, whose calorics and pressure come from canonical
 species, NASA-9 and transport packs (`xtask matdb-pack`). The scene gives the
@@ -2704,8 +2738,8 @@ loop. `insulated` and streaming are mutually exclusive; prescribe zero
 `heat_rate_w` on `heat` for an adiabatic open cavity. The transfer tolerance
 does not weaken the kernel's independent total/species mass audits.
 
-A `restriction` may give `stream_basis: "cavity.stream"` instead of
-`carried`. It is built by `Restriction::for_stream` from that declared
+A `restriction` or `modulated_restriction` may give
+`stream_basis: "cavity.stream"` instead of `carried`. It is built by `Restriction::for_stream` from that declared
 stream port, preserving its complete source identity, enthalpy convention
 and ordered species coordinates. Referenced cavities are built before such
 restrictions, independently of authored element order. The reference names

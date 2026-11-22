@@ -63,7 +63,9 @@ use fs_mbd::spatial_loads::internal_motion::viscous::network::ViscousNetworkMoti
 use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_ports::PortKind;
-use fs_ports::component::{Carrier, Component, PortRole, PortSpec, PortTangent, StreamQuantity};
+use fs_ports::component::{
+    Carrier, Component, PortRole, PortSpec, PortTangent, STREAM_CARRIED, StreamQuantity,
+};
 use fs_qty::chemistry::SpeciesId;
 use fs_system::constitutive::{
     CapacitorChargeCurve, InductorFluxCurve, MAX_CAPACITOR_KNOTS, MAX_INDUCTOR_KNOTS,
@@ -168,9 +170,10 @@ connector<i>.branch<j>.amplitude_sqrt_j for its complete signed memory vector.
 Vector relative scales use initial/refined lengths; orientation uses angular
 motion during the interval. All body and branch accounts are mandatory.
 The default order is 1; choose order 2 only for a smooth second-order model.
-Affine maps, signal sources, published inertance observations and controlled
-commands supplied by signals or point-sampled value admit order 1 only. SI-named controlled-source
-prescriptions retain their interval-mean rules. sampled_controller and
+Affine maps, signal sources, modulated restrictions, published inertance
+observations and controlled commands supplied by signals or point-sampled
+value admit order 1 only. SI-named controlled-source prescriptions retain
+their interval-mean rules. sampled_controller and
 speed_controller require fixed-step operation; their sample events still cap
 steps exactly, but no adaptive discrete-memory metric is supplied. ideal_diode
 and ideal_switch also require fixed stepping; no switching error metric is supplied.
@@ -534,6 +537,15 @@ capacities; all joined volumes must hold the same gas):
                                                       [stream, heat, p if wall]
   restriction    conductance_kg_s_pa, carried = 0 (how many quantities)
                                                                       [a, b]
+  modulated_restriction
+                 the same fields, plus a dimensionless opening signal
+                                                             [a, b, opening]
+  A modulated restriction multiplies conductance by opening in [0, 1]:
+  zero shuts the valve; one restores its full conductance. Connect a signal
+  to opening, or prescribe opening as a waveform held at the step's start.
+  An out-of-range opening is refused by the native proposal at runtime.
+  Source-backed restrictions of either kind use stream_basis instead of
+  carried (below). Modulated restrictions admit adaptive order 1 only.
   A restriction passes conductance (p_a - p_b) [kg/s] with the enthalpy and
   carried quantities of the side the gas leaves. Join each end to a volume's
   stream port; several restrictions may meet at one volume. heat takes the
@@ -786,7 +798,8 @@ Connections, ports written element.port:
                           velocity_source.span, a published mass observation,
                           or a control element's output) to matching signal inputs
                           (a network's temperature<e>, slider.span_a/span_b,
-                          modulated_transformer.ratio, input<i> or command);
+                          modulated_transformer.ratio,
+                          modulated_restriction.opening, input<i> or command);
                           it carries no energy
   {\"prescribe\": port, <quantity>: waveform}
                           hold a port's input from outside: velocity_m_s for a
@@ -814,12 +827,13 @@ Connections, ports written element.port:
                           restriction's end held from outside, contents
                           (pressure [Pa], specific enthalpy [J/kg], then each
                           carried mass fraction); ratio for a
-                          modulated_transformer's ratio signal; value for
+                          modulated_transformer's ratio signal; opening for
+                          modulated_restriction.opening; value for
                           affine/sampled_controller inputs, ideal_switch.closed
                           or controlled-source commands (the latter also accept
                           their SI field name).
-  A prescribed value and a speed_controller input are point samples at the
-  step's start, matching signal_source. SI-named controlled-source commands
+  A prescribed value, valve opening and speed_controller input are point
+  samples at the step's start, matching signal_source. SI-named controlled-source commands
   and physical prescriptions use interval means.
   On slider.span_a/span_b, prescribe velocity_m_s as the same waveform
   moving that end; its two endpoint values are supplied, not its step mean.
@@ -1517,6 +1531,8 @@ enum Kind {
     GasVolume,
     /// A linear flow restriction between two gas volumes.
     Restriction,
+    /// The same native stream law with a held dimensionless opening signal.
+    ModulatedRestriction,
     Heater,
     /// A closed, uniform gas of NASA-9 thermochemistry from cited packs,
     /// `fs-gas`'s cavity, with a pressure-work port and a heat port.
@@ -1524,7 +1540,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 56] = [
+    const TABLE: [(&'static str, Self); 57] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1582,6 +1598,7 @@ impl Kind {
         ("trace_contact", Self::TraceContact),
         ("gas_volume", Self::GasVolume),
         ("restriction", Self::Restriction),
+        ("modulated_restriction", Self::ModulatedRestriction),
         ("heater", Self::Heater),
         ("gas_cavity", Self::GasCavity),
     ];
@@ -1884,7 +1901,10 @@ fn step_order(element: &Element) -> Option<u32> {
         return Some(1);
     }
     match element.kind {
-        Kind::ConductionBody | Kind::AffineSignal | Kind::SignalSource => Some(1),
+        Kind::ConductionBody
+        | Kind::AffineSignal
+        | Kind::SignalSource
+        | Kind::ModulatedRestriction => Some(1),
         Kind::Inertance(_)
             if element
                 .ports
@@ -1914,6 +1934,7 @@ fn declared_order_fits(order: f64, elements: &[Element]) -> Result<(), String> {
                     | Kind::SignalSource
                     | Kind::ControlledEffort
                     | Kind::ControlledFlow
+                    | Kind::ModulatedRestriction
                     | Kind::Inertance(_)
             ) {
                 return Err(format!(
@@ -3632,8 +3653,13 @@ fn element(
             gas = Some(volume.clone());
             add(builder, name, volume, contents)?
         }
-        Kind::Restriction => {
+        Kind::Restriction | Kind::ModulatedRestriction => {
             let law = restriction(definition, &what, builder, existing)?;
+            let law = if kind == Kind::ModulatedRestriction {
+                law.modulated()
+            } else {
+                law
+            };
             add(builder, name, law, ())?
         }
         Kind::Heater => {
@@ -4396,8 +4422,11 @@ fn prescribe(
                     | Kind::SampledController
                     | Kind::SpeedController
                     | Kind::IdealSwitch
+                    | Kind::ModulatedRestriction
             ));
-    let signal_quantity = if element.kind == Kind::SpeedController {
+    let signal_quantity = if element.kind == Kind::ModulatedRestriction {
+        Some("opening")
+    } else if element.kind == Kind::SpeedController {
         Some(
             if builder.port(element.node, "reference").ok() == Some(target.port) {
                 "relative_speed_rad_s"
@@ -4424,7 +4453,7 @@ fn prescribe(
         {
             "ratio"
         }
-        // Control signals, spans and ratios were handled above; remaining
+        // Control signals, spans, openings and ratios were handled above; remaining
         // signals are temperatures at which a network's shift is read.
         (Carrier::Heat, PortRole::EffortIn, _, _) | (Carrier::Signal, PortRole::SignalIn, _, _) => {
             "temperature_k"
@@ -4591,7 +4620,8 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::TraceContact
             | Kind::LayerConductor
             | Kind::HeatNode
-            | Kind::Restriction => Vec::new(),
+            | Kind::Restriction
+            | Kind::ModulatedRestriction => Vec::new(),
             Kind::PortHamiltonian => {
                 for index in 0..element.coordinates {
                     expected.push((
@@ -4740,8 +4770,10 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     // Build those after the storages, regardless of the scene's element order.
     for deferred in [false, true] {
         for (name, definition) in definitions {
-            let needs_basis = definition.str_field("kind") == Some("restriction")
-                && definition.get("stream_basis").is_some();
+            let needs_basis = matches!(
+                definition.str_field("kind"),
+                Some("restriction") | Some("modulated_restriction")
+            ) && definition.get("stream_basis").is_some();
             if needs_basis != deferred {
                 continue;
             }
@@ -5449,6 +5481,9 @@ impl Device {
         if element.kind == Kind::GasCavity {
             return gas::values(&self.system, element.node, &element.ports);
         }
+        if element.kind == Kind::ModulatedRestriction {
+            return self.modulated_restriction_values(element);
+        }
         if element.kind == Kind::ModalStructure {
             return modal::values(&self.system, element.node, &element.ports);
         }
@@ -5908,6 +5943,7 @@ impl Device {
             | Kind::SampledController
             | Kind::ViscoelasticNetwork
             | Kind::GasVolume
+            | Kind::ModulatedRestriction
             | Kind::ResistanceMatrix
             | Kind::DiracJunction
             | Kind::PortHamiltonian
@@ -5917,6 +5953,44 @@ impl Device {
             | Kind::TraceContact
             | Kind::GasCavity => Vec::new(),
         }
+    }
+
+    /// The opening actually used and native transport from a to b.
+    /// Stream coordinates retain their source catalog order.
+    fn modulated_restriction_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let crossing = self
+            .system
+            .port(element.node, "a")
+            .filter(|_| self.system.steps() > 0)
+            .map(|port| self.system.last_output(port));
+        let rate = |index: usize| {
+            crossing
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(f64::NAN)
+        };
+        let opening = self
+            .system
+            .port(element.node, "opening")
+            .filter(|_| self.system.steps() > 0)
+            .and_then(|port| self.system.last_input(port).first().copied())
+            .unwrap_or(f64::NAN);
+        let mut values = vec![
+            ("mass_rate_kg_s".to_owned(), rate(0)),
+            ("enthalpy_rate_w".to_owned(), rate(1)),
+            ("opening".to_owned(), opening),
+        ];
+        let carried = element
+            .ports
+            .iter()
+            .find(|port| port.id().as_str() == "a")
+            .map_or(0, PortSpec::carried_quantities);
+        for index in 0..carried {
+            values.push((
+                format!("carried{index}_rate_kg_s"),
+                rate(STREAM_CARRIED + index),
+            ));
+        }
+        values
     }
 
     /// What a gas volume holds: pressure, temperature, mass, volume and the

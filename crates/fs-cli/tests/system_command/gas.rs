@@ -651,3 +651,159 @@ fn adaptive_mixture_species_accounts_control_refinement_and_resume_exactly() {
         "{error}"
     );
 }
+
+
+#[test]
+fn modulated_source_stream_follows_held_opening_and_preserves_inventory() {
+    let path = example("modulated_n2_stream_exchange.json");
+    let authored = std::fs::read_to_string(&path).unwrap();
+    for prescribed in [false, true] {
+        let text = if prescribed {
+            authored.replace(
+                r#"{"signal": "controller.output", "to": ["a_valve.opening"]}"#,
+                r#"{"prescribe": "a_valve.opening", "opening": {"held_table":
+                    [[0, 0], [0.25, 1], [0.5, 0.25], [0.75, 1], [0.875, 0]]}}"#,
+            )
+        } else {
+            authored.clone()
+        };
+        assert_eq!(text != authored, prescribed);
+        let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        assert_eq!(scene.probe("a_valve.opening").unwrap(), None);
+        let totals = |scene: &fs_cli::SystemScene| {
+            ["mass_kg", "species0_mass_kg", "energy_j"].map(|coordinate| {
+                probe(scene, &format!("left.{coordinate}"))
+                    + probe(scene, &format!("right.{coordinate}"))
+            })
+        };
+        let initial = totals(&scene);
+        let knots = [0.25, 0.5, 0.75, 0.875];
+        let mut visited = [false; 4];
+        let mut directions = [0; 2];
+        let mut saved = None;
+        scene_context(|cx, _| {
+            while !scene.is_finished() {
+                let start = scene.time_s();
+                let opening = if start < 0.25 || start >= 0.875 {
+                    0.0
+                } else if start < 0.5 || start >= 0.75 {
+                    1.0
+                } else {
+                    0.25
+                };
+                // The native source-backed cavity publishes old accepted
+                // intensives. Use those, not the warmed endpoint pressure.
+                let old = ["left", "right"].map(|name| {
+                    [
+                        probe(&scene, &format!("{name}.mass_kg")),
+                        probe(&scene, &format!("{name}.pressure_pa")),
+                        probe(&scene, &format!("{name}.specific_internal_energy_j_kg")),
+                        probe(&scene, &format!("{name}.volume_m3")),
+                    ]
+                });
+                let rate = CONDUCTANCE * opening * (old[0][1] - old[1][1]);
+                let donor = usize::from(rate < 0.0);
+                let enthalpy = old[donor][2] + old[donor][1] * old[donor][3] / old[donor][0];
+                assert!(scene.advance(f64::MAX, cx).unwrap());
+                let dt = scene.time_s() - start;
+                close(probe(&scene, "a_valve.opening"), opening, 1.0e-12);
+                close(probe(&scene, "a_valve.mass_rate_kg_s"), rate, 2.0e-11);
+                close(probe(&scene, "a_valve.enthalpy_rate_w"), rate * enthalpy, 2.0e-7);
+                close(probe(&scene, "a_valve.carried0_rate_kg_s"), rate, 2.0e-11);
+                let accepted_rate = probe(&scene, "a_valve.mass_rate_kg_s");
+                for (index, name) in ["left", "right"].into_iter().enumerate() {
+                    let sign = if index == 0 { -1.0 } else { 1.0 };
+                    let mass = old[index][0] + sign * dt * accepted_rate;
+                    close(probe(&scene, &format!("{name}.mass_kg")), mass, 2.0e-15);
+                    close(probe(&scene, &format!("{name}.species0_mass_kg")), mass, 2.0e-15);
+                }
+                if opening == 0.0 {
+                    close(accepted_rate, 0.0, 0.0);
+                    close(probe(&scene, "left.mass_kg"), old[0][0], 2.0e-15);
+                    close(probe(&scene, "right.mass_kg"), old[1][0], 2.0e-15);
+                } else {
+                    directions[donor] += 1;
+                }
+                for (index, knot) in knots.into_iter().enumerate() {
+                    assert!(
+                        !(start < knot && scene.time_s() > knot + 1.0e-13),
+                        "opening event {knot} was crossed from {start} to {}",
+                        scene.time_s()
+                    );
+                    visited[index] |= (scene.time_s() - knot).abs() < 1.0e-13;
+                }
+                // Resume on a transition, before the next opening is sampled.
+                if saved.is_none() && scene.time_s() >= 0.5 {
+                    saved = Some(scene.checkpoint().unwrap());
+                }
+            }
+            let (bytes, root) = saved.unwrap();
+            let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+            resumed.resume_checkpoint(&bytes, root).unwrap();
+            resumed.run(cx).unwrap();
+            assert_eq!(resumed.render_json(), scene.render_json());
+            assert_eq!(resumed.checkpoint().unwrap(), scene.checkpoint().unwrap());
+        });
+        assert!(visited.into_iter().all(|seen| seen), "{visited:?}");
+        assert!(directions.into_iter().all(|count| count > 0), "{directions:?}");
+        let final_totals = totals(&scene);
+        close(final_totals[0], initial[0], 2.0e-14);
+        close(final_totals[1], initial[1], 2.0e-14);
+        close(final_totals[2] - initial[2], HEAT_W * scene.time_s(), 2.0e-6);
+        close(scene.ledger().mass_residual_kg().unwrap(), 0.0, 2.0e-14);
+        close(scene.ledger().carried_residual(0).unwrap(), 0.0, 2.0e-14);
+        close(scene.ledger().energy_residual_j(), 0.0, 2.0e-6);
+        if !prescribed {
+            let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+            assert_eq!(code, 0, "{stderr}");
+            assert_eq!(json, scene.render_json());
+        }
+    }
+}
+
+#[test]
+fn modulated_stream_refuses_invalid_opening_quantity_basis_and_order() {
+    let original = std::fs::read_to_string(example("n2_stream_exchange.json")).unwrap();
+    let text = original
+        .replace(r#""kind": "restriction""#, r#""kind": "modulated_restriction""#)
+        .replace(
+            r#""connections": ["#,
+            r#""connections": [{"prescribe": "a_valve.opening", "opening": 0.5},"#,
+        );
+    let path = scene_file(&text);
+    for invalid in ["-0.25", "1.25"] {
+        let changed = text.replace(r#""opening": 0.5"#, &format!(r#""opening": {invalid}"#));
+        let mut scene = fs_cli::SystemScene::from_text(&changed, &path).unwrap();
+        let before = scene.render_json();
+        let checkpoint = scene.checkpoint().unwrap();
+        scene_context(|cx, _| {
+            let error = scene.advance(f64::MAX, cx).err().unwrap();
+            assert!(error.message.contains("opening"), "{error}");
+        });
+        assert_eq!(scene.render_json(), before);
+        assert_eq!(scene.checkpoint().unwrap(), checkpoint);
+    }
+    for (changed, reason) in [
+        (text.replace(r#""opening": 0.5"#, r#""value": 0.5"#), "opening"),
+        (
+            text.replace(r#""stream_basis": "left.stream""#, r#""carried": 1"#),
+            "declared medium",
+        ),
+    ] {
+        assert_ne!(changed, text);
+        let error = fs_cli::SystemScene::from_text(&changed, &path).err().unwrap();
+        assert!(error.message.contains(reason), "expected {reason}: {error}");
+    }
+
+    let adaptive = adaptive_stream(&text, &stream_accounts(1, |_| false));
+    let mut scene = fs_cli::SystemScene::from_text(&adaptive, &path).unwrap();
+    scene_context(|cx, _| scene.run(cx).unwrap());
+    close(probe(&scene, "a_valve.opening"), 0.5, 1.0e-12);
+    close(scene.ledger().mass_residual_kg().unwrap(), 0.0, 2.0e-14);
+    let changed = adaptive.replace(r#""order": 1"#, r#""order": 2"#);
+    let error = fs_cli::SystemScene::from_text(&changed, &path).err().unwrap();
+    assert!(
+        error.message.contains("adaptive.order") && error.message.contains("order 1"),
+        "{error}"
+    );
+}
