@@ -642,9 +642,11 @@ impl SystemBuilder {
     /// of the flow, to be stepped on the load line its neighbours present
     /// ([`LoadLine`]): dry friction, a contact.
     ///
-    /// Inside a loop the solve finds the line once per step and the
-    /// component settles on it; one such component per loop. Where every
-    /// flow of its line is prescribed or comes from an earlier block, there
+    /// Inside a loop the solve finds each owner's line once per step with
+    /// the other load-line owners' efforts held, then solves their coupled
+    /// relations together. Redundant active constraints can leave the
+    /// interface Jacobian singular and are refused rather than regularized.
+    /// Where every flow is prescribed or comes from an earlier block, there
     /// is no line to find and the component is stepped by its mandatory
     /// tier.
     ///
@@ -1796,9 +1798,9 @@ impl SystemBuilder {
         // A component on a load line whose flows are solved in a loop: the
         // drivers of those flows gain a term per effort of the component,
         // for the line's compliance, and the block keeps the line.
-        let mut lines: Vec<Option<Line>> = Vec::new();
-        lines.resize_with(blocks.len(), || None);
-        let mut line_of = vec![usize::MAX; count];
+        let mut lines: Vec<Vec<Line>> = Vec::new();
+        lines.resize_with(blocks.len(), Vec::new);
+        let mut line_of = vec![(usize::MAX, usize::MAX); count];
         for node in 0..count {
             let Some(ports) = self.nodes[node].line_ports() else {
                 continue;
@@ -1820,12 +1822,6 @@ impl SystemBuilder {
             }
             if places.iter().all(|&(_, _, unknown)| unknown == usize::MAX) {
                 continue;
-            }
-            if let Some(first) = &lines[block] {
-                return Err(AdmissionError::TwoLines {
-                    first: self.names[first.node].clone(),
-                    second: self.names[node].clone(),
-                });
             }
             let own = places.len();
             for &(input, _, unknown) in &places {
@@ -1867,8 +1863,8 @@ impl SystemBuilder {
                     ends.push((input, unknown));
                 }
             }
-            line_of[node] = block;
-            lines[block] = Some(Line::new(node, places, ends));
+            line_of[node] = (block, lines[block].len());
+            lines[block].push(Line::new(node, places, ends));
         }
         let block_work = blocks
             .iter()
@@ -1885,7 +1881,7 @@ impl SystemBuilder {
                 });
                 let mut work =
                     BlockWork::plan(block, &drivers, &input_owner, &output_start, affine);
-                if line.is_some() {
+                if !line.is_empty() {
                     let declares = |node: usize| self.nodes[node].has_tangent();
                     work.found =
                         Found::plan(block, &input_owner, &input_start, &output_start, &declares);
@@ -2451,11 +2447,11 @@ pub struct System {
     blocks: Vec<Block>,
     /// Per block, what its solve keeps between steps.
     block_work: Vec<BlockWork>,
-    /// Per block, its component on a load line, if its flows are solved
-    /// there; and per component, the block whose line it is on
-    /// (`usize::MAX` for none).
-    lines: Vec<Option<Line>>,
-    line_of: Vec<usize>,
+    /// Per block, its components on load lines whose flows are solved
+    /// there; and per component, its block and position in that list
+    /// (`usize::MAX` in both positions for none).
+    lines: Vec<Vec<Line>>,
+    line_of: Vec<(usize, usize)>,
     step_scratch: StepScratch,
     input_start: Vec<usize>,
     output_start: Vec<usize>,
@@ -2729,7 +2725,8 @@ impl System {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
         // A component on a load line is stepped there: its flow inputs
         // hold the released flows of this step's line.
-        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
+        let (block, position) = self.line_of[node];
+        let line = self.lines.get(block).and_then(|lines| lines.get(position));
         let proposal = if let Some(line) = line {
             self.nodes[node].propose_on_line(
                 self.accepted[node].as_ref(),
@@ -2883,7 +2880,8 @@ impl System {
         cx: &Cx<'_>,
     ) -> Result<Proposal, OwnerError> {
         let (inputs, width) = (self.node_inputs(node), self.node_outputs(node).len());
-        let line = self.lines.get(self.line_of[node]).and_then(Option::as_ref);
+        let (block, position) = self.line_of[node];
+        let line = self.lines.get(block).and_then(|lines| lines.get(position));
         if let Some(line) = line {
             self.nodes[node].propose_on_line(
                 self.accepted[node].as_ref(),
@@ -3225,7 +3223,7 @@ impl System {
         work.allowance.fill(0.0);
         // A block with a component on a load line: the line of this step,
         // found from the starting values, before anything is judged.
-        if self.lines[block].is_some()
+        if !self.lines[block].is_empty()
             && let Some(shorter) = self.find_line(block, unknowns, nodes, work, dt_s, cx)?
         {
             return Ok(Err(shorter));
@@ -3274,7 +3272,7 @@ impl System {
         // such as a span) take one update with its efforts held, which is
         // exact where the other components are affine; every other unknown
         // keeps its start.
-        if self.lines[block].is_some() {
+        if !self.lines[block].is_empty() {
             self.release(block, unknowns, residual, condensed)?;
         }
         let mut iterations = 0_u32;
@@ -3354,7 +3352,7 @@ impl System {
             let power_scale = self.block_power_scale(nodes);
             let mut worst = (0_usize, 0.0_f64);
             let mut converged = true;
-            let on_a_line = self.lines[block].is_some();
+            let on_a_line = !self.lines[block].is_empty();
             for (row, &index) in unknowns.iter().enumerate() {
                 // The interface audit is told only this part: it keeps its
                 // own relative tolerance, so a loose solver tolerance is

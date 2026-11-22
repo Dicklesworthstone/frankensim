@@ -1,4 +1,4 @@
-//! The load line of a looped block.
+//! The load lines of a looped block.
 //!
 //! A component whose effort is not a function of the flow it receives (dry
 //! friction, a closed contact) cannot be iterated on that flow. Its
@@ -13,11 +13,12 @@
 //! ([`fs_ports::component::LoadLine`]). This module finds the line once per
 //! step and keeps the block's unknowns consistent with it:
 //!
-//! - The compliance is how the block's other components, with every other
-//!   unknown eliminated, turn an effort of the line component into flow at
-//!   its own ports. It comes from one assembly of the block's Jacobian with
-//!   the line component's own columns left out, and one back-substitution
-//!   per effort.
+//! - The compliance is how the block's smooth components, with their
+//!   unknowns eliminated and every load-line owner's effort held, turn an
+//!   effort into flow at that owner's ports. One Jacobian assembly excludes
+//!   all load-line owners' columns; one back-substitution per effort gives
+//!   each owner's self-compliance. Other owners' efforts remain independent
+//!   unknowns of the full interface solve, so their coupling is not lost.
 //! - During the solve the line's flow inputs hold the released flows. Their
 //!   drivers gain the term `compliance * own effort`, so the residual of a
 //!   line input is still the residual of the actual flow, and Newton runs
@@ -132,7 +133,10 @@ impl Line {
         if !self.compliance.iter().all(|value| value.is_finite()) {
             return false;
         }
-        let largest = self.compliance.iter().fold(0.0_f64, |seen, value| seen.max(value.abs()));
+        let largest = self
+            .compliance
+            .iter()
+            .fold(0.0_f64, |seen, value| seen.max(value.abs()));
         if largest == 0.0 {
             return true;
         }
@@ -175,38 +179,39 @@ impl System {
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
-        let mut line = self.lines[block]
-            .take()
-            .expect("a block asked for its line has one");
-        let found = self.find_lent(&mut line, unknowns, nodes, work, dt_s, cx);
-        self.lines[block] = Some(line);
+        let mut lines = core::mem::take(&mut self.lines[block]);
+        let found = self.find_lent(block, &mut lines, unknowns, nodes, work, dt_s, cx);
+        self.lines[block] = lines;
         found
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_lent(
         &mut self,
-        line: &mut Line,
+        block: usize,
+        lines: &mut [Line],
         unknowns: &[usize],
         nodes: &[usize],
         work: &mut BlockWork,
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
-        let width = line.places.len();
-        // The neighbours are evaluated with the line component's outputs
-        // held at what the last step accepted, and with no compliance yet
-        // in the drivers: the flow inputs hold actual flows.
-        line.compliance.fill(0.0);
-        line.write_drivers(&mut self.drivers);
-        let held = self.node_outputs(line.node);
-        self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        // All load-line owners are held while the smooth neighbours are
+        // condensed. Asking another non-smooth owner for a tangent here
+        // would make a stuck constraint part of a supposedly released line.
+        for line in lines.iter_mut() {
+            line.compliance.fill(0.0);
+            line.write_drivers(&mut self.drivers);
+            let held = self.node_outputs(line.node);
+            self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        }
         // What is evaluated here and still holds at the solve's first pass
         // is kept for it (`Found`): the inputs each component with a
         // declared tangent was proposed at, and the columns its tangent
         // gives below.
         work.found.clear();
         for (position, &node) in nodes.iter().enumerate() {
-            if node == line.node {
+            if self.line_of[node].0 == block {
                 continue;
             }
             if let Some(shorter) = self.propose(node, dt_s, cx)? {
@@ -223,25 +228,24 @@ impl System {
                 .max(self.drivers[index].magnitude(&self.outputs, &self.boundary_values));
         }
 
-        // I - T with the line component's own columns left out: its
-        // outputs are then free, and a unit of one of them is carried
-        // through everything else.
+        // I - T with every load-line owner's columns left out: their
+        // outputs are independent efforts carried through the smooth
+        // neighbors. The same factors supply every owner's self response.
         work.condensed.clear();
         for (row, terms) in &work.varying {
             self.drivers[unknowns[*row]].gradient(&self.outputs, &mut work.gradient);
-            for (&reader, &(_, slope)) in
-                work.varying_terms[terms.clone()].iter().zip(work.gradient.iter())
+            for (&reader, &(_, slope)) in work.varying_terms[terms.clone()]
+                .iter()
+                .zip(work.gradient.iter())
             {
                 if reader != usize::MAX {
                     work.readers[reader].2 = slope;
                 }
             }
         }
-        let mut own_column = usize::MAX;
         for (column, &index) in unknowns.iter().enumerate() {
             let node = self.input_owner[index];
-            if node == line.node {
-                own_column = column;
+            if self.line_of[node].0 == block {
                 continue;
             }
             let local = index - self.input_start[node];
@@ -256,13 +260,14 @@ impl System {
             for (&(_, offset, slope), &slot) in
                 reading.iter().zip(&work.slots[work.slot_start[column]..])
             {
-                work.condensed.subtract(slot, slope * self.scratch_outputs[offset]);
+                work.condensed
+                    .subtract(slot, slope * self.scratch_outputs[offset]);
             }
         }
         // Singular or not finite: the other components do not say what
         // flow answers an effort, so there is no line. The refusal names
         // the component that needed one.
-        let component = line.node;
+        let component = lines[0].node;
         let no_line = |system: &Self| SystemError::LoadLine {
             node: system.names[component].clone(),
             reason: "the other components of its block do not determine how the flows at its \
@@ -271,42 +276,52 @@ impl System {
         if !work.condensed.factor() {
             return Err(no_line(self));
         }
-        // Every row that reads an output of the line component, whichever
-        // of its inputs the column is.
-        let reading = work.column_readers[own_column].clone();
-        let first_output = self.output_start[line.node];
-        for effort in 0..width {
-            let local = line.places[effort].1 - first_output;
-            work.residual.fill(0.0);
-            for &(row, offset, slope) in &work.readers[reading.clone()] {
-                if offset == local {
-                    work.residual[row] += slope;
+        for line in lines.iter_mut() {
+            let width = line.places.len();
+            // Every row that reads this owner's output, whichever of its
+            // inputs the representative column belongs to.
+            let own_column = unknowns
+                .iter()
+                .rposition(|&input| self.input_owner[input] == line.node)
+                .expect("a looped load-line owner has an unknown");
+            let reading = work.column_readers[own_column].clone();
+            let first_output = self.output_start[line.node];
+            for effort in 0..width {
+                let local = line.places[effort].1 - first_output;
+                work.residual.fill(0.0);
+                for &(row, offset, slope) in &work.readers[reading.clone()] {
+                    if offset == local {
+                        work.residual[row] += slope;
+                    }
                 }
+                if !work.condensed.solve(&mut work.residual) {
+                    return Err(no_line(self));
+                }
+                for (flow, &(_, _, unknown)) in line.places.iter().enumerate() {
+                    line.compliance[flow * width + effort] = if unknown == usize::MAX {
+                        0.0
+                    } else {
+                        -work.residual[unknown]
+                    };
+                }
+                line.end_answers(effort, &work.residual);
             }
-            if !work.condensed.solve(&mut work.residual) {
-                return Err(no_line(self));
+            if !line.passive() {
+                return Err(SystemError::LoadLine {
+                    node: self.names[line.node].clone(),
+                    reason: "its neighbours do not answer an effort with less flow: the line's \
+                             matrix is not finite or its symmetric part is negative",
+                });
             }
-            for (flow, &(_, _, unknown)) in line.places.iter().enumerate() {
-                line.compliance[flow * width + effort] = if unknown == usize::MAX {
-                    0.0
-                } else {
-                    -work.residual[unknown]
-                };
-            }
-            line.end_answers(effort, &work.residual);
-        }
-        if !line.passive() {
-            return Err(SystemError::LoadLine {
-                node: self.names[line.node].clone(),
-                reason: "its neighbours do not answer an effort with less flow: the line's \
-                         matrix is not finite or its symmetric part is negative",
-            });
         }
 
-        // On the line: the drivers carry the matrix, and the flow inputs
-        // become the released flows of the efforts accepted last.
-        line.write_drivers(&mut self.drivers);
-        self.released_flows(line);
+        // Each owner's inputs release its own efforts only. The other
+        // efforts are still carried by the original connection equations
+        // and are solved together in the full Newton iteration.
+        for line in lines {
+            line.write_drivers(&mut self.drivers);
+            self.released_flows(line);
+        }
         Ok(None)
     }
 
@@ -355,27 +370,25 @@ impl System {
         residual: &mut [f64],
         condensed: &mut Condensed,
     ) -> Result<(), SystemError> {
-        let node = self.lines[block]
-            .as_ref()
-            .expect("a block asked to release its line has one")
-            .node;
         // The efforts the last step accepted, whatever an earlier trial of
         // this step left in the outputs.
-        let held = self.node_outputs(node);
-        self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        for line in &self.lines[block] {
+            let held = self.node_outputs(line.node);
+            self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        }
         for (row, &index) in unknowns.iter().enumerate() {
-            residual[row] =
-                self.drivers[index].value(&self.outputs, &self.boundary_values) - self.inputs[index];
+            residual[row] = self.drivers[index].value(&self.outputs, &self.boundary_values)
+                - self.inputs[index];
         }
         if !condensed.solve(residual) {
             return Err(SystemError::LoadLine {
-                node: self.names[node].clone(),
+                node: self.names[self.lines[block][0].node].clone(),
                 reason: "the other components of its block do not determine the flows its held \
                          efforts release: their Jacobian is singular or not finite",
             });
         }
         for (row, &index) in unknowns.iter().enumerate() {
-            if self.input_owner[index] == node {
+            if self.line_of[self.input_owner[index]].0 == block {
                 self.inputs[index] += residual[row];
             }
         }
@@ -404,24 +417,27 @@ impl System {
     /// audit refused a mass held under a constant push for one push in
     /// seven.)
     pub(super) fn crossing(&self, block: usize, row: usize) -> Option<(f64, f64)> {
-        let line = self.lines[block].as_ref()?;
-        let width = line.places.len();
-        // A flow of the line, or the end of one: the same difference.
-        let (flow, input) = if let Some(flow) = line.places.iter().position(|place| place.2 == row)
-        {
-            (flow, line.places[flow].0)
-        } else {
-            let end = line.ends.iter().position(|end| end.1 == row)?;
-            (width + end, line.ends[end].0)
-        };
-        let mut crossing = self.inputs[input];
-        let mut terms = crossing.abs();
-        for (effort, &(_, output, _)) in line.places.iter().enumerate() {
-            let taken = line.compliance[flow * width + effort] * self.outputs[output];
-            crossing -= taken;
-            terms += taken.abs();
+        for line in &self.lines[block] {
+            let width = line.places.len();
+            // A flow of this line, or its end: the same difference.
+            let (flow, input) =
+                if let Some(flow) = line.places.iter().position(|place| place.2 == row) {
+                    (flow, line.places[flow].0)
+                } else if let Some(end) = line.ends.iter().position(|end| end.1 == row) {
+                    (width + end, line.ends[end].0)
+                } else {
+                    continue;
+                };
+            let mut crossing = self.inputs[input];
+            let mut terms = crossing.abs();
+            for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+                let taken = line.compliance[flow * width + effort] * self.outputs[output];
+                crossing -= taken;
+                terms += taken.abs();
+            }
+            return Some((crossing, ROUNDING_UNITS * f64::EPSILON * terms));
         }
-        Some((crossing, ROUNDING_UNITS * f64::EPSILON * terms))
+        None
     }
 
     /// Whether input `index` is a flow of `block`'s load line, or the end of
@@ -438,9 +454,11 @@ impl System {
     /// kernel's own perturbation of `2^-26` m/s took to stop (bead
     /// `.5.8.1`).
     pub(super) fn given_on_line(&self, block: usize, index: usize) -> bool {
-        let Some(line) = self.lines[block].as_ref() else {
+        let (owner_block, position) = self.line_of[self.input_owner[index]];
+        if owner_block != block {
             return false;
-        };
+        }
+        let line = &self.lines[block][position];
         let width = line.places.len();
         let row = if let Some(flow) = line.places.iter().position(|place| place.0 == index) {
             flow
@@ -459,25 +477,25 @@ impl System {
     /// ledger see what crossed. The rounding of these flows is already in
     /// what the solve told the audit ([`Self::crossing`]).
     pub(super) fn line_flows(&mut self, block: usize) {
-        let Some(line) = &self.lines[block] else {
-            return;
-        };
-        let width = line.places.len();
-        for (flow, &(input, _, unknown)) in line.places.iter().enumerate() {
-            if unknown == usize::MAX {
-                continue;
+        for line in &self.lines[block] {
+            let width = line.places.len();
+            for (flow, &(input, _, unknown)) in line.places.iter().enumerate() {
+                if unknown == usize::MAX {
+                    continue;
+                }
+                for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+                    self.inputs[input] -=
+                        line.compliance[flow * width + effort] * self.outputs[output];
+                }
             }
-            for (effort, &(_, output, _)) in line.places.iter().enumerate() {
-                self.inputs[input] -= line.compliance[flow * width + effort] * self.outputs[output];
-            }
-        }
-        for (end, &(input, unknown)) in line.ends.iter().enumerate() {
-            if unknown == usize::MAX {
-                continue;
-            }
-            for (effort, &(_, output, _)) in line.places.iter().enumerate() {
-                self.inputs[input] -=
-                    line.compliance[(width + end) * width + effort] * self.outputs[output];
+            for (end, &(input, unknown)) in line.ends.iter().enumerate() {
+                if unknown == usize::MAX {
+                    continue;
+                }
+                for (effort, &(_, output, _)) in line.places.iter().enumerate() {
+                    self.inputs[input] -=
+                        line.compliance[(width + end) * width + effort] * self.outputs[output];
+                }
             }
         }
     }

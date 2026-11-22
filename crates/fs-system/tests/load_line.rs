@@ -4522,8 +4522,9 @@ fn what_the_tier_cannot_solve_is_refused_by_name() {
     }
     builder.add_on_line("misplaced", slider(), Slip::default()).unwrap();
 
-    // Two sliders on one mass are two lines in one loop: refused at
-    // sealing, both named.
+    // Two sliders may share one mass. The unforced state is a valid fixed
+    // point; determinate motion and nonunique loaded constraints have their
+    // own regressions in multiple_load_lines.rs.
     let mut builder = SystemBuilder::new();
     let mass = builder
         .add_with_tangent(
@@ -4547,16 +4548,9 @@ fn what_the_tier_cannot_solve_is_refused_by_name() {
         members.push(port(&builder, rubbing, "a"));
     }
     builder.common_flow(port(&builder, mass, "p"), &members).unwrap();
-    let Err(refusal) = builder.seal() else {
-        panic!("two lines in one loop are refused");
-    };
-    assert_eq!(
-        refusal,
-        AdmissionError::TwoLines {
-            first: "front".to_owned(),
-            second: "rear".to_owned()
-        }
-    );
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| system.step(0.01, cx).unwrap());
+    assert_eq!(system.state::<Motion>(mass).unwrap().velocity_m_s, 0.0);
 
     // A neighbour that answers a force with motion against it gives a
     // line of negative compliance, and one of no inertia answers with a

@@ -596,20 +596,24 @@ an iterate it is affine, `flow = released - C effort`. A component added with
 is given the released flows and the matrix `C` and returns the efforts its own
 relation allows there.
 
-- The line is found once per step, before anything is judged, from the
-  block's starting values. The other components are evaluated with the line
-  component's efforts held at what the last step accepted; the block's
-  interface Jacobian is assembled with the line component's own columns left
-  out and factored; one back-substitution per effort gives how the flows at
-  the line's ports answer a unit of that effort, with every other unknown of
-  the block eliminated. `C` is minus that. It is frozen for the step: where a
-  neighbour is not linear, it is the neighbour's slope at the step's start.
+- Each owner's line is found once per step, before anything is judged, from
+  the block's starting values. All load-line owners' outputs are held at what
+  the last step accepted while the other components are evaluated. The
+  block's interface Jacobian excludes every load-line owner's columns and
+  is factored once; a back-substitution per effort gives that owner's
+  self-response with the remaining unknowns eliminated. `C` is minus that
+  response. The other load-line owners' efforts stay independent unknowns,
+  not part of `C`: the full Newton solve resolves their cross-coupling.
+  Each line's drivers add only `C * own effort`, so its owner still receives
+  the line defined by the unchanged `LoadLine` contract. The matrices are
+  frozen for the step; a nonlinear neighbour contributes its slope at the
+  step's start. The one-owner case keeps its original arithmetic order.
 - What finding the line evaluated is not evaluated again in the solve's first
-  pass. A component other than the line component that declares its tangent,
+  pass. A component other than the load-line owners that declares its tangent,
   and whose inputs are bit for bit those finding the line proposed it at, is
   not proposed again in the first pass: its candidate, outputs and receipt
   are already those of that proposal. The first assembly takes its columns
-  from finding the line. Between the two only the line component's inputs
+  from finding the lines. Between the two only the load-line owners' inputs
   are written (the released flows, then `release`), the step length is the
   same, and an accepted state changes only when a step is published; a
   proposal is pure (`fs_ports`: equal arguments give bitwise-equal results)
@@ -742,8 +746,8 @@ relation allows there.
   1.8e-15 N of the push. Asserted in `tests/load_line.rs`.)
 - `C` need not be symmetric. The step is refused (`SystemError::LoadLine`,
   naming the component and the reason, nothing published) when the other
-  components do not determine a line (their Jacobian, with the component's
-  columns left out, is singular or not finite), or when the symmetric part
+  components do not determine a line (their Jacobian, with all load-line
+  owners' columns left out, is singular or not finite), or when the symmetric part
   of `C` has an eigenvalue below minus 1e-6 of its largest entry: the
   neighbours then answer an effort with more flow, not less, and a relation
   such as friction has no point to settle on. The margin is what `C` is known
@@ -756,10 +760,16 @@ relation allows there.
   at those flows, and if it is in a loop through another port (a slider
   between prescribed velocities whose heat warms a body) it is differenced
   there as a function of its other inputs.
-- One component on a line per block: `seal` refuses two
-  (`AdmissionError::TwoLines`, both named). `add_on_line` refuses a line that
-  is not over power ports that receive a flow, in increasing order
-  (`AdmissionError::LinePorts`), and claims no name.
+- Several components may be on load lines in one block. Their relations are
+  solved together; declaring two rubbing surfaces on one body is no longer
+  an admission refusal. This does not select a force distribution for
+  redundant active constraints: a singular interface Jacobian returns
+  `SystemError::Singular` with the block's component names and publishes
+  nothing. A fixed point already satisfying the equations can be accepted
+  without factorization; no uniqueness claim is made. `AdmissionError::TwoLines`
+  remains an API variant but is no longer emitted by sealing.
+  `add_on_line` still refuses a line that is not over power ports receiving a
+  flow, in increasing order (`AdmissionError::LinePorts`), and claims no name.
 - The end of a step on the line. A port's flow is its mean over the step,
   and the elements of this crate end a step at twice that mean less its
   start (the midpoint rule); a component that is exact for a held effort
@@ -790,7 +800,7 @@ relation allows there.
     input of the port's width; an end input on a port whose flow is
     prescribed (a prescribed flow is held over its step, or the component
     is told its span).
-- A block with a component on a line keeps no factors between steps and
+- A block with one or more components on lines keeps no factors between steps and
   costs, per step, one assembly of the neighbours' columns (a differenced
   column one proposal of its component, and up to five more where it is
   resolved, below), one factorization and one back-substitution per effort,
@@ -934,11 +944,11 @@ that locates an event (a friction interface that cuts the step at a stop,
   the new flow of a prescribed end is among the step's inputs from the
   start, and a block on a side that jumps is dragged and caught on the
   kernel before that commit as after it. Not run before it was written.) So
-  before the component is first asked in a trial, every input of it (the
+  before any load-line owner is first asked in a trial, every input of each (the
   line's flows, the ends of its flows, and any other, such as the span of a
-  side it is told) takes one update with its efforts held at what the last
+  side it is told) takes one update with every owner's efforts held at what the last
   step accepted, by the factors the search for the line has just made (the
-  block's Jacobian without the component's own columns). That update gives
+  block's Jacobian without any load-line owner's columns). That update gives
   the released flows of the step, and what the others give its other
   inputs, exactly where the other components are affine, and their first
   Newton iterate where they are not. Every other unknown of the block keeps
@@ -1274,7 +1284,8 @@ that locates an event (a friction interface that cuts the step at a stop,
 `TransformerRatio`, `MapShape` and `MapCoefficient` for invalid power maps,
 `Empty` for a junction or a power map without members,
 `HeatRouteWidth` for a heat route that names a field heat port,
-and `LinePorts`, `TwoLines` and `LineEnd` for load lines.
+and `LinePorts` and `LineEnd` for load lines. `TwoLines` remains an API variant
+but multiple load-line owners are admitted.
 `SystemError` for a failed
 step: the component's own error unchanged (`Component`, with the phase), a
 contract breach (`Contract`), a bad negotiation answer, `NotConverged` naming
@@ -2750,12 +2761,19 @@ material, a surface card, a temperature or a slip history stays in `fs-tribo`.
   restore take the same iterations and reach the same bits over 80 steps:
   sliding, at the arrest and at rest.
 - Refused: a line on a heat port, over no port, out of order, over a port
-  twice or over a port the component does not have (at `add_on_line`); two
-  sliders on one mass (at `seal`, both named); a neighbour of negative
+  twice or over a port the component does not have (at `add_on_line`); a neighbour of negative
   inertia, which gives a line of negative compliance, and one of no
   inertia, whose answer is not finite (the first step, the slider named
   with the reason, nothing published). A slider with both ends prescribed
   and no loop is stepped by its mandatory tier with no iteration.
+- Multiple owners, `tests/multiple_load_lines.rs`: two brakes on one moving
+  body against constant-force motion and heat, two spring-coupled bodies with
+  one brake sticking and one sliding against an independent midpoint
+  oscillator update, iteration-budget refusal and cancellation without
+  publication, and bitwise state/wire/account replay across different step
+  lengths. Two loaded sticking brakes on the same body exercise the named
+  singular-block refusal; two unforced brakes at rest exercise acceptance of
+  an already consistent fixed point in `tests/load_line.rs`.
 - Requests to shorten inside a loop, with a test component that cuts the
   step at a stop (`CutsAtAStop`: one constant force to the ground, the stop
   located from the line as for a body under a held force; its heat warms a
@@ -2941,12 +2959,14 @@ solved together. Nothing in the module is deleted.
   nonsymmetric and state-varying pairings are not admitted. No conditioning
   bound or continuum trace-map accuracy is inferred from metric admission.
   No gyrator as a connection (the `Gyrator` element is a component);
-  the non-smooth tier solves one component on a load line per block, with a
-  line frozen at the step's start, and locates no event itself (a component
+  the non-smooth tier solves multiple load-line owners together, each with its
+  self-response frozen at the step's start, and locates no event itself (a component
   on the line may ask for the step that ends at one; `Slider` does not, and
-  a step in which its friction switches is first order); two such components in one loop (two
-  rubbing surfaces on one body, a contact with friction) are refused; no
-  multirate stepping; no
+  a step in which its friction switches is first order). No general
+  multi-contact complementarity algorithm or force-sharing selection is
+  supplied: redundant active constraints may leave a singular block, which
+  is refused with its component names; convergence and uniqueness are not
+  guaranteed. No multirate stepping; no
   monolithic solve through `StageResidual`; no embedded error estimator or
   PI controller (step doubling and proportional control are available).
   All `elements` and the optional nonlinear electrical storage adapters have
