@@ -1901,6 +1901,37 @@ recurrences, signed-work checks, nondividing controller substeps, complete-repor
 checkpoint continuation and scene-admission regressions, including changed-map
 snapshot refusal and identity-map equivalence to an ordinary copy.
 
+`dirac_junction` exposes the native `fs-system::elements::DiracJunction`
+through the same scene builder and coupled solve. Its definition names one
+`domain` (`translation`, `rotation`, `electrical` or `hydraulic`), an ordered
+`ports` array of 2 to 64 distinct scalar identifiers, and a square nested
+`incidence` matrix J in that order. Each port receives effort and returns
+flow: `f = J e`. Coefficients carry the domain's SI flow/effort units, and
+all endpoints share the scene's canonical scalar SI basis, frame and clock.
+`JunctionSchema` admits the original matrix without repair: all entries are
+finite, diagonal entries are zero, and `J_ij = -J_ji` exactly. Singular,
+odd-order and zero matrices are valid; no inverse or rank condition is
+introduced. Malformed extents, repeated/invalid names, dotted port names
+(which cannot be addressed by `element.port`), unknown fields and unsupported
+domains refuse during scene construction.
+
+Ordinary `join` bonds supply attached owners with the negative of the
+junction's flow, as required by the common inward-power convention. This
+relation adds no integration rule, storage or dissipation. Every named port
+reports both conjugate last-step means under its domain's SI names, for
+example `junction.a.voltage_v` and `junction.a.current_a`; both are null
+before the first accepted step. Samples, library probes and CLI reports use
+the same values. The existing native tangent, stateless codec and complete
+matrix/endpoint identity participate in ordinary kernel solves and
+checkpoint continuation. Adaptive scenes require tolerances for their
+dynamic owners, not an invented junction state. The scene form currently
+admits scalar common-domain endpoints only; the kernel's Euclidean-vector
+support and explicit cross-domain power charts are separate capabilities.
+Focused scene regressions cover a three-capacitor midpoint rotation, its
+charge and energy invariants, per-port power, checkpoint continuation and
+changed-law refusal, adaptive use and malformed declarations. These tests
+are numerical evidence only when executed on the corresponding revision.
+
 `port_hamiltonian` lowers to fs-system's `ExactPortHamiltonianComponent`
 (feature `phs`), built from authored `energy` Q, `structure` J,
 `dissipation` R and `input` G: `dx/dt = (J - R) Q x + G u`, stored energy

@@ -1,0 +1,18 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 4.0,
+  "step_s": 0.03125,
+  "sample_every_s": 0.125,
+  "elements": {
+    "junction": {"kind": "dirac_junction", "domain": "electrical", "ports": ["a", "b", "c"],
+      "incidence": [[0, -0.75, 0.75], [0.75, 0, -0.75], [-0.75, 0.75, 0]]},
+    "capacitor_a": {"kind": "node_capacitor", "capacitance_f": 1, "charge_c": 1},
+    "capacitor_b": {"kind": "node_capacitor", "capacitance_f": 1, "charge_c": -0.5},
+    "capacitor_c": {"kind": "node_capacitor", "capacitance_f": 1, "charge_c": 2}
+  },
+  "connections": [
+    {"join": ["junction.a", "capacitor_a.p"]},
+    {"join": ["junction.b", "capacitor_b.p"]},
+    {"join": ["junction.c", "capacitor_c.p"]}
+  ]
+}

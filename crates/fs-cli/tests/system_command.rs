@@ -30,6 +30,8 @@ mod feedback;
 mod gas;
 #[path = "system_command/electrical_switching.rs"]
 mod electrical_switching;
+#[path = "system_command/dirac.rs"]
+mod dirac;
 
 fn example(name: &str) -> String {
     format!(

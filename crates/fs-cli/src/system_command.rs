@@ -10,6 +10,7 @@
 mod adaptive_metric;
 mod conduction;
 mod contact;
+mod dirac;
 mod friction;
 mod gas;
 mod hydraulic;
@@ -648,6 +649,16 @@ ratio * w against the loop):
                  ratio, effort_a and flow_b in the declared domains' SI units.
                  This is an ideal held-ratio power map, not crank/cam geometry
                  or a displacement constraint; no ratio-actuator work is modeled.
+An authored lossless N-port relation in one scalar power domain:
+  dirac_junction domain, ports = [name, ...], incidence (n x n) [each port]
+                 domain is translation, rotation, electrical or hydraulic;
+                 name 2 to 64 distinct ports, in matrix row/column order.
+                 Every port receives effort and returns flow = incidence * effort.
+                 incidence must be finite and exactly skew, with zero diagonal;
+                 singular and zero matrices are valid. Entries carry the declared
+                 domain's SI flow/effort units. Reports each port's last-step
+                 effort and flow as <port>.<SI quantity>, null before a step.
+                 The junction has no state, heat outlet or adaptive error account.
 A linear port-Hamiltonian system written as matrices, stepped by the exact
 held-input owner of fs-system:
   port_hamiltonian energy, structure, dissipation (each n x n, 1 <= n <= 64),
@@ -1472,6 +1483,8 @@ enum Kind {
     Gyrator,
     /// A lossless power map whose scalar ratio comes from a signal.
     ModulatedTransformer,
+    /// An authored lossless scalar N-port law in one power domain.
+    DiracJunction,
     /// Authored linear port-Hamiltonian matrices, stepped exactly for held
     /// inputs by the fs-system owner, with a heat port.
     PortHamiltonian,
@@ -1508,7 +1521,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 55] = [
+    const TABLE: [(&'static str, Self); 56] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1552,6 +1565,7 @@ impl Kind {
         ("nonlinear_inductor", Self::NonlinearInductor),
         ("gyrator", Self::Gyrator),
         ("modulated_transformer", Self::ModulatedTransformer),
+        ("dirac_junction", Self::DiracJunction),
         ("port_hamiltonian", Self::PortHamiltonian),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
@@ -3470,6 +3484,7 @@ fn element(
         }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::ModulatedTransformer => modulated_transformer(builder, name, definition, &what)?,
+        Kind::DiracJunction => add(builder, name, dirac::junction(definition, name, &what)?, ())?,
         Kind::PortHamiltonian => {
             let (owner, state) = phs::port_hamiltonian(definition, &what)?;
             coordinates = state.len();
@@ -4527,6 +4542,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::CarreauPipe
             | Kind::Gyrator
             | Kind::ModulatedTransformer
+            | Kind::DiracJunction
             | Kind::Conductance
             | Kind::TraceContact
             | Kind::LayerConductor
@@ -5409,6 +5425,9 @@ impl Device {
         if element.kind == Kind::PortHamiltonian {
             return self.phs_values(element);
         }
+        if element.kind == Kind::DiracJunction {
+            return self.dirac_values(element);
+        }
         if element.kind == Kind::ThermalTimeline {
             let system = &self.system;
             let environment = match system.port(element.node, "environment") {
@@ -5562,6 +5581,33 @@ impl Device {
             .and_then(|values| values.first())
             .map_or(f64::NAN, |value| -value);
         values.push(("heat_w".to_owned(), heat_w));
+        values
+    }
+
+    /// The last step's conjugate effort and flow at every named Dirac port.
+    fn dirac_values(&self, element: &Element) -> Vec<(String, f64)> {
+        let mut values = Vec::with_capacity(2 * element.ports.len());
+        for port in &element.ports {
+            let Carrier::Power(kind) = port.carrier() else {
+                continue;
+            };
+            let Some(domain) = Domain::of(kind) else {
+                continue;
+            };
+            let name = port.id().as_str();
+            let accepted = self
+                .system
+                .port(element.node, name)
+                .filter(|_| self.system.steps() > 0);
+            let effort = accepted
+                .and_then(|port| self.system.last_input(port).first().copied())
+                .unwrap_or(f64::NAN);
+            let flow = accepted
+                .and_then(|port| self.system.last_output(port).first().copied())
+                .unwrap_or(f64::NAN);
+            values.push((format!("{name}.{}", domain.names().effort), effort));
+            values.push((format!("{name}.{}", domain.names().flow), flow));
+        }
         values
     }
 
@@ -5819,6 +5865,7 @@ impl Device {
             | Kind::ViscoelasticNetwork
             | Kind::GasVolume
             | Kind::ResistanceMatrix
+            | Kind::DiracJunction
             | Kind::PortHamiltonian
             | Kind::ModalStructure
             | Kind::ThermalTimeline
