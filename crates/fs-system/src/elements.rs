@@ -95,6 +95,8 @@ mod resistance;
 pub use resistance::Resistance;
 mod sampled_controller;
 pub use sampled_controller::{ControllerState, SampledController};
+mod signal_limiter;
+pub use signal_limiter::SignalLimiter;
 mod signal_source;
 pub use signal_source::{SignalClock, SignalSource};
 mod slider;

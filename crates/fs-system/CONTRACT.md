@@ -3569,3 +3569,33 @@ energy and species and checkpoint replay. These authored tests are numerical
 evidence only when executed on the corresponding revision. The signal source
 owns sampling and event resolution. This is an ideal linear valve; it supplies
 no actuator work, choking, leakage, geometric valve law or experimental claim.
+
+## Explicit signal limits
+
+`elements::SignalLimiter::new(lower, upper)` is the stateless, coordinatewise
+control law `output[i] = clamp(input[i], lower[i], upper[i])`. Its vector
+`input` and `output` ports have the same nonzero width. Both bound vectors
+are finite and equally sized, with `lower[i] <= upper[i]`; equal bounds hold
+a coordinate constant. The bounds are authored in the signal coordinates'
+units. This is an explicit part of the controller, never silent clamping of
+physical state or a waiver of an actuator's command admission rules.
+
+The component is `NonSmooth`, has an empty native state codec, and binds every
+bound bit and its width into the durable problem identity. It stores no energy
+or mass and exchanges no power. Add it with `add_with_tangent` in a feedback
+loop: the ordinary kernel solves the same graph through its declared diagonal
+tangent. Entries are one strictly inside the bounds and zero outside. At a
+bound the tangent selects zero from the generalized Jacobian, identically in
+JVP and VJP; no classical derivative is claimed at a nondegenerate kink.
+Validation refuses malformed extents, nonfinite inputs or directions, invalid
+steps and cancellation. Finite input magnitudes outside the interval are
+accepted. Evaluation allocates nothing and polls at bounded vector intervals.
+
+`tests/signal_limiter.rs` checks component conformance and finite-difference
+tangents away from kinks, the selected tangent at bounds, transpose duality,
+fixed coordinates, native codec identity, refusal and cancellation. An
+algebraic feedback graph changes between both saturation branches and its
+interior while driving a real mass through a controlled effort source; its
+motion and work follow independently solved forces, and checkpoint replay
+crosses the active-set change bitwise. This law supplies no anti-windup,
+smoothing, time-of-crossing search or feedback-stability guarantee.
