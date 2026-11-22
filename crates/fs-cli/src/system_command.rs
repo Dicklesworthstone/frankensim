@@ -63,7 +63,8 @@ use fs_mbd::spatial_loads::internal_motion::viscous::network::ViscousNetworkMoti
 use fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionControls;
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_ports::PortKind;
-use fs_ports::component::{Carrier, Component, PortRole, PortSpec, PortTangent};
+use fs_ports::component::{Carrier, Component, PortRole, PortSpec, PortTangent, StreamQuantity};
+use fs_qty::chemistry::SpeciesId;
 use fs_system::constitutive::{
     CapacitorChargeCurve, InductorFluxCurve, MAX_CAPACITOR_KNOTS, MAX_INDUCTOR_KNOTS,
     NonlinearCapacitor, NonlinearInductor,
@@ -156,8 +157,9 @@ tolerances apply to each trial interval's energy increment. Derived endpoint
 voltage/current and stateless last-step means are not independent accounts.
 A gas_volume needs mass_kg, energy_j, volume_m3 and carried<i>_kg for each
 carried quantity; a closed gas_cavity needs volume_m3 and temperature_k.
-A streaming gas_cavity requires fixed step_s: adaptive mass/species error
-accounts are not implemented for that owner here.
+A streaming gas_cavity additionally needs mass_kg, energy_j and
+species<i>_mass_kg for every species in its declared stream catalog. Its
+material-transfer step is first order, so adaptive.order must be 1.
 Every network body needs body<i>.position_m, body<i>.velocity_m_s,
 body<i>.angular_velocity_rad_s and body<i>.orientation_rad under its element
 name. These control complete vector differences and rotation angle, not
@@ -567,7 +569,8 @@ gas, the calorics of its NASA-9 packs):
   source identity and coordinate order. Both ends still need ordinary joins;
   mismatched source catalogs or energy references refuse at connection.
   The reference works in any element order. Streaming state reports include
-  species<i>_mass_kg and mass_fraction<i> in the declared catalog order;
+  energy_j in the native species datum, species<i>_mass_kg and
+  mass_fraction<i> in the declared catalog order;
   stream_species in JSON names the species, including depleted zero slots.
 The same four laws about a shaft, with angle, angular velocity and torque:
   inertia        inertia_kg_m2, angle_rad = 0, angular_velocity_rad_s = 0  [p]
@@ -1687,7 +1690,7 @@ struct Device {
     adaptive: Option<AdaptiveSettings>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Coordinate {
     Position,
     Velocity,
@@ -1702,6 +1705,11 @@ enum Coordinate {
     /// A gas cavity's volume, and the temperature of its gas.
     CavityVolume,
     CavityTemperature,
+    /// A streaming cavity's native extensive inventory and caloric energy.
+    CavityMass,
+    CavityEnergy,
+    /// Stable stream identity, independent of the active mixture's ordering.
+    CavitySpecies(SpeciesId),
 }
 
 /// A coordinate of what a gas volume holds: its mass, its internal energy,
@@ -1753,6 +1761,16 @@ impl ErrorAccount {
             Coordinate::CavityTemperature => checkpoint
                 .state::<ClosedGasParcel>(self.node)
                 .map_or(f64::NAN, |gas| gas.state().state().temperature),
+            Coordinate::CavityMass => checkpoint
+                .state::<ClosedGasParcel>(self.node)
+                .map_or(f64::NAN, ClosedGasParcel::mass_kg),
+            Coordinate::CavityEnergy => checkpoint
+                .state::<ClosedGasParcel>(self.node)
+                .map_or(f64::NAN, gas::energy_j),
+            Coordinate::CavitySpecies(ref species) => checkpoint
+                .state::<ClosedGasParcel>(self.node)
+                .and_then(|gas| gas.species_mass_kg(species).ok())
+                .unwrap_or(f64::NAN),
         }
     }
 }
@@ -1776,13 +1794,38 @@ fn gas_volume_accounts(element: &Element) -> Vec<(String, NodeId, Coordinate)> {
         .collect()
 }
 
+/// Source-backed gas keeps its native temperature and volume coordinates.
+/// Material transfer additionally controls every extensive inventory and
+/// the caloric energy, using the stream catalog even after species depletion.
+fn gas_cavity_accounts(element: &Element) -> Vec<(String, NodeId, Coordinate)> {
+    let mut coordinates = vec![
+        ("volume_m3".to_owned(), Coordinate::CavityVolume),
+        ("temperature_k".to_owned(), Coordinate::CavityTemperature),
+    ];
+    if let Some(basis) = gas::stream_basis(&element.ports) {
+        coordinates.push(("mass_kg".to_owned(), Coordinate::CavityMass));
+        coordinates.push(("energy_j".to_owned(), Coordinate::CavityEnergy));
+        for (index, quantity) in basis.quantities().iter().enumerate() {
+            if let StreamQuantity::SpeciesMass(species) = quantity {
+                coordinates.push((
+                    format!("species{index}_mass_kg"),
+                    Coordinate::CavitySpecies(species.clone()),
+                ));
+            }
+        }
+    }
+    coordinates
+        .into_iter()
+        .map(|(field, coordinate)| {
+            (format!("{}.{field}", element.name), element.node, coordinate)
+        })
+        .collect()
+}
+
 /// The refusal of an element whose kind has no error account, with the
 /// reason for its kind.
 fn no_error_account(element: &Element) -> String {
     let why = match element.kind {
-        Kind::GasCavity => {
-            "its streaming mass and species inventories have no error account here"
-        }
         Kind::SlidingInterface => "its law's state is not given as numbers",
         Kind::ThermalTimeline => "its cells are born and joined at events",
         Kind::SampledController => {
@@ -1831,8 +1874,10 @@ fn whole_state_account(element: &Element) -> (&'static str, Coordinate) {
 /// conduction body steps by backward Euler. A modal structure is exact for a
 /// held effort and holds one that varies within a step, which leaves the
 /// coupled step at order two. A gas volume steps by the trapezoidal rule, and
-/// a closed gas cavity measures order two. Point-sampled commands and accepted-state
-/// observations conservatively limit control scenes to order one.
+/// a closed gas cavity measures order two. The native streaming cavity's
+/// explicit material transfer and subsequent heat/work solve are first order.
+/// Point-sampled commands and accepted-state observations conservatively limit
+/// control scenes to order one.
 /// None: the order is the scene's to establish.
 fn step_order(element: &Element) -> Option<u32> {
     if element.point_sampled_command {
@@ -1848,7 +1893,11 @@ fn step_order(element: &Element) -> Option<u32> {
         {
             Some(1)
         }
-        Kind::GasCavity => gas::stream_basis(&element.ports).is_none().then_some(2),
+        Kind::GasCavity => Some(if gas::stream_basis(&element.ports).is_some() {
+            1
+        } else {
+            2
+        }),
         Kind::ModalStructure | Kind::GasVolume => Some(2),
         _ => None,
     }
@@ -4492,11 +4541,6 @@ fn solver(definition: &J) -> Result<SolveConfig, String> {
 
 fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<AdaptiveSettings, String> {
     fields(definition, &["order", "min_step_s", "max_attempts", "tolerances"], "adaptive")?;
-    if let Some(element) = elements.iter().find(|element| {
-        element.kind == Kind::GasCavity && gas::stream_basis(&element.ports).is_some()
-    }) {
-        return Err(no_error_account(element));
-    }
     let defaults = AdaptiveConfig::default();
     let order = number_or(definition, "order", f64::from(defaults.order), "adaptive")?;
     let attempts = number_or(definition, "max_attempts", f64::from(defaults.max_attempts), "adaptive")?;
@@ -4593,10 +4637,10 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 expected.extend(gas_volume_accounts(element));
                 Vec::new()
             }
-            Kind::GasCavity => vec![
-                ("volume_m3", Coordinate::CavityVolume),
-                ("temperature_k", Coordinate::CavityTemperature),
-            ],
+            Kind::GasCavity => {
+                expected.extend(gas_cavity_accounts(element));
+                Vec::new()
+            }
             Kind::ConductionBody | Kind::ModalStructure => vec![whole_state_account(element)],
             Kind::Slider
             | Kind::FrictionInterface
@@ -5179,7 +5223,7 @@ impl Device {
             }) {
                 "gas_cavity calorics and pressure use the original NASA-9 and species packs; \
                  streaming cavities use fs-gas's native inventory and energy transfer, with \
-                 fixed steps and independently audited total and species mass; restrictions \
+                 first-order transfer and independently audited total and species mass; restrictions \
                  use the donor's enthalpy and composition, and exact source/enthalpy identity \
                  is required at every stream connection; transport packs bound admitted states \
                  but do not supply the authored restriction conductance; stream entropy is not \

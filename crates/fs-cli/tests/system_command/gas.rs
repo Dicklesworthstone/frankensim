@@ -389,13 +389,6 @@ fn stream_scene_admission_preserves_source_identity_and_requires_explicit_policy
             "carried",
         ),
         (
-            original.replace(
-                "\"duration_s\": 1.0,",
-                "\"duration_s\": 1.0, \"adaptive\": {\"tolerances\": {}},",
-            ),
-            "fixed step_s",
-        ),
-        (
             original.replace("\"stream_basis\": \"left.stream\"", "\"carried\": 1"),
             "declared medium",
         ),
@@ -449,4 +442,212 @@ fn streaming_checkpoint_continuation_binds_mass_tolerance_and_source() {
     write_packs(&path, "n2", &packs);
     assert!(fs_cli::SystemScene::from_text(&text, &path).is_ok());
     super::checkpoints::resume_is_refused("stream gas source", &path, &root);
+}
+
+fn stream_accounts(species: usize, tight: impl Fn(&str) -> bool) -> Vec<(String, f64)> {
+    let mut accounts = Vec::new();
+    for cavity in ["left", "right"] {
+        let mut coordinates = vec![
+            ("volume_m3".to_owned(), 1.0e-3),
+            ("temperature_k".to_owned(), 300.0),
+            ("mass_kg".to_owned(), 1.0e-3),
+            ("energy_j".to_owned(), 100.0),
+        ];
+        coordinates.extend((0..species).map(|index| (format!("species{index}_mass_kg"), 1.0e-3)));
+        for (coordinate, scale) in coordinates {
+            let name = format!("{cavity}.{coordinate}");
+            let fraction = if tight(&name) { 1.0e-6 } else { 1.0e-2 };
+            accounts.push((name, fraction * scale));
+        }
+    }
+    accounts
+}
+
+fn adaptive_stream(text: &str, accounts: &[(String, f64)]) -> String {
+    let borrowed: Vec<_> = accounts
+        .iter()
+        .map(|(name, value)| (name.as_str(), *value))
+        .collect();
+    let settings = super::error_controlled(0.1, &borrowed).replace("\"order\": 2", "\"order\": 1");
+    assert!(text.contains("\"step_s\": 0.01,"));
+    text.replace("\"step_s\": 0.01,", &settings)
+}
+
+/// Fixed-volume mass and enthalpy balances, with NASA-9 coefficients from
+/// the original source TSVs. This calls no Component or parcel integrator.
+/// The common formation constant cancels from h_d - u_i for pure N2.
+fn n2_exchange_reference(steps: u32) -> [f64; 4] {
+    let a = super::n2_nasa9_low();
+    let r = super::n2_gas_constant();
+    let volume = 1.0e-3;
+    let mut state = [
+        90_000.0 * volume / (r * 300.0),
+        300.0,
+        80_000.0 * volume / (r * 300.0),
+        300.0,
+    ];
+    let rhs = |y: [f64; 4]| {
+        let rate = CONDUCTANCE * r * (y[0] * y[1] - y[2] * y[3]) / volume;
+        let donor_temperature = if rate >= 0.0 { y[1] } else { y[3] };
+        let enthalpy = r * (super::n2_energy(&a, donor_temperature) + donor_temperature);
+        let left_u = r * super::n2_energy(&a, y[1]);
+        let right_u = r * super::n2_energy(&a, y[3]);
+        [
+            -rate,
+            rate * (left_u - enthalpy)
+                / (y[0] * r * (super::n2_heat_capacity(&a, y[1]) - 1.0)),
+            rate,
+            (rate * (enthalpy - right_u) + HEAT_W)
+                / (y[2] * r * (super::n2_heat_capacity(&a, y[3]) - 1.0)),
+        ]
+    };
+    let dt = 1.0 / f64::from(steps);
+    for _ in 0..steps {
+        let first = rhs(state);
+        let second = rhs(std::array::from_fn(|i| state[i] + 0.5 * dt * first[i]));
+        let third = rhs(std::array::from_fn(|i| state[i] + 0.5 * dt * second[i]));
+        let fourth = rhs(std::array::from_fn(|i| state[i] + dt * third[i]));
+        for i in 0..4 {
+            state[i] += dt * (first[i] + 2.0 * second[i] + 2.0 * third[i] + fourth[i]) / 6.0;
+        }
+    }
+    state
+}
+
+#[test]
+fn adaptive_source_backed_exchange_converges_to_independent_caloric_balances() {
+    let original = std::fs::read_to_string(example("n2_stream_exchange.json")).unwrap();
+    let path = scene_file(&original);
+    let run = |tight| {
+        let text = adaptive_stream(&original, &stream_accounts(1, |_| tight));
+        let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        scene_context(|cx, _| scene.run(cx).unwrap());
+        scene
+    };
+    let loose = run(false);
+    let tight = run(true);
+    let reference = n2_exchange_reference(8192);
+    let finer = n2_exchange_reference(16384);
+    for (index, (actual, expected)) in reference.into_iter().zip(finer).enumerate() {
+        close(actual, expected, if index % 2 == 0 { 1.0e-11 } else { 1.0e-5 });
+    }
+    let distance = |scene: &fs_cli::SystemScene| {
+        [
+            "left.mass_kg",
+            "left.temperature_k",
+            "right.mass_kg",
+            "right.temperature_k",
+        ]
+        .into_iter()
+        .zip(finer)
+        .map(|(name, expected)| (probe(scene, name) / expected - 1.0).abs())
+        .fold(0.0, f64::max)
+    };
+    let (far, near) = (distance(&loose), distance(&tight));
+    assert!(near < 0.2 * far && near < 2.0e-4, "loose {far:e}, tight {near:e}");
+    assert!(tight.steps() > loose.steps());
+    assert!(probe(&tight, "a_valve.mass_rate_kg_s") < 0.0);
+    close(
+        probe(&tight, "left.mass_kg") + probe(&tight, "right.mass_kg"),
+        170_000.0 * 1.0e-3 / (super::n2_gas_constant() * 300.0),
+        2.0e-14,
+    );
+    close(tight.ledger().mass_residual_kg().unwrap(), 0.0, 2.0e-14);
+    close(tight.ledger().carried_residual(0).unwrap(), 0.0, 2.0e-14);
+    close(tight.ledger().energy_residual_j(), 0.0, 2.0e-6);
+
+    // The committed example takes this same path through the actual binary.
+    let example_path = example("adaptive_n2_stream_exchange.json");
+    let text = std::fs::read_to_string(&example_path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &example_path).unwrap();
+    scene_context(|cx, _| scene.run(cx).unwrap());
+    let (code, json, stderr) = run_binary(&["--json", "system", &example_path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json, scene.render_json());
+}
+
+#[test]
+fn adaptive_mixture_species_accounts_control_refinement_and_resume_exactly() {
+    let original = std::fs::read_to_string(example("n2_stream_exchange.json")).unwrap();
+    let original = original
+        .replace(
+            "thermochemical 300 90000 mole 1 N2 1",
+            "thermochemical 300 90000 mole 2 N2 0.75 tracer 0.25",
+        )
+        .replace(
+            "thermochemical 300 80000 mole 1 N2 1",
+            "thermochemical 300 80000 mole 2 N2 0.25 tracer 0.75",
+        )
+        .replace(
+            "\"transport\": \"n2/transport.fsmcdpk\"}]",
+            "\"transport\": \"n2/transport.fsmcdpk\"}, {\"species\": \"tracer/species.pack\", \
+             \"nasa9\": \"tracer/nasa9.pack\", \"transport\": \"tracer/transport.fsmcdpk\"}]",
+        );
+    let path = scene_file(&original);
+    write_packs(&path, "tracer", &tracer_packs(&nitrogen_packs()));
+    let loose_text = adaptive_stream(&original, &stream_accounts(2, |_| false));
+    let text = adaptive_stream(&original, &stream_accounts(2, |name| name.contains(".species")));
+    let mut loose = fs_cli::SystemScene::from_text(&loose_text, &path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    let totals = |scene: &fs_cli::SystemScene| {
+        ["mass_kg", "species0_mass_kg", "species1_mass_kg", "energy_j"].map(|coordinate| {
+            probe(scene, &format!("left.{coordinate}")) + probe(scene, &format!("right.{coordinate}"))
+        })
+    };
+    let initial = totals(&scene);
+    scene_context(|cx, _| {
+        loose.run(cx).unwrap();
+        assert!(scene.advance(f64::MAX, cx).unwrap());
+        assert!(!scene.is_finished());
+        let (bytes, root) = scene.checkpoint().unwrap();
+        let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        resumed.resume_checkpoint(&bytes, root).unwrap();
+        scene.run(cx).unwrap();
+        resumed.run(cx).unwrap();
+        assert_eq!(resumed.render_json(), scene.render_json());
+        assert_eq!(resumed.checkpoint().unwrap(), scene.checkpoint().unwrap());
+    });
+    assert!(
+        scene.steps() > loose.steps(),
+        "species tolerances did not control the step"
+    );
+    let final_totals = totals(&scene);
+    for index in 0..3 {
+        close(final_totals[index], initial[index], 2.0e-14);
+    }
+    close(final_totals[3] - initial[3], HEAT_W * scene.time_s(), 2.0e-6);
+    for index in 0..2 {
+        close(scene.ledger().carried_residual(index).unwrap(), 0.0, 2.0e-14);
+    }
+    close(scene.ledger().mass_residual_kg().unwrap(), 0.0, 2.0e-14);
+    close(scene.ledger().energy_residual_j(), 0.0, 2.0e-6);
+    for name in ["left", "right"] {
+        close(
+            probe(&scene, &format!("{name}.energy_j")),
+            probe(&scene, &format!("{name}.mass_kg"))
+                * probe(&scene, &format!("{name}.specific_internal_energy_j_kg")),
+            1.0e-12,
+        );
+    }
+    assert!(scene.render_json().contains("\"stream_species\":[\"N2\",\"tracer\"]"));
+
+    // Every state coordinate is mandatory, including a later catalog species.
+    let accounts = stream_accounts(2, |_| true);
+    for missing in 0..accounts.len() {
+        let mut partial = accounts.clone();
+        let (name, _) = partial.remove(missing);
+        let error = fs_cli::SystemScene::from_text(&adaptive_stream(&original, &partial), &path)
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains(&format!("adaptive.tolerances.{name}")),
+            "{error}"
+        );
+    }
+    let order_two = text.replace("\"order\": 1", "\"order\": 2");
+    let error = fs_cli::SystemScene::from_text(&order_two, &path).err().unwrap();
+    assert!(
+        error.message.contains("adaptive.order") && error.message.contains("order 1"),
+        "{error}"
+    );
 }

@@ -1,0 +1,45 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.1,
+  "sample_every_s": 0.1,
+  "adaptive": {
+    "order": 1,
+    "min_step_s": 1e-7,
+    "max_attempts": 40,
+    "tolerances": {
+      "left.volume_m3": {"absolute": 1e-12, "relative": 0},
+      "left.temperature_k": {"absolute": 1e-3, "relative": 0},
+      "left.mass_kg": {"absolute": 1e-9, "relative": 0},
+      "left.energy_j": {"absolute": 1e-4, "relative": 0},
+      "left.species0_mass_kg": {"absolute": 1e-9, "relative": 0},
+      "right.volume_m3": {"absolute": 1e-12, "relative": 0},
+      "right.temperature_k": {"absolute": 1e-3, "relative": 0},
+      "right.mass_kg": {"absolute": 1e-9, "relative": 0},
+      "right.energy_j": {"absolute": 1e-4, "relative": 0},
+      "right.species0_mass_kg": {"absolute": 1e-9, "relative": 0}
+    }
+  },
+  "elements": {
+    "a_valve": {"kind": "restriction", "conductance_kg_s_pa": 2.0e-9,
+                "stream_basis": "left.stream"},
+    "left": {"kind": "gas_cavity", "gas": "thermochemical 300 90000 mole 1 N2 1",
+             "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack",
+                          "transport": "n2/transport.fsmcdpk"}],
+             "volume_m3": 1.0e-3, "stream_mass_tolerance_kg": 1.0e-15,
+             "temperature_min_k": 200, "temperature_max_k": 900},
+    "right": {"kind": "gas_cavity", "gas": "thermochemical 300 80000 mole 1 N2 1",
+              "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack",
+                           "transport": "n2/transport.fsmcdpk"}],
+              "volume_m3": 1.0e-3, "stream_mass_tolerance_kg": 1.0e-15,
+              "temperature_min_k": 200, "temperature_max_k": 900}
+  },
+  "connections": [
+    {"join": ["left.stream", "a_valve.a"]},
+    {"join": ["right.stream", "a_valve.b"]},
+    {"prescribe": "left.p", "flow_m3_s": 0},
+    {"prescribe": "right.p", "flow_m3_s": 0},
+    {"prescribe": "left.heat", "heat_rate_w": 0},
+    {"prescribe": "right.heat", "heat_rate_w": 40}
+  ]
+}

@@ -2460,10 +2460,19 @@ A `gas_volume` gives `mass_kg`, `energy_j`, `volume_m3` and one
 `carried<i>_kg` for each carried quantity: the fields of what it holds. (The
 report's `carried<i>` are fractions and are not accounts.) A closed
 `gas_cavity` gives `volume_m3` and `temperature_k`; its pressure follows from
-those two. A cavity with `stream_mass_tolerance_kg` is refused under
-`adaptive`, by its element name: its changing total and species inventories
-have no error accounts in this scene path. It requires a fixed `step_s`;
-the closed cavity's order-two claim does not extend to material transfer.
+those two. A cavity with `stream_mass_tolerance_kg` additionally requires
+`mass_kg`, `energy_j` and `species<i>_mass_kg` for every species in its
+immutable stream catalog. These are native endpoint inventories, not
+instantaneous transport rates or mass fractions. `energy_j` is mass times
+specific internal energy in the original species' caloric datum, the same
+quantity stored by the streaming owner. Independent mass/species accounts
+remain mandatory even when a large formation-energy offset dominates this
+energy's relative scale. Species accounts retain their identifiers across
+active-mixture reordering, depletion and re-entry, measuring an absent
+species as zero. No species references are leaked or indexed by a changing
+active mixture. The original full-step/two-half-step metric compares these
+coordinates with the explicitly declared tolerances; the native transfer,
+source admission and conservation audits remain unchanged.
 
 A `conduction_body` gives one account for its whole field: `temperature_k`,
 or `specific_enthalpy_j_kg` for a body whose state is specific enthalpy. Its
@@ -2482,8 +2491,11 @@ the element's name, its kind, the kind's order and the declared one:
 - `modal_structure`: 2. Its step is exact for a held force, and a force that
   varies within a step is held, which leaves the coupled step at order 2.
 - `gas_volume`: 2, the trapezoidal rule. A closed `gas_cavity`: 2, as measured.
+- Streaming `gas_cavity`: 1. Its native step transports species and enthalpy
+  from the initial state, then applies heat and volume work. Declaring order
+  2 is refused even if the particular scene happens to exchange no material.
 
-No other kind is held to an order. The four were measured with a debug
+The following original four comparisons were measured with a debug
 build of 1afbe6e1e8 (md5 d8958a0070e9adae894d437b78a55166): five fixed
 steps, each half the one before, each end state compared with a run at a
 much smaller step. The error fell by these factors at each halving:
@@ -2703,8 +2715,8 @@ not a connection: ordinary `join`/`common_effort` entries still wire both
 restriction ends. The kernel refuses different species catalogs, source
 laws, enthalpy references or coordinate orders, even when widths match.
 
-Streaming reports additionally give `species<i>_mass_kg` and
-`mass_fraction<i>`, measured from the native accepted inventory in the
+Streaming reports additionally give `energy_j` in the native species datum,
+`species<i>_mass_kg` and `mass_fraction<i>`, measured from the accepted inventory in the
 original stream catalog order. The JSON element's `stream_species` array
 names those coordinates. A depleted species retains its ordinal and reports
 zero until it re-enters; active mixture reorderings do not rename accounts.
@@ -2712,8 +2724,12 @@ Total mass and each species' window balance use the existing kernel ledger
 coverage and residual fields below. Restrictions carry the donor's enthalpy
 and composition in either flow direction. Stream entropy is not carried by
 the v0 port, so mass/energy closure is not an entropy or passivity claim.
-Streaming adaptive integration is refused until complete inventory error
-accounts and an appropriate order are supplied.
+Streaming adaptive integration uses the common step-doubling driver with
+order 1 and the complete volume, temperature, total mass, energy and named
+species mass accounts above. The estimates control local temporal error;
+they do not certify global trajectory error, reaction physics or a material
+law outside its source domain. Caloric solve tolerances must still resolve
+the requested state accuracy.
 
 `examples/system/n2_stream_exchange.json` connects two source-backed nitrogen
 cavities through an identified restriction. Heating the initially
@@ -2724,6 +2740,13 @@ total-mass ledger, and compare CLI/library reports. An authored two-species
 fixture exercises independent composition coordinates. A checkpoint at
 0.375 s resumes in another process to the same complete report, and changed
 stream tolerance or source association refuses the old saved state.
+
+`examples/system/adaptive_n2_stream_exchange.json` gives the same source-backed
+exchange an explicit error budget. Focused adaptive regressions compare
+the trajectory with independent thermochemical equations, require every
+inventory account, exercise species-controlled refinement and continuation,
+and refuse a declared order above one. These are authored numerical checks;
+their execution results must be recorded for the corresponding revision.
 
 Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
 `examples/system/n2/`:

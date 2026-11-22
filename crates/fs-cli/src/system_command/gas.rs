@@ -166,6 +166,11 @@ pub(super) fn stream_basis(ports: &[PortSpec]) -> Option<&StreamBasis> {
     ports.iter().find_map(PortSpec::stream_basis)
 }
 
+/// The streaming owner's native internal energy in its species' caloric datum.
+pub(super) fn energy_j(gas: &ClosedGasParcel) -> f64 {
+    gas.mass_kg() * gas.state().specific_internal_energy_j_kg()
+}
+
 /// Names of the native species coordinates, including any depleted species.
 pub(super) fn species_names(ports: &[PortSpec]) -> Vec<&str> {
     stream_basis(ports)
@@ -199,6 +204,7 @@ pub(super) fn values(system: &System, node: NodeId, ports: &[PortSpec]) -> Vec<(
     .map(|(key, value)| (key.to_owned(), value))
     .collect();
     if let Some(basis) = stream_basis(ports) {
+        values.push(("energy_j".to_owned(), energy_j(gas)));
         let inventory = gas.species_inventory_kg();
         for (index, quantity) in basis.quantities().iter().enumerate() {
             if let StreamQuantity::SpeciesMass(species) = quantity {
