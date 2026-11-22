@@ -69,7 +69,7 @@ use fs_system::constitutive::{
 };
 use fs_system::elements::{
     Admittance, AffineSignal, Conductance, ControlledSource, ControllerState, Damper, FlowSource,
-    Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater, Mass,
+    Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater, IdealDiode, IdealSwitch, Mass,
     ModulatedTransformer, Motion, Resistance, Restriction, SampledController, SignalClock,
     SignalSource, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
@@ -169,7 +169,8 @@ Affine maps, signal sources, published inertance observations and controlled
 commands supplied by signals or point-sampled value admit order 1 only. SI-named controlled-source
 prescriptions retain their interval-mean rules. sampled_controller and
 speed_controller require fixed-step operation; their sample events still cap
-steps exactly, but no adaptive discrete-memory metric is supplied.
+steps exactly, but no adaptive discrete-memory metric is supplied. ideal_diode
+and ideal_switch also require fixed stepping; no switching error metric is supplied.
 The refined two-half-step state is retained; rejected trials leave no state
 or ledger entries. step_s remains the largest interval.
 The final externally capped interval may be shorter than min_step_s; an
@@ -583,6 +584,16 @@ share that voltage (current is positive into each component):
   node_capacitor capacitance_f, charge_c = 0                          [p]
   resistor_branch resistance_ohm, or material, length_m, area_m2      [a, b, heat]
   current_source current_a (waveform; negative supplies the node)     [p]
+  ideal_diode    no parameters; i >= 0, v <= 0, i*v = 0              [p]
+  ideal_switch   no parameters; closed signal is exactly 0 or 1      [p, closed]
+An ideal device's p receives current and returns voltage, positive power into
+the device. Join a resistor_branch.a to a voltage.p, node_capacitor.p and
+ideal device.p for a series RC circuit; prescribe 0 V at the resistor's b.
+A closed switch has zero voltage; an open switch has zero current. Connect
+a signal_source to closed or prescribe value there, using held_table for
+binary schedules. Reports expose current_a, voltage_v and the switch's closed
+command from the last step (null initially). Fixed stepping only; these ideal
+relations contain no semiconductor loss, recovery, arcing or impulse model.
 A resistor or resistor_branch that names a scene material whose declaration
 names a resistivity_property is that material's uniform conductor of length
 length_m and cross-section area_m2: in every trial fs-material's Ohmic node
@@ -706,12 +717,18 @@ is its origin:
                  connector then has a signal input temperature<e> [K], read
                  once a step; a temperature outside valid_k refuses the step.
 A waveform is a number, {\"sine\": {amplitude, frequency_hz, phase_rad = 0,
-offset = 0}} or {\"table\": [[time_s, value], ...]} (linear, ends held).
+offset = 0}}, {\"table\": [[time_s, value], ...]} (linear, ends held), or
+{\"held_table\": [[time_s, value], ...]} (constant between knots; a knot's
+new value applies at that time). Both tables hold their first/last values
+outside their span and require nonempty, finite, strictly increasing times.
+Times and values are bounded to magnitude 1e150. Held tables schedule each
+knot after the first and integrate each constant segment exactly.
 
 Connections, ports written element.port:
   {\"join\": [ports]}       the ports meet at one node: a mass (inertia,
                           inductor) and the ends that share its velocity
-                          (angular velocity, current), or a heat capacity and
+                          (angular velocity, current), or a resistor_branch
+                          end setting series current, or a heat capacity and
                           the elements at its temperature
   {\"common_effort\": [ports]}
                           one effort-setting port (node_capacitor,
@@ -783,8 +800,9 @@ Connections, ports written element.port:
                           (pressure [Pa], specific enthalpy [J/kg], then each
                           carried mass fraction); ratio for a
                           modulated_transformer's ratio signal; value for
-                          affine/sampled_controller inputs or controlled-source
-                          commands (the latter also accept their SI field name).
+                          affine/sampled_controller inputs, ideal_switch.closed
+                          or controlled-source commands (the latter also accept
+                          their SI field name).
   A prescribed value and a speed_controller input are point samples at the
   step's start, matching signal_source. SI-named controlled-source commands
   and physical prescriptions use interval means.
@@ -1439,6 +1457,10 @@ enum Kind {
     ResistorBranch(Domain),
     /// A prescribed flow, positive into the source.
     CurrentSource(Domain),
+    /// An ideal one-way electrical relation on the kernel's load line.
+    IdealDiode,
+    /// An ideal electrical open/short relation with a binary signal input.
+    IdealSwitch,
     /// The fs-material laminar pipe of a Carreau-Yasuda liquid, whose
     /// viscosity follows the temperature at its heat port.
     CarreauPipe,
@@ -1485,7 +1507,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 53] = [
+    const TABLE: [(&'static str, Self); 55] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1515,6 +1537,8 @@ impl Kind {
         ("node_capacitor", Self::NodeCapacitor(Domain::Electrical)),
         ("resistor_branch", Self::ResistorBranch(Domain::Electrical)),
         ("current_source", Self::CurrentSource(Domain::Electrical)),
+        ("ideal_diode", Self::IdealDiode),
+        ("ideal_switch", Self::IdealSwitch),
         ("accumulator", Self::NodeCapacitor(Domain::Hydraulic)),
         (
             "hydraulic_resistor",
@@ -1752,6 +1776,9 @@ fn no_error_account(element: &Element) -> String {
         Kind::SpeedController => {
             "its sample count, phase and held command form a discrete policy, not a continuous error coordinate"
         }
+        Kind::IdealDiode | Kind::IdealSwitch => {
+            "its switching relation has no event-resolved step-doubling error metric here"
+        }
         // A slider, a friction interface, a Hertz patch, a contact interface.
         _ => {
             "its force jumps where it sticks, slips or strikes, and an estimate by step \
@@ -1950,7 +1977,7 @@ fn waveform(value: &J, what: &str) -> Result<Waveform, String> {
     }
     let object = value
         .as_object()
-        .ok_or_else(|| format!("{what}: a waveform is a number, a sine or a table"))?;
+        .ok_or_else(|| format!("{what}: a waveform is a number, sine, table or held_table"))?;
     match object {
         [(key, sine)] if key == "sine" => {
             let inner = format!("{what}.sine");
@@ -1963,10 +1990,10 @@ fn waveform(value: &J, what: &str) -> Result<Waveform, String> {
             )
             .map_err(|e| format!("{inner}: {e}"))
         }
-        [(key, table)] if key == "table" => {
+        [(key, table)] if key == "table" || key == "held_table" => {
             let rows = table
                 .as_array()
-                .ok_or_else(|| format!("{what}.table: expected an array of [time_s, value]"))?;
+                .ok_or_else(|| format!("{what}.{key}: expected an array of [time_s, value]"))?;
             let knots = rows
                 .iter()
                 .map(|row| match row.as_array() {
@@ -1974,11 +2001,16 @@ fn waveform(value: &J, what: &str) -> Result<Waveform, String> {
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| format!("{what}.table: every row is [time_s, value]"))?;
-            Waveform::table(knots).map_err(|e| format!("{what}: {e}"))
+                .ok_or_else(|| format!("{what}.{key}: every row is [time_s, value]"))?;
+            let waveform = if key == "held_table" {
+                Waveform::held_table(knots)
+            } else {
+                Waveform::table(knots)
+            };
+            waveform.map_err(|e| format!("{what}: {e}"))
         }
         _ => Err(format!(
-            "{what}: a waveform object has exactly one key, sine or table"
+            "{what}: a waveform object has exactly one key, sine, table or held_table"
         )),
     }
 }
@@ -3354,6 +3386,24 @@ fn element(
             node_capacity = Some(capacity);
             add(builder, name, storage, content)?
         }
+        Kind::IdealDiode => {
+            fields(definition, &["kind"], &what)?;
+            let diode = IdealDiode::new();
+            let ports = diode.ports().to_vec();
+            let node = builder
+                .add_on_line(name, diode, ())
+                .map_err(|error| Refusal::Admission(error.to_string()))?;
+            (node, ports)
+        }
+        Kind::IdealSwitch => {
+            fields(definition, &["kind"], &what)?;
+            let switch = IdealSwitch::new();
+            let ports = switch.ports().to_vec();
+            let node = builder
+                .add_on_line(name, switch, ())
+                .map_err(|error| Refusal::Admission(error.to_string()))?;
+            (node, ports)
+        }
         Kind::ResistorBranch(Domain::Electrical) if definition.get("material").is_some() => {
             let (resistor, material) =
                 ohmic_resistor(definition, materials, Terminals::Voltage, &what)?;
@@ -4277,7 +4327,10 @@ fn prescribe(
         && (value_command
             || matches!(
                 element.kind,
-                Kind::AffineSignal | Kind::SampledController | Kind::SpeedController
+                Kind::AffineSignal
+                    | Kind::SampledController
+                    | Kind::SpeedController
+                    | Kind::IdealSwitch
             ));
     let signal_quantity = if element.kind == Kind::SpeedController {
         Some(
@@ -4289,7 +4342,11 @@ fn prescribe(
                 "angular_velocity_rad_s"
             },
         )
-    } else if value_command || matches!(element.kind, Kind::AffineSignal | Kind::SampledController)
+    } else if value_command
+        || matches!(
+            element.kind,
+            Kind::AffineSignal | Kind::SampledController | Kind::IdealSwitch
+        )
     {
         Some("value")
     } else {
@@ -4351,15 +4408,19 @@ fn prescribe(
     // signed zeros as the same physical time as the builder's ordering does.
     events.dedup_by(|a, b| (*a).partial_cmp(&*b) == Some(std::cmp::Ordering::Equal));
     // A series element end carried by a node receives minus the node's
-    // flow. A node capacitor instead receives current into its own stored
-    // charge, so its prescribed current keeps the component's positive sign,
-    // and a gas cavity keeps its compression flow's.
+    // flow. Node capacitors and ideal electrical devices instead use current
+    // positive into their own p port, so their prescriptions keep that sign;
+    // a gas cavity likewise keeps its compression flow's.
     let prescribed_flow = matches!(
         (target.carrier, target.role),
         (Carrier::Power(_), PortRole::FlowIn)
     ) && !matches!(
         elements[target.element].kind,
-        Kind::NodeCapacitor(_) | Kind::NonlinearCapacitor | Kind::GasCavity
+        Kind::NodeCapacitor(_)
+            | Kind::NonlinearCapacitor
+            | Kind::IdealDiode
+            | Kind::IdealSwitch
+            | Kind::GasCavity
     );
     let sign = if prescribed_flow { -1.0 } else { 1.0 };
     builder
@@ -4527,6 +4588,8 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::ContactInterface
             | Kind::SampledController
             | Kind::SpeedController
+            | Kind::IdealDiode
+            | Kind::IdealSwitch
             | Kind::ThermalTimeline => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
@@ -4722,6 +4785,17 @@ impl Device {
             NO_CLAIM
         };
         let mut description = std::borrow::Cow::Borrowed(base);
+        if self
+            .elements
+            .iter()
+            .any(|element| matches!(element.kind, Kind::IdealDiode | Kind::IdealSwitch))
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; ideal electrical devices enforce their open/short relation on \
+                 each representative step with binary held switch commands; no semiconductor \
+                 losses, recovery, breakdown, arcing, impulses or interior zero-crossing model"
+            ));
+        }
         if self
             .elements
             .iter()
@@ -5536,6 +5610,10 @@ impl Device {
             Some(port) if system.steps() > 0 => system.last_output(port)[0],
             _ => f64::NAN,
         };
+        let input = |port: &str| match system.port(element.node, port) {
+            Some(port) if system.steps() > 0 => system.last_input(port)[0],
+            _ => f64::NAN,
+        };
         match element.kind {
             Kind::Inertance(domain) => {
                 let names = domain.names();
@@ -5563,6 +5641,12 @@ impl Device {
                     ),
                 ]
             }
+            Kind::IdealDiode => vec![("current_a", input("p")), ("voltage_v", output("p"))],
+            Kind::IdealSwitch => vec![
+                ("current_a", input("p")),
+                ("voltage_v", output("p")),
+                ("closed", input("closed")),
+            ],
             Kind::NonlinearCapacitor => {
                 let charge = system.state::<f64>(element.node).copied().unwrap_or(f64::NAN);
                 let voltage = element.charge_voltage_curve.as_ref()

@@ -28,6 +28,8 @@ mod laminar_pipe;
 mod feedback;
 #[path = "system_command/gas.rs"]
 mod gas;
+#[path = "system_command/electrical_switching.rs"]
+mod electrical_switching;
 
 fn example(name: &str) -> String {
     format!(

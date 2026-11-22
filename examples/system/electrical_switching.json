@@ -1,0 +1,27 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.4,
+  "step_s": 0.037,
+  "sample_every_s": 0.05,
+  "solver": {"absolute_tolerance": 1e-12, "relative_tolerance": 1e-12},
+  "elements": {
+    "diode_supply": {"kind": "voltage", "voltage_v": {"held_table": [[0, -12], [0.7, 6], [1.0, -18]]}},
+    "diode_resistor": {"kind": "resistor_branch", "resistance_ohm": 10},
+    "diode_capacitor": {"kind": "node_capacitor", "capacitance_f": 0.01},
+    "diode": {"kind": "ideal_diode"},
+    "switch_supply": {"kind": "voltage", "voltage_v": -12},
+    "switch_resistor": {"kind": "resistor_branch", "resistance_ohm": 10},
+    "switch_capacitor": {"kind": "node_capacitor", "capacitance_f": 0.01},
+    "switch": {"kind": "ideal_switch"},
+    "switch_command": {"kind": "signal_source", "waveforms": [{"held_table": [[0, 1], [0.2, 0], [0.35, 1]]}]},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10, "temperature_k": 300}
+  },
+  "connections": [
+    {"join": ["diode_resistor.a", "diode_supply.p", "diode_capacitor.p", "diode.p"]},
+    {"prescribe": "diode_resistor.b", "voltage_v": 0},
+    {"join": ["switch_resistor.a", "switch_supply.p", "switch_capacitor.p", "switch.p"]},
+    {"prescribe": "switch_resistor.b", "voltage_v": 0},
+    {"signal": "switch_command.output", "to": ["switch.closed"]},
+    {"common_effort": ["case.heat", "diode_resistor.heat", "switch_resistor.heat"]}
+  ]
+}

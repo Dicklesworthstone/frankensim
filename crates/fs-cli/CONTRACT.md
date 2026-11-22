@@ -1727,6 +1727,53 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+`ideal_diode` and `ideal_switch` lower to the native fs-system load-line
+Components, with no scene-side solve. Each takes only `kind`. Their electrical
+`p` port receives current and returns voltage, with positive power into the
+device. A direct `current_a` prescription on either ideal device preserves
+that positive-inward sign. A nonzero prescribed current into an open device
+refuses because an isolated boundary supplies no circuit impedance. The diode
+enforces `i >= 0`, `v <= 0`, `i*v = 0`. The switch's scalar
+`closed` input is exactly 0 (zero current) or 1 (zero voltage, either current
+direction); any other command refuses the step without publishing a prefix.
+It accepts a signal connection or `{"prescribe":"switch.closed","value":waveform}`,
+point sampled at the accepted step start. A `join` may use a
+`resistor_branch.a` as its flow-setting port, with voltage, node-capacitor and
+ideal-device `p` ports as members, to describe a series RC loop. Ground the
+resistor's `b` at zero voltage. Common-effort heat junctions seed their member
+temperature guesses from the connected heat capacity's initial temperature.
+
+Waveforms everywhere in the scene accept `{"held_table":[[time_s,value],...]}`
+alongside the existing number, sine and linearly interpolated `table` forms.
+The new form holds the latest knot's value until the next knot, applies the
+new value at the knot, and holds endpoint values outside the table's span.
+Times are finite, strictly increasing and nonempty; times and values are bounded
+to magnitude 1e150. The native waveform supplies exact interval means for
+physical sources and prescriptions, point values for signal laws, and events
+at every held knot after the first. Binary switch schedules should use held
+tables; a linear transition produces
+fractional commands and is refused. Interpolation choice and every knot are
+part of checkpoint identity.
+
+Reports and probes expose last-step `current_a` and `voltage_v` for both ideal
+devices and `closed` for the switch, null before the first accepted step.
+These nonsmooth laws currently require fixed `step_s`, following the CLI's
+existing load-line admission convention; no event-resolved adaptive error
+metric is claimed. Their representative-step open/short relations do not
+model semiconductor loss, reverse recovery, breakdown, arcing, impulses or
+interior zero-crossing events.
+
+`examples/system/electrical_switching.json` combines two RC loops, one that
+blocks a reversed supply and one that opens and recloses on a held schedule,
+with all resistor heat stored in a common case. Its 0.037 s maximum step
+does not divide the four switch/source event times. Authored regressions in
+`tests/system_command/electrical_switching.rs` compare every accepted step
+against an independent midpoint charge recurrence, signed supply work,
+capacitor storage, Joule heat and the case's temperature, and exercise event
+landing, binary-command refusal, prescribed versus signal-wired commands,
+checkpoint identity and complete-report continuation. These regressions must
+be run before claiming their tolerances have been observed.
+
 The same parallel forms exist for a liquid (`Domain::Hydraulic`, port kind
 `FluidPressureFlux`): `accumulator` (`capacitance_m3_pa`, optional `volume_m3`;
 reports `volume_m3` and the endpoint `pressure_pa = volume_m3 /
