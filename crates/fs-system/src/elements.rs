@@ -87,6 +87,8 @@ mod controlled_source;
 pub use controlled_source::ControlledSource;
 mod dirac;
 pub use dirac::{DiracError, DiracJunction};
+mod electrical;
+pub use electrical::{IdealDiode, IdealSwitch};
 mod modulated_transformer;
 pub use modulated_transformer::ModulatedTransformer;
 mod resistance;

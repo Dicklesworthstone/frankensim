@@ -3497,3 +3497,38 @@ checkpoint replay, compensated near-knot steps and adjacent times, atomic
 schedule admission and problem identity. `tests/adaptive.rs` exercises the same
 negotiation through step doubling, an invalid-estimate rewind and independently
 integrated heat input. The waveform-event assertions remain in `tests/elements.rs`.
+
+## Ideal electrical diode and commanded switch
+
+`elements::IdealDiode` and `elements::IdealSwitch` are stateless, lossless
+`LoadLine` components, added with `SystemBuilder::add_on_line`. Their scalar
+electrical port `p` receives current [A] and returns voltage [V], with positive
+power entering the device. For the diode, current runs from anode to cathode
+and voltage is anode minus cathode: the ideal relation is `i >= 0`, `v <= 0`,
+`i * v = 0`. Forward conduction has zero voltage; reverse bias has zero current.
+The switch's scalar signal `closed` must be exactly `0` or `1`: open enforces
+zero current, closed enforces zero voltage and admits either current direction.
+Fractional commands refuse. Prescribe changes with a scheduled boundary or
+`SignalSource` using `Waveform::held_table`, so steps respect authored events.
+
+The kernel supplies `i = released - C * v`, with finite nonnegative compliance
+`C`. An open device with `C = 0` and nonzero prescribed current refuses; with
+both zero it chooses zero voltage without asserting uniqueness. Neither device
+stores energy, dissipates heat or substitutes a large resistance. Both have
+native empty-state codecs with distinct identities. Invalid inputs, impossible
+current constraints and cancellation refuse without publishing outputs.
+
+These are ideal relations between a step's representative values. They do not
+locate circuit-induced zero crossings, model semiconductor forward drops,
+recovery or breakdown, or resolve arcing and ideal-storage switching impulses.
+The caller owns temporal resolution and event schedules; a binary command is
+not a continuous control law for instantaneous feedback inside a nonlinear solve.
+
+Run `cargo run -p fs-system --example electrical_switching` for two RC branches
+whose resistors heat a shared thermal capacity. One diode blocks discharge
+when its supply reverses; a commanded switch interrupts the other branch's
+charging. The example emits capacitor voltages, branch currents, temperature,
+source work and the energy residual from the composition kernel. The seven
+regressions in `tests/electrical_switches.rs` cover constitutive and energy
+conformance, analytic resistive circuits, event boundaries, refusal and replay,
+native codecs, and independent midpoint RC charge and thermal-work balances.

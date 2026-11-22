@@ -66,7 +66,7 @@ jobs:
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
-        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test snapshots --locked
+        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
       - name: Devices described as data
         run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
       - name: Native source-backed gas Component
