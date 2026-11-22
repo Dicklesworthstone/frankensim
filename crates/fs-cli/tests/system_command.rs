@@ -26,6 +26,8 @@ mod ohmic;
 mod laminar_pipe;
 #[path = "system_command/feedback.rs"]
 mod feedback;
+#[path = "system_command/gas.rs"]
+mod gas;
 
 fn example(name: &str) -> String {
     format!(

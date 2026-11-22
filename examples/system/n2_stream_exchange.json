@@ -1,0 +1,28 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.01,
+  "sample_every_s": 0.1,
+  "elements": {
+    "a_valve": {"kind": "restriction", "conductance_kg_s_pa": 2.0e-9,
+                "stream_basis": "left.stream"},
+    "left": {"kind": "gas_cavity", "gas": "thermochemical 300 90000 mole 1 N2 1",
+             "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack",
+                          "transport": "n2/transport.fsmcdpk"}],
+             "volume_m3": 1.0e-3, "stream_mass_tolerance_kg": 1.0e-15,
+             "temperature_min_k": 200, "temperature_max_k": 900},
+    "right": {"kind": "gas_cavity", "gas": "thermochemical 300 80000 mole 1 N2 1",
+              "sources": [{"species": "n2/species.pack", "nasa9": "n2/nasa9.pack",
+                           "transport": "n2/transport.fsmcdpk"}],
+              "volume_m3": 1.0e-3, "stream_mass_tolerance_kg": 1.0e-15,
+              "temperature_min_k": 200, "temperature_max_k": 900}
+  },
+  "connections": [
+    {"join": ["left.stream", "a_valve.a"]},
+    {"join": ["right.stream", "a_valve.b"]},
+    {"prescribe": "left.p", "flow_m3_s": 0},
+    {"prescribe": "right.p", "flow_m3_s": 0},
+    {"prescribe": "left.heat", "heat_rate_w": 0},
+    {"prescribe": "right.heat", "heat_rate_w": 40}
+  ]
+}

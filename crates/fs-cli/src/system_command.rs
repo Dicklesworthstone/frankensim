@@ -154,7 +154,9 @@ in that field's SI units; relative tolerances are nonnegative. Source-work
 tolerances apply to each trial interval's energy increment. Derived endpoint
 voltage/current and stateless last-step means are not independent accounts.
 A gas_volume needs mass_kg, energy_j, volume_m3 and carried<i>_kg for each
-carried quantity; a gas_cavity needs volume_m3 and temperature_k.
+carried quantity; a closed gas_cavity needs volume_m3 and temperature_k.
+A streaming gas_cavity requires fixed step_s: adaptive mass/species error
+accounts are not implemented for that owner here.
 Every network body needs body<i>.position_m, body<i>.velocity_m_s,
 body<i>.angular_velocity_rad_s and body<i>.orientation_rad under its element
 name. These control complete vector differences and rotation angle, not
@@ -535,7 +537,7 @@ capacities; all joined volumes must hold the same gas):
   With wall = true, p is the pressure on a moving wall: join it to a mass
   as {\"port\": volume.p, \"ratio\": area_m2}, positive for a wall whose
   motion in the mass's positive direction enlarges the volume.
-A closed gas of cited thermochemistry (fs-gas: frozen composition, ideal
+A gas of cited thermochemistry (fs-gas: frozen chemistry, ideal
 gas, the calorics of its NASA-9 packs):
   gas_cavity     gas (a record \"thermochemical T_K p_Pa mole|mass N
                  species fraction ...\"), sources = [{species, nasa9,
@@ -543,8 +545,9 @@ gas, the calorics of its NASA-9 packs):
                  scene, one triple per species), volume_m3,
                  temperature_min_k, temperature_max_k (the bracket of the
                  owner's caloric solve), energy_tolerance_j_kg = 1e-7,
-                 max_iterations = 128, insulated = false
-                                                 [p, heat unless insulated]
+                 max_iterations = 128, insulated = false,
+                 stream_mass_tolerance_kg (optional; enables material flow)
+                                        [p, heat unless insulated, stream if enabled]
   p receives the compression flow [m3/s], positive when the cavity
   shrinks, and returns the step's work pressure [Pa]: prescribe flow_m3_s
   on it, or join it to a mass as {\"port\": cavity.p, \"ratio\": area_m2},
@@ -553,6 +556,17 @@ gas, the calorics of its NASA-9 packs):
   resolves the packs at its end state, transport claims included, so the
   gas stays inside every claim's validity (the seed-v1 transport cards
   hold from 75 to 101.325 kPa).
+  stream_mass_tolerance_kg must be positive and finite; it is the native
+  inventory-transfer tolerance, not a relaxation of the kernel's mass audit.
+  It cannot be combined with insulated: prescribe zero heat_rate_w on heat
+  for an adiabatic streaming cavity. Its stream carries mass, enthalpy and
+  each catalog species' mass. A restriction between these cavities names
+  stream_basis: \"cavity.stream\" instead of carried, copying that port's
+  source identity and coordinate order. Both ends still need ordinary joins;
+  mismatched source catalogs or energy references refuse at connection.
+  The reference works in any element order. Streaming state reports include
+  species<i>_mass_kg and mass_fraction<i> in the declared catalog order;
+  stream_species in JSON names the species, including depleted zero slots.
 The same four laws about a shaft, with angle, angular velocity and torque:
   inertia        inertia_kg_m2, angle_rad = 0, angular_velocity_rad_s = 0  [p]
   torsion_spring stiffness_n_m_rad, cubic_n_m_rad3 = 0, twist_rad = 0  [a, b]
@@ -1727,6 +1741,9 @@ fn gas_volume_accounts(element: &Element) -> Vec<(String, NodeId, Coordinate)> {
 /// reason for its kind.
 fn no_error_account(element: &Element) -> String {
     let why = match element.kind {
+        Kind::GasCavity => {
+            "its streaming mass and species inventories have no error account here"
+        }
         Kind::SlidingInterface => "its law's state is not given as numbers",
         Kind::ThermalTimeline => "its cells are born and joined at events",
         Kind::SampledController => {
@@ -1772,7 +1789,7 @@ fn whole_state_account(element: &Element) -> (&'static str, Coordinate) {
 /// conduction body steps by backward Euler. A modal structure is exact for a
 /// held effort and holds one that varies within a step, which leaves the
 /// coupled step at order two. A gas volume steps by the trapezoidal rule, and
-/// a gas cavity measures order two. Point-sampled commands and accepted-state
+/// a closed gas cavity measures order two. Point-sampled commands and accepted-state
 /// observations conservatively limit control scenes to order one.
 /// None: the order is the scene's to establish.
 fn step_order(element: &Element) -> Option<u32> {
@@ -1789,7 +1806,8 @@ fn step_order(element: &Element) -> Option<u32> {
         {
             Some(1)
         }
-        Kind::ModalStructure | Kind::GasVolume | Kind::GasCavity => Some(2),
+        Kind::GasCavity => gas::stream_basis(&element.ports).is_none().then_some(2),
+        Kind::ModalStructure | Kind::GasVolume => Some(2),
         _ => None,
     }
 }
@@ -3203,6 +3221,7 @@ fn element(
     materials: &materials::Materials,
     prepared: &mut conduction::Prepared,
     scene: &Path,
+    existing: &[Element],
 ) -> Result<Element, Refusal> {
     let what = format!("elements.{name}");
     let kind_name = definition
@@ -3498,7 +3517,10 @@ fn element(
             gas = Some(volume.clone());
             add(builder, name, volume, contents)?
         }
-        Kind::Restriction => add(builder, name, restriction(definition, &what)?, ())?,
+        Kind::Restriction => {
+            let law = restriction(definition, &what, builder, existing)?;
+            add(builder, name, law, ())?
+        }
         Kind::Heater => {
             fields(definition, &["kind", "power_w"], &what)?;
             let wave = definition
@@ -3698,12 +3720,48 @@ fn slider(
 }
 
 /// A `restriction` between gas volumes.
-fn restriction(definition: &J, what: &str) -> Result<Restriction, Refusal> {
+fn restriction(
+    definition: &J,
+    what: &str,
+    builder: &SystemBuilder,
+    elements: &[Element],
+) -> Result<Restriction, Refusal> {
     fields(
         definition,
-        &["kind", "conductance_kg_s_pa", "carried"],
+        &["kind", "conductance_kg_s_pa", "carried", "stream_basis"],
         what,
     )?;
+    let conductance = number(definition, "conductance_kg_s_pa", what)?;
+    if definition.get("stream_basis").is_some() {
+        if definition.get("carried").is_some() {
+            return Err(format!(
+                "{what}: stream_basis determines the carried coordinates; omit carried"
+            )
+            .into());
+        }
+        let reference = definition
+            .str_field("stream_basis")
+            .ok_or_else(|| format!("{what}.stream_basis: expected a port name, cavity.stream"))?;
+        let target = resolve(builder, elements, reference)?;
+        let owner = &elements[target.element];
+        let spec = owner
+            .ports
+            .iter()
+            .find(|port| port.carrier() == Carrier::Stream)
+            .filter(|port| {
+                owner.kind == Kind::GasCavity
+                    && target.carrier == Carrier::Stream
+                    && port.stream_basis().is_some()
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{what}.stream_basis: {reference:?} must name the stream port of a \
+                     gas_cavity with stream_mass_tolerance_kg"
+                )
+            })?;
+        return Restriction::for_stream(conductance, spec)
+            .map_err(|error| Refusal::Input(format!("{what}: {error}")));
+    }
     let carried = number_or(definition, "carried", 0.0, what)?;
     if !(0.0..=MAX_CARRIED as f64).contains(&carried) || carried.fract() != 0.0 {
         return Err(format!(
@@ -3712,7 +3770,7 @@ fn restriction(definition: &J, what: &str) -> Result<Restriction, Refusal> {
         .into());
     }
     Restriction::new(
-        number(definition, "conductance_kg_s_pa", what)?,
+        conductance,
         carried as usize,
     )
     .map_err(|e| Refusal::Input(format!("{what}: {e}")))
@@ -4357,6 +4415,11 @@ fn solver(definition: &J) -> Result<SolveConfig, String> {
 
 fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<AdaptiveSettings, String> {
     fields(definition, &["order", "min_step_s", "max_attempts", "tolerances"], "adaptive")?;
+    if let Some(element) = elements.iter().find(|element| {
+        element.kind == Kind::GasCavity && gas::stream_basis(&element.ports).is_some()
+    }) {
+        return Err(no_error_account(element));
+    }
     let defaults = AdaptiveConfig::default();
     let order = number_or(definition, "order", f64::from(defaults.order), "adaptive")?;
     let attempts = number_or(definition, "max_attempts", f64::from(defaults.max_attempts), "adaptive")?;
@@ -4549,15 +4612,26 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
     // A trace contact is computed from two bodies, so those are built first.
     let mut prepared = conduction::prepare(definitions, &materials, source_path)?;
     let mut elements = Vec::with_capacity(definitions.len());
-    for (name, definition) in definitions {
-        elements.push(element(
-            &mut builder,
-            name,
-            definition,
-            &materials,
-            &mut prepared,
-            source_path,
-        )?);
+    // Source-identified restrictions copy a cavity's native port declaration.
+    // Build those after the storages, regardless of the scene's element order.
+    for deferred in [false, true] {
+        for (name, definition) in definitions {
+            let needs_basis = definition.str_field("kind") == Some("restriction")
+                && definition.get("stream_basis").is_some();
+            if needs_basis != deferred {
+                continue;
+            }
+            let added = element(
+                &mut builder,
+                name,
+                definition,
+                &materials,
+                &mut prepared,
+                source_path,
+                &elements,
+            )?;
+            elements.push(added);
+        }
     }
     let connections = root
         .get("connections")
@@ -5009,14 +5083,26 @@ impl Device {
                     "limited to declared pure-phase thermal laws; no ",
                     "limited to declared pure-phase thermal laws and gas cavities' packs; no ",
                 );
-            description = std::borrow::Cow::Owned(format!(
-                "{base}; a gas_cavity holds a closed, uniform, frozen ideal-gas mixture whose \
+            let claim = if self.elements.iter().any(|element| {
+                element.kind == Kind::GasCavity && gas::stream_basis(&element.ports).is_some()
+            }) {
+                "gas_cavity calorics and pressure use the original NASA-9 and species packs; \
+                 streaming cavities use fs-gas's native inventory and energy transfer, with \
+                 fixed steps and independently audited total and species mass; restrictions \
+                 use the donor's enthalpy and composition, and exact source/enthalpy identity \
+                 is required at every stream connection; transport packs bound admitted states \
+                 but do not supply the authored restriction conductance; stream entropy is not \
+                 carried or audited, and no reactions, condensation, real-gas equation of \
+                 state, internal waves or wall heat capacity is modeled"
+            } else {
+                "a gas_cavity holds a closed, uniform, frozen ideal-gas mixture whose \
                  calorics and pressure are its NASA-9 and species packs', stepped by the fs-gas \
                  discrete-gradient heat and work solve; its transport packs are resolved at \
                  every step end and bound the admitted states though no transport is used; no \
                  reactions, condensation, real-gas equation of state, internal waves, leakage \
                  or wall heat capacity"
-            ));
+            };
+            description = std::borrow::Cow::Owned(format!("{base}; {claim}"));
         }
         if self
             .elements
@@ -5226,7 +5312,7 @@ impl Device {
             return self.gas_values(element);
         }
         if element.kind == Kind::GasCavity {
-            return gas::values(&self.system, element.node);
+            return gas::values(&self.system, element.node, &element.ports);
         }
         if element.kind == Kind::ModalStructure {
             return modal::values(&self.system, element.node, &element.ports);
@@ -5844,6 +5930,14 @@ impl Device {
             // the card's identities, beside the contact's rows.
             if let Some(declared) = &element.contact {
                 out.push_str(&declared.json_member());
+            }
+            if element.kind == Kind::GasCavity && gas::stream_basis(&element.ports).is_some() {
+                let species = gas::species_names(&element.ports)
+                    .into_iter()
+                    .map(quote)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = write!(out, ",\"stream_species\":[{species}]");
             }
             out.push('}');
         }

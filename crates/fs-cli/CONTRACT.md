@@ -1093,9 +1093,9 @@ the four that had none (`accumulator` and `flow_source`, `capacitor`,
 `every_kind_is_the_kind_of_an_element_of_some_example_scene`, reads the
 directory and fails, naming the kinds, when a name of the table is the kind
 of no element. So each kind is saved and resumed by a test here, in the form
-its example gives it. Not shown: a form no example uses, and the two modes
-this command does not lower, a streaming gas cavity and an implicit thermal
-timeline, which have no codec.
+its example gives it. A streaming gas cavity uses the native variable-inventory
+codec, retaining accepted mass, composition and its complete original source
+catalog. An implicit thermal timeline is not lowered by this command.
 
 Tests in `tests/system_command.rs`:
 - A 2 kg puck on a 1 cm patch under 10 N, sliding from 1 m/s without
@@ -2360,8 +2360,12 @@ controlled; nonlinear storage uses its actual charge/flux coordinate.
 
 A `gas_volume` gives `mass_kg`, `energy_j`, `volume_m3` and one
 `carried<i>_kg` for each carried quantity: the fields of what it holds. (The
-report's `carried<i>` are fractions and are not accounts.) A `gas_cavity`
-gives `volume_m3` and `temperature_k`; its pressure follows from those two.
+report's `carried<i>` are fractions and are not accounts.) A closed
+`gas_cavity` gives `volume_m3` and `temperature_k`; its pressure follows from
+those two. A cavity with `stream_mass_tolerance_kg` is refused under
+`adaptive`, by its element name: its changing total and species inventories
+have no error accounts in this scene path. It requires a fixed `step_s`;
+the closed cavity's order-two claim does not extend to material transfer.
 
 A `conduction_body` gives one account for its whole field: `temperature_k`,
 or `specific_enthalpy_j_kg` for a body whose state is specific enthalpy. Its
@@ -2379,7 +2383,7 @@ the element's name, its kind, the kind's order and the declared one:
 - `conduction_body`: 1. It steps by backward Euler.
 - `modal_structure`: 2. Its step is exact for a held force, and a force that
   varies within a step is held, which leaves the coupled step at order 2.
-- `gas_volume`: 2, the trapezoidal rule. `gas_cavity`: 2, as measured.
+- `gas_volume`: 2, the trapezoidal rule. A closed `gas_cavity`: 2, as measured.
 
 No other kind is held to an order. The four were measured with a debug
 build of 1afbe6e1e8 (md5 d8958a0070e9adae894d437b78a55166): five fixed
@@ -2548,22 +2552,22 @@ accepted steps than with all four loose and rejects a trial: 3342, 4294,
 when this was written. With all four tight it ends 1.7e-8 from a run at a
 fixed step of 20 µs, against 2.4e-6 with all loose. A scene without the
 chamber's carried mass is refused by that account's name. Limits: one gas for all joined
-volumes, unchecked; constant heat capacities; no source-backed gas, which
-is the closed `gas_cavity` below.
+volumes, unchecked; constant heat capacities. Source-backed closed and
+streaming gas instead use `gas_cavity` below.
 
-`gas_cavity` lowers to `fs_gas::component::GasCavity`: a closed, uniform,
-frozen ideal-gas mixture whose calorics and pressure come from canonical
+`gas_cavity` lowers to `fs_gas::component::GasCavity`: a uniform,
+frozen ideal-gas mixture, closed by default, whose calorics and pressure come from canonical
 species, NASA-9 and transport packs (`xtask matdb-pack`). The scene gives the
 `gas` record (`thermochemical T_K p_Pa mole|mass N species fraction ...`),
 one `sources` triple of pack paths per species (relative to the scene),
 `volume_m3`, the caloric bracket `temperature_min_k` and `temperature_max_k`,
-and optionally `energy_tolerance_j_kg` (1e-7), `max_iterations` (1 to 128)
-and `insulated`. Port `p` receives the compression flow [m3/s], positive when
+and optionally `energy_tolerance_j_kg` (1e-7), `max_iterations` (1 to 128),
+`insulated`, and `stream_mass_tolerance_kg`. Port `p` receives the compression flow [m3/s], positive when
 the cavity shrinks, and returns the step's work pressure. `prescribe` takes
 `flow_m3_s` with that sign, like an accumulator's. As a `join` member
 `{"port": "cavity.p", "ratio": area_m2}`, a mass moving the positive way
 enlarges the cavity, as with a `gas_volume` wall. Port `heat` (absent when
-insulated) is a heat capacity's. The owner's discrete-gradient step changes
+insulated) is a heat capacity's. The closed owner's discrete-gradient step changes
 the entropy only by the heat over its mean temperature. Every step resolves
 the packs at its end state, including the transport claims, which no
 equation uses. A state outside any card's validity (the seed-v1 N2
@@ -2571,13 +2575,56 @@ transport card holds 75 to 101.325 kPa and 200 to 1000 K) is refused at
 admission (exit 3) or by the step that would reach it (exit 4). So is a
 bracket that spans two NASA-9 charts (N2's split at 1000 K). Reports give
 temperature, pressure, density, volume, mass and specific internal energy.
-Under `adaptive` its volume and temperature are error accounts (above). Its
+Under `adaptive` a closed cavity's volume and temperature are error accounts (above). Its
 state has fs-gas's codec, three words (volume,
 temperature, pressure) on a reference bound whole, so `--checkpoint` saves it:
 `tests/system_command/checkpoints.rs` saves `n2_gas_spring.json` at 0.125 s
 and resumes it in another process to the report of a run that pauses there,
 and its checkpoint is refused by the scene with another gas temperature,
 volume or temperature bracket.
+
+Setting the finite positive `stream_mass_tolerance_kg` opts into the native
+owner's material-stream mode. It adds `stream`, carrying mass rate,
+enthalpy rate and each catalog species' mass rate, all positive into the
+cavity. The owner retains the native species inventory and caloric transfer
+solve; the CLI evaluates no gas law. This mode is registered without an
+analytic tangent, so the kernel differences its proposal when solving a
+loop. `insulated` and streaming are mutually exclusive; prescribe zero
+`heat_rate_w` on `heat` for an adiabatic open cavity. The transfer tolerance
+does not weaken the kernel's independent total/species mass audits.
+
+A `restriction` may give `stream_basis: "cavity.stream"` instead of
+`carried`. It is built by `Restriction::for_stream` from that declared
+stream port, preserving its complete source identity, enthalpy convention
+and ordered species coordinates. Referenced cavities are built before such
+restrictions, independently of authored element order. The reference names
+a streaming `gas_cavity`; an unknown element, another port/kind, a closed
+cavity or simultaneous `carried` is refused. The reference declares a basis,
+not a connection: ordinary `join`/`common_effort` entries still wire both
+restriction ends. The kernel refuses different species catalogs, source
+laws, enthalpy references or coordinate orders, even when widths match.
+
+Streaming reports additionally give `species<i>_mass_kg` and
+`mass_fraction<i>`, measured from the native accepted inventory in the
+original stream catalog order. The JSON element's `stream_species` array
+names those coordinates. A depleted species retains its ordinal and reports
+zero until it re-enters; active mixture reorderings do not rename accounts.
+Total mass and each species' window balance use the existing kernel ledger
+coverage and residual fields below. Restrictions carry the donor's enthalpy
+and composition in either flow direction. Stream entropy is not carried by
+the v0 port, so mass/energy closure is not an entropy or passivity claim.
+Streaming adaptive integration is refused until complete inventory error
+accounts and an appropriate order are supplied.
+
+`examples/system/n2_stream_exchange.json` connects two source-backed nitrogen
+cavities through an identified restriction. Heating the initially
+lower-pressure vessel reverses the material flow. The focused tests in
+`tests/system_command/gas.rs` compare every accepted endpoint against native
+paired transfer followed by native heat integration, check each species and
+total-mass ledger, and compare CLI/library reports. An authored two-species
+fixture exercises independent composition coordinates. A checkpoint at
+0.375 s resumes in another process to the same complete report, and changed
+stream tolerance or source association refuses the old saved state.
 
 Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
 `examples/system/n2/`:
@@ -2602,9 +2649,11 @@ Tests in `tests/system_command.rs`, all on the seed N2 packs committed in
   tolerance for the cavity's volume) and two run refusals (compression past
   101.325 kPa, a bracket reaching 1000 K).
 
-No claim: the gas is frozen and ideal, with no reactions, condensation,
-real-gas equation of state, internal waves, leakage or wall heat capacity.
-Transport is resolved, not used. The packs are the seed-v1 cards, so a
+No claim: the gas chemistry is frozen and ideal, with no reactions,
+condensation, real-gas equation of state, internal waves or wall heat capacity.
+Material exchange occurs only through explicitly connected or prescribed
+stream ports. Transport cards are resolved but do not determine an authored
+restriction's conductance. The packs are the seed-v1 cards, so a
 scene's states must stay inside their validity.
 
 Stream reports expose the kernel's independently measured inventory accounts.

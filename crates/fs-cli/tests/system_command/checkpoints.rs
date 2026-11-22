@@ -20,7 +20,7 @@ fn checkpoint_continuation(scene: &std::path::Path, text: &str) -> String {
 /// The scene saved at `until_s` and resumed by another process reports byte
 /// for byte what one process reports that pauses at `until_s` and goes on.
 /// Returns the saved root.
-fn checkpoint_continuation_at(scene: &std::path::Path, text: &str, until_s: f64) -> String {
+pub(super) fn checkpoint_continuation_at(scene: &std::path::Path, text: &str, until_s: f64) -> String {
     let checkpoint = scene.with_extension("fssnap");
     let scene_path = scene.to_str().unwrap();
     let checkpoint_path = checkpoint.to_str().unwrap();
@@ -425,7 +425,7 @@ fn saved_conduction_scenes_continue_with_identical_reports() {
 
 /// The scene at `scene` refuses the checkpoint beside it: no report, and
 /// the checkpoint diagnostic.
-fn resume_is_refused(case: &str, scene: &std::path::Path, root: &str) {
+pub(super) fn resume_is_refused(case: &str, scene: &std::path::Path, root: &str) {
     let checkpoint = scene.with_extension("fssnap");
     let (code, stdout, stderr) = run_binary(&[
         "--json",
@@ -661,15 +661,14 @@ fn a_saved_gas_cavity_continues_alike_and_refuses_a_changed_gas() {
     each_changed_scene_is_refused(CHANGED_GAS_SCENES);
 }
 
-/// The examples the tests above save and resume by `checkpoint_continuation`
-/// (28 scenes).
+/// Examples covered by the focused checkpoint tests here and in `gas`.
 const SAVED_ABOVE: &str = "adaptive_oscillator adaptive_suspension \
     adaptive_viscoelastic_mount anisotropic_damping bowed_mode carreau_pipe damped_pair \
     damped_pair_lining dragged_lining phase_change_conduction phase_change_store \
     port_hamiltonian_oscillator projected_suspension self_heating_damper spun_puck \
     steel316_blocks_trace steel316_enthalpy_bar steel316_heated_bar stribeck_block struck_mode \
     two_blocks_atkins two_blocks_atkins_following two_slabs two_slabs_mapped two_slabs_trace \
-    variable_transmission viscoelastic_mount n2_gas_spring";
+    variable_transmission viscoelastic_mount n2_gas_spring n2_stream_exchange";
 
 /// Claims, declared before the first run: every other scene of
 /// `examples/system`, run in place with `--until T --whole-steps

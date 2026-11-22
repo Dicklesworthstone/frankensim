@@ -1,6 +1,5 @@
-//! `gas_cavity`: a closed, uniform gas of cited thermochemistry, `fs-gas`'s
-//! [`GasCavity`], with a pressure-work port and, unless insulated, a heat
-//! port.
+//! `gas_cavity`: a uniform gas of cited thermochemistry, `fs-gas`'s
+//! [`GasCavity`], with pressure-work, heat and optional material-stream ports.
 //!
 //! The gas is a thermochemical record resolved through explicit canonical
 //! species, NASA-9 and transport packs, by the same loader the cht command
@@ -14,7 +13,7 @@ use fs_material::gas_species::input::ThermochemicalPhase;
 use fs_material::gas_species::input::packs::{
     MAX_SOURCE_BYTES, MAX_SOURCE_PACK_BYTES, SourcePackBytes, read_source_parcel,
 };
-use fs_ports::component::PortSpec;
+use fs_ports::component::{Component, PortSpec, StreamBasis, StreamQuantity};
 use fs_system::{NodeId, System, SystemBuilder};
 
 use super::materials::read_pack;
@@ -49,6 +48,7 @@ pub(super) fn cavity(
             "energy_tolerance_j_kg",
             "max_iterations",
             "insulated",
+            "stream_mass_tolerance_kg",
         ],
         what,
     )?;
@@ -124,6 +124,17 @@ pub(super) fn cavity(
         Some(J::Bool(insulated)) => *insulated,
         Some(_) => return Err(format!("{what}: insulated is true or false").into()),
     };
+    let stream_mass_tolerance_kg = definition
+        .get("stream_mass_tolerance_kg")
+        .map(|_| positive(definition, "stream_mass_tolerance_kg", what))
+        .transpose()?;
+    if insulated && stream_mass_tolerance_kg.is_some() {
+        return Err(format!(
+            "{what}: stream_mass_tolerance_kg is incompatible with insulated; \
+             prescribe zero heat_rate_w on heat for an adiabatic streaming cavity"
+        )
+        .into());
+    }
     let reference = ClosedGasParcel::from_isochoric(parcel);
     let temperature_k = reference.state().state().temperature;
     let mut cavity =
@@ -133,16 +144,47 @@ pub(super) fn cavity(
             .insulated()
             .map_err(|error| format!("{what}: {error}"))?;
     }
-    Ok((add(builder, name, cavity, reference)?, temperature_k))
+    let added = if let Some(tolerance) = stream_mass_tolerance_kg {
+        cavity = cavity
+            .streaming(tolerance)
+            .map_err(|error| format!("{what}: {error}"))?;
+        let ports = cavity.ports().to_vec();
+        // The native streaming owner deliberately has no analytic tangent.
+        // The kernel differences its unchanged proposal map inside loops.
+        let node = builder
+            .add(name, cavity, reference)
+            .map_err(|error| Refusal::Admission(error.to_string()))?;
+        (node, ports)
+    } else {
+        add(builder, name, cavity, reference)?
+    };
+    Ok((added, temperature_k))
+}
+
+/// The native catalog and enthalpy identity retained by a streaming cavity.
+pub(super) fn stream_basis(ports: &[PortSpec]) -> Option<&StreamBasis> {
+    ports.iter().find_map(PortSpec::stream_basis)
+}
+
+/// Names of the native species coordinates, including any depleted species.
+pub(super) fn species_names(ports: &[PortSpec]) -> Vec<&str> {
+    stream_basis(ports)
+        .into_iter()
+        .flat_map(StreamBasis::quantities)
+        .filter_map(|quantity| match quantity {
+            StreamQuantity::SpeciesMass(species) => Some(species.as_str()),
+            StreamQuantity::Named { .. } => None,
+        })
+        .collect()
 }
 
 /// The report of a gas cavity: the state of the gas it holds.
-pub(super) fn values(system: &System, node: NodeId) -> Vec<(String, f64)> {
+pub(super) fn values(system: &System, node: NodeId, ports: &[PortSpec]) -> Vec<(String, f64)> {
     let Some(gas) = system.state::<ClosedGasParcel>(node) else {
         return Vec::new();
     };
     let state = gas.state();
-    [
+    let mut values: Vec<(String, f64)> = [
         ("temperature_k", state.state().temperature),
         ("pressure_pa", state.state().pressure),
         ("density_kg_m3", state.state().density),
@@ -155,5 +197,18 @@ pub(super) fn values(system: &System, node: NodeId) -> Vec<(String, f64)> {
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
-    .collect()
+    .collect();
+    if let Some(basis) = stream_basis(ports) {
+        let inventory = gas.species_inventory_kg();
+        for (index, quantity) in basis.quantities().iter().enumerate() {
+            if let StreamQuantity::SpeciesMass(species) = quantity {
+                let mass = inventory
+                    .as_ref()
+                    .map_or(f64::NAN, |held| held.get(species).copied().unwrap_or(0.0));
+                values.push((format!("species{index}_mass_kg"), mass));
+                values.push((format!("mass_fraction{index}"), mass / gas.mass_kg()));
+            }
+        }
+    }
+    values
 }
