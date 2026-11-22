@@ -110,7 +110,7 @@ fn power_port(port: &J, what: &str) -> Result<PortSpec, String> {
     let domain = port
         .str_field("domain")
         .and_then(Domain::parse)
-        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical"))?;
+        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical, hydraulic"))?;
     let role = match port.str_field("role") {
         Some("effort_in") => PortRole::EffortIn,
         Some("flow_in") => PortRole::FlowIn,

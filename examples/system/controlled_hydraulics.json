@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2.0,
+  "step_s": 0.037,
+  "sample_every_s": 0.125,
+  "elements": {
+    "store": {"kind": "accumulator", "capacitance_m3_pa": 1e-9, "volume_m3": 2e-4},
+    "line": {"kind": "hydraulic_resistor", "resistance_pa_s_m3": 1e9},
+    "pump": {"kind": "controlled_flow", "domain": "hydraulic"},
+    "reservoir": {"kind": "controlled_effort", "domain": "hydraulic"},
+    "oil": {"kind": "heat_capacity", "capacity_j_k": 50.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"common_effort": ["store.p", "line.a", "pump.p"]},
+    {"join": ["line.b", "reservoir.p"]},
+    {"route": "line.heat", "to": [["oil.heat", 1.0]]},
+    {"prescribe": "pump.command", "flow_m3_s": {"held_table": [[0, -1e-4], [0.6, 1e-4], [1.2, -2e-4]]}},
+    {"prescribe": "reservoir.command", "pressure_pa": {"held_table": [[0, 1e5], [0.9, 5e4]]}}
+  ]
+}

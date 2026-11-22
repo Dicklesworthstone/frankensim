@@ -208,9 +208,9 @@ Elements (ports in brackets; physical fields use SI units):
   spring         stiffness_n_m, cubic_n_m3 = 0, extension_m = 0       [a, b]
   damper         damping_n_s_m                                        [a, b, heat]
   resistance_matrix domain, matrix (square, 1 to 64 rows)              [u, heat]
-                 domain is translation, rotation or electrical; matrix
-                 is symmetric positive definite, in SI effort/flow units
-                 (N s/m, N m s/rad or ohm). u receives a flow vector and
+                 domain is translation, rotation, electrical or hydraulic;
+                 matrix is symmetric positive definite, in SI effort/flow units
+                 (N s/m, N m s/rad, ohm or Pa s/m^3). u receives a flow vector and
                  returns matrix times that vector; heat must be connected.
   force          force_n (waveform)                                   [p]
   affine_signal  matrix (m by n), bias (m numbers)      [input0..input<n-1>, output]
@@ -228,14 +228,14 @@ Elements (ports in brackets; physical fields use SI units):
                  Use fixed step_s; sample events cap larger physical steps.
   controlled_effort domain                                           [p, command]
   controlled_flow domain                                             [p, command]
-                 domain is translation, rotation or electrical. command is
-                 a scalar held effort or flow in that domain's SI unit.
-                 Prescribe force_n, torque_n_m or voltage_v for effort;
-                 velocity_m_s, angular_velocity_rad_s or current_a for flow.
+                 domain is translation, rotation, electrical or hydraulic.
+                 command is a scalar held effort or flow in that domain's SI unit.
+                 Prescribe force_n, torque_n_m, voltage_v or pressure_pa for effort;
+                 velocity_m_s, angular_velocity_rad_s, current_a or flow_m3_s for flow.
                  Those SI-named prescriptions supply the interval mean;
                  value instead supplies a signed start-of-step point sample.
-                 Flow is positive INTO the source: negative electrical flow
-                 supplies current to a node_capacitor. Reports the declared
+                 Flow is positive INTO the source: negative current or liquid
+                 flow supplies a node_capacitor or accumulator. Reports the declared
                  SI field, command and signed energy_in_j, negative when
                  energy is supplied.
   Signal matrices and vectors contain finite numbers, with at most 64 inputs,
@@ -638,8 +638,9 @@ the kernel exchanges work-conjugate means over each step.
 Between two domains, without loss (an ideal DC machine with a = electrical,
 b = rotation and ratio in N m/A: torque ratio * i on the rotor, back-EMF
 ratio * w against the loop):
-  gyrator        ratio, a, b (translation | rotation | electrical)    [a, b]
-  modulated_transformer a, b (translation | rotation | electrical)    [a, b, ratio]
+  gyrator        ratio, a, b                                        [a, b]
+  modulated_transformer a, b                                        [a, b, ratio]
+                 a and b name translation, rotation, electrical or hydraulic.
                  a receives flow and b receives effort; the scalar ratio
                  signal sets e_a = ratio * e_b, f_b = -ratio * f_a.
                  Prescribe ratio as a waveform or connect a scalar signal.
@@ -655,8 +656,8 @@ held-input owner of fs-system:
                  (dx/dt = (structure - dissipation) energy x + input u, with
                  stored energy x' energy x / 2 in J. energy and dissipation
                  are symmetric positive semidefinite, structure is skew. The
-                 domain is translation, rotation or electrical. An effort_in
-                 port receives an effort and returns the step mean of its row
+                 domain is translation, rotation, electrical or hydraulic.
+                 An effort_in port receives an effort and returns the step mean of its row
                  of input' energy x as a flow; a flow_in port receives a flow
                  and returns an effort. heat is routed like a damper's and
                  carries the work dissipation absorbs. Reports x0, x1, ...,
@@ -1326,13 +1327,13 @@ struct Names {
 }
 
 impl Domain {
-    /// The domain named by a gyrator, transformer or resistance matrix. The
-    /// hydraulic domain is not offered there: no scene has run it there.
+    /// The power domain named by a generic source, converter or matrix law.
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "translation" => Self::Translation,
             "rotation" => Self::Rotation,
             "electrical" => Self::Electrical,
+            "hydraulic" => Self::Hydraulic,
             _ => return None,
         })
     }
@@ -2443,7 +2444,7 @@ fn resistance_matrix(
     let domain = definition
         .str_field("domain")
         .and_then(Domain::parse)
-        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical"))?;
+        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical, hydraulic"))?;
     let rows = definition
         .get("matrix")
         .and_then(J::as_array)
@@ -2585,7 +2586,7 @@ fn controlled_source(
     let domain = definition
         .str_field("domain")
         .and_then(Domain::parse)
-        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical"))?;
+        .ok_or_else(|| format!("{what}: domain is one of translation, rotation, electrical, hydraulic"))?;
     let source = if kind == Kind::ControlledEffort {
         ControlledSource::effort(domain.port_kind())
     } else {
@@ -2605,7 +2606,7 @@ fn gyrator(
         definition
             .str_field(key)
             .and_then(Domain::parse)
-            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical"))
+            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical, hydraulic"))
     };
     let (a, b) = (side("a")?, side("b")?);
     let gyrator = Gyrator::new(a.port_kind(), b.port_kind(), number(definition, "ratio", what)?)
@@ -2624,7 +2625,7 @@ fn modulated_transformer(
         definition
             .str_field(key)
             .and_then(Domain::parse)
-            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical"))
+            .ok_or_else(|| format!("{what}: {key} is one of translation, rotation, electrical, hydraulic"))
     };
     let (a, b) = (side("a")?, side("b")?);
     add(

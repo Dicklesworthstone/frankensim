@@ -411,3 +411,194 @@ fn control_scene_validation_preserves_shapes_observation_opt_in_and_error_accoun
         .unwrap();
     assert!(error.message.contains("supported order is 1"), "{error}");
 }
+
+#[test]
+fn controlled_hydraulics_close_volume_work_and_heat_and_resume() {
+    let path = example("controlled_hydraulics.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+    assert_eq!(scene.probe("pump.flow_m3_s").unwrap(), None);
+    assert_eq!(scene.probe("reservoir.pressure_pa").unwrap(), None);
+    let (capacity, resistance, initial_volume) = (1e-9, 1e9, 2e-4);
+    let mut volume = initial_volume;
+    let (mut pump_work, mut reservoir_work, mut heat) = (0.0, 0.0, 0.0);
+    let mut flow_signs = [false; 2];
+    let mut events = [false; 3];
+    let mut saved = None;
+    scene_context(|cx, _| {
+        while !scene.is_finished() {
+            let start = scene.time_s();
+            let command = if start < 0.6 {
+                -1e-4
+            } else if start < 1.2 {
+                1e-4
+            } else {
+                -2e-4
+            };
+            let reservoir_pressure = if start < 0.9 { 1e5 } else { 5e4 };
+            assert!(scene.advance(f64::MAX, cx).unwrap());
+            let dt = scene.time_s() - start;
+            // C dp/dt = -q_pump - (p - p_reservoir) / R.
+            // Integrate the linear balance independently at the midpoint.
+            let alpha = dt / (2.0 * resistance * capacity);
+            let next_volume = ((1.0 - alpha) * volume
+                + dt * (reservoir_pressure / resistance - command))
+                / (1.0 + alpha);
+            let pressure = (volume + next_volume) / (2.0 * capacity);
+            let flow = (pressure - reservoir_pressure) / resistance;
+            let pump_increment = dt * pressure * command;
+            pump_work += pump_increment;
+            reservoir_work += dt * reservoir_pressure * flow;
+            heat += dt * resistance * flow * flow;
+            volume = next_volume;
+            flow_signs[if command > 0.0 { 1 } else { 0 }] = true;
+            assert!(pump_increment * command > 0.0);
+            close(probe(&scene, "store.volume_m3"), volume);
+            close(probe(&scene, "store.pressure_pa"), volume / capacity);
+            close(probe(&scene, "pump.flow_m3_s"), command);
+            close(probe(&scene, "pump.command"), command);
+            close(probe(&scene, "reservoir.pressure_pa"), reservoir_pressure);
+            close(probe(&scene, "line.flow_m3_s"), flow);
+            close(probe(&scene, "line.heat_w"), resistance * flow * flow);
+            close(probe(&scene, "pump.energy_in_j"), pump_work);
+            close(probe(&scene, "reservoir.energy_in_j"), reservoir_work);
+            close(probe(&scene, "oil.temperature_k"), 300.0 + heat / 50.0);
+            close(
+                (volume * volume - initial_volume * initial_volume) / (2.0 * capacity)
+                    + pump_work
+                    + reservoir_work
+                    + heat,
+                0.0,
+            );
+            assert!(scene.ledger().energy_residual_j().abs() < 2e-8);
+            for (seen, event) in events.iter_mut().zip([0.6, 0.9, 1.2]) {
+                assert!(!(start < event && scene.time_s() > event + 1e-12));
+                *seen |= (scene.time_s() - event).abs() < 1e-12;
+            }
+            if saved.is_none() && scene.time_s() >= 0.9 {
+                saved = Some(scene.checkpoint().unwrap());
+            }
+        }
+        let (bytes, root) = saved.unwrap();
+        let mut resumed = fs_cli::SystemScene::from_text(&text, &path).unwrap();
+        resumed.resume_checkpoint(&bytes, root).unwrap();
+        resumed.run(cx).unwrap();
+        assert_eq!(resumed.render_json(), scene.render_json());
+        let mut changed =
+            fs_cli::SystemScene::from_text(&text.replace("[0.9, 5e4]", "[0.9, 6e4]"), &path)
+                .unwrap();
+        assert!(changed.resume_checkpoint(&bytes, root).is_err());
+        assert_eq!(changed.time_s(), 0.0);
+    });
+    assert!(flow_signs.into_iter().all(|seen| seen));
+    assert!(events.into_iter().all(|seen| seen));
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json, scene.render_json());
+}
+
+const HYDRAULIC_LAWS: &str = r#"{
+  "schema": "frankensim.system.v0", "duration_s": 0.25, "step_s": 0.25,
+  "elements": {
+    "gyrator": {"kind": "gyrator", "ratio": 3, "a": "hydraulic", "b": "rotation"},
+    "transformer": {"kind": "modulated_transformer", "a": "rotation", "b": "hydraulic"},
+    "loss": {"kind": "resistance_matrix", "domain": "hydraulic", "matrix": [[3, 1], [1, 2]]},
+    "storage": {"kind": "port_hamiltonian",
+      "energy": [[4]], "structure": [[0]], "dissipation": [[0]], "input": [[1]],
+      "state": [0.125], "ports": [{"name": "p", "domain": "hydraulic", "role": "flow_in"}]},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 10, "temperature_k": 300}
+  },
+  "connections": [
+    {"prescribe": "gyrator.a", "flow_m3_s": 2},
+    {"prescribe": "gyrator.b", "angular_velocity_rad_s": 4},
+    {"prescribe": "transformer.a", "angular_velocity_rad_s": 2},
+    {"prescribe": "transformer.b", "pressure_pa": 5},
+    {"prescribe": "transformer.ratio", "ratio": -3},
+    {"prescribe": "loss.u", "flow_m3_s": [2, -1]},
+    {"prescribe": "storage.p", "flow_m3_s": -0.5},
+    {"join": ["case.heat", "loss.heat", "storage.heat"]}
+  ]
+}"#;
+
+#[test]
+fn hydraulic_converter_matrix_and_phs_ports_keep_native_power_equations() {
+    let mut scene =
+        fs_cli::SystemScene::from_text(HYDRAULIC_LAWS, "hydraulic-laws.json").unwrap();
+    scene_context(|cx, _| scene.run(cx).unwrap());
+    // Prescribed attachment flows enter these generic ports with the
+    // opposite sign, just as in the other admitted power domains.
+    let a = probe(&scene, "gyrator.effort_a");
+    let b = probe(&scene, "gyrator.effort_b");
+    close(a, -12.0); // e_a = 3 f_b, f_b = -4 rad/s.
+    close(b, 6.0); // e_b = -3 f_a, f_a = -2 m^3/s.
+    close(-2.0 * a - 4.0 * b, 0.0);
+    let effort = probe(&scene, "transformer.effort_a");
+    let flow = probe(&scene, "transformer.flow_b");
+    close(effort, -15.0);
+    close(flow, -6.0);
+    close(-2.0 * effort + 5.0 * flow, 0.0);
+    // R [-2, 1]' = [-5, 0]'; u' R u = 10 W, all delivered as heat.
+    close(probe(&scene, "loss.u0.pressure_pa"), -5.0);
+    close(probe(&scene, "loss.u1.pressure_pa"), 0.0);
+    close(probe(&scene, "loss.heat_w"), 10.0);
+    close(probe(&scene, "case.temperature_k"), 300.25);
+    // dx/dt = 0.5 m^3/s, H = 2 x^2 J: final x = 0.25 m^3.
+    close(probe(&scene, "storage.x0"), 0.25);
+    close(probe(&scene, "storage.p.pressure_pa"), 0.75);
+    close(probe(&scene, "storage.heat_w"), 0.0);
+    close(
+        value(&scene.render_json(), &element("storage"), "stored_change_j"),
+        0.09375,
+    );
+    assert!(scene.ledger().energy_residual_j().abs() < 2e-9);
+}
+
+#[test]
+fn hydraulic_scene_commands_and_domains_refuse_wrong_units_and_unknown_names() {
+    let text = std::fs::read_to_string(example("controlled_hydraulics.json")).unwrap();
+    for (from, to, expected) in [
+        (
+            r#""flow_m3_s": {"held_table""#,
+            r#""current_a": {"held_table""#,
+            "flow_m3_s",
+        ),
+        (
+            r#""pressure_pa": {"held_table""#,
+            r#""force_n": {"held_table""#,
+            "pressure_pa",
+        ),
+        (
+            r#""domain": "hydraulic""#,
+            r#""domain": "steam""#,
+            "electrical, hydraulic",
+        ),
+    ] {
+        let changed = text.replace(from, to);
+        assert_ne!(changed, text);
+        let error = fs_cli::SystemScene::from_text(&changed, "invalid-hydraulic-command.json")
+            .err()
+            .unwrap();
+        assert!(error.message.contains(expected), "{error}");
+    }
+    // Every shared Domain::parse consumer lists the newly admitted domain
+    // while continuing to reject thermal/unknown power-domain declarations.
+    for (from, to) in [
+        (r#""a": "hydraulic""#, r#""a": "thermal""#),
+        (r#""b": "hydraulic""#, r#""b": "thermal""#),
+        (
+            r#""domain": "hydraulic", "matrix""#,
+            r#""domain": "thermal", "matrix""#,
+        ),
+        (
+            r#""domain": "hydraulic", "role""#,
+            r#""domain": "thermal", "role""#,
+        ),
+    ] {
+        let changed = HYDRAULIC_LAWS.replace(from, to);
+        assert_ne!(changed, HYDRAULIC_LAWS);
+        let error = fs_cli::SystemScene::from_text(&changed, "invalid-hydraulic-domain.json")
+            .err()
+            .unwrap();
+        assert!(error.message.contains("electrical, hydraulic"), "{error}");
+    }
+}

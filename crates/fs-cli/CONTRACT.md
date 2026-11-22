@@ -767,11 +767,12 @@ binary, including `system`, `cooling-cht`, `electrothermal`, `cooling-network`,
 
 `controlled_effort` and `controlled_flow` lower directly to
 `fs_system::elements::ControlledSource`. Each declares `domain` as
-`translation`, `rotation` or `electrical`; physical port `p` exchanges power,
+`translation`, `rotation`, `electrical` or `hydraulic`; physical port `p` exchanges power,
 while scalar signal input `command` sets the source's effort or flow. A command
 can come from the existing `signal` connection or from `prescribe` using the
-selected SI quantity: `force_n`, `torque_n_m`, `voltage_v`, `velocity_m_s`,
-`angular_velocity_rad_s` or `current_a`; these named physical quantities use
+selected SI quantity: `force_n`, `torque_n_m`, `voltage_v`, `pressure_pa`,
+`velocity_m_s`, `angular_velocity_rad_s`, `current_a` or `flow_m3_s`;
+these named physical quantities use
 interval means. An explicit generic `value` prescription instead supplies a
 point sample at the accepted start time and restricts adaptive order to one.
 Other wrong quantity names refuse. Signal values must already have the declared
@@ -779,7 +780,8 @@ unit; no conversion or controller is inferred. Prescribed table knots use the
 existing scheduled-boundary path.
 
 Effort is positive in the connected node's positive direction. Flow is positive
-into the source, so negative commanded current supplies a connected capacitor.
+into the source, so negative commanded current supplies a connected capacitor
+and negative commanded volume flow fills a connected accumulator.
 The source reports its signed `energy_in_j` (negative when supplying energy)
 and last commanded effort or flow, also available as `command` (`null` before
 the first accepted step).
@@ -790,6 +792,22 @@ from a command. Tests execute `examples/system/controlled_sources.json` through
 the real CLI and native facade against independent mechanical/electrical
 recurrences, verify signed work and first-law balance, and exercise adaptive
 integration, source-work admission and accepted-prefix checkpoint continuation.
+
+`examples/system/controlled_hydraulics.json` composes a commanded flow source,
+an accumulator, a commanded reservoir pressure and a constant hydraulic line
+resistance, with the line's dissipated power stored as oil heat. The pump's
+negative command fills the accumulator; its positive command removes volume
+and receives signed work. The scene changes both commands at scheduled
+boundaries. Authored regressions in `tests/system_command/feedback.rs` compare
+each accepted interval with an independent midpoint volume recurrence and
+pressure-times-flow work, check source work plus stored energy and heat, and
+compare complete reports after checkpoint continuation and through the CLI.
+Separate authored equations cover hydraulic gyrator and modulated-transformer
+ports, a coupled resistance matrix and a flow-in port-Hamiltonian storage law.
+These regressions require compilation and execution before their tolerances
+are claimed. All use existing native owners; the hydraulic domain supplies
+pressure/volume-flow power coordinates, not a liquid stream inventory,
+cavitation model, material selection or a guarantee of admissible absolute pressure.
 
 `speed_controller` lowers to `fs_control::component::SampledSpeedController`.
 Its required fields retain the owner's SI parameter names: `sample_period_s`,
@@ -1783,9 +1801,11 @@ source) and `pressure` (`pressure_pa`). They lower to the same kernel elements
 as the electrical forms; an electrical and a hydraulic scene of the same
 numbers report the same values bit for bit (the test's hydraulic scene is
 `examples/system/hydraulic_accumulator.json`). `prescribe` takes `pressure_pa` on
-a hydraulic effort input and `flow_m3_s` on a hydraulic flow input. Gyrators,
-modulated transformers and resistance matrices do not take the hydraulic
-domain.
+a hydraulic effort input and `flow_m3_s` on a hydraulic flow input.
+Generic controlled sources, gyrators, modulated transformers, resistance
+matrices and port-Hamiltonian ports also accept `hydraulic`, using the same
+native pressure/volume-flow power coordinates. Their authored equation and
+conservation regressions are described under controlled sources above.
 
 `carreau_pipe` lowers to fs-material's `CarreauPipeComponent`: an authored
 Carreau-Yasuda curve (`viscosity_zero_pa_s`, `viscosity_infinite_pa_s`,
@@ -1808,7 +1828,7 @@ or across the pipe, and any measured liquid.
 
 `modulated_transformer` lowers to the kernel's signal-modulated lossless
 transformer. Required `a` and `b` name its power domains (`translation`,
-`rotation` or `electrical`). Port `a` receives flow and returns effort; `b`
+`rotation`, `electrical` or `hydraulic`). Port `a` receives flow and returns effort; `b`
 receives effort and returns flow. The required scalar input `ratio` takes an
 ordinary signal connection or `{"prescribe": "name.ratio", "ratio": waveform}`.
 A prescribed waveform supplies its exact interval mean, held for the step,
@@ -1887,7 +1907,7 @@ snapshot refusal and identity-map equivalence to an ordinary copy.
 `x' Q x / 2`, port outputs `G' Q x`. n is 1 to 64, Q and R are symmetric
 positive semidefinite, J is skew, and the fs-phs admission refuses each
 violation by name. Each of the 1 to 64 `ports` is a scalar power port with a
-`domain` (`translation`, `rotation` or `electrical`) and a `role`
+`domain` (`translation`, `rotation`, `electrical` or `hydraulic`) and a `role`
 (`effort_in` or `flow_in`), in the column order of G. `heat` is reserved for
 the owner's outlet, which takes a temperature and returns minus the
 dissipated power. `state` is optional (zeros). The owner steps held inputs
@@ -1914,8 +1934,8 @@ another process, reports byte for byte what one process reports that pauses
 at 0.125 s and goes on; its checkpoint is refused by the same scene with
 another entry of its energy, its structure, its dissipation or its input
 matrix. Not covered: nonlinear storage, switching or
-contact, exactness when inputs come from other elements (they are the
-kernel's step means), and the hydraulic domain.
+contact or exactness when inputs come from other elements (they are the
+kernel's step means). The hydraulic regression is described above.
 
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
@@ -2534,21 +2554,22 @@ its own matrix (no `matrix` beside the members). It lowers to
 it from a body's `force0` and `torque0`; a member's shape and a matrix
 beside the members are refused.
 
-A `resistance_matrix` element takes `domain` (`translation`, `rotation` or
-`electrical`) and a finite square `matrix` of 1 to 64 coordinates, in SI
-effort per flow (N s/m, N m s/rad or ohm). It lowers to the existing
+A `resistance_matrix` element takes `domain` (`translation`, `rotation`,
+`electrical` or `hydraulic`) and a finite square `matrix` of 1 to 64 coordinates,
+in SI effort per flow (N s/m, N m s/rad, ohm or Pa s/m³). It lowers to the existing
 `fs_system::elements::Resistance` with its analytic tangent; the owner
 requires exact symmetry and positive definiteness. Its vector port `u`
 receives flow and returns `R u`; all absorbed `u^T R u` leaves its mandatory
 `heat` port. Prescribed flows follow the existing attachment-flow sign
 convention. It has no state or adaptive error account. Last-step probes are
-`u<i>.force_n`, `u<i>.torque_n_m` or `u<i>.voltage_v`, plus `heat_w`; before
+`u<i>.force_n`, `u<i>.torque_n_m`, `u<i>.voltage_v` or `u<i>.pressure_pa`,
+plus `heat_w`; before
 the first step these are null. `examples/system/anisotropic_damping.json`
 connects a full off-diagonal damping tensor to a 3-D rigid body through a
 power map and sends its heat to a case. Binary regressions check independently
 diagonalized decay modes, position, cross-axis motion, last-step efforts and
-all lost kinetic energy against stored heat, all three power domains with
-adaptive stepping, matrix admission and mandatory heat wiring. This is a
+all lost kinetic energy against stored heat, translation, rotation and electrical
+domains with adaptive stepping, matrix admission and mandatory heat wiring. This is a
 constant linear resistance; no temperature or geometry dependence is inferred.
 
 A member of a `join` or `common_effort` list may be written
