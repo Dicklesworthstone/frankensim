@@ -24,7 +24,7 @@ fn wall_loads(pressure: f64) -> [InertialWallLoad; 2] {
 
 #[test]
 fn g1_exothermic_two_wall_recoil_closes_physical_energy_momentum_and_source_gauge() {
-    let mut reference = None;
+    let mut reference: Option<([f64; 2], Vec<[f64; 3]>)> = None;
     for datum in [0.0, 128.0] {
         let mechanism = mechanism(8.0, 30.0, datum);
         let mut flow = closed(&mechanism, 8, chemistry());
