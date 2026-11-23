@@ -1,6 +1,8 @@
 //! Actual shared circuit and thermal owners, not copied RC or heat steppers.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "circuit_enthalpy/graph.rs"]
+mod graph;
 use common::*;
 use fs_couple::circuit_enthalpy::*;
 use fs_thermal::enthalpy::{CellId,StepConfig};

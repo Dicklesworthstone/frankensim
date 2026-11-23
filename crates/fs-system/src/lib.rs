@@ -27,7 +27,9 @@
 //! heat capacity, conductance, heater), their power-domain variants, and the
 //! dual storage, admittance and flow source for common-effort networks.
 //! Mechanical, electrical and thermal devices can be described as data and
-//! run through the same kernel.
+//! run through the same kernel. With feature `phs`, `circuit` runs any
+//! Kirchhoff netlist of fs-phs as one Component whose resistors heat what
+//! their heat ports are joined to.
 //!
 //! # Version 0
 //!
@@ -46,6 +48,8 @@
 #![warn(missing_docs)]
 
 mod adaptive;
+#[cfg(feature = "phs")]
+pub mod circuit;
 #[cfg(feature = "constitutive")]
 pub mod constitutive;
 pub mod elements;

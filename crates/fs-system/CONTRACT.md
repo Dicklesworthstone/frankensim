@@ -3309,6 +3309,90 @@ its volume spring, each coordinate within -120 dB of its full scale.
 These numerical checks do not establish physical validity of an authored model;
 the other numerical adapters and sparse work in bead `.5.12` remain open.
 
+## Kirchhoff circuit Component with heat ports
+
+The same optional `phs` feature exposes `circuit::KirchhoffCircuit` (epic
+`frankensim-rc-1109-root-3gc12`, the circuit/enthalpy coupling of
+`fs-couple`). It owns an `fs_phs::circuit::CircuitGraph` and its signed mutual
+inductances: any netlist that owner admits (resistors, inductors, capacitors,
+voltage and current sources, ideal transformers) is one Component. Ports, in
+order: `source<p>` for each external port, `EffortIn` when the port drives a
+voltage source and `FlowIn` when it drives a current source, returning the
+owner's step-mean conjugate; then `heat<b>` for each resistor, by branch
+index, receiving temperature and returning minus the resistor's Joule power.
+An external port must drive exactly one source branch, or construction
+refuses. State is the owner's differential history only: inductor flux
+linkages, then capacitor charges. Node potentials and constraint currents
+start each step at zero, as `fs_couple::material_circuit` starts them.
+
+A proposal assembles the circuit at the resistances of the step and runs the
+owner's `CircuitDae::step_audited`; nothing is integrated here. A resistor
+given a `ResistanceLaw` with `following(branch, law)` takes `law.ohms(T)` at
+the temperature `T` its heat port receives; a law with no answer, or with a
+resistance that is not positive and finite, refuses the step with the branch
+index (`CircuitComponentError::Law`). It is never clamped. Each resistor's
+heat is `dt v^2 / R`, `v` the voltage across it at the algebraic midpoint of
+the step. Its entropy is that heat over the temperature its port received.
+Supplied work minus stored change minus the resistors' heat is booked as
+numerical loss and refused (`Balance`) beyond the arithmetic rounding floor
+plus the caller's `energy_tolerance_j`. The receipt's `energy_tolerance_j` is
+that rounding floor, as in `phs::PortHamiltonianComponent`. The circuit is
+`Class::Smooth` and declares no tangent. Identity words bind the netlist,
+transformers, mutual couplings, each law's own words and the tolerance; the
+codec is one word of `f64` bits per coordinate.
+
+Which temperature a law sees is a property of the graph, not of this
+Component. Joined by `common_effort` to an `elements::HeatCapacity`, it is the
+body's step-mean temperature. Joined by a `heat_route` with
+`RouteTemperature::SinkEquivalent` to a backward-Euler
+`fs_thermal::component::ThermalTimeline` built `returning_end_temperatures`,
+it is the cell's end-of-step temperature. That is the protocol of
+`fs_couple::circuit_enthalpy`: backward Euler for the cells, circuit midpoint
+currents, endpoint material resistance.
+
+`tests/circuit.rs` (9 tests):
+- the ports for a netlist with both kinds of source;
+- a series RC discharging into two heat capacities: charge equal to the
+  midpoint rule's `q0 ((1 - a) / (1 + a))^n`, heats split as the
+  resistances, ledger closed;
+- a voltage source driving R and L: current on the midpoint recurrence,
+  source work equal to field energy plus body heat;
+- an RC whose resistor follows the temperature of the body it heats, against
+  a fixed point solved by bisection in the test, with the resistance moved
+  by more than 5 %;
+- `check_component` conformance with a source and a law;
+- refusals: a law without an answer, by branch; a cold port; a port
+  driving two sources; a law given to a capacitor or given twice; a zero
+  tolerance;
+- the receipt's heat and entropy at the received temperatures;
+- codec round trip and an identity that tells two laws apart.
+Ten defects planted one at a time in the Component each failed at least one
+of these tests: heat at the end potentials, the law asked at 300 K, the
+heat-rate sign, the source-output sign, a state not advanced, entropy at
+300 K, every resistor at the first resistance, the stored-change sign, a law
+left out of the identity, temperatures given to the wrong resistors.
+
+`fs-couple`'s `tests/circuit_enthalpy/graph.rs` builds the module's own
+endpoint-feedback fixture (two material cards, one resistor rising 0.5 % per
+kelvin, a 1 W/K link, eight intervals of 0.25 s) as such a graph. The
+resistors follow the cards through the same `MaterialOhmicBody` resolution as
+the module, and the comparison is against `circuit_enthalpy::step_candidate`.
+On the export of 1e611fdf33 the cell temperatures and the charge agree bit
+for bit over the first four intervals and the Joule heat within 9e-16 J;
+after that all agree within 2e-9 K, 1.4e-12 C and 4e-12 J. The test's bounds are
+1e-7 K, 1e-10 C and 2e-10 J. Five defects planted in the graph each failed
+it: heat routed to the other cell, one resistor left at its placeholder
+resistance, resistors at a fixed 300 K, cells returning step-mean
+temperatures, the link conductance halved.
+
+Not claimed: a tangent or `PortTangent`; second-order accuracy of the
+coupled step, which is first order with endpoint coefficients as the module
+documents; the module's phase-dependent resistance at a latent plateau,
+which the fixture's single-phase cards do not reach; sources, conductances
+or reservoirs that the module's coefficients can resolve per trial (the
+comparison uses none). The module is kept as the regression reference;
+nothing in `fs-couple` changes.
+
 ## Signal-controlled power sources
 
 `elements::ControlledSource::effort(kind)` and `flow(kind)` connect controller

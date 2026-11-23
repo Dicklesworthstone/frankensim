@@ -72,5 +72,9 @@ required-features = ["phs"]
 name = "phs_exact"
 required-features = ["phs"]
 
+[[test]]
+name = "circuit"
+required-features = ["phs"]
+
 [lints]
 workspace = true
