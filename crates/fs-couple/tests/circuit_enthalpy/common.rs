@@ -62,6 +62,8 @@ pub fn initial<'a>(curves:&'a [ResolvedHeatCapacityCurve;2],conductance:f64,endp
     -> DepositionSimulation<'a> { sourced(curves,conductance,endpoint_event,[0.0;2]) }
 /// [`initial`] with the cells' boundaries carrying authored sources \[W\], cell 30 then cell 10.
 /// An endpoint event replaces cell 30's source by 4 W; it does not add to it.
+// Ten of the targets that include this file never call `initial`.
+#[allow(dead_code)]
 pub fn sourced(curves:&[ResolvedHeatCapacityCurve;2],conductance:f64,endpoint_event:Option<f64>,
     sources_w:[f64;2]) -> DepositionSimulation<'_> {
     let mut events=Vec::new();
