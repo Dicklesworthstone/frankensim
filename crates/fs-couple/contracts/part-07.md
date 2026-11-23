@@ -2624,100 +2624,6 @@ motion, finite-liquid-coolant exchange and transactional refusal. Sources are
 manufactured fixtures, not measured device qualification.
 
 
-### Dynamic device output charge with fixed material capacitance
-
-`converter::commutation::battery_motor::capacitance` connects the original
-eleven-state finite battery/converter/motor owner to the existing material and
-HeatAssembly enthalpy path. Both switch-node charges remain continuous across
-gate and thermal boundaries. Incoming bus/node coordinates are total electrode
-charges. Binding requires four explicit authored capacitances and a bitwise
-match to original positive farad claims on the corresponding semiconductor
-packages; replacing capacitance at fixed incoming charge is refused.
-
-`DeviceCapacitanceBinding` and `DeviceCapacitanceMaterial` retain the original
-card, claim, property key, package and held external context. Every actual
-caloric proposal refreshes source validity, even when the electrical trajectory
-cache is reused. Only original zero-axis `ConstantWithinValidity` laws with
-owned static applicability are admitted. A sampled temperature- or
-voltage-dependent capacitance is refused. All storage coefficients remain fixed;
-variable charge laws and their reversible parameter/entropy work require a
-separate coupled model.
-
-Equality of the retained source snapshots (`DeviceConductionMaterial`,
-`DeviceCapacitanceMaterial`, `DeviceChargeMaterial`, `GateConductanceMaterial`,
-`GateCurrentSurfaceMaterial` with its thermal multiplier, and
-`ConverterChannelMaterial`) means the same material state: card, material, axes,
-query point, requirement, source axes, selected claim and value bits. The
-receipt's selection-policy tag and hash are left out on purpose, because a
-refresh at the same state re-resolves under `PinnedByProperty`, so a source bound
-under `SingleClaimOnly` still equals its own refresh; a changed claim or value
-bit still refuses the step. Every knot of a retained charge or gate source path,
-including a 0 V charge knot the library inserts into an authored law without
-one, is queried under a pin of the selected claim, so a path compares as it is.
-
-The actual eleven-state receipt retains four signed device-capacitor energy
-changes and the original bus/inductor storage. Their independently summed
-partition precedes the seven-constituent and fourteen-loss physical balances.
-Only those fourteen dissipative terms and optionally routed actual auxiliary
-work heat the finite bodies. Stored capacitor energy is never deposited as
-package heat or reconstructed from a balance remainder.
-
-The nine-state public network/candidate/sample interfaces remain available.
-Both lanes share the same source-refresh and enthalpy loop, exact coefficient
-cache, full subdivision budgets, represented endpoint clocks and original
-HeatAssembly/radiation closure. The capacitor lane has explicit eleven-state
-accepted histories, source bundles and native receipts; no synthetic nine-state
-receipt or sequential electrical/thermal trajectory replaces them.
-
-Four regression definitions cover steady motoring/regeneration calorimetry,
-dynamic capacitor energy with hot-diode feedback and gate continuation,
-source/charge/package/domain refusal, and two finite thermal inventories.
-Fixture values are synthetic. These new coupled regressions were not compiled
-or executed in this delivery; the dependency set was incomplete and the runtime
-became unavailable. Gate-drive energy, reverse recovery, avalanche, nonlinear
-Coss and unresolved-peak qualification remain outside this constant-C lane.
-
-### Full device charge curves through the material and heat owners
-
-`converter::commutation::battery_motor::charge` connects four original Q(V)
-laws to the same eleven-state finite battery/converter/motor owner and shared
-finite-cell/`HeatAssembly` thermal path. Curves follow input high/low then
-output high/low drain-to-source signs. Binding compares every authored
-charge/voltage knot and its full support against the material law before
-accepting total electrode charges. Constant-capacitance coordinates and a
-sampled differential capacitance cannot replace that law.
-
-Each source declares a coulomb property, an owned typed volt axis and finite
-support on both voltage polarities. The complete selected `PropertyLineSlice`
-and claim remain retained. An exactly uncharged point inside an original
-affine segment may be inserted without changing its law or integral.
-Temperature/phase applicability refreshes at each actual caloric proposal;
-only voltage may change constitutive charge. A temperature-dependent charge
-law, changed support/claim/held context or changed curve refuses. Once the
-fresh complete path matches the retained law, its original admitted slope
-and energy tables are shared rather than rebuilt.
-
-Native device energy is the original integral of V dQ. Its four signed
-changes remain separate in the actual receipt and contribute to converter
-storage, while the existing fourteen physical losses alone heat their declared
-bodies. Optional auxiliary routing uses actual delivered work. The same
-independent energy gates, coefficient cache, full electrical trial charge,
-represented clock and original heat/radiation transport serve nonlinear and
-constant laws. Exact native chord traversal has an explicit numerical budget
-recorded with each proposal; exhaustion refuses instead of resampling or
-weakening the law.
-
-Four regression definitions exercise independent motoring/regenerative heat,
-integral energy distinct from QV/2 with all eleven discrete balance equations
-and hot-diode continuation, full-law/source/domain/temperature refusals and
-affine zero-reference insertion, and original two-inventory heat transport.
-The new coupled source and tests pass a syntax parse with the pinned Rust
-formatter. Coupled typechecking and execution remain unverified because the
-available native dependency set is incomplete. Endpoint feedback requires
-time refinement. Synthetic curves do not qualify measured devices, gate
-dynamics, recovery, hysteresis, avalanche, temperature-dependent reversible
-field energy or unresolved operating peaks.
-
 ### Finite gate charge, Miller feedback and separately received driver heat
 
 `converter::commutation::battery_motor::gate` connects the original
@@ -2973,6 +2879,18 @@ because the complete native dependency graph is unavailable. Endpoint thermal
 feedback requires time refinement. Manufactured surfaces and thermal scales
 do not qualify measured devices or unresolved waveform peaks; reverse
 recovery, avalanche and finite-energy gate-rail dynamics remain separate gaps.
+
+Equality of the retained source snapshots (`DeviceConductionMaterial`,
+`DeviceCapacitanceMaterial`, `DeviceChargeMaterial`, `GateConductanceMaterial`,
+`GateCurrentSurfaceMaterial` with its thermal multiplier, and
+`ConverterChannelMaterial`) means the same material state: card, material, axes,
+query point, requirement, source axes, selected claim and value bits. The
+receipt's selection-policy tag and hash are left out on purpose, because a
+refresh at the same state re-resolves under `PinnedByProperty`, so a source bound
+under `SingleClaimOnly` still equals its own refresh; a changed claim or value
+bit still refuses the step. Every knot of a retained charge or gate source path,
+including a 0 V charge knot the library inserts into an authored law without
+one, is queried under a pin of the selected claim, so a path compares as it is.
 
 ## Finite source impedance, regulated demand and material heat
 

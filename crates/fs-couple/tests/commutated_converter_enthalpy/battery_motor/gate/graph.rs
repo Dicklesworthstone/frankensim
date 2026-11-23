@@ -23,7 +23,7 @@ use fs_system::commutated_drive::{
 
 use super::super::graph::{
     Card, CardResistance, Case, Coolant, Drivers, Lane, Row, cell_ids, cells_start, compare,
-    heat_assembly, held_to_owner, kernel_run, leak, owner_drive, text,
+    heat_assembly, held_to_owner, kernel_rows, leak, owner_drive, text,
 };
 use super::super::nine_state::coolant;
 use super::*;
@@ -414,7 +414,7 @@ fn a_gate_graph_drives_its_gate_on_and_off_through_a_finite_driver() {
         ..gate_case(f, &steady, &p, 300.0, 1.0)
     };
     let module = module_run(f, &case, &p, 2);
-    let graph = kernel_run(&case, 2);
+    let graph = kernel_rows(&case, 2);
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, and its closed form.
     held_to_owner(
@@ -446,7 +446,7 @@ fn a_gate_graph_carries_the_thermal_channel_surface_and_the_miller_charge() {
     let p = authored(0.05, true);
     let case = gate_case(f, &steady, &p, 300.0, 0.125);
     let module = module_run(f, &case, &p, 3);
-    let graph = kernel_run(&case, 3);
+    let graph = kernel_rows(&case, 3);
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, its surface `g` on three
     // knots where the card's line has more, so not bit for bit.
@@ -497,7 +497,7 @@ fn a_gate_graph_shares_a_finite_liquid_coolant_with_a_driver_cell() {
         ..gate_case(f, &steady, &p, 300.0, 1.0)
     };
     let module = module_linked_run(f, &case, &p, 2);
-    let graph = kernel_run(&case, 2);
+    let graph = kernel_rows(&case, 2);
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, the coolant's energy by its
     // own caloric curve, and the closed form.
@@ -532,7 +532,7 @@ fn a_gate_graph_steps_from_another_accepted_state_at_the_answers_there() {
         let steady = steady_drive(false);
         let p = authored(miller, feedback);
         let case = gate_case(f, &steady, &p, 320.0, dt_s);
-        let graph = kernel_run(&case, 1);
+        let graph = kernel_rows(&case, 1);
         // The module bound at that state takes the same step.
         let module = module_run(f, &case, &p, 1);
         compare(&module, &graph, [1e-14, 1e-12]);

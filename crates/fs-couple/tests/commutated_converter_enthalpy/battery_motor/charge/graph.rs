@@ -1,12 +1,151 @@
 //! The Q(V) charge fixtures as declared graphs (`battery_motor/graph.rs`).
 
+use fs_phs::circuit::capacitance::CapacitorChargeCurve;
+use fs_phs::circuit::converter::commutation::capacitance::charge::ChargeCommutationParameters;
+use fs_qty::ElectricCharge;
 use fs_system::commutated_drive::DeviceStorage;
 
-use super::super::graph::{
-    Case, Row, cells_start, closed_form_step, compare, heat_assembly, kernel_refusal, kernel_run,
-    leak, owner_check, steady_check,
+use super::graph::{
+    Case, closed_form_step, kernel_refusal, kernel_run, leak, owner_check, steady_check,
 };
 use super::*;
+
+const SCALE: [f64; 4] = [0.025, 0.04, 0.035, 0.05];
+const VOLTAGE: [f64; 8] = [-100.0, -5.0, -0.5, 0.0, 0.5, 2.0, 20.0, 100.0];
+const CHARGE: [f64; 8] = [-50.0, -5.0, -1.0, 0.0, 1.0, 2.5, 7.0, 15.0];
+const CHORD_BUDGET: usize = 4096;
+
+fn context(t: f64) -> QueryPoint {
+    common::point(t)
+        .with_quantity("Vds", QuantitySpec::dimensional(Voltage::DIMS), 0.0)
+        .unwrap()
+}
+fn source_points(device: usize) -> Vec<(f64, f64)> {
+    VOLTAGE
+        .into_iter()
+        .zip(CHARGE)
+        .map(|(v, q)| (v, SCALE[device] * q))
+        .collect()
+}
+fn curves() -> [CapacitorChargeCurve; 4] {
+    core::array::from_fn(|i| {
+        CapacitorChargeCurve::try_new(source_points(i).into_iter().map(|(v, q)| (q, v)).collect())
+            .unwrap()
+    })
+}
+struct ChargeFixture {
+    base: Fixture,
+    keys: [PropertyKey; 4],
+}
+fn charge_fixture(cp: f64, threshold_slope: f64, upper_k: f64) -> ChargeFixture {
+    let f = fixture(cp, threshold_slope, 350.0, 100.0);
+    let keys = core::array::from_fn(|i| {
+        PropertyKey::new(format!("device_output_charge_{i}"), ElectricCharge::DIMS)
+    });
+    let mut claims = ClaimSet::new();
+    for (_, claim) in f.card.claims().claims_ordered() {
+        claims.insert_claim(claim.clone()).unwrap();
+    }
+    for (device, key) in keys.iter().enumerate() {
+        let value = PropertyValue::Curve {
+            abscissa: "Vds".into(),
+            abscissa_dims: Voltage::DIMS,
+            knots: source_points(device),
+            dims: ElectricCharge::DIMS,
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value,
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        299.0,
+                        upper_k,
+                    )
+                    .with_quantity(
+                        "Vds",
+                        QuantitySpec::dimensional(Voltage::DIMS),
+                        -100.0,
+                        100.0,
+                    ),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic monotone asymmetric Q(V) fixture, not qualified device data"
+                        .into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic-device".into(),
+            phase: "solid".into(),
+            process: "authored fixture".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(
+        &card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+            density: &PropertyKey::new("density", Density::DIMS),
+            temperature_axis: "T",
+            lower: &common::point(299.0),
+            upper: &common::point(350.0),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        1e-6,
+    )
+    .unwrap();
+    ChargeFixture {
+        base: Fixture {
+            card,
+            caloric,
+            keys: f.keys,
+            cp,
+        },
+        keys,
+    }
+}
+fn initial(steady: &SteadyDrive, node_offset_v: [f64; 2]) -> [f64; 11] {
+    let p = parameters();
+    let current = steady.state[3] / p.inductance_h;
+    let input = steady.state[4] / p.bus_capacitance_f[0];
+    let output = steady.state[5] / p.bus_capacitance_f[1];
+    let left = if steady.gates.on[0] {
+        (10.0 * input - current) / 10.01
+    } else {
+        (5.01 * input + 2.5 - current) / 5.02
+    };
+    let right = left - 0.1 * current;
+    let c = ChargeCommutationParameters {
+        converter: p,
+        output_charge_curves: curves(),
+        maximum_cells_per_chord: CHORD_BUDGET,
+    }
+    .state(
+        current,
+        [input, output],
+        [left + node_offset_v[0], right + node_offset_v[1]],
+    )
+    .unwrap();
+    let mut state = [0.0; 11];
+    state[..3].copy_from_slice(&steady.state[..3]);
+    state[3..8].copy_from_slice(&c);
+    state[8..].copy_from_slice(&steady.state[6..]);
+    state
+}
 
 fn charge_case<'s>(
     f: &'static ChargeFixture,
@@ -21,7 +160,7 @@ fn charge_case<'s>(
         context: leak(context(300.0)),
         storage_keys: &f.keys,
         storage: DeviceStorage::Charge {
-            curves: curves(1.0),
+            curves: curves(),
             maximum_cells_per_chord: CHORD_BUDGET,
         },
         steady,
@@ -36,157 +175,41 @@ fn charge_case<'s>(
     }
 }
 
-/// The module's `steps` steps of the case from its bound drive, each
-/// advancing the cells by `advance_s`; its first refusal, as text.
-fn module_run(
-    f: &ChargeFixture,
-    case: &Case<'_>,
-    advance_s: f64,
-    steps: usize,
-) -> Result<Vec<Row>, String> {
-    let context = context(300.0);
-    let cells = f.base.cells(&context);
-    let resistors = drive_resistors(&f.base);
-    let devices = f.base.devices();
-    let charges = f.bindings();
-    let network = coupled(&cells, &resistors, &devices, &charges);
-    let mut thermal = f.base.thermal();
-    let authored = curves(1.0);
-    let native = &case.steady.native;
-    let error = |error| format!("{error:?}");
-    let mut drive = network
-        .bind(&thermal, native, &authored, case.start, || false)
-        .map_err(error)?;
-    let mut rows = Vec::new();
-    for k in 0..steps {
-        let intervals = [CommutationInterval {
-            gates: case.gates(k),
-            duration_s: case.dt_s,
-        }];
-        let next = network
-            .step_candidate(
-                &thermal,
-                thermal.time_s() + advance_s,
-                &drive,
-                &intervals,
-                &[case.steady.command],
-                case.substeps,
-                case.load_cell,
-                power_controls(),
-                cycle_controls(),
-                drive_controls(7),
-                &[0.0; 7],
-                || false,
-            )
-            .map_err(error)?;
-        rows.push(Row {
-            state: *next.drive().state(),
-            kelvin: IDS.map(|id| next.thermal().temperature_k(id).unwrap()),
-        });
-        (thermal, drive, _) = next.into_parts();
-    }
-    Ok(rows)
-}
-
-/// The module's `steps` steps of the case through its heat assembly, which
-/// carries the case's link (`FixedCooling`).
-fn module_linked_run(f: &ChargeFixture, case: &Case<'_>, steps: usize) -> Vec<Row> {
-    let start = &cells_start(case);
-    heat_assembly(case, start, |cx, transport| {
-        let (resistors, devices) = (drive_resistors(&f.base), f.base.devices());
-        let drive = CommutatedBatteryMotorHeatNetwork {
-            assembly: transport,
-            resistors: &resistors,
-            devices: &devices,
-            bearing_cell: IDS[0],
-        };
-        let charges = f.bindings();
-        let network = ChargeBatteryMotorHeatNetwork {
-            drive,
-            charges: &charges,
-            maximum_cells_per_chord: CHORD_BUDGET,
-        };
-        let (native, authored) = (&case.steady.native, curves(1.0));
-        let mut drive = network
-            .bind(cx, start, native, &authored, case.start)
-            .unwrap();
-        let mut thermal = start.clone();
-        let mut rows = Vec::new();
-        for k in 0..steps {
-            let intervals = [CommutationInterval {
-                gates: case.gates(k),
-                duration_s: case.dt_s,
-            }];
-            let next = network
-                .step_candidate(
-                    cx,
-                    &thermal,
-                    thermal.time_s() + case.dt_s,
-                    &drive,
-                    &intervals,
-                    &[case.steady.command],
-                    case.substeps,
-                    case.load_cell,
-                    power_controls(),
-                    cycle_controls(),
-                    drive_controls(7),
-                    &[0.0; 7],
-                )
-                .unwrap();
-            rows.push(Row {
-                state: *next.drive().state(),
-                kelvin: IDS.map(|id| next.thermal().temperature_k(id).unwrap()),
-            });
-            (thermal, drive, _) = next.into_parts();
-        }
-        rows
-    })
-}
-
 #[test]
 fn charge_curves_as_a_graph_keep_the_steady_motoring_and_regenerative_drive() {
     for regeneration in [false, true] {
-        let f = leak(charge_fixture(1.0, 0.0, 350.0, false, 1.0));
+        let f = leak(charge_fixture(1.0, 0.0, 350.0));
         let steady = steady_drive(regeneration);
         let start = initial(&steady, [0.0; 2]);
         let case = charge_case(f, &steady, start, 1.0 / 64.0, 4, Some(IDS[3]));
-        let module = module_run(f, &case, case.dt_s, 3).unwrap();
-        // On 38d60e3722 the two agree bit for bit. The bounds
-        // allow for rounding on another platform.
-        let graph = kernel_run(&case, 3);
-        compare(&module, &graph, [1e-14, 1e-11]);
-        // Without the module: within 1.1e-15 relative and 2.7e-14 K of the
-        // closed form.
-        steady_check(&case, &graph, [2e-14, 1e-12]);
+        // On 9b41f08404 within 1.1e-15 relative and 2.7e-14 K of the closed
+        // form.
+        steady_check(&case, &kernel_run(&case, 3), [2e-14, 1e-12]);
     }
 }
 
 #[test]
 fn charge_curves_as_a_graph_follow_the_hot_diode_threshold() {
-    // The module's dynamic fixture: cells of 0.01 J/K, a diode threshold
+    // The dynamic fixture: cells of 0.01 J/K, a diode threshold
     // rising 20 mV/K, the nodes started off their steady values.
-    let f = leak(charge_fixture(0.01, 0.02, 350.0, false, 1.0));
+    let f = leak(charge_fixture(0.01, 0.02, 350.0));
     let steady = steady_drive(false);
     let start = initial(&steady, [-0.45, 0.4]);
     let case = charge_case(f, &steady, start, 1.0 / 1024.0, 1, None);
-    let module = module_run(f, &case, case.dt_s, 3).unwrap();
-    // On 38d60e3722 the two agree within 9.3e-15 relative and
-    // 4.9e-11 K over three steps; the bounds sit 21 and 20 times above.
     let graph = kernel_run(&case, 3);
-    compare(&module, &graph, [2e-13, 1e-9]);
-    // Without the module: the owner by hand bit for bit, each cell's
-    // balance within 5.5e-16 J.
+    // On 9b41f08404 the owner by hand bit for bit, each cell's balance
+    // within 5.5e-16 J.
     owner_check(&case, &graph, 0.02, [1e-14, 1e-14]);
     // The feedback is real: the output high package, whose diode conducts,
     // warms past 300.75 K, so its threshold rises by more than 15 mV.
-    assert!(module[2].kelvin[3] > 300.75, "{:?}", module[2].kelvin);
+    assert!(graph[2].kelvin[3] > 300.75, "{:?}", graph[2].kelvin);
 }
 
 #[test]
 fn charge_curves_as_a_graph_follow_a_gate_program_that_changes() {
-    // The module's dynamic fixture continues with only the output high
+    // The dynamic fixture continues with only the output high
     // switch on; a third step returns to the first gates.
-    let f = leak(charge_fixture(0.01, 0.02, 350.0, false, 1.0));
+    let f = leak(charge_fixture(0.01, 0.02, 350.0));
     let steady = steady_drive(false);
     let start = initial(&steady, [-0.45, 0.4]);
     let other = DeviceGateState {
@@ -197,82 +220,63 @@ fn charge_curves_as_a_graph_follow_a_gate_program_that_changes() {
         schedule: vec![steady.gates, other, steady.gates],
         ..charge_case(f, &steady, start, dt, 1, None)
     };
-    let module = module_run(f, &case, dt, 3).unwrap();
-    // On a8d5a7f02c the two agree within 5.5e-15 relative and 2.7e-11 K
-    // over three steps; the bounds sit 18 and 37 times above.
     let graph = kernel_run(&case, 3);
-    compare(&module, &graph, [1e-13, 1e-9]);
-    // Without the module: the owner by hand bit for bit, each cell's
-    // balance within 5.5e-16 J.
+    // On 9b41f08404 the owner by hand bit for bit, each cell's balance
+    // within 5.5e-16 J.
     owner_check(&case, &graph, 0.02, [1e-14, 1e-14]);
     // The schedule matters: with the first gates kept, the second step ends
     // elsewhere.
-    let kept = module_run(f, &charge_case(f, &steady, start, dt, 1, None), dt, 3).unwrap();
+    let kept = kernel_run(&charge_case(f, &steady, start, dt, 1, None), 2);
     assert_ne!(
         kept[1].state.map(f64::to_bits),
-        module[1].state.map(f64::to_bits)
+        graph[1].state.map(f64::to_bits)
     );
 }
 
 #[test]
 fn charge_curves_as_a_graph_carry_the_link_between_cells() {
-    // The module's heat-assembly fixture: steady motoring with a link of
+    // The heat-assembly fixture: steady motoring with a link of
     // 0.25 W/K between the inductor's cell and the motor's. Then the hot
     // dynamic fixture with the same link.
     let steady = steady_drive(false);
     let fixtures = [
-        ((1.0, 0.0), [0.0; 2], 1.0 / 64.0, 4, [1e-14, 1e-11]),
-        ((0.01, 0.02), [-0.45, 0.4], 1.0 / 1024.0, 1, [1e-13, 1e-9]),
+        ((1.0, 0.0), [0.0; 2], 1.0 / 64.0, 4),
+        ((0.01, 0.02), [-0.45, 0.4], 1.0 / 1024.0, 1),
     ];
-    // On 72250ec7fc the steady fixture agrees bit for bit in the drive and
-    // within 1.7e-13 K in the cells, the hot one within 7.8e-16 relative and
-    // 1.6e-11 K. The bounds are those of the same fixtures without the link,
-    // 1e-13 in place of 2e-13 for the hot drive.
-    for ((cp, slope), offset, dt, substeps, bounds) in fixtures {
-        let f = leak(charge_fixture(cp, slope, 350.0, false, 1.0));
+    for ((cp, slope), offset, dt, substeps) in fixtures {
+        let f = leak(charge_fixture(cp, slope, 350.0));
         let start = initial(&steady, offset);
         let case = Case {
             linked: true,
             ..charge_case(f, &steady, start, dt, substeps, None)
         };
-        let module = module_linked_run(f, &case, 3);
-        let graph = kernel_run(&case, 3);
-        compare(&module, &graph, bounds);
-        // Without the module: the owner by hand bit for bit, each cell's
-        // balance within 4.4e-14 J.
-        owner_check(&case, &graph, slope, [1e-14, 1e-12]);
-        // The steady fixture's first step also meets the module's own
-        // closed form on the graph: within 5.7e-14 K.
+        // On 9b41f08404 the owner by hand bit for bit, each cell's balance
+        // within 4.4e-14 J.
+        owner_check(&case, &kernel_run(&case, 3), slope, [1e-14, 1e-12]);
+        // The steady fixture's first step also meets the closed form through
+        // the link: within 5.7e-14 K.
         assert!(substeps != 4 || closed_form_step(&case) < 1e-12);
     }
 }
 
 #[test]
-fn charge_curves_as_a_graph_refuse_what_the_module_refuses() {
+fn charge_curves_as_a_graph_refuse_a_claim_out_of_its_domain_and_a_partial_period() {
     let steady = steady_drive(false);
     let start = initial(&steady, [0.0; 2]);
     let dt = 1.0 / 64.0;
     // Charge curves qualified only up to 300.000001 K, which the step passes.
-    let f = leak(charge_fixture(1.0, 0.0, 300.000001, false, 1.0));
+    let f = leak(charge_fixture(1.0, 0.0, 300.000001));
     let case = charge_case(f, &steady, start, dt, 4, None);
-    let module = module_run(f, &case, dt, 1).unwrap_err();
     let graph = kernel_refusal(&case, dt);
-    for text in [&module, &graph] {
-        assert!(text.contains("NoClaimInDomain"), "{text}");
-        assert!(text.contains("device_output_charge_0"), "{text}");
-    }
+    assert!(graph.contains("NoClaimInDomain"), "{graph}");
+    assert!(graph.contains("device_output_charge_0"), "{graph}");
     assert!(
         graph.contains(r#"Law { port: "heat_input_high""#),
         "{graph}"
     );
     // A step that is not one gate program.
-    let f = leak(charge_fixture(1.0, 0.0, 350.0, false, 1.0));
+    let f = leak(charge_fixture(1.0, 0.0, 350.0));
     let case = charge_case(f, &steady, start, dt, 4, None);
-    let module = module_run(f, &case, 2.0 * dt, 1).unwrap_err();
-    assert!(
-        module.contains("same represented thermal endpoint"),
-        "{module}"
-    );
     let graph = kernel_refusal(&case, 2.0 * dt);
     assert!(graph.contains("one period of its program"), "{graph}");
 }

@@ -2,14 +2,14 @@
   "schema": "frankensim-enumeration-ratchet-v2",
   "bead": "frankensim-rc-1109-root-3gc12.8.1",
   "fs-couple.with_fns": 1200,
-  "fs-couple.candidates": 486,
+  "fs-couple.candidates": 484,
   "fs-couple.errors": 631,
   "fs-couple.traits": 114,
-  "fs-couple.lines": 796498,
+  "fs-couple.lines": 805257,
   "fs-material.with_fns": 424,
   "fs-material.candidates": 125,
   "fs-material.errors": 303,
   "fs-material.traits": 62,
-  "fs-material.lines": 447345,
+  "fs-material.lines": 450565,
   "no_claim": "line-scan counts of declarations in non-test source: fn names containing _with_ at any visibility; struct, enum and type names ending in Candidate; struct, enum and type names ending in Error; trait definitions. Lines are recorded and not gated. A count says nothing about whether the code is correct or used."
 }

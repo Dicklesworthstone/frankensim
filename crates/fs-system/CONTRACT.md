@@ -4077,8 +4077,9 @@ Not claimed:
 The optional `phs` feature also exposes
 `commutated_drive::CommutatedBatteryMotorDrive` (bead
 `frankensim-rc-1109-root-3gc12.6.6`, under `.9.2`). It is the drive that
-`fs_couple::circuit_enthalpy::converter::commutation::battery_motor` couples
-in its `capacitance` and `charge` lanes. Its owner is the drive of
+`fs_couple::circuit_enthalpy::converter::commutation::battery_motor` coupled
+by hand in its `capacitance` and `charge` lanes, which the graphs below
+replaced. Its owner is the drive of
 `fs_phs::circuit::converter::commutation::capacitance::battery_motor`: the
 equivalent-circuit battery and its lead, a two-leg converter of four switches
 (channel, body diode and output storage each) and a DC motor whose rotor and
@@ -4306,12 +4307,12 @@ Planted defects, one at a time, each failed at least one test:
   - the stored lane's charter.
 
 fs-couple's `tests/commutated_converter_enthalpy/battery_motor/graph.rs`
-declares the drive of the module's `capacitance` and `charge` lanes as a
-graph:
+declares the drive of the retired `capacitance` and `charge` lanes ("the
+module") as a graph:
 - this drive with the fixture's storage, its five resistances and four
   switches following the fixture's card at the temperature each heat port
   receives. A switch's law also asks its package's storage claim, so a
-  temperature outside that claim is refused as the module refuses it;
+  temperature outside that claim is refused as the module refused it;
 - two `Force` sources holding the command's shaft torques;
 - the seven cells as the backward-Euler timeline returning end-of-step
   temperatures, and one heat route per heat port;
@@ -4320,7 +4321,8 @@ graph:
   material law, gives the module's fixed conductance and the flux's
   derivatives in both cells' enthalpies.
 
-Against the module, three steps of each fixture, for both storage files:
+Until the module retired, three steps of each fixture were held to it, for
+both storage files:
 - steady motoring and regeneration (1/64 s, four substeps, the load's work
   into a package): bit for bit, held to 1e-14 relative and 1e-11 K;
 - the hot dynamic fixture (cells of 0.01 J/K, a diode threshold rising
@@ -4352,7 +4354,7 @@ Against the module, three steps of each fixture, for both storage files:
   5.7e-14 K, held to 1e-12 K. The drive's laws at the two linked cells do
   not vary with temperature here, so the link reaches the cells only.
 
-Each run is also checked without the module:
+Each run is also checked without the module; these checks remain:
 - the steady runs against `steady_drive`'s closed form over the three
   periods: each cell k times its steady heat, the drive back at its start
   but for the battery's charge, k dt `cell_current_a` lower. Within
@@ -4371,7 +4373,7 @@ failed these checks. The references themselves failed with the owner at
 the start temperatures, with half the threshold slope, and with the
 battery's charge kept in the steady closed form.
 
-Both sides refuse two steps:
+The graph refuses two steps, as the module did:
 - a storage claim qualified only up to 300.000001 K (the graph with `Law`
   naming `heat_input_high`);
 - a step that is not one program.
@@ -4391,12 +4393,13 @@ these tests:
 - the link's conductance doubled;
 - the timeline without the link's law.
 
-`battery_motor/nine_state.rs` declares the module's own lane, switches
-without output storage, the same way: the drive in the `NoDeviceStorage`
-lane, its switches asking no storage claim. The harness takes the lane as a
-type parameter (`Lane`); each lane's owner is built by hand (the gate
-lane's in gate/graph.rs, at its cells' temperatures). Against
-the module, three steps of each fixture:
+`battery_motor/nine_state.rs` declares the lane `battery_motor` still
+couples by hand (from here on "the module"), switches without output
+storage, the same way: the drive in the `NoDeviceStorage` lane, its switches
+asking no storage claim. The harness takes the lane as a type parameter
+(`Lane`); each lane's owner is built by hand (the gate lane's in
+gate/graph.rs, at its cells' temperatures). Against the module, three
+steps of each fixture:
 - steady motoring and regeneration (1/64 s, four substeps, the load's work
   into a package): bit for bit, held to 1e-14 relative and 1e-11 K;
 - the feedback fixture (cells of 0.001 J/K, a diode threshold rising
@@ -4453,5 +4456,5 @@ state refusing a step from another.
 Not claimed: torques and rail voltages that change within the program;
 reverse recovery and avalanche; storage, OCV or bearing drag that change
 with temperature. The
-graphs do not cover the module's refusals of a source that changed or was
-bound another way.
+retired lanes' refusals of a source that changed or was bound another way
+retired with them; the graphs do not cover them.

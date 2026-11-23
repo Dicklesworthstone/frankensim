@@ -4,8 +4,8 @@
 use fs_system::commutated_drive::NoDeviceStorage;
 
 use super::graph::{
-    Case, Coolant, Row, cells_start, compare, heat_assembly, kernel_refusal, kernel_run, leak,
-    owner_check, steady_check,
+    Case, Coolant, Row, cells_start, compare, heat_assembly, kernel_refusal, kernel_rows,
+    kernel_run, leak, owner_check, steady_check,
 };
 use super::*;
 
@@ -240,7 +240,7 @@ fn the_nine_state_drive_as_a_graph_shares_a_finite_liquid_coolant() {
     let module = module_linked_run(&case, 3);
     // On 4d192a789c the drive agrees bit for bit and the cells within
     // 1.1e-13 K over three steps.
-    let graph = kernel_run(&case, 3);
+    let graph = kernel_rows(&case, 3);
     compare(&module, &graph, [1e-14, 1e-11]);
     // Without the module: the owner by hand bit for bit, each cell's
     // balance, the coolant's by its own caloric curve, within 8.1e-14 J.
@@ -298,7 +298,7 @@ fn the_nine_state_drive_as_a_graph_refuses_what_the_module_refuses() {
     // Qualified to 350 K, the graph takes the step; a step that is not one
     // gate program is refused.
     let case = case(350.0, 100.0);
-    assert_eq!(kernel_run::<_, [f64; 7]>(&case, 1).len(), 1);
+    assert_eq!(kernel_run(&case, 1).len(), 1);
     let module = module_run(&case, 2.0 * dt, 1).unwrap_err();
     assert!(
         module.contains("same represented thermal endpoint"),

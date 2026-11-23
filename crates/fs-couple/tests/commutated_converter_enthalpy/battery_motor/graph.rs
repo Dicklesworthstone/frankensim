@@ -1,11 +1,11 @@
 //! The battery-motor drive's fixtures as declared graphs on the composition
 //! kernel.
 //!
-//! `battery_motor` and its `capacitance` and `charge` lanes couple fs-phs's
-//! commutated drive to the enthalpy timeline by hand. A step runs the gate
-//! program once, each resistance and switch at its receiving cell's card at
-//! the END temperature, with Newton on the cell energies. The graph says the
-//! same with no code for the pair:
+//! `battery_motor` ("the module" below) couples fs-phs's commutated drive to
+//! the enthalpy timeline by hand, as its retired `capacitance` and `charge`
+//! lanes did. A step runs the gate program once, each resistance and switch
+//! at its receiving cell's card at the END temperature, with Newton on the
+//! cell energies. The graph says the same with no code for the pair:
 //! - `fs_system::commutated_drive::CommutatedBatteryMotorDrive` in the
 //!   fixture's lane ([`Lane`]), its five resistances following
 //!   [`CardResistance`] and its four switches following [`CardSwitch`];
@@ -17,8 +17,10 @@
 //! - where the fixture links two cells, the same link in the timeline at the
 //!   module's fixed conductance ([`FixedCoolingStandIn`]).
 //!
-//! The two sides solve the same equations with different solvers, so they
-//! agree to within the solves' tolerances.
+//! Each run is checked against `steady_drive`'s closed form or the owner's
+//! step built by hand (`owner_check`). The nine-state graphs are also held
+//! to the module step for step (`compare`); until the storage lanes
+//! retired, so were theirs (fs-system CONTRACT).
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -861,7 +863,7 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
     let q = per_body(case.steady.heat_w.map(|p| h * p), 0.0);
     let x = h * g * (q[0] - q[6]) / (1.0 + 2.0 * h * g);
     let exchange = [-x, 0.0, 0.0, 0.0, 0.0, 0.0, x];
-    let kelvin = kernel_run::<DeviceStorage, [f64; 7]>(case, 1)[0].kelvin;
+    let kelvin = kernel_run(case, 1)[0].kelvin;
     let error = |i: usize| (kelvin[i] - (300.0 + q[i] + exchange[i])).abs();
     (0..7).map(error).fold(0.0, f64::max)
 }
@@ -1050,8 +1052,15 @@ pub(super) fn steady_check<L: Lane, K: AsRef<[f64]>>(
     within("graph against the closed form", worst, bounds);
 }
 
-/// `steps` steps of the case's graph. The kernel's ledger closes.
-pub(super) fn kernel_run<L: Lane, K: Default + AsMut<[f64]>>(
+/// `steps` steps of the case's graph, the seven cells in `IDS` order.
+pub(super) fn kernel_run<L: Lane>(case: &Case<'_, L>, steps: usize) -> Vec<Row<L::State>> {
+    kernel_rows(case, steps)
+}
+
+/// `steps` steps of the case's graph, the timeline's cells in `cell_ids`
+/// order in `K`: the seven, then the coolant if any. The kernel's ledger
+/// closes.
+pub(super) fn kernel_rows<L: Lane, K: Default + AsMut<[f64]>>(
     case: &Case<'_, L>,
     steps: usize,
 ) -> Vec<Row<L::State, K>> {

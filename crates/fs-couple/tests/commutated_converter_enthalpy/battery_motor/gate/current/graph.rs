@@ -19,7 +19,7 @@ use fs_phs::circuit::converter::commutation::gate::{
 };
 use fs_system::commutated_drive::{ChannelLaw, GateStorage};
 
-use super::super::super::graph::{Card, Case, compare, held_to_owner, kernel_run, leak, text};
+use super::super::super::graph::{Card, Case, compare, held_to_owner, kernel_rows, leak, text};
 use super::super::graph::{CELLS, gate_case, gate_owner, module_steps};
 use super::*;
 
@@ -237,7 +237,7 @@ fn a_current_graph_scales_its_channel_power_at_the_accepted_temperature() {
     let f = leak(current_fixture(0.05, 0.2, Defect::None));
     let p = authored(0.05, false);
     let (case, _) = surface_case(f, &p, 300.0);
-    let graph = kernel_run(&case, 2);
+    let graph = kernel_rows(&case, 2);
     let module = module_network(f, |network| module_steps(network, &case, &p, 2));
     compare(&module, &graph, [1e-14, 1e-12]);
     // Without the module: the owner by hand with the surface in closed form.
@@ -282,7 +282,7 @@ fn a_current_graph_steps_from_another_accepted_state_at_the_answers_there() {
     let f = leak(current_fixture(0.05, 0.2, Defect::None));
     let p = authored(0.05, false);
     let (case, laws) = surface_case(f, &p, 320.0);
-    let graph = kernel_run(&case, 1);
+    let graph = kernel_rows(&case, 1);
     // The module bound at that state takes the same step.
     let module = module_network(f, |network| module_steps(network, &case, &p, 1));
     compare(&module, &graph, [1e-14, 1e-12]);

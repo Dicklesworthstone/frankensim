@@ -1,7 +1,7 @@
 //! Finite chemical/shaft power, diode heat and the original finite caloric owners.
-#[path = "battery_motor/capacitance.rs"]
+#[path = "battery_motor/capacitance/graph.rs"]
 mod capacitance;
-#[path = "battery_motor/charge.rs"]
+#[path = "battery_motor/charge/graph.rs"]
 mod charge;
 #[path = "battery_motor/gate.rs"]
 mod gate;
