@@ -1,8 +1,14 @@
 //! G1/G3: actual field motion, material transport and finite enthalpy owners.
 //! Synthetic constitutive fixtures test causality and physical accounting;
 //! they do not establish a measured actuator's material or dynamic fidelity.
+#[path = "circuit_enthalpy/card.rs"]
+mod card;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "circuit_enthalpy_motion/graph.rs"]
+mod graph;
+#[path = "circuit_enthalpy/kernel.rs"]
+mod kernel;
 #[path = "electrical_contacts/source.rs"]
 mod source;
 #[path = "circuit_enthalpy_motion/support.rs"]

@@ -30,64 +30,19 @@
 
 use std::sync::Arc;
 
-use fs_couple::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, MaterialOhmicBody};
-use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;
+use fs_couple::cavity_phs::piston::thermal::power::joule::JouleHeatingError;
 use fs_couple::circuit_enthalpy::entropy;
 use fs_couple::material_circuit::MaterialCircuit;
 use fs_matdb::MaterialCard;
 use fs_material::phase::ResolvedHeatCapacityCurve;
-use fs_material::state_point::MaterialPropertySelection;
 use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance};
-use fs_system::circuit::{KirchhoffCircuit, ResistanceLaw};
+use fs_system::circuit::KirchhoffCircuit;
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::TimelineState;
 
+use crate::card::CardResistance;
 use crate::common::*;
-use crate::kernel::{CELLS, enthalpy_at, timeline, with_cx};
-
-/// The fixture's resistor, resolved as the module's `coefficients` resolves
-/// it: the card's conductor at the phase state of the cell, here the state
-/// at the temperature the resistor's heat port receives, its geometry
-/// checked against the cell's volume.
-#[derive(Debug)]
-struct CardResistance {
-    card: &'static MaterialCard,
-    curve: &'static ResolvedHeatCapacityCurve,
-    /// The destination cell's volume \[m^3\].
-    volume_m3: f64,
-    /// Names the card in the circuit's identity: the fixture's index.
-    tag: u64,
-}
-
-impl ResistanceLaw for CardResistance {
-    fn ohms(&self, kelvin: f64) -> Result<f64, String> {
-        let h = enthalpy_at(self.curve, kelvin)?;
-        let phase = self
-            .curve
-            .curve()
-            .state_at_specific_enthalpy(h)
-            .map_err(|error| format!("{error:?}"))?;
-        let context = point(300.0);
-        let body = MaterialOhmicBody {
-            material: ThermalMaterialPoint {
-                material: self.card,
-                context: &context,
-                temperature_axis: "T",
-                liquid_fraction_axis: None,
-            },
-            selection: MaterialPropertySelection::SingleClaimOnly,
-            length_m: 1.0,
-            area_m2: 1.0,
-        };
-        body.resolve_conductor(phase, self.volume_m3)
-            .map(|conductor| conductor.resistance_ohm())
-            .map_err(|error| format!("{error:?}"))
-    }
-
-    fn identity_words(&self, words: &mut Vec<u64>) {
-        words.extend([self.tag, self.volume_m3.to_bits()]);
-    }
-}
+use crate::kernel::{CELLS, timeline, with_cx};
 
 /// One accepted interval: the circuit's differential state (inductor flux
 /// linkages \[Wb\], then capacitor charges \[C\]), the two cells' temperatures

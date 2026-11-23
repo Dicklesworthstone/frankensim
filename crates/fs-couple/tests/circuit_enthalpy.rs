@@ -1,4 +1,6 @@
 //! Actual shared circuit and thermal owners, not copied RC or heat steppers.
+#[path = "circuit_enthalpy/card.rs"]
+mod card;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 #[path = "circuit_enthalpy/graph.rs"]

@@ -255,6 +255,9 @@ physics owners below fs-couple can be composed without it.
     - `Restriction`: no words. Identity: conductance, carried count, and its
       gas's identity if it has one.
     - `Mass`: two words, position and velocity; identity: inertance.
+    - `GapField`: two words, the field coordinate and the gap; a decode
+      refuses a gap outside the open range. Identity: the kind (capacitor
+      or inductor), the coupling scale and both limits.
     - `Storage`, `Spring`, `HeatCapacity`: one word, respectively integrated
       flow, extension and temperature. Identities retain capacity, both spring
       coefficients, or thermal capacity.
@@ -3960,3 +3963,111 @@ interior while driving a real mass through a controlled effort source; its
 motion and work follow independently solved forces, and checkpoint replay
 crosses the active-set change bitwise. This law supplies no anti-windup,
 smoothing, time-of-crossing search or feedback-stability guarantee.
+
+## Field in a gap of variable width
+
+`elements::GapField` stores `H = x^2 g / (2 s)` in a gap of width `g` [m]:
+- the field of a parallel-plate capacitor (`GapField::capacitor`), with `x`
+  the charge [C] and `s = epsilon A` [F m];
+- the air gap of a winding whose return path stores no field
+  (`GapField::inductor`), with `x` the flux linkage [Wb] and `s = mu N^2 A`
+  [H m].
+
+Its state is `GapFieldState { coordinate, gap_m }`. Port `field` receives the
+rate of `x` and returns its conjugate. A capacitor's port is `FlowIn` (current
+into the positive plate); an inductor's is `EffortIn` (voltage across the
+winding). Port `gap` (`FlowIn`) receives the rate at which the gap opens and
+returns the force the field holds against that opening, positive as the
+plates or poles attract.
+
+Both returned efforts are the exact mean of the gradient along the segment
+between the step's end points: the average-vector-field discrete gradient,
+the formula of fs-couple's moving field.
+
+```text
+e_x = x_m g_m / s + (dx / 12) (dg / s)
+e_g = (x_m^2 + dx^2 / 12) / (2 s)
+```
+
+The receipt is lossless. Its stored change `e_x dx + e_g dg` is
+`H(end) - H(start)` within rounding, for every step. The class is `Smooth`,
+and the port tangent is the exact, symmetric derivative of the two efforts.
+
+The gap is admitted strictly inside `gap_limits_m`, which must be finite with
+`0 <= lower < upper`. A state or a step end outside that range is refused
+(`ElementError::Law`), never clamped. The coupling scale and its reciprocal
+must be positive and finite. The scale is constant: a coefficient that changed
+with temperature would need the field's entropy, which the element does not
+hold. The element has no fringing, saturation or leakage, and no motion of its
+own. A `Mass` carries the moving boundary, joined to `gap` by a common-flow
+junction with ratio -1, so that the mass's velocity opens the gap.
+
+`tests/gap_field.rs` (4 tests):
+- the conformance kit and the tangent check, over 64 states and inputs of
+  both kinds. The efforts are held to Simpson's rule on the gradient (which
+  is quadratic along the segment) within 16 eps of its size, and the stored
+  change to `H(end) - H(start)` within 32 eps;
+- a held field (no current into the plates, no voltage across the winding)
+  joined to a mass and a held force, over ten steps:
+  - the coordinate is held bit for bit;
+  - the gap moves bit for bit with the mass;
+  - both follow the uniform acceleration `(F - x^2 / (2 s)) / m` within
+    1e-14 m and 1e-15 m/s;
+  - the force's work is the field's and the mass's energy change;
+- a gap discharging through a resistance (an inductor's `Damper`, a
+  capacitor's `Admittance`) while a mass and a force move it, against the
+  monolithic discrete-gradient step solved by hand with Newton:
+  - twenty steps agree within 4.5e-15 (bounds 1e-13);
+  - the resistance's heat reaches the heat capacity within 1.3e-14 J;
+  - the work balance closes;
+- refusals:
+  - the scale and the limits at construction;
+  - states outside the range (energy, codec);
+  - a step end outside it, and a non-finite input, with the outputs and the
+    candidate untouched;
+  - the kind, the scale and each limit change the identity.
+
+Nine defects planted one at a time in the element each failed at least one
+of these tests, as did two in the graph below:
+- in the element:
+  - either effort without its increment term;
+  - either tangent term wrong;
+  - a closed lower limit;
+  - the identity without a limit;
+  - the inductor's port receiving flow;
+  - a decode admitting any gap;
+  - the gap advanced at the field's rate;
+- in the graph:
+  - the mass closing the gap;
+  - the force reversed.
+
+fs-couple's `tests/circuit_enthalpy_motion/graph.rs` declares the moving
+field of `circuit_enthalpy::motion::step_candidate` as a graph:
+- the module's netlist in a `KirchhoffCircuit`, with the gap's branch
+  replaced by a source port (a voltage source for a capacitor, a current
+  source for an inductor), and each resistor following its card at the
+  temperature its heat port receives;
+- a `GapField` bonded to that port;
+- a `Mass` and a `Force` in one common-flow junction with the gap;
+- the backward-Euler timeline and one heat route per resistor.
+
+Against the module, at every interval:
+- a gap inductor shorted through two heated resistors (8 x 0.1 s): within
+  1.2e-9 K, 1.9e-12 Wb, 3.4e-15 m, 1.0e-14 m/s and 1.9e-12 J;
+- a gap capacitor pushed open while it discharges (8 x 0.1 s): within
+  2.7e-11 K, 1.4e-14 C, 1.3e-14 m, 1.8e-14 m/s and 1.1e-13 J;
+- a linkage held by a 0 V port beside a driven branch (4 x 0.25 s): the
+  linkage, the gap and the velocity are equal, and the sides agree within
+  1.3e-8 K and 7.0e-11 J. Both meet the uniform acceleration within 1e-10.
+
+The graph's work balance closes within 1e-8 J: the force's and the ports'
+supply against the gap's, the mass's and the cells' energy change.
+
+Not claimed:
+- the module's layered axial support;
+- its coupled multi-winding gap;
+- its nonlinear dielectric;
+- its conductivity and contact variants;
+- its gap-limit and budget refusals as graph behaviour;
+- a field coefficient that depends on temperature;
+- fringing.

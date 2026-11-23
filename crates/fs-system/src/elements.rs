@@ -24,6 +24,9 @@
 //! The flow is velocity, angular velocity or current; a spring's state is
 //! the displacement, twist or charge. A [`Gyrator`] joins two domains without
 //! loss: it is the ideal DC machine between a current loop and a rotor.
+//! A [`GapField`] joins them through storage: the field of a capacitor or an
+//! air gap whose energy depends on the width of the gap, which its force
+//! opens or closes.
 //!
 //! # Signs
 //!
@@ -89,6 +92,8 @@ mod dirac;
 pub use dirac::{DiracError, DiracJunction};
 mod electrical;
 pub use electrical::{IdealDiode, IdealSwitch};
+mod gap_field;
+pub use gap_field::{GapField, GapFieldState};
 mod modulated_transformer;
 pub use modulated_transformer::ModulatedTransformer;
 mod resistance;

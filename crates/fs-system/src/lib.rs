@@ -24,8 +24,9 @@
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
-//! heat capacity, conductance, heater), their power-domain variants, and the
-//! dual storage, admittance and flow source for common-effort networks.
+//! heat capacity, conductance, heater), their power-domain variants, the
+//! dual storage, admittance and flow source for common-effort networks, and
+//! the field in a gap of variable width that joins a circuit to a mass.
 //! Mechanical, electrical and thermal devices can be described as data and
 //! run through the same kernel. With feature `phs`, `circuit` runs any
 //! Kirchhoff netlist of fs-phs as one Component whose resistors heat what
