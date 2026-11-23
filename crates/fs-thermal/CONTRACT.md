@@ -198,10 +198,21 @@ G0, in `crates/fs-system/tests/thermal_timeline_slice.rs` (run with
 `cargo test -p fs-system --features slices`); the list is in
 `crates/fs-system/CONTRACT.md`.
 
-No claim: the entropy generated inside the timeline is reported as zero. That
-is a lower bound for conduction between cells; for the boundaries it is one
-only if the environment wire is at the authored ambient temperature, which is
-not checked. A birth after the start is refused, because its mass and enthalpy
+Entropy. An implicit timeline's receipt books the entropy its owner's solve
+generates in the owner's links and boundaries: the solve's own
+`EntropyAudit::conduction_generation_j_k`, at the solve's quadrature
+temperatures. Heat handed in through a cell port is the delivering
+component's to account for. `an_implicit_timeline_books_its_owners_conduction_entropy`
+(in the G0 file) holds the booked value to the owner's account under backward
+Euler and SDIRK2, within 1e-12 of it. It holds the backward-Euler step to
+`G (T_a - T_b)^2 / (T_a T_b)` for the link plus `q (T_0 - T_a) / (T_a T_0)`
+for a 280 K film, at the end temperatures. The boundary part completes the
+account only when the environment wire is routed at the authored ambient
+temperature, which is not checked. The explicit rule keeps no entropy account
+and books zero, a lower bound for its conduction; the same test pins that
+zero.
+
+No claim: a birth after the start is refused, because its mass and enthalpy
 would enter with no port to carry them. The class is `Smooth`; a law with a
 latent interval has kinks at the interval's ends, where a kernel that
 differences the port map gets a one-sided slope; with the implicit solve the

@@ -1791,9 +1791,18 @@ behind the contract), two linked cells with a law each.
   16.758 J to the room in the owner's audit and in the kernel's sink, to
   1e-9 of it; the same cells not in contact, whose films act on the whole
   faces, end 0.19 K away, which is what losing the covered area would be.
+- Entropy (`an_implicit_timeline_books_its_owners_conduction_entropy`): the
+  quarter-second step with a 280 K film on cell 10 books, under both schemes,
+  the owner's own `conduction_generation_j_k` to 1e-12 of it. Under backward
+  Euler that is the link's `G (T_a - T_b)^2 / (T_a T_b)` plus the film's
+  `q (T_0 - T_a) / (T_a T_0)` at the end temperatures. The explicit rule books
+  exactly zero.
 Thirty-seven planted defects in the explicit component were each caught, and
 twenty-three in the implicit driver; none was planted for the end-of-step
-option or for the contact carried outside.
+option or for the contact carried outside. Five more were planted in the
+entropy wiring, and each failed the entropy test: the implicit step booking
+zero, its storage change, or its generation plus its reservoir input; the
+explicit rule booking heat; the receipt ignoring the solve.
 
 Against the hand-written coupling,
 `crates/fs-couple/tests/legacy/rigid_damping_heat/graph.rs` (run with
@@ -3419,9 +3428,31 @@ its sources. Four of the six graph defects above also fail it; resistors at
 300 K and step-mean cell temperatures do not, since its constant cards make
 the resistance independent of temperature.
 
+Entropy. Each interval of the three fixtures also holds the module's own
+entropy account (`circuit_enthalpy::entropy::step_candidate`, which returns
+the same candidate) to the kernel's ledger:
+- its `electrical_loss_generation_j_k` to the circuit's entropy, which is
+  each resistor's heat over the temperature its port received;
+- its `conduction_generation_j_k` to the timeline's entropy, which is the
+  owner's own now that fs-thermal's implicit timeline books it.
+
+On the export of 1e611fdf33 the two sides agree within 1.7e-14, 6.6e-15 and
+3.5e-16 J/K; the bounds are 1e-12, 3e-13 and 2e-14 J/K. The heat routes
+carry only the interface iteration's residue: each route's heat times the
+difference of the reciprocal temperatures that the port and the cell last
+saw. The residue is at most 5.4e-16 J/K, 4.3e-15 of the total, and the
+bound is 2e-13 of the total. Three defects planted in the comparison each
+failed it: the module's two terms swapped, the kernel's two nodes swapped,
+and the environment route at 290 K against the 300 K sink (the sources
+fixture alone). Of the timeline-wiring defects listed with the timeline
+slice, the three that change what the implicit step books also fail it: zero,
+the storage change, and the receipt ignoring the solve. The one that adds the
+reservoir input does not, since these fixtures have no film or reservoir.
+
 Not claimed: a tangent or `PortTangent`; second-order accuracy of the
 coupled step, which is first order with endpoint coefficients as the module
-documents; the module's phase-dependent resistance at a latent plateau,
+documents; the module's storage, reservoir-input, temporal and algebraic
+entropy terms, since the ledger books generation, not storage; the module's phase-dependent resistance at a latent plateau,
 which the fixture's single-phase cards do not reach; sources, conductances
 or reservoirs that the module's coefficients resolve from the state of each
 trial (the comparison uses constant sources only). The module is kept as the

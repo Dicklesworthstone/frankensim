@@ -112,13 +112,19 @@
 //! The kernel keeps component states as `'static` values, so a timeline
 //! added to a system must borrow laws that live that long.
 //!
-//! No claim: the entropy generated inside the timeline (conduction between
-//! cells at different temperatures, exchange with its boundaries) is
-//! reported as zero. That is a lower bound for the conduction; for the
-//! boundaries it is one only if the environment wire is at the authored
-//! ambient temperature, which is not checked. A birth after the start is
-//! refused, because mass and its enthalpy would enter with no port to carry
-//! them; the port map has no analytic tangent; the owner's adaptive
+//! Entropy: an implicit timeline books the entropy its owner's solve
+//! generates inside it, the owner's `conduction_generation_j_k`: each link's
+//! `G (T_a - T_b)^2 / (T_a T_b)` and each boundary's exchange with its
+//! authored ambient or reservoir, over the step, at the solve's quadrature
+//! temperatures (the end temperatures for backward Euler). The entropy of
+//! heat handed in through a cell port is the delivering component's to book.
+//! The boundary part completes the account only when the environment wire is
+//! routed at the authored ambient temperature, which is not checked. The
+//! explicit rule keeps no entropy account and books zero, which is a lower
+//! bound for its conduction.
+//!
+//! No claim: a birth after the start is refused, because mass and its
+//! enthalpy would enter with no port to carry them; the port map has no analytic tangent; the owner's adaptive
 //! (step-doubling) and staged variants are not wrapped; the owner's own
 //! accuracy statements are unchanged by the wrapping.
 //!
@@ -792,6 +798,7 @@ impl<'a> ThermalTimeline<'a> {
                     held,
                     audit,
                     solve: (0.0, 0.0),
+                    entropy_j_k: 0.0,
                 }))
             }
             Driver::Implicit {
@@ -851,6 +858,7 @@ impl<'a> ThermalTimeline<'a> {
                     held,
                     audit: report.energy,
                     solve: (report.maximum_cell_residual_j, controls.cell_tolerance_j),
+                    entropy_j_k: report.entropy.conduction_generation_j_k,
                 }))
             }
         }
@@ -874,6 +882,10 @@ struct Advanced<'a> {
     /// The implicit solve's largest cell residual and its tolerance [J];
     /// zeros for the explicit rule.
     solve: (f64, f64),
+    /// The entropy the implicit solve generated in the owner's links and
+    /// boundaries [J/K]; zero for the explicit rule, which keeps no entropy
+    /// account.
+    entropy_j_k: f64,
 }
 
 /// `sum |m e|` over the active cells: the size of the terms of the stored
@@ -989,6 +1001,7 @@ impl<'a> Component for ThermalTimeline<'a> {
             held,
             audit,
             solve,
+            entropy_j_k,
         }) = self.advance(&old.simulation, &observer, target_s, dt_s, cx)?
         else {
             // The owner's solve rejected the interval, and half of the step
@@ -1058,7 +1071,7 @@ impl<'a> Component for ThermalTimeline<'a> {
             // minus the owner's residual, and the rounding of handing the
             // energy over.
             numerical_loss_j: booked_j - audit.stored_energy_change_j,
-            entropy_generated_j_per_k: 0.0,
+            entropy_generated_j_per_k: entropy_j_k,
             energy_tolerance_j: units * f64::EPSILON * scale_j + f64::MIN_POSITIVE,
             residual: solve.0,
             tolerance: solve.1,

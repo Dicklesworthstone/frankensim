@@ -1215,6 +1215,67 @@ fn the_implicit_timeline_conforms_and_its_step_is_the_owners_solve() {
 }
 
 #[test]
+fn an_implicit_timeline_books_its_owners_conduction_entropy() {
+    // Cell 10 also loses heat to a 280 K film over the faces the link does
+    // not cover; cell 20 is insulated.
+    let gate = CancelGate::new_clock_free();
+    let film = Boundary {
+        ambient_k: 280.0,
+        htc_w_m2_k: 5.0,
+        ..insulated()
+    };
+    let scene = Scene {
+        boundaries: [film, insulated()],
+        ..Scene::default()
+    };
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.5);
+    let (dt_s, rates) = (0.25, [2.0, -0.5]);
+    let held = HeldSources::new([(A, rates[0]), (B, rates[1])]);
+    let inputs = [rates[0], rates[1], 280.0];
+    for scheme in [ImplicitScheme::BackwardEuler, ImplicitScheme::Sdirk2] {
+        let component =
+            ThermalTimeline::implicit(vec![A, B], scene.graph(&active, laws), controls, scheme)
+                .expect("component");
+        let start = component.start(&active).expect("start");
+        let (next, receipt, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+        let twin = scene.graph(&active, laws);
+        let (native, report) = owner_solve(&twin, &active, &held, dt_s, controls, scheme);
+        same_cells(&next, &native);
+        let (booked, owner) = (
+            receipt.entropy_generated_j_per_k,
+            report.entropy.conduction_generation_j_k,
+        );
+        assert!(owner > 0.0);
+        assert!(
+            (booked - owner).abs() <= 1.0e-12 * owner,
+            "{booked} vs {owner}"
+        );
+        if matches!(scheme, ImplicitScheme::BackwardEuler) {
+            // Backward Euler's own reading at the end temperatures: the link's
+            // G (Ta - Tb)^2 / (Ta Tb) and the film's q (T0 - Ta) / (Ta T0).
+            let (ta, tb) = (temperature(&next, A), temperature(&next, B));
+            let film_j = dt_s * 5.0 * (SURFACE_M2 - LINK_AREA_M2) * (280.0 - ta);
+            let by_hand = dt_s * LINK_W_K * (ta - tb).powi(2) / (ta * tb)
+                + film_j * (280.0 - ta) / (ta * 280.0);
+            assert!(
+                (booked - by_hand).abs() <= 1.0e-12 * by_hand,
+                "{booked} vs {by_hand}"
+            );
+        }
+    }
+    // The explicit rule keeps no entropy account and books zero.
+    let simulation = scene.timeline();
+    let explicit = ThermalTimeline::new(vec![A, B], true, config(0.05)).expect("component");
+    let start = explicit.start(&simulation).expect("start");
+    let (_, receipt, _) = propose(&explicit, &start, 0.01, &inputs, &gate).expect("step");
+    assert_eq!(
+        receipt.entropy_generated_j_per_k.to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+#[test]
 fn a_backward_euler_timeline_can_return_the_temperatures_at_the_end_of_the_step() {
     let gate = CancelGate::new_clock_free();
     let scene = Scene::default();
