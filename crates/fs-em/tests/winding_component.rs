@@ -701,13 +701,12 @@ fn following<'m>(circuit: &NonlinearWindingCircuit<'m>, card: &MaterialCard) -> 
         .unwrap()
 }
 
-/// The owner's own step from `owner`, with every element resolved by hand at
-/// its receiver's temperature, and the graph resistor's resistance.
-fn owner_at<'m>(
-    owner: &NonlinearWindingCircuit<'m>,
+/// The core and stranded conductors, each resolved by hand at its
+/// receiver's temperature.
+fn conductors_at(
     card: &MaterialCard,
     kelvin: [f64; 3],
-) -> (NonlinearWindingCandidate<'m>, f64) {
+) -> (Vec<EddyConductor>, Vec<WindingConductor>) {
     let at = |triangle: usize| resolve(card, kelvin[usize::from(triangle >= 4)]).unwrap();
     let core = [2, 3, 6, 7]
         .into_iter()
@@ -724,6 +723,17 @@ fn owner_at<'m>(
             conductor: at(triangle),
         })
         .collect();
+    (core, windings)
+}
+
+/// The owner's own step from `owner`, with every element resolved by hand at
+/// its receiver's temperature, and the graph resistor's resistance.
+fn owner_at<'m>(
+    owner: &NonlinearWindingCircuit<'m>,
+    card: &MaterialCard,
+    kelvin: [f64; 3],
+) -> (NonlinearWindingCandidate<'m>, f64) {
+    let (core, windings) = conductors_at(card, kelvin);
     let path = resolve(card, kelvin[2])
         .unwrap()
         .into_uniform_conductor(path_length(card), 1.0)
@@ -879,6 +889,75 @@ fn a_law_that_ignores_temperature_steps_as_fixed_conductors_do() {
 }
 
 #[test]
+fn with_no_resistor_law_the_graph_resistor_keeps_its_authored_value() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    let (cells, paths) = laws(&card, None);
+    // The owner rebinds every graph resistor or none.
+    let parallel = series_on(
+        &problem,
+        &card,
+        core(&card, 300.0),
+        Branch::Resistor { ohms: 1.0 },
+    );
+    let mut both = receivers();
+    both[2].resistors.push(3);
+    match PlanarWinding::at_port_temperatures(
+        &parallel,
+        cells.clone(),
+        paths.clone(),
+        both,
+        controls(),
+        TOLERANCE_J,
+    ) {
+        Err(PlanarWindingError::Invalid { what }) => {
+            assert_eq!(what, "every graph resistor or none has a law");
+        }
+        other => panic!("expected the partial-law refusal, got {other:?}"),
+    }
+    let winding = PlanarWinding::at_port_temperatures(
+        &circuit,
+        cells,
+        BTreeMap::new(),
+        receivers(),
+        controls(),
+        TOLERANCE_J,
+    )
+    .unwrap();
+    let kelvin = [300.0, 350.0, 400.0];
+    let inputs = [VOLTS, kelvin[0], kelvin[1], kelvin[2]];
+    let state = PlanarWindingState::new(circuit.clone());
+    let mut next = state.clone();
+    let mut outputs = [0.0; 4];
+    with_cx(|cx| winding.propose(&state, DT, &inputs, &mut next, &mut outputs, cx)).unwrap();
+    let (core, windings) = conductors_at(&card, kelvin);
+    let expected = circuit
+        .step_to_candidate(DT, core, windings, &[VOLTS], controls(), &mut || false)
+        .unwrap();
+    assert_eq!(next, PlanarWindingState::new(expected.circuit().clone()));
+    assert_eq!(next.circuit().graph(), circuit.graph());
+    // The authored value is then the Component's own.
+    let hot = circuit
+        .with_graph_resistors(
+            vec![GraphResistorMaterial {
+                branch: 2,
+                conductor: paths[&2].conductor(400.0).unwrap(),
+            }],
+            &mut || false,
+        )
+        .unwrap();
+    let hot = PlanarWindingState::new(hot);
+    let mut ignored = hot.clone();
+    match with_cx(|cx| winding.propose(&hot, DT, &inputs, &mut ignored, &mut outputs, cx)) {
+        Err(PlanarWindingError::Invalid { what }) => {
+            assert_eq!(what, "the state's circuit is not this Component's topology");
+        }
+        other => panic!("expected the topology refusal, got {other:?}"),
+    }
+}
+
+#[test]
 fn the_component_with_laws_passes_the_conformance_kit() {
     let card = common::source(true, 18.0);
     let problem = common::problem(&card, 0.3);
@@ -922,10 +1001,6 @@ fn laws_refuse_what_they_cannot_answer_and_constructions_they_cannot_drive() {
     refused(
         build(cells[..2].to_vec(), paths.clone()),
         "one conductor law per heat receiver required",
-    );
-    refused(
-        build(cells.clone(), BTreeMap::new()),
-        "a graph resistor has no law",
     );
     let mut inductor = paths.clone();
     inductor.insert(1, paths[&2].clone());

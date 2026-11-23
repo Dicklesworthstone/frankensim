@@ -21,8 +21,9 @@
 //! the generated entropy and, with laws, the conductors and graph resistors
 //! of the step: a [`ConductorLaw`] per receiver for its triangles, and a
 //! [`ResistorLaw`] per graph resistor through the owner's
-//! `with_graph_resistors`. A law with no answer refuses the step; the
-//! Component never clamps a temperature.
+//! `with_graph_resistors`, or none, keeping the circuit's own resistors. A
+//! law with no answer refuses the step; the Component never clamps a
+//! temperature.
 //!
 //! The Component borrows the owner's problem for `'m` and leaks nothing. A
 //! system of the kernel holds `'static` members, so a caller that adds one
@@ -280,7 +281,8 @@ enum Supply {
         cells: BTreeMap<usize, Option<u32>>,
         /// One per heat receiver.
         conductors: Vec<Arc<dyn ConductorLaw>>,
-        /// One per native graph resistor, by branch.
+        /// One per native graph resistor, by branch, or none: the
+        /// circuit's own resistors stay.
         resistors: BTreeMap<usize, Arc<dyn ResistorLaw>>,
     },
 }
@@ -361,13 +363,14 @@ impl<'m> PlanarWinding<'m> {
     /// resistors follow the temperatures its heat ports receive: receiver
     /// `k`'s law gives the conductor of each of its triangles at port `k`'s
     /// temperature, and each graph resistor's law gives it at the
-    /// temperature of the port its heat leaves through. The core and
+    /// temperature of the port its heat leaves through. With no resistor
+    /// laws, the graph resistors keep `circuit`'s values. The core and
     /// stranded triangles, and the core regions, are `circuit`'s own.
     ///
     /// # Errors
     /// As [`Self::new`]; the number of conductor laws is not the number of
-    /// receivers; a graph resistor has no law, or a law names a branch that
-    /// is not a resistor.
+    /// receivers; some graph resistors have laws and others do not, or a law
+    /// names a branch that is not a resistor.
     pub fn at_port_temperatures(
         circuit: &NonlinearWindingCircuit<'m>,
         conductor_laws: Vec<Arc<dyn ConductorLaw>>,
@@ -472,8 +475,9 @@ impl<'m> PlanarWinding<'m> {
                     "a resistor law names a branch that is not a resistor",
                 ));
             }
-            if resistors.iter().any(|branch| !laws.contains_key(branch)) {
-                return Err(invalid("a graph resistor has no law"));
+            // The owner rebinds every graph resistor or none.
+            if !laws.is_empty() && resistors.iter().any(|branch| !laws.contains_key(branch)) {
+                return Err(invalid("every graph resistor or none has a law"));
             }
         }
         let mut ports = Vec::with_capacity(roles.len() + receivers.len());
@@ -530,9 +534,11 @@ impl<'m> PlanarWinding<'m> {
                 "positive duration, complete finite ports and positive temperatures required",
             ));
         }
-        let same = match self.supply {
-            Supply::Fixed { .. } => old.0.graph() == &self.graph,
-            Supply::Laws { .. } => same_topology(old.0.graph(), &self.graph),
+        let same = match &self.supply {
+            Supply::Laws { resistors, .. } if !resistors.is_empty() => {
+                same_topology(old.0.graph(), &self.graph)
+            }
+            Supply::Fixed { .. } | Supply::Laws { .. } => old.0.graph() == &self.graph,
         };
         if !same {
             return Err(invalid(

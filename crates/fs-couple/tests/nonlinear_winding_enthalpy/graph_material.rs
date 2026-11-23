@@ -17,21 +17,21 @@ use fs_material::{
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_qty::{QuantitySpec, Temperature};
 
-const RESISTOR_CELL: CellId = CellId(8);
-const RESISTOR_MATERIAL: MaterialId = MaterialId(10);
+pub(super) const RESISTOR_CELL: CellId = CellId(8);
+pub(super) const RESISTOR_MATERIAL: MaterialId = MaterialId(10);
 const CAPACITANCE: f64 = 1.0;
 const CHARGE: f64 = 8.0;
-const LINKS: [ConductionLink; 1] = [ConductionLink {
+pub(super) const LINKS: [ConductionLink; 1] = [ConductionLink {
     link: 17,
     distance_a_m: 0.5,
     distance_b_m: 0.5,
 }];
-const DESTINATIONS: [ResistorCell; 1] = [ResistorCell {
+pub(super) const DESTINATIONS: [ResistorCell; 1] = [ResistorCell {
     branch: 2,
     cell: RESISTOR_CELL,
 }];
 
-fn graph_card(alpha: f64, upper_t: f64) -> MaterialCard {
+pub(super) fn graph_card(alpha: f64, upper_t: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let basis = ElectricalPropertyBasis::Resistivity;
     for (name, dims, value) in [
@@ -116,7 +116,9 @@ fn graph_card(alpha: f64, upper_t: f64) -> MaterialCard {
     )
     .unwrap()
 }
-fn two_bodies<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2]) -> DepositionSimulation<'a> {
+pub(super) fn two_bodies<'a>(
+    curves: &'a [ResolvedHeatCapacityCurve; 2],
+) -> DepositionSimulation<'a> {
     let mut events = [CELL, RESISTOR_CELL]
         .into_iter()
         .enumerate()
@@ -179,7 +181,7 @@ fn two_bodies<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2]) -> DepositionSimul
     .unwrap()
     .0
 }
-fn bindings<'a>(
+pub(super) fn bindings<'a>(
     cards: &'a [MaterialCard; 2],
     curves: &'a [ResolvedHeatCapacityCurve; 2],
     context: &'a QueryPoint,
@@ -198,7 +200,7 @@ fn bindings<'a>(
         conductivity: Some((key, MaterialPropertySelection::SingleClaimOnly)),
     })
 }
-fn resistors() -> [CellResistor; 1] {
+pub(super) fn resistors() -> [CellResistor; 1] {
     [CellResistor {
         destination: DESTINATIONS[0],
         selection: MaterialPropertySelection::SingleClaimOnly,
@@ -206,7 +208,7 @@ fn resistors() -> [CellResistor; 1] {
         area_m2: VOLUME,
     }]
 }
-fn native<'a>(
+pub(super) fn native<'a>(
     problem: &'a fs_em::planar::nonlinear::PlanarNonlinearMagnetostatics,
     card: &MaterialCard,
 ) -> NonlinearWindingCircuit<'a> {
@@ -245,7 +247,7 @@ fn native<'a>(
     )
     .unwrap()
 }
-fn solve_controls() -> CircuitEnthalpySolve {
+pub(super) fn solve_controls() -> CircuitEnthalpySolve {
     CircuitEnthalpySolve {
         maximum_cells: 2,
         ..controls()

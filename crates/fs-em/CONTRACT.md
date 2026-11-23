@@ -2973,7 +2973,8 @@ codec: a system holding it cannot be written to a durable snapshot.
   of each of its triangles at the temperature its port received;
 - a `ResistorLaw` per native graph resistor, asked for the source-bound
   resistor (`ResolvedConductor`) at the temperature of the port its heat
-  leaves through.
+  leaves through; or no resistor law, and the graph resistors keep the
+  construction circuit's values.
 
 The owner's `with_graph_resistors` rebinds the resistors before the step. It
 refuses a source that is not a static Ohmic scalar, and checks that storage,
@@ -2983,15 +2984,16 @@ construction circuit's own.
 
 Construction refuses:
 - a law count other than the receiver count;
-- a graph resistor without a law;
+- laws for some graph resistors and not others, since the owner rebinds
+  them all;
 - a law on a branch that is not a resistor.
 
 A law with no answer refuses the step (`Law`), naming the receiver, the
 element and the temperature; the temperature is never clamped. A law whose
 answer changes card, basis or claims meets the owner's continuity refusal.
-With laws, the topology check ignores resistor values, which the laws set at
-every step. With fixed conductors it compares them too. State equality
-compares the graph by value.
+With resistor laws, the topology check ignores resistor values, which the
+laws set at every step. Without them, and with fixed conductors, it compares
+them too. State equality compares the graph by value.
 
 A port's temperature is the one the kernel gives it, held over the step.
 Under a timeline built `returning_end_temperatures` it is the cell's end
@@ -3009,7 +3011,7 @@ The identity words bind:
   parses back to the same bits;
 - the energy tolerance.
 
-`tests/winding_component.rs` (10 tests). With fixed conductors:
+`tests/winding_component.rs` (11 tests). With fixed conductors:
 - the ports of a graph with a voltage source, and of one with a current source
   driving a resistor of its own (`FlowIn`; 1.5 A into 2 ohm returns 3 V and
   4.5 W);
@@ -3036,9 +3038,12 @@ temperature, and at 400 K its conductivity is 2/3 of its 300 K value:
   goes 0.45, 0.315 and 0.39 ohm. Each step passes `audit_step` with balance
   defects of at most 2.4e-15 J;
 - a law that ignores temperature steps as fixed conductors do, bit for bit;
+- with no resistor law, a step is the owner's own with the authored
+  resistor, bit for bit; a state with another resistor value is refused,
+  and so are laws for one of two graph resistors;
 - `check_component` conformance;
 - refusals:
-  - a law count, a missing resistor law and a resistor law on an inductor;
+  - a law count and a resistor law on an inductor;
   - a stranded law and a resistor law asked at 520 K, beyond the card's
     500 K validity;
   - another card's law, refused by the owner ("winding electrical source
@@ -3070,7 +3075,7 @@ failed at least one of these tests:
 17. an unmapped resistor admitted;
 18. a doubly mapped element admitted.
 
-Eighteen in the laws' paths each did too:
+Nineteen in the laws' paths each did too:
 1. conductor laws asked at the next receiver's temperature;
 2. resistor laws asked at the first port's temperature;
 3. the temperature clamped to 500 K;
@@ -3085,10 +3090,11 @@ Eighteen in the laws' paths each did too:
 12. core cells read as stranded;
 13. the law count check dropped;
 14. a resistor law on a non-resistor admitted;
-15. a graph resistor without a law admitted;
+15. laws for one of two graph resistors admitted;
 16. a conductor law's refusal named as a resistor's;
 17. the cold-port check dropped;
-18. the fixed topology check dropped.
+18. the fixed topology check dropped;
+19. with no resistor laws, the topology check ignoring resistor values.
 
 No fixture reaches the `UnaccountedWork` refusal, or a `Balance` refusal
 without a planted defect: the fixture's balance defects stay below 2.4e-15 J.

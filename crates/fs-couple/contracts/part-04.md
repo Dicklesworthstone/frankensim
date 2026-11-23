@@ -5558,6 +5558,39 @@ work and numerical loss. They also exercise incomplete routes, trial budgets,
 late cancellation, clock mismatch and deterministic retry. The integration
 tests are added and parsed; full native execution is not yet claimed.
 
+On the composition kernel, `tests/nonlinear_winding_enthalpy/graph.rs`
+declares the fixtures of the G1/G3/G4 regression and of the material
+resistor regression below as graphs. fs-em's `PlanarWinding` (feature
+`component`), built with `at_port_temperatures`, sits beside a
+backward-Euler `ThermalTimeline` whose cell ports return end temperatures,
+with one heat route per destination cell:
+- the winding's conductors follow the cell's card at the temperature the
+  port receives, rebound as the module rebinds them;
+- the material graph resistor follows its card over the `CellResistor`
+  path, with the sources the module pins;
+- the authored 1-ohm resistor keeps its ohms.
+
+The laws use only public fs-material and fs-matdb calls. Before any graph
+runs, both give the module's own conductors at each of its end
+temperatures, bit for bit. The interface closes to a relative 1e-10, the
+stop of the winding's field Newton; the kernel's default 1e-12 is tighter
+than that heat is answered.
+
+Held over four steps of 1/4 s, on both saturation cards, and with the
+resistor's R(T) off and at 8 % per kelvin:
+- each interval against the module within 6.6e-11 K, 2.3e-11 A, 3.0e-12 C,
+  6.8e-11 J and 2.3e-13 J/K, the entropy being the losses' at their cells'
+  temperatures and the link's conduction; the bounds sit about fifty times
+  above;
+- each interval of the one-cell fixture against `reference()`, the
+  independent bisection fixed point, from the kernel's own start of
+  interval: within 3.1e-11 K, 1.6e-11 A and 6.0e-11 J;
+- the ledger: residual within 1e-8 J; the supplied work, less the circuit's
+  stored change and numerical loss, equals the cells' stored change within
+  1e-8 J; the routes' entropy stays within the interface tolerance.
+
+Nine planted defects in the graph and its laws each failed a test.
+
 ### Ordinary resistor material feedback in nonlinear field circuits
 
 `WindingThermalNetwork::step_nonlinear_material_candidate` extends that SAME
