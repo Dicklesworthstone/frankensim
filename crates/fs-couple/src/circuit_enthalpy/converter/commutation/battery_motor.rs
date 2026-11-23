@@ -252,18 +252,10 @@ fn admit_original_state(native: &BatteryMotorDrive, state: &[f64; 9]) -> Result<
     Ok(())
 }
 
-/// A view of actual native physical transfers, never an averaged receipt.
-#[derive(Clone, Copy)]
-struct GateTransfers {
-    source_work_j: [f64; 4],
-    resistor_heat_j: [f64; 4],
-}
-
 struct DrivePower<'a> {
     native: &'a fs_phs::PreparedStepRecord,
     storage_change_j: [f64; 7],
     heat: [f64; 14],
-    gate: Option<GateTransfers>,
     battery_terminal_work_j: f64,
     converter_terminal_work_j: [f64; 2],
     motor_electrical_work_j: f64,
@@ -277,9 +269,6 @@ struct DrivePower<'a> {
 trait DriveSources: Clone + PartialEq {
     fn same_electrical_coefficients(&self, _other: &Self) -> bool {
         true
-    }
-    fn gate_driver_cells(&self) -> Option<[CellId; 4]> {
-        None
     }
 }
 impl DriveSources for () {}
@@ -296,7 +285,6 @@ impl DriveReceipt for CommutatedBatteryMotorCycleStep {
             native: &self.native,
             storage_change_j: self.storage_change_j,
             heat: self.heat_joules(),
-            gate: None,
             battery_terminal_work_j: self.battery_terminal_work_j,
             converter_terminal_work_j: self.converter_terminal_work_j,
             motor_electrical_work_j: self.motor_electrical_work_j,
@@ -386,15 +374,7 @@ fn physical_account(receipt: &impl DriveReceipt, allowance_j: f64) -> Result<(Dd
             "commutated drive needs fourteen nonnegative physical heats and actual load work",
         ));
     }
-    let gate_heat = step.gate.map_or([0.0; 4], |gate| gate.resistor_heat_j);
-    if gate_heat.iter().any(|q| !q.is_finite() || *q < 0.0) {
-        return Err(invalid(
-            "gate driver heat must be a nonnegative physical resistor integral",
-        ));
-    }
-    let driver_heat = sum(gate_heat)?;
-    let gate_work = sum(step.gate.map_or([0.0; 4], |gate| gate.source_work_j))?;
-    let total = sum(heat)? + driver_heat;
+    let total = sum(heat)?;
     let s = step.storage_change_j;
     let battery = sum(s[..3].iter().copied())?;
     let converter = Dd::from_f64(finite(s[3])?);
@@ -407,13 +387,13 @@ fn physical_account(receipt: &impl DriveReceipt, allowance_j: f64) -> Result<(Dd
     let electromagnetic = Dd::from_f64(finite(step.electromagnetic_work_j)?);
     let shaft = sum(step.shaft_work_j)?;
     let load = Dd::from_f64(step.load_work_j);
-    let external = shaft - load + gate_work;
+    let external = shaft - load;
     let delta = Dd::from_f64(finite(step.native.delta_h)?);
-    let converter_heat = sum(heat[..5].iter().chain(&heat[10..]).copied())? + driver_heat;
+    let converter_heat = sum(heat[..5].iter().chain(&heat[10..]).copied())?;
     let residuals = [
         battery + sum([heat[5], heat[6]])? - battery_work,
         battery_work + Dd::from_f64(heat[7]) + input,
-        converter + converter_heat - input - output - gate_work,
+        converter + converter_heat - input - output,
         output + motor + load,
         magnetic + Dd::from_f64(heat[8]) + electromagnetic - motor,
         kinetic + Dd::from_f64(heat[9]) - electromagnetic - shaft,
@@ -854,11 +834,6 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     advance(original, parameters.devices, &capacitors, &drive.state)
                         .map_err(map_drive)?
                 };
-                if step.account().gate.is_some() != capacitors.gate_driver_cells().is_some() {
-                    return Err(map_drive(invalid(
-                        "gate work and heat require their complete original driver bindings",
-                    )));
-                }
                 let (heat, external) = physical_account(&step, controls.total_energy_tolerance_j)
                     .map_err(map_drive)?;
                 let load_heat = load_heat_cell.map(|cell| RegulatedLoadHeat {
@@ -924,15 +899,6 @@ impl CommutatedBatteryMotorThermalNetwork<'_> {
                     checkpoint()?;
                     add(driver.drive.devices[i].cell(), heat[1 + i]);
                     add(driver.drive.devices[i].cell(), heat[10 + i]);
-                }
-                if let (Some(cells), Some(gate)) = (
-                    driver.drive.capacitors.gate_driver_cells(),
-                    driver.step.account().gate,
-                ) {
-                    for (cell, energy) in cells.into_iter().zip(gate.resistor_heat_j) {
-                        checkpoint()?;
-                        add(cell, energy);
-                    }
                 }
                 if let Some(load) = &driver.load_heat {
                     checkpoint()?;
