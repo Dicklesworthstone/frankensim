@@ -419,8 +419,8 @@ fn a_netlist_whose_ports_do_not_each_drive_one_source_is_refused() {
         ],
         transformers: vec![],
     };
-    // The owner itself may admit a port shared by two sources; this
-    // boundary cannot give one port two roles or two outputs.
+    // The owner itself admits a port shared by two sources; this boundary
+    // cannot give one port two roles or two outputs.
     assert!(matches!(
         KirchhoffCircuit::new(twice, vec![], 1.0e-12),
         Err(CircuitComponentError::Invalid { .. })
@@ -577,18 +577,21 @@ fn the_state_codec_round_trips_and_the_identity_names_the_law() {
 
     // Laws whose words run together the same way still differ: [2, 9] on
     // resistor 1 against [] on resistor 1 and [9] on resistor 2.
-    let words = |laws: &[(usize, &[u64])]| {
+    let identity_of = |laws: &[(usize, &[u64])]| {
         let mut circuit = KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12).unwrap();
-        for &(branch, words) in laws {
+        for &(branch, law_words) in laws {
             circuit = circuit
-                .following(branch, Arc::new(Words(words.to_vec())))
+                .following(branch, Arc::new(Words(law_words.to_vec())))
                 .unwrap();
         }
         let mut identity = Vec::new();
         circuit.identity_words(&mut identity);
         identity
     };
-    assert_ne!(words(&[(1, &[2, 9])]), words(&[(1, &[]), (2, &[9])]));
+    assert_ne!(
+        identity_of(&[(1, &[2, 9])]),
+        identity_of(&[(1, &[]), (2, &[9])])
+    );
 }
 
 /// A constant 1 ohm whose identity is the given words.

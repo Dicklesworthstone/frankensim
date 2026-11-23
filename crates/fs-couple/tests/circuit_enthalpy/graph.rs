@@ -412,7 +412,8 @@ fn graph_run(
             );
             let ledger = system.ledger();
             let joule = ledger.nodes[electrical.index()].dissipated_j.value();
-            // The environment sink receives what the cells' sources took in.
+            // What the cells' authored sources put in came from the
+            // environment sink: minus the heat the sink received.
             let outside = -ledger.sinks[0].heat_j.value();
             let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
             rows.push(Row {
