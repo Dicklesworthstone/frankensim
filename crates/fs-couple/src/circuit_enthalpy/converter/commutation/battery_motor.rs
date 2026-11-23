@@ -283,8 +283,6 @@ trait DriveSources: Clone + PartialEq {
     }
 }
 impl DriveSources for () {}
-impl DriveSources for Arc<[DeviceCapacitanceMaterial; 4]> {}
-impl DriveSources for Arc<[DeviceChargeMaterial; 4]> {}
 
 trait DriveReceipt: Clone {
     fn account(&self) -> DrivePower<'_>;

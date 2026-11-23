@@ -10,19 +10,6 @@
 /// Finite chemical energy, both motor shafts and source-bound device/material heat.
 pub mod battery_motor;
 
-mod capacitors;
-pub use capacitors::{DeviceCapacitanceBinding, DeviceCapacitanceMaterial};
-
-mod charge;
-pub use charge::{DeviceChargeBinding, DeviceChargeMaterial};
-
-mod gate;
-pub use gate::{
-    GateChannelBinding, GateChannelMaterial, GateConductanceBinding, GateConductanceMaterial,
-    GateCurrentSurfaceBinding, GateCurrentSurfaceMaterial, GateCurrentThermalScale, GateMaterial,
-    GateMaterialBindings,
-};
-
 mod devices;
 pub use devices::{DeviceConductionBinding, DeviceConductionKeys, DeviceConductionMaterial};
 

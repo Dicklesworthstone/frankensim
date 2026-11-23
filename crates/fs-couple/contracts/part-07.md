@@ -2623,58 +2623,22 @@ motoring/regenerative fourteen-heat calorimetry, threshold-only feedback into
 motion, finite-liquid-coolant exchange and transactional refusal. Sources are
 manufactured fixtures, not measured device qualification.
 
+Equality of the retained source snapshots (`DeviceConductionMaterial` and
+`ConverterChannelMaterial`) means the same material state: card, material, axes,
+query point, requirement, source axes, selected claim and value bits. The
+receipt's selection-policy tag and hash are left out on purpose, because a
+refresh at the same state re-resolves under `PinnedByProperty`, so a source bound
+under `SingleClaimOnly` still equals its own refresh; a changed claim or value
+bit still refuses the step.
 
 ### Finite gate charge, Miller feedback and separately received driver heat
 
 `converter::commutation::battery_motor::gate` coupled the original
 fifteen-state gate-controlled finite battery/converter/motor trajectory to the
 same material and finite-cell/`HeatAssembly` enthalpy owners by hand. It
-retired; its fixtures run only as the declared graphs below. The gate materials
-of `converter::commutation` that it bound remain, and no lane binds them:
-
-`GateMaterialBindings<B>` requires four complete intrinsic drain-source Q(V)
-sources, four positive constant Cgs sources, four nonnegative constant Cgd
-sources, four complete channel sources and eight original on/off
-driver-resistance bindings. Its historical `channel_conductance` field defaults
-to positive G(Vgs,T) lines and also accepts `GateCurrentSurfaceBinding` for
-complete original channel-only Iref(Vds,Vgs) surfaces. Both material forms
-implement the sealed `GateChannelBinding`/`GateChannelMaterial` interface and
-share the same preparation, electrical solve, thermal iteration and accounting.
-Charge, capacitance and channel response belong to the corresponding
-semiconductor package. Each on/off resistor pair names one explicit
-driver-heat receiver; shared receivers sum their actual heats. Gate-clamped
-Coss is not silently reinterpreted as intrinsic Qds.
-
-A current binding owns two distinct existing typed voltage coordinates, an
-ampere property and a finite operating rectangle containing both drain signs.
-It retains the complete original claim and `PreparedSurfaceResponse`, including
-its original samples and triangles. The original full-rectangle envelope
-query proves continuous coverage including the interior. No conductance-grid
-conversion, I/V division, nominal drain voltage, resampling or extrapolation
-is used. Original affine cells supply current and both analytical partials;
-source-owned cutoff, saturation and passive negative differential slope are
-admitted. Same-sign drain cells, zero current on the authored zero-drain mesh
-and correctly signed vertex currents establish passivity over each original
-cell. Cells crossing zero drain bias and isolated operating samples without
-a tangent refuse. The channel excludes body-diode current, which remains with
-its original separate owner.
-
-An optional `GateCurrentThermalScale` supplies an explicitly authored positive
-dimensionless s(T,phase), giving I=s*Iref and scaling both voltage partials.
-Without it the admitted surface remains fixed. The scale may depend only on
-owned thermal coordinates and permitted fixed external conditions; evolving
-voltage response or voltage applicability cannot be frozen at a reference
-point. Both the complete current claim and any scale must qualify the actual
-thermal proposal. This separable law does not infer a three-coordinate
-response from two-coordinate data.
-
-Full typed voltage support, material claims, package, held context and caloric
-applicability remain retained. Current/scale source receipts and full-rectangle
-support refresh before numerical reuse, as do legacy conductance and driver
-resistance sources. Changed source authority, unowned bias/frequency,
-reinterpreted incoming charge and incomplete receivers refuse. Intrinsic Qds,
-Cgs and Cgd remain unchanged along accepted charge history; temperature-dependent
-reversible storage requires its own caloric model and is refused here.
+retired, with the gate, drain-charge and capacitance materials of
+`converter::commutation` that it bound; its fixtures run only as the declared
+graphs below.
 
 On the composition kernel, `tests/commutated_converter_enthalpy/battery_motor/
 gate/graph.rs` declares this lane's fixtures as graphs. fs-system's
@@ -2864,18 +2828,6 @@ Not carried by the current-surface graph:
 The surface law makes none of these checks. It evaluates the card's surface
 wherever the drive asks. It refuses only a point outside the support or
 outside every surface cell.
-
-Equality of the retained source snapshots (`DeviceConductionMaterial`,
-`DeviceCapacitanceMaterial`, `DeviceChargeMaterial`, `GateConductanceMaterial`,
-`GateCurrentSurfaceMaterial` with its thermal multiplier, and
-`ConverterChannelMaterial`) means the same material state: card, material, axes,
-query point, requirement, source axes, selected claim and value bits. The
-receipt's selection-policy tag and hash are left out on purpose, because a
-refresh at the same state re-resolves under `PinnedByProperty`, so a source bound
-under `SingleClaimOnly` still equals its own refresh; a changed claim or value
-bit still refuses the step. Every knot of a retained charge or gate source path,
-including a 0 V charge knot the library inserts into an authored law without
-one, is queried under a pin of the selected claim, so a path compares as it is.
 
 ## Finite source impedance, regulated demand and material heat
 
