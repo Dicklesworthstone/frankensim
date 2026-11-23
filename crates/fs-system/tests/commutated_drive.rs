@@ -11,6 +11,7 @@ use fs_phs::SolveBudget;
 use fs_phs::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource};
 use fs_phs::circuit::capacitance::CapacitorChargeCurve;
 use fs_phs::circuit::converter::battery_fed::motor::BatteryMotorDrive;
+use fs_phs::circuit::converter::commutation::battery_motor::PreparedCommutatedBatteryMotorCycle;
 use fs_phs::circuit::converter::commutation::capacitance::CapacitiveCommutationParameters;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
     PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
@@ -31,8 +32,8 @@ use fs_ports::component::{Component, Proposal};
 use fs_system::SystemBuilder;
 use fs_system::circuit::ResistanceLaw;
 use fs_system::commutated_drive::{
-    CommutatedBatteryMotorDrive, CommutatedDriveError, DeviceStorage, DriveParameters,
-    DriveResistor, GateProgram, HEAT_PORTS, LOAD_PORT, SwitchLaw, SwitchPosition,
+    CommutatedBatteryMotorDrive, CommutatedDriveError, DeviceStorage, DriveLane, DriveParameters,
+    DriveResistor, GateProgram, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, SwitchLaw, SwitchPosition,
 };
 use fs_system::elements::{Force, HeatCapacity, SourceAccount, Waveform};
 
@@ -161,7 +162,7 @@ fn storages() -> [DeviceStorage; 2] {
     ]
 }
 
-fn drive(storage: DeviceStorage, channel_limit_a: f64) -> CommutatedBatteryMotorDrive {
+fn drive<L: DriveLane>(storage: L, channel_limit_a: f64) -> CommutatedBatteryMotorDrive<L> {
     let (electrical, cycle) = controls();
     CommutatedBatteryMotorDrive::new(
         parameters(channel_limit_a),
@@ -222,7 +223,10 @@ const SWITCHES: [SwitchPosition; 4] = [
     SwitchPosition::OutputLow,
 ];
 
-fn following(mut drive: CommutatedBatteryMotorDrive, upper_k: f64) -> CommutatedBatteryMotorDrive {
+fn following<L: DriveLane>(
+    mut drive: CommutatedBatteryMotorDrive<L>,
+    upper_k: f64,
+) -> CommutatedBatteryMotorDrive<L> {
     for resistor in RESISTORS {
         drive = drive.following(resistor, Arc::new(Linear(0.1))).unwrap();
     }
@@ -275,14 +279,17 @@ fn inputs(spread_k: f64) -> Vec<f64> {
     inputs
 }
 
-/// The owner's own step at what the laws answer at `kelvin`, built here
-/// without the Component.
-fn native(
-    storage: &DeviceStorage,
-    old: &[f64; 11],
-    torques: [f64; 2],
+/// The owner's original drive at what the laws answer at `kelvin`, its
+/// switches there and the program's commands, built here without the
+/// Component.
+fn owner(
     kelvin: &[f64],
-) -> ([f64; 11], [f64; 2], [f64; 11], [f64; 14]) {
+    torques: [f64; 2],
+) -> (
+    BatteryMotorDrive,
+    [SwitchDevice; 4],
+    Vec<BatteryMotorSwitchCommand>,
+) {
     let ohms = |k: usize| Linear(0.1).ohms(kelvin[k]).unwrap();
     let mut p = parameters(100.0);
     p.converter.winding_resistance_ohm = ohms(0);
@@ -314,9 +321,7 @@ fn native(
     .unwrap()
     .with_dc_motor(DcMotor::new(p.motor).unwrap())
     .unwrap();
-    let (electrical, cycle) = controls();
-    let g = program();
-    let commands: Vec<_> = g
+    let commands = program()
         .auxiliary_loads
         .iter()
         .map(|&auxiliary_load| BatteryMotorSwitchCommand {
@@ -324,8 +329,39 @@ fn native(
             auxiliary_load,
         })
         .collect();
+    (original, p.converter.devices, commands)
+}
+
+/// Each heat port's heat: the owner's fourteen with each switch's channel
+/// and diode together, then the load's work.
+fn port_heats(h: [f64; 14], load_work_j: f64) -> [f64; 11] {
+    [
+        h[0],
+        h[1] + h[10],
+        h[2] + h[11],
+        h[3] + h[12],
+        h[4] + h[13],
+        h[5],
+        h[6],
+        h[7],
+        h[8],
+        h[9],
+        load_work_j,
+    ]
+}
+
+/// The owner's own step at what the laws answer at `kelvin`, built here
+/// without the Component.
+fn native(
+    storage: &DeviceStorage,
+    old: &[f64; 11],
+    torques: [f64; 2],
+    kelvin: &[f64],
+) -> ([f64; 11], [f64; 2], [f64; 11], [f64; 14]) {
+    let (original, devices, commands) = owner(kelvin, torques);
+    let (electrical, cycle) = controls();
+    let g = program();
     let mut next = [0.0; 11];
-    let devices = p.converter.devices;
     let (n, k) = (&g.intervals, g.substeps_per_interval);
     let step = match storage {
         DeviceStorage::Capacitance(c) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
@@ -359,19 +395,7 @@ fn native(
     }
     .unwrap();
     let h = step.heat_joules();
-    let heats = [
-        h[0],
-        h[1] + h[10],
-        h[2] + h[11],
-        h[3] + h[12],
-        h[4] + h[13],
-        h[5],
-        h[6],
-        h[7],
-        h[8],
-        h[9],
-        step.load_work_j,
-    ];
+    let heats = port_heats(h, step.load_work_j);
     (next, step.mean_shaft_speed_rad_s, heats, h)
 }
 
@@ -679,6 +703,136 @@ fn the_codec_and_the_identity_tell_states_and_drives_apart() {
             400.0
         ))
     );
+}
+
+/// The nine-state start: the fixture's cell and motor, and the converter's
+/// flux and bus charges at the same current and bus voltages.
+fn nine_state_start() -> [f64; 9] {
+    let eleven = start(&DeviceStorage::Capacitance(COSS));
+    let converter = AveragedBuckBoost::new(
+        BuckBoostParameters {
+            inductance_h: 0.3,
+            bus_capacitance_f: [0.2, 0.4],
+            winding_resistance_ohm: 0.1,
+            input_on_resistance_ohm: [0.1; 2],
+            output_on_resistance_ohm: [0.1; 2],
+        },
+        BridgeModulation {
+            input_high_fraction: 0.0,
+            output_high_fraction: 0.0,
+        },
+    )
+    .unwrap()
+    .state(1.0, [12.0, 7.0])
+    .unwrap();
+    let mut state = [0.0; 9];
+    state[..3].copy_from_slice(&eleven[..3]);
+    state[3..6].copy_from_slice(&converter);
+    state[6..].copy_from_slice(&eleven[8..]);
+    state
+}
+
+#[test]
+fn the_nine_state_lane_is_the_owners_cycle_without_switch_storage() {
+    let old = nine_state_start();
+    let component = following(drive(NoDeviceStorage, 100.0), 400.0);
+    assert_eq!(component.period_s().to_bits(), PERIOD.to_bits());
+    assert_eq!(component.ports().len(), 13);
+    let charter = CommutatedBatteryMotorDrive::<NoDeviceStorage>::STATE_CHARTER.unwrap();
+    assert!(charter.schema_grammar.starts_with("[f64; 9]"));
+    let inputs = inputs(7.0);
+    let (original, devices, commands) = owner(&inputs[2..], [inputs[0], inputs[1]]);
+    let (electrical, cycle) = controls();
+    let g = program();
+    let mut next = [0.0; 9];
+    let step = PreparedCommutatedBatteryMotorCycle::new_controlled(
+        original,
+        devices,
+        &g.intervals,
+        g.substeps_per_interval,
+        electrical,
+        cycle,
+        || false,
+    )
+    .unwrap()
+    .step_interval_commands_controlled(&old, &commands, &mut next, || false)
+    .unwrap();
+    let heats = port_heats(step.heat_joules(), step.load_work_j);
+    assert!(
+        heats[10] > 0.0 && heats[1..5].iter().any(|q| *q > 0.0),
+        "{heats:?}"
+    );
+    // The stored energy is the owner's Hamiltonian.
+    let hamiltonian = owner(&inputs[2..], [0.0; 2]).0.system().hamiltonian(&old);
+    let energy = component.stored_energy_j(&old).unwrap();
+    assert!((energy - hamiltonian).abs() <= 1e-14 * hamiltonian.abs());
+    with_cx(|cx| {
+        let (mut new, mut outputs) = ([0.0; 9], [0.0; 13]);
+        let proposal = component
+            .propose(&old, PERIOD, &inputs, &mut new, &mut outputs, cx)
+            .unwrap();
+        let Proposal::Step(receipt) = proposal else {
+            panic!("the drive shortened the step");
+        };
+        assert_eq!(new.map(f64::to_bits), next.map(f64::to_bits));
+        assert_eq!(
+            [outputs[0], outputs[1]].map(f64::to_bits),
+            step.mean_shaft_speed_rad_s.map(f64::to_bits)
+        );
+        for (output, heat) in outputs[2..].iter().zip(heats) {
+            assert_eq!(output.to_bits(), (-heat / PERIOD).to_bits());
+        }
+        let stored = component.stored_energy_j(&next).unwrap() - energy;
+        assert!((receipt.stored_change_j - stored).abs() <= receipt.energy_tolerance_j);
+        let case = Case {
+            state: &old,
+            stale: &old.map(|q| 1.01 * q),
+            dt_s: PERIOD,
+            inputs: &inputs,
+        };
+        check_component(&component, &case, cx).expect("component conformance");
+        // Refusals leave the outputs and the candidate untouched.
+        let refuse = |dt_s: f64, inputs: &[f64]| {
+            let (mut new, mut outputs) = ([7.0; 9], [9.0; 13]);
+            let error = component
+                .propose(&old, dt_s, inputs, &mut new, &mut outputs, cx)
+                .unwrap_err();
+            assert!(untouched(&new, 7.0) && untouched(&outputs, 9.0));
+            error
+        };
+        let error = refuse(0.5 * PERIOD, &inputs);
+        assert!(
+            matches!(error, CommutatedDriveError::Invalid { .. }),
+            "{error}"
+        );
+        let mut hot = inputs.clone();
+        hot[4] = 410.0;
+        let error = refuse(PERIOD, &hot);
+        assert!(
+            matches!(
+                error,
+                CommutatedDriveError::Law {
+                    port: "heat_input_low",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    });
+    // The codec keeps the nine coordinates alone; the identity names the lane.
+    let mut words = Vec::new();
+    assert!(component.encode_state(&old, &mut words));
+    assert_eq!(component.decode_state(&words), Some(old));
+    let capacitive = drive(DeviceStorage::Capacitance(COSS), 100.0);
+    let mut eleven = Vec::new();
+    assert!(capacitive.encode_state(&start(&DeviceStorage::Capacitance(COSS)), &mut eleven));
+    assert_eq!(component.decode_state(&eleven), None);
+    let (mut nine, mut other) = (Vec::new(), Vec::new());
+    drive(NoDeviceStorage, 100.0).identity_words(&mut nine);
+    capacitive.identity_words(&mut other);
+    // The words agree up to the storage law's tag and part there.
+    let part = nine.iter().zip(&other).position(|(a, b)| a != b).unwrap();
+    assert_eq!((nine[part], other[part]), (2, 0));
 }
 
 /// The test program with only the output high switch on after the dead time.

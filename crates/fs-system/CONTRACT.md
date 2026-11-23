@@ -4084,6 +4084,21 @@ equivalent-circuit battery and its lead, a two-leg converter of four switches
 (channel, body diode and output storage each) and a DC motor whose rotor and
 stator both turn.
 
+**Lanes.** The drive's type parameter, a sealed `DriveLane`, fixes the
+switches' storage, the state and the owner the drive prepares:
+- `DeviceStorage`, the default: the drive above, eleven coordinates. Code
+  that names no lane is in this one;
+- `NoDeviceStorage`: switches without output storage, the owner
+  `PreparedCommutatedBatteryMotorCycle` of
+  `fs_phs::circuit::converter::commutation::battery_motor`. Its nine
+  coordinates are the battery's three, the converter's flux linkage and two
+  bus charges, and the motor's three. It is the drive that
+  `fs_couple::circuit_enthalpy::converter::commutation::battery_motor`
+  itself couples by hand.
+
+Ports, laws, programs, heat, balance and refusals are the same in both
+lanes; what follows holds for both unless it names one.
+
 A step is the owner's whole gate program, `step_interval_commands_controlled`
 over every interval and substep in one native workspace; nothing is
 integrated here. The owner is built with the resistances and switches of the
@@ -4103,11 +4118,13 @@ Ports, in order:
 Each heat port receives the temperature where its heat leaves and returns
 minus that heat over the step divided by the step.
 
-State is the owner's eleven coordinates. Stored energy is the owner's
-Hamiltonian: the battery's, the converter's (switch storage included) and the
-motor's. The switch storage is one `DeviceStorage` parameter: four constant
-capacitances or four charge-voltage curves. It is fixed; storage that changed
-with temperature would need its entropy.
+State is the owner's coordinates, eleven or nine by lane. Stored energy is
+the owner's Hamiltonian: the battery's, the converter's (switch storage
+included) and the motor's. Without switch storage the converter's is its
+averaged bridge's: the inductor's and the two buses'. The switch storage is
+one `DeviceStorage` parameter: four constant capacitances or four
+charge-voltage curves. It is fixed; storage that changed with temperature
+would need its entropy.
 
 **Laws.** `following(resistor, law)` gives one of the five resistances a
 `circuit::ResistanceLaw`. `switch_following(position, law)` gives a switch a
@@ -4146,11 +4163,14 @@ residual and tolerance.
 kernel differences the port map. The map is smooth except where a body diode
 starts or stops conducting, a switch reaches a limit or the load changes
 branch as the inputs move. Identity words bind the curve, every parameter,
-the storage law, the program, both controls, each law's words (counted) and
-the tolerance, then any further programs. The codec is eleven words of `f64`
-bits; encode and decode refuse a state whose energy the laws do not admit.
+the storage law (a tag, 0 for capacitances, 1 for charge curves and 2 for
+none, then its words), the program, both controls, each law's words
+(counted) and the tolerance, then any further programs. The codec is one
+word of `f64` bits per coordinate; encode and decode refuse a state whose
+energy the laws do not admit. Each lane has its own state charter.
 
-`tests/commutated_drive.rs` (5 tests, both storage laws each), on a program
+`tests/commutated_drive.rs` (5 tests with both storage laws each, and one of
+the lane without switch storage), on a program
 of a dead time then input low and output high on, with an auxiliary load;
 both the input low and output high diodes conduct:
 - a step with all five resistances and four switches following laws against
@@ -4180,7 +4200,18 @@ both the input low and output high diodes conduct:
   `2` and `-1` are refused, as are no programs, a program of another
   period, a program short of a load entry and a second list. The
   conformance kit passes with the signal. The identity changes with the
-  further programs.
+  further programs;
+- the lane without switch storage, from the fixture's cell, motor and bus
+  voltages, against `PreparedCommutatedBatteryMotorCycle` built by hand at
+  the laws' answers: state, mean velocities and every heat port bit for
+  bit. Its stored energy is the owner's whole Hamiltonian (measured equal,
+  bound 1e-14 relative). The receipt's stored change is within 8.4e-14 J
+  of the energies' (bound: the receipt's tolerance, 2.0e-10 J). The
+  conformance kit passes. A step that is not one period, and a switch law
+  out of its range (`Law` naming `heat_input_low`), are refused, leaving
+  outputs and candidate untouched. The codec keeps nine words and refuses
+  the eleven of a stored drive's state. The identity parts from a
+  capacitance drive's at the storage tag, 2 against 0.
 
 Planted defects, one at a time, each failed at least one test:
 - a switch's heat taken with another switch's diode;
@@ -4197,7 +4228,14 @@ Planted defects, one at a time, each failed at least one test:
 - the program signal ignored;
 - a fractional program signal rounded down;
 - the identity without the further programs;
-- a further program of any period.
+- a further program of any period;
+- in the lane without switch storage:
+  - the converter's energy with its two buses swapped;
+  - a decode that takes a word list of any length;
+  - the energy split where the stored lane's motor starts;
+  - the owner prepared with one more substep;
+  - the storage tagged as the capacitances';
+  - the stored lane's charter.
 
 fs-couple's `tests/commutated_converter_enthalpy/battery_motor/graph.rs`
 declares the drive of the module's `capacitance` and `charge` lanes as a

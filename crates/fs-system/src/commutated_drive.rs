@@ -2,11 +2,12 @@
 //! what their heat ports are joined to.
 //!
 //! [`CommutatedBatteryMotorDrive`] puts the drive of
-//! `fs_phs::circuit::converter::commutation::capacitance::battery_motor`
-//! behind `fs_ports::component::Component`. It joins the equivalent-circuit
-//! battery and its lead to a two-leg converter and a DC motor whose rotor and
-//! stator both turn. The converter has four switches, each a channel with
-//! its body diode and with output charge storage. Nothing is integrated
+//! `fs_phs::circuit::converter::commutation::battery_motor` and of its
+//! `capacitance` lanes behind `fs_ports::component::Component`. It joins the
+//! equivalent-circuit battery and its lead to a two-leg converter and a DC
+//! motor whose rotor and stator both turn. The converter has four switches,
+//! each a channel with its body diode, with or without output charge storage
+//! ([`DriveLane`]). Nothing is integrated
 //! here. A step is the owner's whole gate program
 //! (`step_interval_commands_controlled`): every interval and substep in one
 //! native workspace, on the owner built with the resistances and switches of
@@ -31,16 +32,18 @@
 //!   receives the temperature \[K\] where its heat leaves and returns minus
 //!   that heat over the step divided by the step \[W\].
 //!
-//! State: the owner's eleven coordinates:
+//! State: the owner's coordinates, which the drive's lane fixes:
 //! - the remaining chemical charge, polarization charge and battery bus
 //!   charge \[C\];
-//! - the converter's flux linkage \[Wb\], its two bus charges and its two
-//!   switching-node charges \[C\];
+//! - the converter's flux linkage \[Wb\] and its two bus charges, and with
+//!   switch storage its two switching-node charges \[C\];
 //! - the motor's flux linkage \[Wb\] and its rotor and stator angular
 //!   momenta \[N m s\].
 //!
-//! Its stored energy is the owner's Hamiltonian, the switches' output
-//! storage included; no resistance or switch changes it.
+//! That is nine coordinates without switch storage ([`NoDeviceStorage`]) and
+//! eleven with it ([`DeviceStorage`], the default lane). Its stored energy is
+//! the owner's Hamiltonian, the switches' output storage included; no
+//! resistance or switch changes it.
 //!
 //! Switch storage ([`DeviceStorage`]) is either four constant output
 //! capacitances or four voltage-charge curves whose energy is the integral
@@ -86,6 +89,7 @@
 //! and avalanche; temperature-dependent storage, OCV or bearing drag.
 
 use core::fmt;
+use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -94,10 +98,10 @@ use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_phs::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource};
 use fs_phs::circuit::capacitance::CapacitorChargeCurve;
 use fs_phs::circuit::converter::battery_fed::motor::BatteryMotorDrive;
+use fs_phs::circuit::converter::commutation::battery_motor::PreparedCommutatedBatteryMotorCycle;
 use fs_phs::circuit::converter::commutation::capacitance::CapacitiveCommutationParameters;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
-    CapacitiveBatteryMotorCycleStep, PreparedCapacitiveBatteryMotorCycle,
-    PreparedChargeBatteryMotorCycle,
+    PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
 };
 use fs_phs::circuit::converter::commutation::capacitance::charge::ChargeCommutationParameters;
 use fs_phs::circuit::converter::commutation::{
@@ -108,7 +112,7 @@ use fs_phs::circuit::converter::switching::SwitchCycleControls;
 use fs_phs::circuit::converter::switching::battery_motor::BatteryMotorSwitchCommand;
 use fs_phs::circuit::converter::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters};
 use fs_phs::circuit::motor::{DcMotor, DcMotorParameters};
-use fs_phs::{PhsError, PreparedStepError, arithmetic_rounding_floor};
+use fs_phs::{PhsError, PreparedStepError, PreparedStepRecord, arithmetic_rounding_floor};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, Proposal, Receipt,
 };
@@ -216,6 +220,128 @@ pub enum DeviceStorage {
     },
 }
 
+/// Switches without output storage: the owner's nine-coordinate lane,
+/// `fs_phs::circuit::converter::commutation::battery_motor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoDeviceStorage;
+
+/// What the switches store, which fixes the drive's state:
+/// [`NoDeviceStorage`], nine coordinates, or [`DeviceStorage`], eleven.
+/// Sealed: the lanes are the owner's.
+pub trait DriveLane: lane::Sealed + fmt::Debug + Clone + Send + Sync + 'static {}
+
+impl DriveLane for NoDeviceStorage {}
+impl DriveLane for DeviceStorage {}
+
+mod lane {
+    use super::{
+        CapacitiveCommutationParameters, ChargeCommutationParameters, CommutatedDriveError,
+        CommutationParameters, DeviceStorage, NoDeviceStorage, StateIdentityCharterV2, averaged,
+        fmt, invalid,
+    };
+
+    /// The lane's state and storage law, for the drive alone.
+    pub trait Sealed {
+        /// The owner's coordinates.
+        type State: Copy
+            + Default
+            + AsRef<[f64]>
+            + AsMut<[f64]>
+            + fmt::Debug
+            + PartialEq
+            + Send
+            + Sync
+            + 'static;
+        /// The state's identity charter.
+        const CHARTER: StateIdentityCharterV2;
+        /// The switches' storage law on `converter`.
+        fn law(self, converter: CommutationParameters) -> Storage;
+    }
+
+    /// The converter's storage law with the converter it belongs to.
+    #[derive(Debug, Clone)]
+    pub enum Storage {
+        /// No switch storage.
+        Plain(CommutationParameters),
+        /// Constant output capacitances.
+        Capacitance(CapacitiveCommutationParameters),
+        /// Voltage-charge curves.
+        Charge(ChargeCommutationParameters),
+    }
+
+    impl Storage {
+        /// The converter's stored energy at its coordinates.
+        pub fn energy(&self, converter: &[f64]) -> Result<f64, CommutatedDriveError> {
+            let model = CommutatedDriveError::Model;
+            let shape = || invalid("the converter's coordinates are the lane's");
+            match self {
+                Self::Plain(p) => {
+                    let flux_and_buses: &[f64; 3] = converter.try_into().map_err(|_| shape())?;
+                    Ok(averaged(p)
+                        .map_err(model)?
+                        .system()
+                        .hamiltonian(flux_and_buses))
+                }
+                Self::Capacitance(p) => p
+                    .stored_energy_j(converter.try_into().map_err(|_| shape())?)
+                    .map_err(model),
+                Self::Charge(p) => p
+                    .stored_energy_j(converter.try_into().map_err(|_| shape())?)
+                    .map_err(model),
+            }
+        }
+    }
+
+    impl Sealed for NoDeviceStorage {
+        type State = [f64; 9];
+        const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
+            owner: "fs-system::commutated_drive::CommutatedBatteryMotorDrive<NoDeviceStorage>",
+            state_family: "fs_phs commutated battery-motor drive coordinates, no switch storage",
+            schema_grammar: "[f64; 9]: battery chemical, polarization and bus charges [C]; \
+                converter flux linkage [Wb] and two bus charges [C]; motor flux linkage [Wb], \
+                rotor and stator angular momenta [N m s]; finite energy",
+            codec_grammar: "one word per coordinate, the f64 bits, in schema order",
+            codec_version: 1,
+        };
+        fn law(self, converter: CommutationParameters) -> Storage {
+            Storage::Plain(converter)
+        }
+    }
+
+    impl Sealed for DeviceStorage {
+        type State = [f64; 11];
+        const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
+            owner: "fs-system::commutated_drive::CommutatedBatteryMotorDrive",
+            state_family: "fs_phs commutated battery-motor drive coordinates",
+            schema_grammar: "[f64; 11]: battery chemical, polarization and bus charges [C]; \
+                converter flux linkage [Wb], two bus and two switching-node charges [C]; motor \
+                flux linkage [Wb], rotor and stator angular momenta [N m s]; finite energy",
+            codec_grammar: "one word per coordinate, the f64 bits, in schema order",
+            codec_version: 1,
+        };
+        fn law(self, converter: CommutationParameters) -> Storage {
+            match self {
+                Self::Capacitance(output_capacitance_f) => {
+                    Storage::Capacitance(CapacitiveCommutationParameters {
+                        converter,
+                        output_capacitance_f,
+                    })
+                }
+                Self::Charge {
+                    curves,
+                    maximum_cells_per_chord,
+                } => Storage::Charge(ChargeCommutationParameters {
+                    converter,
+                    output_charge_curves: curves,
+                    maximum_cells_per_chord,
+                }),
+            }
+        }
+    }
+}
+
+use lane::Storage;
+
 /// The drive as authored: its battery, lead, converter and motor.
 #[derive(Debug, Clone)]
 pub struct DriveParameters {
@@ -313,24 +439,57 @@ fn step_error(error: PreparedStepError) -> CommutatedDriveError {
     }
 }
 
-/// The converter's storage law with the converter it belongs to.
-#[derive(Debug, Clone)]
-enum Storage {
-    Capacitance(CapacitiveCommutationParameters),
-    Charge(ChargeCommutationParameters),
+/// The converter of `converter` with its averaged bridge, whose system holds
+/// the converter's storage.
+fn averaged(converter: &CommutationParameters) -> Result<AveragedBuckBoost, PhsError> {
+    let on = converter.devices.map(|device| device.on_resistance_ohm);
+    AveragedBuckBoost::new(
+        BuckBoostParameters {
+            inductance_h: converter.inductance_h,
+            bus_capacitance_f: converter.bus_capacitance_f,
+            winding_resistance_ohm: converter.winding_resistance_ohm,
+            input_on_resistance_ohm: [on[0], on[1]],
+            output_on_resistance_ohm: [on[2], on[3]],
+        },
+        BridgeModulation {
+            input_high_fraction: 0.0,
+            output_high_fraction: 0.0,
+        },
+    )
 }
 
-impl Storage {
-    fn energy(&self, converter: &[f64; 5]) -> Result<f64, PhsError> {
-        match self {
-            Self::Capacitance(p) => p.stored_energy_j(converter),
-            Self::Charge(p) => p.stored_energy_j(converter),
+/// What the drive reads of the owner's cycle receipt, the same in every lane.
+struct Cycle {
+    heat_j: [f64; 14],
+    stored_change_j: f64,
+    balance_residual_j: f64,
+    shaft_work_j: [f64; 2],
+    load_work_j: f64,
+    mean_shaft_speed_rad_s: [f64; 2],
+    integration_steps: usize,
+    native: PreparedStepRecord,
+}
+
+/// A [`Cycle`] from either owner's receipt, whose fields share their names.
+macro_rules! cycle {
+    ($step:expr) => {{
+        let step = $step;
+        Cycle {
+            heat_j: step.heat_joules(),
+            stored_change_j: step.total_storage_change_j(),
+            balance_residual_j: step.balance_residual_j(),
+            shaft_work_j: step.shaft_work_j,
+            load_work_j: step.load_work_j,
+            mean_shaft_speed_rad_s: step.mean_shaft_speed_rad_s,
+            integration_steps: step.integration_steps,
+            native: step.native,
         }
-    }
+    }};
 }
 
-/// A prepared native cycle of either storage law.
+/// A prepared native cycle of the drive's lane.
 enum Prepared {
+    Plain(PreparedCommutatedBatteryMotorCycle),
     Capacitance(PreparedCapacitiveBatteryMotorCycle),
     Charge(PreparedChargeBatteryMotorCycle),
 }
@@ -338,6 +497,7 @@ enum Prepared {
 impl Prepared {
     fn period_s(&self) -> f64 {
         match self {
+            Self::Plain(native) => native.period_s(),
             Self::Capacitance(native) => native.period_s(),
             Self::Charge(native) => native.period_s(),
         }
@@ -345,27 +505,48 @@ impl Prepared {
 
     fn step(
         &mut self,
-        old: &[f64; 11],
+        old: &[f64],
         commands: &[BatteryMotorSwitchCommand],
-        next: &mut [f64; 11],
+        next: &mut [f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<CapacitiveBatteryMotorCycleStep, PreparedStepError> {
+    ) -> Result<Cycle, CommutatedDriveError> {
+        let shape = || invalid("the state has the lane's coordinates");
         match self {
-            Self::Capacitance(native) => {
-                native.step_interval_commands_controlled(old, commands, next, cancelled)
-            }
-            Self::Charge(native) => {
-                native.step_interval_commands_controlled(old, commands, next, cancelled)
-            }
+            Self::Plain(native) => native
+                .step_interval_commands_controlled(
+                    old.try_into().map_err(|_| shape())?,
+                    commands,
+                    next.try_into().map_err(|_| shape())?,
+                    cancelled,
+                )
+                .map(|step| cycle!(step)),
+            Self::Capacitance(native) => native
+                .step_interval_commands_controlled(
+                    old.try_into().map_err(|_| shape())?,
+                    commands,
+                    next.try_into().map_err(|_| shape())?,
+                    cancelled,
+                )
+                .map(|step| cycle!(step)),
+            Self::Charge(native) => native
+                .step_interval_commands_controlled(
+                    old.try_into().map_err(|_| shape())?,
+                    commands,
+                    next.try_into().map_err(|_| shape())?,
+                    cancelled,
+                )
+                .map(|step| cycle!(step)),
         }
+        .map_err(step_error)
     }
 }
 
-/// The battery-fed commutated motor drive of fs-phs as one Component.
+/// The battery-fed commutated motor drive of fs-phs as one Component, in the
+/// lane `L` ([`DriveLane`]).
 ///
 /// See the module documentation for the ports, the state, the heat and the
 /// laws.
-pub struct CommutatedBatteryMotorDrive {
+pub struct CommutatedBatteryMotorDrive<L: DriveLane = DeviceStorage> {
     parameters: DriveParameters,
     curve: BatteryOcvCurve,
     storage: Storage,
@@ -383,9 +564,10 @@ pub struct CommutatedBatteryMotorDrive {
     motor: DcMotor,
     ports: Vec<PortSpec>,
     energy_tolerance_j: f64,
+    lane: PhantomData<L>,
 }
 
-impl fmt::Debug for CommutatedBatteryMotorDrive {
+impl<L: DriveLane> fmt::Debug for CommutatedBatteryMotorDrive<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommutatedBatteryMotorDrive")
             .field("parameters", &self.parameters)
@@ -399,8 +581,9 @@ impl fmt::Debug for CommutatedBatteryMotorDrive {
     }
 }
 
-impl CommutatedBatteryMotorDrive {
-    /// The drive of `parameters` whose switches store charge by `storage`,
+impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
+    /// The drive of `parameters` whose switches store charge as `storage`
+    /// says, or not at all ([`NoDeviceStorage`]),
     /// running `program` once per step under the owner's `electrical` and
     /// `cycle` controls.
     ///
@@ -416,7 +599,7 @@ impl CommutatedBatteryMotorDrive {
     /// interval is required; a tolerance that is not positive and finite.
     pub fn new(
         parameters: DriveParameters,
-        storage: DeviceStorage,
+        storage: L,
         program: GateProgram,
         electrical: PowerLoadControls,
         cycle: SwitchCycleControls,
@@ -433,22 +616,7 @@ impl CommutatedBatteryMotorDrive {
             BatteryOcvCurve::new(parameters.capacity_c, &parameters.soc_voltage).map_err(model)?;
         let battery = BatterySource::new(curve.clone(), parameters.battery).map_err(model)?;
         let motor = DcMotor::new(parameters.motor).map_err(model)?;
-        let storage = match storage {
-            DeviceStorage::Capacitance(output_capacitance_f) => {
-                Storage::Capacitance(CapacitiveCommutationParameters {
-                    converter: parameters.converter,
-                    output_capacitance_f,
-                })
-            }
-            DeviceStorage::Charge {
-                curves,
-                maximum_cells_per_chord,
-            } => Storage::Charge(ChargeCommutationParameters {
-                converter: parameters.converter,
-                output_charge_curves: curves,
-                maximum_cells_per_chord,
-            }),
-        };
+        let storage = storage.law(parameters.converter);
         let loaded = program.auxiliary_loads.iter().any(Option::is_some);
         let ports = port_specs(loaded, false)?;
         let mut drive = Self {
@@ -466,6 +634,7 @@ impl CommutatedBatteryMotorDrive {
             motor,
             ports,
             energy_tolerance_j,
+            lane: PhantomData,
         };
         // The owner admits the program and the storage at the authored
         // resistances and switches; its period is every step's length.
@@ -566,14 +735,13 @@ impl CommutatedBatteryMotorDrive {
         self.period_s
     }
 
-    fn energy(&self, state: &[f64; 11]) -> Result<f64, CommutatedDriveError> {
-        let converter = core::array::from_fn(|i| state[3 + i]);
+    fn energy(&self, state: &[f64]) -> Result<f64, CommutatedDriveError> {
+        // The battery's three coordinates, the converter's, the motor's three.
+        let motor = state.len() - 3;
         let parts = [
             self.battery.system().hamiltonian(&state[..3]),
-            self.storage
-                .energy(&converter)
-                .map_err(CommutatedDriveError::Model)?,
-            self.motor.system().hamiltonian(&state[8..]),
+            self.storage.energy(&state[3..motor])?,
+            self.motor.system().hamiltonian(&state[motor..]),
         ];
         let energy = parts[0] + parts[1] + parts[2];
         if state.iter().all(|value| value.is_finite()) && energy.is_finite() {
@@ -595,28 +763,15 @@ impl CommutatedBatteryMotorDrive {
         motor: DcMotorParameters,
     ) -> Result<BatteryMotorDrive, CommutatedDriveError> {
         let model = CommutatedDriveError::Model;
-        let on = converter.devices.map(|device| device.on_resistance_ohm);
-        AveragedBuckBoost::new(
-            BuckBoostParameters {
-                inductance_h: converter.inductance_h,
-                bus_capacitance_f: converter.bus_capacitance_f,
-                winding_resistance_ohm: converter.winding_resistance_ohm,
-                input_on_resistance_ohm: [on[0], on[1]],
-                output_on_resistance_ohm: [on[2], on[3]],
-            },
-            BridgeModulation {
-                input_high_fraction: 0.0,
-                output_high_fraction: 0.0,
-            },
-        )
-        .map_err(model)?
-        .with_battery_source(
-            BatterySource::new(self.curve.clone(), battery).map_err(model)?,
-            lead_resistance_ohm,
-        )
-        .map_err(model)?
-        .with_dc_motor(DcMotor::new(motor).map_err(model)?)
-        .map_err(model)
+        averaged(converter)
+            .map_err(model)?
+            .with_battery_source(
+                BatterySource::new(self.curve.clone(), battery).map_err(model)?,
+                lead_resistance_ohm,
+            )
+            .map_err(model)?
+            .with_dc_motor(DcMotor::new(motor).map_err(model)?)
+            .map_err(model)
     }
 
     fn prepare(
@@ -627,6 +782,16 @@ impl CommutatedBatteryMotorDrive {
         cancelled: impl FnMut() -> bool,
     ) -> Result<Prepared, CommutatedDriveError> {
         match &self.storage {
+            Storage::Plain(_) => PreparedCommutatedBatteryMotorCycle::new_controlled(
+                original,
+                switches,
+                &program.intervals,
+                program.substeps_per_interval,
+                self.electrical,
+                self.cycle,
+                cancelled,
+            )
+            .map(Prepared::Plain),
             Storage::Capacitance(p) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
                 original,
                 switches,
@@ -719,9 +884,9 @@ impl CommutatedBatteryMotorDrive {
     /// the owner's accounts, its native record and the port works disagree.
     fn account(
         &self,
-        step: &CapacitiveBatteryMotorCycleStep,
-        old: &[f64; 11],
-        next: &[f64; 11],
+        step: &Cycle,
+        old: &[f64],
+        next: &[f64],
         torques: [f64; 2],
         kelvin: &[f64],
         dt_s: f64,
@@ -743,9 +908,9 @@ impl CommutatedBatteryMotorDrive {
         let speeds = step.mean_shaft_speed_rad_s;
         let port_work_j = [0, 1].map(|i| torques[i] * speeds[i] * dt_s);
         let shaft_j = step.shaft_work_j[0] + step.shaft_work_j[1];
-        let heat_j = step.heat_joules().iter().sum::<f64>();
-        let stored_change_j = step.total_storage_change_j();
-        let numerical_loss_j = -step.balance_residual_j();
+        let heat_j = step.heat_j.iter().sum::<f64>();
+        let stored_change_j = step.stored_change_j;
+        let numerical_loss_j = -step.balance_residual_j;
         let energy_old = self.energy(old)?;
         let energy_new = self.energy(next)?;
         let magnitude = energy_old.abs()
@@ -813,6 +978,8 @@ impl CommutatedBatteryMotorDrive {
     /// The identity words of the storage, the program and the controls.
     fn program_words(&self, words: &mut Vec<u64>) {
         match &self.storage {
+            // The lane without switch storage: a tag of its own.
+            Storage::Plain(_) => words.push(2),
             Storage::Capacitance(s) => {
                 words.push(0);
                 words.extend(s.output_capacitance_f.map(f64::to_bits));
@@ -920,8 +1087,8 @@ fn counted(words: &mut Vec<u64>, identity: Option<impl FnOnce(&mut Vec<u64>)>) {
 /// The heat of each heat port over the step \[J\]: the owner's fourteen
 /// accounts with each switch's channel and diode together, then the load's
 /// work.
-fn port_heats(step: &CapacitiveBatteryMotorCycleStep) -> [f64; 11] {
-    let h = step.heat_joules();
+fn port_heats(step: &Cycle) -> [f64; 11] {
+    let h = step.heat_j;
     [
         h[0],
         h[1] + h[10],
@@ -937,32 +1104,29 @@ fn port_heats(step: &CapacitiveBatteryMotorCycleStep) -> [f64; 11] {
     ]
 }
 
-impl Component for CommutatedBatteryMotorDrive {
-    type State = [f64; 11];
+impl<L: DriveLane> Component for CommutatedBatteryMotorDrive<L> {
+    type State = L::State;
     type Error = CommutatedDriveError;
 
-    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
-        owner: "fs-system::commutated_drive::CommutatedBatteryMotorDrive",
-        state_family: "fs_phs commutated battery-motor drive coordinates",
-        schema_grammar: "[f64; 11]: battery chemical, polarization and bus charges [C]; converter \
-            flux linkage [Wb], two bus and two switching-node charges [C]; motor flux linkage \
-            [Wb], rotor and stator angular momenta [N m s]; finite energy",
-        codec_grammar: "one word per coordinate, the f64 bits, in schema order",
-        codec_version: 1,
-    });
+    const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(L::CHARTER);
 
-    fn encode_state(&self, state: &[f64; 11], words: &mut Vec<u64>) -> bool {
-        if self.energy(state).is_err() {
+    fn encode_state(&self, state: &L::State, words: &mut Vec<u64>) -> bool {
+        if self.energy(state.as_ref()).is_err() {
             return false;
         }
-        words.extend(state.iter().map(|value| value.to_bits()));
+        words.extend(state.as_ref().iter().map(|value| value.to_bits()));
         true
     }
 
-    fn decode_state(&self, words: &[u64]) -> Option<[f64; 11]> {
-        let words: &[u64; 11] = words.try_into().ok()?;
-        let state = words.map(f64::from_bits);
-        self.energy(&state).is_ok().then_some(state)
+    fn decode_state(&self, words: &[u64]) -> Option<L::State> {
+        let mut state = L::State::default();
+        if words.len() != state.as_ref().len() {
+            return None;
+        }
+        for (value, word) in state.as_mut().iter_mut().zip(words) {
+            *value = f64::from_bits(*word);
+        }
+        self.energy(state.as_ref()).is_ok().then_some(state)
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
@@ -1042,16 +1206,16 @@ impl Component for CommutatedBatteryMotorDrive {
         Class::Smooth
     }
 
-    fn stored_energy_j(&self, state: &[f64; 11]) -> Result<f64, CommutatedDriveError> {
-        self.energy(state)
+    fn stored_energy_j(&self, state: &L::State) -> Result<f64, CommutatedDriveError> {
+        self.energy(state.as_ref())
     }
 
     fn propose(
         &self,
-        old: &[f64; 11],
+        old: &L::State,
         dt_s: f64,
         inputs: &[f64],
-        new: &mut [f64; 11],
+        new: &mut L::State,
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, CommutatedDriveError> {
@@ -1102,12 +1266,13 @@ impl Component for CommutatedBatteryMotorDrive {
                 auxiliary_load,
             })
             .collect();
-        let mut next = [0.0; 11];
-        let step = native
-            .step(old, &commands, &mut next, || cx.is_cancel_requested())
-            .map_err(step_error)?;
+        let mut next = L::State::default();
+        let step = native.step(old.as_ref(), &commands, next.as_mut(), || {
+            cx.is_cancel_requested()
+        })?;
 
-        let (receipt, rates, speeds) = self.account(&step, old, &next, torques, kelvin, dt_s)?;
+        let (receipt, rates, speeds) =
+            self.account(&step, old.as_ref(), next.as_ref(), torques, kelvin, dt_s)?;
         cx.checkpoint()
             .map_err(|_| CommutatedDriveError::Cancelled)?;
         outputs[0] = speeds[0];
