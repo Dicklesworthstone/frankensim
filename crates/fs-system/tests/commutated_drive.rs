@@ -680,3 +680,95 @@ fn the_codec_and_the_identity_tell_states_and_drives_apart() {
         ))
     );
 }
+
+/// The test program with only the output high switch on after the dead time.
+fn other_program() -> GateProgram {
+    let mut program = program();
+    program.intervals[1].gates.on = [false, false, true, false];
+    program
+}
+
+/// One proposal of one period; the new state and the thirteen outputs, or
+/// the refusal, which leaves both untouched.
+fn step(
+    drive: &CommutatedBatteryMotorDrive,
+    old: &[f64; 11],
+    inputs: &[f64],
+) -> Result<([f64; 11], [f64; 13]), CommutatedDriveError> {
+    with_cx(|cx| {
+        let (mut new, mut outputs) = ([7.0; 11], [9.0; 13]);
+        let result = drive.propose(old, PERIOD, inputs, &mut new, &mut outputs, cx);
+        if result.is_err() {
+            assert!(untouched(&new, 7.0) && untouched(&outputs, 9.0));
+        }
+        result.map(|_| (new, outputs))
+    })
+}
+
+#[test]
+fn a_program_signal_chooses_each_steps_program() {
+    let (electrical, cycle) = controls();
+    for storage in storages() {
+        let old = start(&storage);
+        let built = |program| {
+            let drive = CommutatedBatteryMotorDrive::new(
+                parameters(100.0),
+                storage.clone(),
+                program,
+                electrical,
+                cycle,
+                1e-9,
+            );
+            following(drive.unwrap(), 400.0)
+        };
+        let scheduled = built(program()).scheduled(vec![other_program()]).unwrap();
+        assert_eq!(scheduled.ports().len(), 14);
+        assert_eq!(scheduled.ports()[13].id().as_str(), "program");
+        // Each index runs what the drive built with that program alone runs.
+        let given = inputs(5.0);
+        let mut ends = Vec::new();
+        for (index, program) in [0.0, 1.0].into_iter().zip([program(), other_program()]) {
+            let signalled = [given.as_slice(), &[index]].concat();
+            let (new, outputs) = step(&scheduled, &old, &signalled).unwrap();
+            let (alone, alone_outputs) = step(&built(program), &old, &given).unwrap();
+            assert_eq!(new.map(f64::to_bits), alone.map(f64::to_bits));
+            assert_eq!(outputs.map(f64::to_bits), alone_outputs.map(f64::to_bits));
+            ends.push(new);
+        }
+        assert_ne!(ends[0].map(f64::to_bits), ends[1].map(f64::to_bits));
+        // A signal that names no program is refused.
+        for index in [0.5, 2.0, -1.0] {
+            let signalled = [given.as_slice(), &[index]].concat();
+            let error = step(&scheduled, &old, &signalled).unwrap_err();
+            assert!(error.to_string().contains("program signal"), "{error}");
+        }
+        with_cx(|cx| {
+            let case = Case {
+                state: &old,
+                stale: &start(&DeviceStorage::Capacitance(COSS)).map(|q| 1.01 * q),
+                dt_s: PERIOD,
+                inputs: &[given.as_slice(), &[1.0]].concat(),
+            };
+            check_component(&scheduled, &case, cx).expect("component conformance");
+        });
+        // Programs are given once, nonempty, each with an entry per interval
+        // and the drive's period.
+        let refuses = |programs| built(program()).scheduled(programs).is_err();
+        let mut longer = other_program();
+        longer.intervals[1].duration_s *= 2.0;
+        let mut unloaded = other_program();
+        unloaded.auxiliary_loads.pop();
+        assert!(refuses(Vec::new()) && refuses(vec![longer]) && refuses(vec![unloaded]));
+        assert!(scheduled.scheduled(vec![other_program()]).is_err());
+        // The identity holds the further programs.
+        let identity = |drive: CommutatedBatteryMotorDrive| {
+            let mut words = Vec::new();
+            drive.identity_words(&mut words);
+            words
+        };
+        let plain = identity(built(program()));
+        let other = identity(built(program()).scheduled(vec![other_program()]).unwrap());
+        let same = identity(built(program()).scheduled(vec![program()]).unwrap());
+        assert!(plain != other && plain != same && other != same);
+    }
+}

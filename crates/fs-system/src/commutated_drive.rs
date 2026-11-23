@@ -67,6 +67,14 @@
 //! is never clamped. Inductances, capacitances, the OCV, the motor's
 //! coupling, its inertias and the bearing drag stay fixed.
 //!
+//! Programs: a drive runs the program it was built with every step, unless
+//! it was given further programs with
+//! [`CommutatedBatteryMotorDrive::scheduled`]. It then has a signal input
+//! `program` after its heat ports. The signal is the index of the step's
+//! program, an exact whole number held over the step, as `IdealSwitch`
+//! takes its `closed` command; a `SignalSource` of `Waveform::held_table`
+//! schedules it. Every program has the drive's period.
+//!
 //! Class: [`Class::Smooth`], with no tangent, so the kernel differences the
 //! port map. The map is smooth except where, as the inputs move, a body
 //! diode starts or stops conducting, a switch reaches an operating limit, or
@@ -362,6 +370,8 @@ pub struct CommutatedBatteryMotorDrive {
     curve: BatteryOcvCurve,
     storage: Storage,
     program: GateProgram,
+    /// The programs the `program` signal names after the first, if any.
+    scheduled: Vec<GateProgram>,
     period_s: f64,
     electrical: PowerLoadControls,
     cycle: SwitchCycleControls,
@@ -381,6 +391,7 @@ impl fmt::Debug for CommutatedBatteryMotorDrive {
             .field("parameters", &self.parameters)
             .field("storage", &self.storage)
             .field("program", &self.program)
+            .field("scheduled", &self.scheduled)
             .field("resistor_laws", &self.resistor_laws)
             .field("switch_laws", &self.switch_laws)
             .field("energy_tolerance_j", &self.energy_tolerance_j)
@@ -438,29 +449,14 @@ impl CommutatedBatteryMotorDrive {
                 maximum_cells_per_chord,
             }),
         };
-        let mut ports = Vec::with_capacity(13);
-        for name in ["rotor", "stator"] {
-            ports.push(
-                PortSpec::power(
-                    StableId::new(name).map_err(CommutatedDriveError::Identifier)?,
-                    PortKind::RotationalTorqueAngularVelocity,
-                    PortRole::EffortIn,
-                    NonZeroUsize::MIN,
-                )
-                .map_err(CommutatedDriveError::Port)?,
-            );
-        }
         let loaded = program.auxiliary_loads.iter().any(Option::is_some);
-        for name in HEAT_PORTS.into_iter().chain(loaded.then_some(LOAD_PORT)) {
-            let id = StableId::new(name).map_err(CommutatedDriveError::Identifier)?;
-            ports.push(PortSpec::heat(id, PortRole::EffortIn).map_err(CommutatedDriveError::Port)?);
-        }
-        PortLayout::new(&ports).map_err(CommutatedDriveError::Port)?;
+        let ports = port_specs(loaded, false)?;
         let mut drive = Self {
             parameters,
             curve,
             storage,
             program,
+            scheduled: Vec::new(),
             period_s: 0.0,
             electrical,
             cycle,
@@ -476,9 +472,47 @@ impl CommutatedBatteryMotorDrive {
         let p = &drive.parameters;
         let original = drive.original(&p.converter, p.battery, p.lead_resistance_ohm, p.motor)?;
         drive.period_s = drive
-            .prepare(original, p.converter.devices, || false)?
+            .prepare(original, p.converter.devices, &drive.program, || false)?
             .period_s();
         Ok(drive)
+    }
+
+    /// The same drive choosing each step's program by its `program` signal:
+    /// `0` runs the program it was built with, `k` runs `programs[k - 1]`.
+    /// It gains the signal input after its heat ports, and the load port if
+    /// one of the programs has a load.
+    ///
+    /// # Errors
+    /// No program, or a drive already given its programs; a program without
+    /// one auxiliary load entry per interval; the owner's refusal of a
+    /// program; a program whose period is not the drive's.
+    pub fn scheduled(mut self, programs: Vec<GateProgram>) -> Result<Self, CommutatedDriveError> {
+        if programs.is_empty() || !self.scheduled.is_empty() {
+            return Err(invalid(
+                "a drive is given one nonempty list of further programs",
+            ));
+        }
+        let p = &self.parameters;
+        for program in &programs {
+            if program.auxiliary_loads.len() != program.intervals.len() {
+                return Err(invalid("one auxiliary load entry per interval"));
+            }
+            let original =
+                self.original(&p.converter, p.battery, p.lead_resistance_ohm, p.motor)?;
+            let period_s = self
+                .prepare(original, p.converter.devices, program, || false)?
+                .period_s();
+            if (period_s - self.period_s).abs() > 64.0 * f64::EPSILON * self.period_s {
+                return Err(invalid("every program has the drive's period"));
+            }
+        }
+        let loaded = core::iter::once(&self.program)
+            .chain(&programs)
+            .flat_map(|program| &program.auxiliary_loads)
+            .any(Option::is_some);
+        self.ports = port_specs(loaded, true)?;
+        self.scheduled = programs;
+        Ok(self)
     }
 
     /// The same drive with `resistor` following `law` at the temperature
@@ -589,9 +623,9 @@ impl CommutatedBatteryMotorDrive {
         &self,
         original: BatteryMotorDrive,
         switches: [SwitchDevice; 4],
+        program: &GateProgram,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Prepared, CommutatedDriveError> {
-        let program = &self.program;
         match &self.storage {
             Storage::Capacitance(p) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
                 original,
@@ -794,35 +828,7 @@ impl CommutatedBatteryMotorDrive {
                 }
             }
         }
-        let program = &self.program;
-        words.extend([
-            program.intervals.len() as u64,
-            program.substeps_per_interval as u64,
-        ]);
-        for (interval, load) in program.intervals.iter().zip(&program.auxiliary_loads) {
-            let gates = interval
-                .gates
-                .on
-                .iter()
-                .enumerate()
-                .fold(0_u64, |mask, (i, &on)| mask | (u64::from(on) << i));
-            words.extend([gates, interval.duration_s.to_bits()]);
-            match load {
-                None => words.push(0),
-                Some(load) => {
-                    words.push(1);
-                    words.extend(
-                        [
-                            load.requested_power_w(),
-                            load.maximum_current_a(),
-                            load.foldback_voltage_v(),
-                            load.maximum_voltage_v(),
-                        ]
-                        .map(f64::to_bits),
-                    );
-                }
-            }
-        }
+        gate_program_words(&self.program, words);
         let (e, s) = (self.electrical, self.cycle);
         words.extend([
             e.solve.relative.to_bits(),
@@ -836,6 +842,65 @@ impl CommutatedBatteryMotorDrive {
             s.relative_energy_tolerance.to_bits(),
         ]);
     }
+}
+
+/// The words of one gate program: its intervals, gates, durations and loads.
+fn gate_program_words(program: &GateProgram, words: &mut Vec<u64>) {
+    words.extend([
+        program.intervals.len() as u64,
+        program.substeps_per_interval as u64,
+    ]);
+    for (interval, load) in program.intervals.iter().zip(&program.auxiliary_loads) {
+        let gates = interval
+            .gates
+            .on
+            .iter()
+            .enumerate()
+            .fold(0_u64, |mask, (i, &on)| mask | (u64::from(on) << i));
+        words.extend([gates, interval.duration_s.to_bits()]);
+        match load {
+            None => words.push(0),
+            Some(load) => {
+                words.push(1);
+                words.extend(
+                    [
+                        load.requested_power_w(),
+                        load.maximum_current_a(),
+                        load.foldback_voltage_v(),
+                        load.maximum_voltage_v(),
+                    ]
+                    .map(f64::to_bits),
+                );
+            }
+        }
+    }
+}
+
+/// The drive's ports: the two shafts, the heat ports, the load's port if a
+/// program has a load, and the `program` signal if it chooses programs.
+fn port_specs(loaded: bool, signalled: bool) -> Result<Vec<PortSpec>, CommutatedDriveError> {
+    let mut ports = Vec::with_capacity(14);
+    for name in ["rotor", "stator"] {
+        ports.push(
+            PortSpec::power(
+                StableId::new(name).map_err(CommutatedDriveError::Identifier)?,
+                PortKind::RotationalTorqueAngularVelocity,
+                PortRole::EffortIn,
+                NonZeroUsize::MIN,
+            )
+            .map_err(CommutatedDriveError::Port)?,
+        );
+    }
+    for name in HEAT_PORTS.into_iter().chain(loaded.then_some(LOAD_PORT)) {
+        let id = StableId::new(name).map_err(CommutatedDriveError::Identifier)?;
+        ports.push(PortSpec::heat(id, PortRole::EffortIn).map_err(CommutatedDriveError::Port)?);
+    }
+    if signalled {
+        let id = StableId::new("program").map_err(CommutatedDriveError::Identifier)?;
+        ports.push(PortSpec::signal_in(id, NonZeroUsize::MIN));
+    }
+    PortLayout::new(&ports).map_err(CommutatedDriveError::Port)?;
+    Ok(ports)
 }
 
 /// A law's identity, its words counted so that one law's words cannot read
@@ -960,6 +1025,13 @@ impl Component for CommutatedBatteryMotorDrive {
             );
         }
         words.push(self.energy_tolerance_j.to_bits());
+        // A drive without further programs keeps the words above alone.
+        if !self.scheduled.is_empty() {
+            words.push(self.scheduled.len() as u64);
+            for program in &self.scheduled {
+                gate_program_words(program, words);
+            }
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -986,11 +1058,13 @@ impl Component for CommutatedBatteryMotorDrive {
         cx.checkpoint()
             .map_err(|_| CommutatedDriveError::Cancelled)?;
         let width = self.ports.len();
+        // The heat ports end where the `program` signal, if any, begins.
+        let heat_end = width - usize::from(!self.scheduled.is_empty());
         if !(dt_s.is_finite() && dt_s > 0.0)
             || inputs.len() != width
-            || outputs.len() != width
+            || outputs.len() != heat_end
             || inputs.iter().any(|value| !value.is_finite())
-            || inputs[2..].iter().any(|&kelvin| kelvin <= 0.0)
+            || inputs[2..heat_end].iter().any(|&kelvin| kelvin <= 0.0)
         {
             return Err(invalid(
                 "positive duration, complete finite ports and positive temperatures required",
@@ -1000,12 +1074,27 @@ impl Component for CommutatedBatteryMotorDrive {
         if (dt_s - self.period_s).abs() > allowance_s {
             return Err(invalid("a step of the drive is one period of its program"));
         }
-        let (torques, kelvin) = ([inputs[0], inputs[1]], &inputs[2..]);
+        let program = match inputs.get(heat_end) {
+            None => &self.program,
+            // An exact whole number naming a program.
+            Some(&index) => match (0..=self.scheduled.len()).find(|&k| {
+                u32::try_from(k).is_ok_and(|k| f64::from(k).to_bits() == index.to_bits())
+            }) {
+                Some(0) => &self.program,
+                Some(k) => &self.scheduled[k - 1],
+                None => {
+                    return Err(invalid(
+                        "the program signal names one of the drive's programs",
+                    ));
+                }
+            },
+        };
+        let (torques, kelvin) = ([inputs[0], inputs[1]], &inputs[2..heat_end]);
         let (converter, battery, lead, motor) = self.laws_at(kelvin)?;
         let original = self.original(&converter, battery, lead, motor)?;
-        let mut native = self.prepare(original, converter.devices, || cx.is_cancel_requested())?;
-        let commands: Vec<_> = self
-            .program
+        let cancelled = || cx.is_cancel_requested();
+        let mut native = self.prepare(original, converter.devices, program, cancelled)?;
+        let commands: Vec<_> = program
             .auxiliary_loads
             .iter()
             .map(|&auxiliary_load| BatteryMotorSwitchCommand {

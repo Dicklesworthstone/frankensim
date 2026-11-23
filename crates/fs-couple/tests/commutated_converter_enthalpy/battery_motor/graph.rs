@@ -30,7 +30,7 @@ use fs_system::commutated_drive::{
     CommutatedBatteryMotorDrive, DeviceStorage, DriveParameters, DriveResistor, GateProgram,
     HEAT_PORTS, LOAD_PORT, SwitchLaw, SwitchPosition,
 };
-use fs_system::elements::{Force, SourceAccount, Waveform};
+use fs_system::elements::{Force, SignalClock, SignalSource, SourceAccount, Waveform};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 use fs_thermal::enthalpy::conduction::implicit::{
@@ -63,6 +63,16 @@ pub(super) struct Case<'s> {
     /// The cell that receives the auxiliary load's work; none leaves it
     /// outside.
     pub(super) load_cell: Option<CellId>,
+    /// The gates of each step in turn; empty runs the steady gates in every
+    /// step.
+    pub(super) schedule: Vec<DeviceGateState>,
+}
+
+impl Case<'_> {
+    /// The gates of step `k`.
+    pub(super) fn gates(&self, k: usize) -> DeviceGateState {
+        self.schedule.get(k).copied().unwrap_or(self.steady.gates)
+    }
 }
 
 /// One accepted step: the drive's eleven coordinates and the seven cells'
@@ -311,9 +321,9 @@ fn timeline(f: &'static Fixture) -> (ThermalTimeline<'static>, TimelineState<'st
 /// its resistances and switches following the fixture's card.
 fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
     let f = case.fixture;
-    let program = GateProgram {
+    let program = |k| GateProgram {
         intervals: vec![CommutationInterval {
-            gates: case.steady.gates,
+            gates: case.gates(k),
             duration_s: case.dt_s,
         }],
         auxiliary_loads: vec![case.steady.command.auxiliary_load],
@@ -335,12 +345,17 @@ fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
     let mut drive = CommutatedBatteryMotorDrive::new(
         drive_parameters,
         case.storage.clone(),
-        program,
+        program(0),
         power_controls(),
         cycle_controls(),
         1e-9,
     )
     .unwrap();
+    // A schedule runs step k's program as the drive's program k.
+    if case.schedule.len() > 1 {
+        let programs = (1..case.schedule.len()).map(program).collect();
+        drive = drive.scheduled(programs).unwrap();
+    }
     let card = Card {
         material: &f.card,
         curve: &f.caloric,
@@ -398,6 +413,22 @@ pub(super) fn declare(case: &Case<'_>) -> (System, NodeId, NodeId) {
             builder.port(node, shaft).unwrap(),
         );
         builder.bond(a, b).unwrap();
+    }
+    if case.schedule.len() > 1 {
+        // Program k from the start of step k, held over the step.
+        let steps = u32::try_from(case.schedule.len()).unwrap();
+        let table = (0..steps)
+            .map(|k| (case.dt_s * f64::from(k), f64::from(k)))
+            .collect();
+        let source = SignalSource::new(vec![Waveform::held_table(table).unwrap()]).unwrap();
+        let source = builder
+            .add_with_tangent("schedule", source, SignalClock::default())
+            .unwrap();
+        let (a, b) = (
+            builder.port(source, "output").unwrap(),
+            builder.port(node, "program").unwrap(),
+        );
+        builder.signal(a, b).unwrap();
     }
     let (timeline, start) = timeline(f);
     let cells = builder.add("cells", timeline, start).unwrap();

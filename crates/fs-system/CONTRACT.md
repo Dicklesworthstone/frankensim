@@ -4119,6 +4119,16 @@ the OCV, the motor's coupling and inertias and the bearing drag are fixed.
 The error type is the drive's own, as for the battery: `ElementError` has no
 variant for an owner's refusal or a balance defect.
 
+**Programs.** The drive runs the program it was built with every step unless
+`scheduled(programs)` gives it further ones. It then has a signal input
+`program` after its heat ports, and the load port if any program has a load.
+The signal names the step's program: `0` the first, `k` the `k`-th further
+one. It must be an exact whole number naming a program, as `IdealSwitch`
+takes `closed`; anything else refuses the step. A `SignalSource` of
+`Waveform::held_table` schedules it. Every further program has an auxiliary
+load entry per interval, is admitted by the owner and has the drive's period;
+the drive takes its further programs once.
+
 **Heat and balance.** The heats, the load's work and the shaft works are the
 owner's cycle accounts. Each of the following is refused (`Balance`) beyond
 the rounding floor plus the caller's `energy_tolerance_j`:
@@ -4137,10 +4147,10 @@ kernel differences the port map. The map is smooth except where a body diode
 starts or stops conducting, a switch reaches a limit or the load changes
 branch as the inputs move. Identity words bind the curve, every parameter,
 the storage law, the program, both controls, each law's words (counted) and
-the tolerance. The codec is eleven words of `f64` bits; encode and decode
-refuse a state whose energy the laws do not admit.
+the tolerance, then any further programs. The codec is eleven words of `f64`
+bits; encode and decode refuse a state whose energy the laws do not admit.
 
-`tests/commutated_drive.rs` (3 tests, both storage laws each), on a program
+`tests/commutated_drive.rs` (5 tests, both storage laws each), on a program
 of a dead time then input low and output high on, with an auxiliary load;
 both the input low and output high diodes conduct:
 - a step with all five resistances and four switches following laws against
@@ -4163,7 +4173,14 @@ both the input low and output high diodes conduct:
 
   Each leaves outputs and candidate untouched. The codec refuses a short
   word list and a state outside the curve, and the identity changes with
-  the storage law and with every law followed.
+  the storage law and with every law followed;
+- a drive given a further program, with only the output high switch on after
+  the dead time. Signalled `0` or `1`, it takes bit for bit the step of the
+  drive built with that program alone, and the two steps differ. `0.5`,
+  `2` and `-1` are refused, as are no programs, a program of another
+  period, a program short of a load entry and a second list. The
+  conformance kit passes with the signal. The identity changes with the
+  further programs.
 
 Planted defects, one at a time, each failed at least one test:
 - a switch's heat taken with another switch's diode;
@@ -4176,7 +4193,11 @@ Planted defects, one at a time, each failed at least one test:
 - a switch law with no answer replaced by the authored switch;
 - an identity without the resistance laws;
 - the program's end velocity in place of its mean;
-- entropy without the load.
+- entropy without the load;
+- the program signal ignored;
+- a fractional program signal rounded down;
+- the identity without the further programs;
+- a further program of any period.
 
 fs-couple's `tests/commutated_converter_enthalpy/battery_motor/graph.rs`
 declares the drive of the module's `capacitance` and `charge` lanes as a
@@ -4198,7 +4219,16 @@ Against the module, three steps of each fixture, for both storage files:
   - charge curves: within 9.3e-15 relative and 4.9e-11 K;
 
   held to 1e-13 (2e-13 for charge curves) and 1e-9 K. The output high
-  package passes 300.75 K, so its diode threshold feeds back.
+  package passes 300.75 K, so its diode threshold feeds back;
+- the same fixture as the module continues it, with only the output high
+  switch on in the second step and the first gates again in the third. The
+  graph schedules the drive's program with a `SignalSource`:
+  - constant capacitances: within 2.8e-15 relative and 1.4e-11 K, held to
+    1e-13 and 5e-10 K;
+  - charge curves: within 5.5e-15 relative and 2.7e-11 K, held to 1e-13 and
+    1e-9 K.
+
+  Keeping the first gates ends the second step elsewhere.
 
 Both sides refuse two steps:
 - a storage claim qualified only up to 300.000001 K (the graph with `Law`
@@ -4208,18 +4238,18 @@ Both sides refuse two steps:
 After each refusal the graph's drive and cells keep their states. The
 kernel's ledger closes within 1e-9 J.
 
-Six defects planted in the graph, one at a time, each failed at least one of
+Seven defects planted in the graph, one at a time, each failed at least one of
 these tests:
 - the lead's heat in the polarization's cell;
 - the stator given the rotor's torque;
 - a switch law that does not ask its storage claim;
 - the timeline returning mean temperatures;
 - the storage claims in reverse order;
-- the load's work left outside.
+- the load's work left outside;
+- the schedule's third step on the second program.
 
 Not claimed: torques that change within the program; gate charge and
 gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
 avalanche; storage, OCV or bearing drag that change with temperature. The
 graphs do not cover the module's links between cells (its heat-assembly
-fixtures), a gate program that changes from step to step, or its refusals of
-a source that changed or was bound another way.
+fixtures) or its refusals of a source that changed or was bound another way.

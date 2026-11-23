@@ -23,6 +23,7 @@ fn capacitive_case<'s>(
         dt_s,
         substeps,
         load_cell,
+        schedule: Vec::new(),
     }
 }
 
@@ -46,12 +47,12 @@ fn module_run(
     let mut drive = network
         .bind(&thermal, native, COSS, case.start, || false)
         .map_err(error)?;
-    let intervals = [CommutationInterval {
-        gates: case.steady.gates,
-        duration_s: case.dt_s,
-    }];
     let mut rows = Vec::new();
-    for _ in 0..steps {
+    for k in 0..steps {
+        let intervals = [CommutationInterval {
+            gates: case.gates(k),
+            duration_s: case.dt_s,
+        }];
         let next = network
             .step_candidate(
                 &thermal,
@@ -106,6 +107,34 @@ fn constant_capacitors_as_a_graph_follow_the_hot_diode_threshold() {
     // The feedback is real: the output high package, whose diode conducts,
     // warms past 300.8 K, so its threshold rises by more than 16 mV.
     assert!(module[2].kelvin[3] > 300.8, "{:?}", module[2].kelvin);
+}
+
+#[test]
+fn constant_capacitors_as_a_graph_follow_a_gate_program_that_changes() {
+    // The module's dynamic fixture continues with only the output high
+    // switch on; a third step returns to the first gates.
+    let f = leak(capacitive_fixture(0.01, 0.02, 350.0, false, 1.0));
+    let steady = steady_drive(false);
+    let start = initial(&steady, [-0.3, 0.4]);
+    let other = DeviceGateState {
+        on: [false, false, true, false],
+    };
+    let dt = 1.0 / 1024.0;
+    let case = Case {
+        schedule: vec![steady.gates, other, steady.gates],
+        ..capacitive_case(f, &steady, start, dt, 1, None)
+    };
+    let module = module_run(f, &case, dt, 3).unwrap();
+    // On a8d5a7f02c the two agree within 2.8e-15 relative and 1.4e-11 K
+    // over three steps; the bounds sit 36 times above.
+    compare(&module, &kernel_run(&case, 3), [1e-13, 5e-10]);
+    // The schedule matters: with the first gates kept, the second step ends
+    // elsewhere.
+    let kept = module_run(f, &capacitive_case(f, &steady, start, dt, 1, None), dt, 3).unwrap();
+    assert_ne!(
+        kept[1].state.map(f64::to_bits),
+        module[1].state.map(f64::to_bits)
+    );
 }
 
 #[test]
