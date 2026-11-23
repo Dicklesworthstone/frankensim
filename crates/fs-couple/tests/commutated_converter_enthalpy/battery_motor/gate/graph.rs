@@ -10,47 +10,57 @@
 
 use std::sync::Arc;
 
+use fs_couple::circuit_enthalpy::converter::commutation::GateChannelBinding;
 use fs_matdb::{ClaimSelection, MaterialAnswer};
 use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
-use fs_phs::circuit::converter::commutation::gate::GateChannelLaw;
-use fs_system::circuit::ResistanceLaw;
+use fs_phs::circuit::converter::commutation::gate::{GateChannelLaw, GateChannelResponse};
 use fs_system::commutated_drive::{
     ChannelLaw, CommutatedBatteryMotorDrive, GateDriverResistances, GateRail, GateStorage,
     SwitchPosition,
 };
 
 use super::super::graph::{
-    Card, Case, Coolant, Drivers, Lane, Row, cell_ids, cells_start, compare, heat_assembly,
-    held_to_owner, kernel_run, leak, owner_drive, text,
+    Card, CardResistance, Case, Coolant, Drivers, Lane, Row, cell_ids, cells_start, compare,
+    heat_assembly, held_to_owner, kernel_run, leak, owner_drive, text,
 };
 use super::super::nine_state::coolant;
 use super::*;
 
 /// The timeline's cells with ports: the seven, then the drivers'.
-const CELLS: usize = 11;
+pub(super) const CELLS: usize = 11;
 
 impl Lane for GateStorage {
-    fn cycle(
-        &self,
-        _: BatteryMotorDrive,
-        _: [SwitchDevice; 4],
-        _: &[CommutationInterval],
-        _: usize,
-        _: BatteryMotorSwitchCommand,
-        _: &[f64; 15],
-    ) -> ([f64; 15], [f64; 14], f64) {
-        unreachable!("`gate_owner` builds this lane's owner at its cells' temperatures")
-    }
-
-    fn driver_following(
-        drive: CommutatedBatteryMotorDrive<Self>,
-        switch: SwitchPosition,
-        rail: GateRail,
-        law: Arc<dyn ResistanceLaw>,
+    /// Each gate's on and off resistances follow the card at its driver
+    /// cell, on the case's two driver claims.
+    fn add_drivers(
+        mut drive: CommutatedBatteryMotorDrive<Self>,
+        case: &Case<'_, Self>,
     ) -> CommutatedBatteryMotorDrive<Self> {
-        drive.driver_following(switch, rail, law).unwrap()
+        let Some(drivers) = case.drivers else {
+            return drive;
+        };
+        let card = Card {
+            material: &case.fixture.card,
+            curve: &case.fixture.caloric,
+            context: case.context,
+        };
+        let switches = [
+            SwitchPosition::InputHigh,
+            SwitchPosition::InputLow,
+            SwitchPosition::OutputHigh,
+            SwitchPosition::OutputLow,
+        ];
+        let rails = switches
+            .into_iter()
+            .flat_map(|switch| [(switch, GateRail::On), (switch, GateRail::Off)]);
+        let keys = drivers.keys.iter().cycle();
+        for ((tag, (switch, rail)), key) in (5..).zip(rails).zip(keys) {
+            let law = CardResistance { card, key, tag };
+            drive = drive.driver_following(switch, rail, Arc::new(law)).unwrap();
+        }
+        drive
     }
 }
 
@@ -145,7 +155,7 @@ fn card_storage(f: &'static GateFixture, card: Card) -> GateStorage {
 /// started as the module starts it, every cell at `start_k`, one step of
 /// `dt_s` per program. The card's storage must be the authored storage, as
 /// the module's bind requires.
-fn gate_case<'s>(
+pub(super) fn gate_case<'s>(
     f: &'static GateFixture,
     steady: &'s SteadyDrive,
     p: &GateCommutationParameters,
@@ -223,7 +233,22 @@ fn module_run(
     let (q, cgs, cgd) = (f.charges(), f.caps(false), f.caps(true));
     let (conductance, driver_r) = (f.conductances(), f.driver_resistors());
     let bindings = gate_bindings(&q, &cgs, &cgd, &conductance, &driver_r);
-    let network = coupled(&cells, &resistors, &devices, bindings);
+    module_steps(
+        &coupled(&cells, &resistors, &devices, bindings),
+        case,
+        p,
+        steps,
+    )
+}
+
+/// The module's `steps` steps of the case on `network`, its drive bound at
+/// the case's start, authored as `p`.
+pub(super) fn module_steps<B: GateChannelBinding>(
+    network: &GateBatteryMotorThermalNetwork<'_, B>,
+    case: &Case<'_, GateStorage>,
+    p: &GateCommutationParameters,
+    steps: usize,
+) -> Vec<Row<[f64; 15], [f64; CELLS]>> {
     let mut thermal = cells_start(case);
     let native = &case.steady.native;
     let mut drive = network
@@ -318,32 +343,21 @@ fn module_linked_run(
     })
 }
 
-/// The owner's step built by hand for a gate case (`held_to_owner`): the
-/// module's authored parameters with the card's `laws` (Cgd, whether the
-/// channels feed back, the on resistance's slope) in closed form at the
-/// cells' end temperatures. Each channel is `g` at its package's
-/// temperature on the module's three gate voltages, each gate's on
-/// resistance 0.25 ohm + slope (T - 300 K) at its driver cell. The new
-/// state, then the seven cells' heats and the four drivers'.
-fn gate_owner(
+/// The owner's step built by hand for a gate case (`held_to_owner`), with
+/// the parameters `at` gives at the cells' end temperatures. The new state,
+/// then the seven cells' heats and the four drivers'.
+pub(super) fn gate_owner<C: GateChannelResponse + Clone + 'static>(
     case: &Case<'_, GateStorage>,
-    (miller, feedback, slope): (f64, bool, f64),
+    at: impl Fn(&[f64]) -> GateCommutationParameters<C>,
 ) -> impl Fn(usize, &[f64; 15], &[f64]) -> ([f64; 15], Vec<f64>) {
     move |k: usize, old: &[f64; 15], kelvin: &[f64]| {
-        let mut p = authored(miller, feedback);
-        p.channel_conductance = core::array::from_fn(|i| {
-            let knot = |volts| (volts, g(i, volts, kelvin[i + 1], feedback));
-            GateConductanceCurve::try_new([-4.0, 0.0, 4.0].map(knot).to_vec()).unwrap()
-        });
-        for (driver, t) in p.gate_drivers.iter_mut().zip(&kelvin[IDS.len()..]) {
-            driver.on_resistance_ohm += slope * (t - 300.0);
-        }
+        let p = at(kelvin);
         let intervals = [CommutationInterval {
             gates: case.gates(k),
             duration_s: case.dt_s,
         }];
         let (e, c) = (power_controls(), cycle_controls());
-        let owner = PreparedGateBatteryMotorCycle::new_gate_controlled(
+        let owner = PreparedGateBatteryMotorCycle::<C>::new_gate_controlled(
             owner_drive(),
             p,
             &intervals,
@@ -360,6 +374,27 @@ fn gate_owner(
         let mut heat = per_body(step.heat_joules(), 0.0).to_vec();
         heat.extend_from_slice(&step.all_heat_joules()[14..]);
         (next, heat)
+    }
+}
+
+/// The module's authored parameters with the card's `laws` (Cgd, whether
+/// the channels feed back, the on resistance's slope) in closed form at the
+/// cells' temperatures. Each channel is `g` at its package's temperature on
+/// the module's three gate voltages, each gate's on resistance 0.25 ohm +
+/// slope (T - 300 K) at its driver cell.
+fn closed_form(
+    (miller, feedback, slope): (f64, bool, f64),
+) -> impl Fn(&[f64]) -> GateCommutationParameters {
+    move |kelvin: &[f64]| {
+        let mut p = authored(miller, feedback);
+        p.channel_conductance = core::array::from_fn(|i| {
+            let knot = |volts| (volts, g(i, volts, kelvin[i + 1], feedback));
+            GateConductanceCurve::try_new([-4.0, 0.0, 4.0].map(knot).to_vec()).unwrap()
+        });
+        for (driver, t) in p.gate_drivers.iter_mut().zip(&kelvin[IDS.len()..]) {
+            driver.on_resistance_ohm += slope * (t - 300.0);
+        }
+        p
     }
 }
 
@@ -382,7 +417,12 @@ fn a_gate_graph_drives_its_gate_on_and_off_through_a_finite_driver() {
     let graph = kernel_run(&case, 2);
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, and its closed form.
-    held_to_owner(&case, &graph, gate_owner(&case, laws), [1e-14, 5e-12]);
+    held_to_owner(
+        &case,
+        &graph,
+        gate_owner(&case, closed_form(laws)),
+        [1e-14, 5e-12],
+    );
     // The module's closed form: the gate charges to 2 V through 0.5 ohm,
     // the on resistance at 302 K, its driver's cell taking 2 J; then from
     // the 1 V rail through 2 ohm it falls to 1.6 V and 0.32 J more.
@@ -410,7 +450,12 @@ fn a_gate_graph_carries_the_thermal_channel_surface_and_the_miller_charge() {
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, its surface `g` on three
     // knots where the card's line has more, so not bit for bit.
-    held_to_owner(&case, &graph, gate_owner(&case, laws), [2e-13, 1e-12]);
+    held_to_owner(
+        &case,
+        &graph,
+        gate_owner(&case, closed_form(laws)),
+        [2e-13, 1e-12],
+    );
     // The Miller charge is real, as the module checks: a gate-drain
     // voltage moves by more than 1 uV in the first step.
     let (v0, g0) = voltages(&case.start, 0.05);
@@ -456,7 +501,12 @@ fn a_gate_graph_shares_a_finite_liquid_coolant_with_a_driver_cell() {
     compare(&module, &graph, [5e-13, 5e-12]);
     // Without the module: the owner by hand, the coolant's energy by its
     // own caloric curve, and the closed form.
-    held_to_owner(&case, &graph, gate_owner(&case, laws), [2e-13, 5e-12]);
+    held_to_owner(
+        &case,
+        &graph,
+        gate_owner(&case, closed_form(laws)),
+        [2e-13, 5e-12],
+    );
     // The module's closed form for the first step, backward Euler from
     // 300 K through the link with cells of 1 and 2 J/K: the driver's 2 J
     // warm its cell 10/7 K and the coolant 2/7 K, where the on resistance
@@ -488,7 +538,7 @@ fn a_gate_graph_steps_from_another_accepted_state_at_the_answers_there() {
         compare(&module, &graph, [1e-14, 1e-12]);
         // Without the module: the owner by hand at the laws' closed forms
         // there, its new state bit for bit.
-        let owner = gate_owner(&case, laws);
+        let owner = gate_owner(&case, closed_form(laws));
         let (next, _) = owner(0, &case.start, &graph[0].kelvin);
         assert_eq!(next.map(f64::to_bits), graph[0].state.map(f64::to_bits));
         held_to_owner(&case, &graph, owner, [0.0, 5e-13]);

@@ -8,6 +8,9 @@ use fs_couple::circuit_enthalpy::converter::commutation::{
 };
 use fs_qty::{Current, Dims};
 
+#[path = "current/graph.rs"]
+mod graph;
+
 type CurrentDrive = MaterialGateBatteryMotorDrive<GateCurrentSurfaceMaterial>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -4394,7 +4394,8 @@ these tests:
 `battery_motor/nine_state.rs` declares the module's own lane, switches
 without output storage, the same way: the drive in the `NoDeviceStorage`
 lane, its switches asking no storage claim. The harness takes the lane as a
-type parameter (`Lane`, which builds each lane's owner by hand). Against
+type parameter (`Lane`); each lane's owner is built by hand (the gate
+lane's in gate/graph.rs, at its cells' temperatures). Against
 the module, three steps of each fixture:
 - steady motoring and regeneration (1/64 s, four substeps, the load's work
   into a package): bit for bit, held to 1e-14 relative and 1e-11 K;

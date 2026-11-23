@@ -35,8 +35,8 @@ use fs_ports::PortKind;
 use fs_system::circuit::ResistanceLaw;
 use fs_system::commutated_drive::{
     CommutatedBatteryMotorDrive, DRIVER_HEAT_PORTS, DeviceStorage, DriveLane, DriveParameters,
-    DriveResistor, GateProgram, GateRail, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, RAIL_PORTS,
-    SwitchLaw, SwitchPosition,
+    DriveResistor, GateProgram, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, RAIL_PORTS, SwitchLaw,
+    SwitchPosition,
 };
 use fs_system::elements::{Force, SignalClock, SignalSource, SourceAccount, Waveform};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
@@ -132,10 +132,22 @@ pub(super) fn cell_ids<L: Lane>(case: &Case<'_, L>) -> Vec<CellId> {
     ids
 }
 
-/// A drive lane on the graph. The harness steps its owner by hand
-/// (`owner_step`), but for the gate lane's: its channels and drivers take
-/// their cells' temperatures, so `gate/graph.rs` builds that owner itself.
+/// A drive lane on the graph.
 pub(super) trait Lane: DriveLane {
+    /// `drive` with its gate drivers' resistances following the case's
+    /// driver claims. Only the gate lane has drivers; the others add nothing.
+    fn add_drivers(
+        drive: CommutatedBatteryMotorDrive<Self>,
+        _: &Case<'_, Self>,
+    ) -> CommutatedBatteryMotorDrive<Self> {
+        drive
+    }
+}
+
+/// A lane whose owner the harness steps by hand from its authored storage
+/// (`owner_step`). The gate lane is not one: its channels and drivers take
+/// their cells' temperatures, so `gate/graph.rs` builds its owner.
+pub(super) trait HandOwner: Lane {
     /// One owner cycle of `intervals` from `old` under `command`: the new
     /// state, the fourteen heats and the load's work \[J\].
     fn cycle(
@@ -147,20 +159,11 @@ pub(super) trait Lane: DriveLane {
         command: BatteryMotorSwitchCommand,
         old: &Self::State,
     ) -> (Self::State, [f64; 14], f64);
-
-    /// `drive` with the resistance between the gate of `switch` and its
-    /// `rail` following `law`. Only the gate lane has drivers.
-    fn driver_following(
-        _: CommutatedBatteryMotorDrive<Self>,
-        _: SwitchPosition,
-        _: GateRail,
-        _: Arc<dyn ResistanceLaw>,
-    ) -> CommutatedBatteryMotorDrive<Self> {
-        unreachable!("only the gate lane has drivers")
-    }
 }
 
-impl Lane for NoDeviceStorage {
+impl Lane for NoDeviceStorage {}
+
+impl HandOwner for NoDeviceStorage {
     fn cycle(
         &self,
         original: BatteryMotorDrive,
@@ -188,7 +191,9 @@ impl Lane for NoDeviceStorage {
     }
 }
 
-impl Lane for DeviceStorage {
+impl Lane for DeviceStorage {}
+
+impl HandOwner for DeviceStorage {
     fn cycle(
         &self,
         original: BatteryMotorDrive,
@@ -339,11 +344,11 @@ impl Card {
 /// A resistance from its receiving cell's card, as the module's channels
 /// read it.
 #[derive(Debug)]
-struct CardResistance {
-    card: Card,
-    key: &'static PropertyKey,
+pub(super) struct CardResistance {
+    pub(super) card: Card,
+    pub(super) key: &'static PropertyKey,
     /// Names the law in the drive's identity.
-    tag: u64,
+    pub(super) tag: u64,
 }
 
 impl ResistanceLaw for CardResistance {
@@ -746,19 +751,7 @@ fn drive<L: Lane>(case: &Case<'_, L>) -> CommutatedBatteryMotorDrive<L> {
         };
         drive = drive.switch_following(position, Arc::new(law)).unwrap();
     }
-    // Each gate's on and off resistances follow the card at its driver cell.
-    if let Some(drivers) = case.drivers {
-        let rails = switches
-            .into_iter()
-            .flat_map(|switch| [(switch, GateRail::On), (switch, GateRail::Off)]);
-        let keys = drivers.keys.iter().cycle();
-        for ((tag, (switch, rail)), key) in (5..).zip(rails).zip(keys) {
-            let law = CardResistance { card, key, tag };
-            drive = L::driver_following(drive, switch, rail, Arc::new(law));
-        }
-    }
-
-    drive
+    L::add_drivers(drive, case)
 }
 
 /// The case as a graph. Returns the system, the drive and the cells.
@@ -800,7 +793,9 @@ pub(super) fn declare<L: Lane>(case: &Case<'_, L>) -> (System, NodeId, NodeId) {
     let (timeline, start) = timeline(case);
     let cells = builder.add("cells", timeline, start).unwrap();
     let mut routes: Vec<_> = HEAT_PORTS.into_iter().zip(RECEIVERS.map(Some)).collect();
-    routes.push((LOAD_PORT, case.load_cell));
+    // The drive has a load port only when its program carries a load.
+    let load = case.steady.command.auxiliary_load;
+    routes.extend(load.map(|_| (LOAD_PORT, case.load_cell)));
     let drivers = case.drivers.into_iter().flat_map(|drivers| drivers.cells);
     routes.extend(DRIVER_HEAT_PORTS.into_iter().zip(drivers.map(Some)));
     for &(name, receiver) in &routes {
@@ -879,7 +874,7 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
 /// 0.2 ohm, and every limit is 100 (`parameters()`). The battery's flat
 /// 12 V curve and `motor()` are `steady_drive`'s. The new state and the
 /// heat each cell receives \[J\].
-fn owner_step<L: Lane>(
+fn owner_step<L: HandOwner>(
     case: &Case<'_, L>,
     k: usize,
     (old, kelvin): (&L::State, &[f64]),
@@ -954,7 +949,7 @@ fn within(what: &str, worst: [f64; 2], bounds: [f64; 2]) {
 
 /// The graph's steps against the owner's step built by hand (`owner_step`);
 /// see [`held_to_owner`].
-pub(super) fn owner_check<L: Lane, K: AsRef<[f64]>>(
+pub(super) fn owner_check<L: HandOwner, K: AsRef<[f64]>>(
     case: &Case<'_, L>,
     rows: &[Row<L::State, K>],
     slope_v_k: f64,

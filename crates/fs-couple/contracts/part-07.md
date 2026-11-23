@@ -2881,7 +2881,87 @@ Not carried by the graph:
 - the Cgs and Cgd claims at each step's temperatures, after the first
   reading.
 
-The current-surface lane (`gate/current.rs`) is not on the graph yet.
+`gate/current/graph.rs` declares the current-surface fixtures in the same
+lane. Each channel follows its package card's complete I(Vds, Vgs) surface
+times the card's thermal multiplier at the package's temperature. The
+harness resolves both through public fs-material and fs-matdb calls as the
+module does: the claim that the reference point (0 V drain, -4 V gate)
+selects, then that claim's surface. It evaluates the surface on the
+module's support, -20 V to 20 V drain and -4 V to 4 V gate. As in the
+module's tests, the steps of 1/1024 s run without the auxiliary load, so
+the graph routes no load port.
+
+Held to the module:
+- each channel law at 300 K equals the module's bound source bit for bit,
+  on a grid of 63 points over the support, and refuses three points just
+  outside it;
+- two steps from the module's current state (Cgd 0.05 F, the multiplier
+  rising 0.2 per K), within 1e-14 relative and 1e-12 K.
+
+Held without the module:
+- to `PreparedGateBatteryMotorCycle` built by hand at the graph's end
+  temperatures, with the surface in closed form: the new state within 1e-14
+  relative, each cell's energy change within 2e-13 J. Where the drain is
+  beyond 1 V and the gate positive, as at the first step's midpoints, each
+  of the card's triangles carries the closed form's affine law;
+- to the module's closed forms for the first step. Each package warms by
+  its channel's and its diode's heat at the midpoint voltages, the current
+  scaled by 1 + 0.2 (T - 300 K) at its end temperature. Each driver cell
+  warms by its resistor's heat.
+
+The module's drive is bound at one accepted state, and it refuses a step
+from another state when the channels' multiplier varies with temperature
+(`current_surface_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state`).
+From that fixture's 320 K state, the graph takes the step at the laws'
+answers there. That step:
+- equals the module's step with its drive bound at 320 K, within 1e-14
+  relative and 1e-12 K;
+- has the new state of the owner built by hand at the laws' answers at the
+  end temperatures bit for bit, and each cell balanced within 2e-13 J.
+
+Every cell ends at or above 320 K. At those end temperatures, each
+multiplier differs in its bits from its 300 K value.
+
+Each defect below was planted on its own with the module comparison switched
+off. Each one failed at least one test:
+- each surface channel answering at 300 K (the 320 K step's state is no
+  longer the owner's, bit for bit);
+- the surface read with its drain and gate swapped;
+- the channel current without its multiplier;
+- the support check dropped;
+- the gate lane's drivers left at their authored resistances;
+- the load port routed without a load (the graph refuses to build);
+- in fs-system's drive, each channel asked at its gate driver's port.
+
+Not carried by the current-surface graph:
+- the drive bound at one state refusing a step from another accepted state
+  (above);
+- the refusals at bind in
+  `missing_surface_support_active_vertices_and_bias_conditioned_multiplier_are_refused`:
+  - "passive channel source cells must meet on an authored zero-drain
+    mesh; crossing cells are not split or inferred" (no 0 V drain line);
+  - a surface that does not cover the operating rectangle: "an exposed
+    source edge enters the requested surface rectangle" (a hole) and no
+    claim in the domain (a gate domain to 3 V);
+  - "original channel source violates signed passive current or exact
+    zero-drain current" (an active vertex, and a 0 V drain row that carries
+    current);
+  - "separable channel multiplier can vary only with owned thermal
+    coordinates or fixed external conditions" (a multiplier conditioned on
+    the drain or the gate voltage);
+- the changed "lot" at a step: "switching device cannot change its held
+  original source context";
+- the source records kept at the accepted temperature: the claim, samples
+  and triangles, the card's identity and the query point. The graph keeps
+  no record;
+- the module's step through its generic heat assembly
+  (`current_surface_thermal_feedback_uses_the_original_generic_heat_assembly`)
+  is not compared with the graph. Its closed forms and its energy balance
+  hold on the graph's step (above).
+
+The surface law makes none of these checks. It evaluates the card's surface
+wherever the drive asks. It refuses only a point outside the support or
+outside every surface cell.
 
 Focused G0/G1 fixtures specify source-owned current saturation/cutoff and signed
 reverse current, original-cell derivatives, explicit thermal scaling,
