@@ -3383,7 +3383,14 @@ after that all agree within 2e-9 K, 1.4e-12 C and 4e-12 J. The test's bounds are
 1e-7 K, 1e-10 C and 2e-10 J. Five defects planted in the graph each failed
 it: heat routed to the other cell, one resistor left at its placeholder
 resistance, resistors at a fixed 300 K, cells returning step-mean
-temperatures, the link conductance halved.
+temperatures, the link conductance halved. The same file declares the
+module's mutual-coil fixture (2 H and 3 H coupled by 1 H, each shunted by a
+card resistor rising 0.5 % and 0.2 % per kelvin, linkages 3.5 and 0.5 Wb, six
+intervals of 0.25 s) with the same graph and only the netlist changed: it
+agrees within 2e-9 K, 1.1e-11 Wb and 7.1e-12 J at every interval, under
+bounds of 1e-7 K, 5e-10 Wb and 4e-10 J. The five planted defects above fail
+it as well, and three more fail it alone: the coupling left out, its sign
+flipped, the starting linkages swapped.
 
 Not claimed: a tangent or `PortTangent`; second-order accuracy of the
 coupled step, which is first order with endpoint coefficients as the module
