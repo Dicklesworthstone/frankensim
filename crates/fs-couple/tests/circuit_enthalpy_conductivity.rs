@@ -6,6 +6,10 @@ mod motion;
 mod contacts;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "circuit_enthalpy_conductivity/graph.rs"]
+mod graph;
+#[path = "circuit_enthalpy/kernel.rs"]
+mod kernel;
 
 use common::{DESTINATIONS, config, initial, near, point};
 use fs_couple::circuit_enthalpy::conductivity::step_candidate;

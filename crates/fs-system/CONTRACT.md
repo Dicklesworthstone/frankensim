@@ -3349,8 +3349,31 @@ that rounding floor, as in `phs::PortHamiltonianComponent`; its residual and
 tolerance are those of the owner's solve certificate, and a step without one
 is refused. The circuit is `Class::Smooth` and declares no tangent. Identity
 words bind the netlist, transformers, mutual couplings, each law's branch and
-its words, counted, and the tolerance; the codec is one word of `f64` bits per
+its words, counted, the tolerance, and the operating-point iteration's
+controls when the circuit has one. The codec is one word of `f64` bits per
 coordinate.
+
+Operating point. A law may also follow the voltage across its resistor and the
+current through it (`ResistanceLaw::follows_operating_point`, answered by
+`ohms_at(T, v, i)`), as a conductor whose resistivity follows the field or the
+current density does. Such a law needs the circuit's `OperatingPointIteration`,
+given by `iterating(iteration)` before the law; `following` refuses it
+otherwise, and the battery refuses it always. The circuit then solves the step
+by the constitutive iteration of `fs_couple::material_circuit::conductivity`:
+- every trial steps the owner from the same start, each such resistor at its
+  law's resistance at an applied operating point, zero in the first trial;
+- the point a trial solves is the step's midpoint voltage across the resistor
+  and that voltage over the applied resistance;
+- a trial is accepted when every such law, asked at the point it solved,
+  answers within `absolute_resistance_tolerance_ohm` plus
+  `relative_resistance_tolerance` times the larger resistance of the applied
+  one, and the trial's power `v i` is within `power_tolerance_w` of the law's
+  `R i^2`. The heat is the accepted trial's;
+- otherwise the next trial applies the solved point, or with a `relaxation`
+  below one the point that fraction of the way from the applied one;
+- a circuit that has not met its tolerances by its `maximum_trials`-th trial
+  refuses with `CircuitComponentError::OperatingPoint`.
+A circuit with no such law takes one trial, whatever its iteration.
 
 Which temperature a law sees is a property of the graph, not of this
 Component. Joined by `common_effort` to an `elements::HeatCapacity`, it is the
@@ -3361,7 +3384,7 @@ it is the cell's end-of-step temperature. That is the protocol of
 `fs_couple::circuit_enthalpy`: backward Euler for the cells, circuit midpoint
 currents, endpoint material resistance.
 
-`tests/circuit.rs` (11 tests):
+`tests/circuit.rs` (15 tests):
 - the ports for a netlist with both kinds of source;
 - a series RC discharging into two heat capacities: charge equal to the
   midpoint rule's `q0 ((1 - a) / (1 + a))^n`, heats split as the
@@ -3383,7 +3406,27 @@ currents, endpoint material resistance.
 - the receipt's heat and entropy at the received temperatures;
 - codec round trip, a nonfinite word refused, and an identity that tells
   two laws apart by value and by branch and keeps apart laws whose words run
-  together.
+  together;
+- a resistor following its field (`R = 1 + 0.05 |v|` in an RC), unrelaxed and
+  relaxed by half, against the midpoint step solved by bisection in the test:
+  within 2.1e-13 C and 1.5e-11 W on the export of 1e611fdf33 with series 1-8,
+  under bounds of 1e-11 C and 1e-9 W. With the resistance tolerance at half
+  the resistance, the power tolerance alone holds the step to 4.8e-11 C of
+  it (bound 2.5e-9 C). One trial is refused;
+- a steep current law (`R = 0.1 + 1000 |i|`): unrelaxed it is refused after
+  64 trials, and relaxed by half it meets the closed form (charge to the bit,
+  heat rates within 2e-14 W, bounds 1e-12);
+- the iteration's admission: a following law before it, the iteration given
+  twice, and each control out of its range are refused;
+- a circuit whose law follows temperature alone steps bit for bit the same
+  with an iteration as without; the iteration and its relaxation each change
+  the identity; the iterated circuit passes `check_component`.
+Ten defects planted one at a time in the iteration each failed at least one
+of the last four tests: the relaxation ignored or reversed, the law asked at
+the applied point, the point taken at the step's end, the power check
+dropped, the first trial accepted, one trial past the cap, the iteration left
+out of the identity, a following law admitted before the iteration, a
+relaxation up to two admitted.
 Fourteen defects planted one at a time in the Component each failed at least
 one of these tests: heat at the end potentials, the law asked at 300 K, the
 heat-rate sign, the source-output sign, a state not advanced, entropy at
@@ -3449,15 +3492,54 @@ slice, the three that change what the implicit step books also fail it: zero,
 the storage change, and the receipt ignoring the solve. The one that adds the
 reservoir input does not, since these fixtures have no film or reservoir.
 
+Conductivity. `fs-couple`'s `tests/circuit_enthalpy_conductivity/graph.rs`
+declares the fixtures of `circuit_enthalpy::conductivity` the same way. Each
+resistor follows its card through a `ResistanceLaw` that resolves it as the
+module does: the seed conductor at the phase state of the temperature its
+port receives, as the fixtures' `coefficients` resolve it, then at the field
+`V / L` or current density `I / A` of its operating point on each axis the
+card binds, as the material circuit refreshes it. The circuit iterates with
+the module's conductivity controls (64 trials, 1e-12 ohm, 1e-12 of the
+resistance, the circuit's 1e-8 W). Both run on the backward-Euler timeline
+returning end temperatures.
+- The module's field fixture: resistivity `1 + 0.05 E` on resistor 1, resistor
+  2 rising 0.5 % per kelvin, the 1 F capacitor at 10 C, a 1 W/K link, eight
+  intervals of 0.2 s, unrelaxed. The two sides agree within 3.5e-9 K,
+  9.2e-12 C and 9.9e-12 J at every interval, under bounds of 2e-7 K, 5e-10 C
+  and 5e-10 J. Cell 10 warms 9 K.
+- The module's steep current-density card, `0.1 + 1000 J`, with a constant
+  heat capacity and resistor 2 as above, relaxed by half, six intervals. The
+  charge agrees bit for bit, the temperatures within 1.8e-12 K and the Joule
+  heat within 1.7e-16 J, under bounds of 1e-10 K, 5e-10 C and 1e-14 J.
+  Unrelaxed, both sides refuse the first interval after 64 trials: the
+  module with `ConductivityConvergence`, the kernel's circuit with
+  `OperatingPoint`.
+Of the ten iteration defects above, six fail these comparisons too: the
+relaxation ignored or reversed, the law asked at the applied point, the end
+point, the first trial accepted, one trial past the cap. Two defects planted
+in the graph also fail them: the card's law at temperature alone, and the
+kernel unrelaxed beside the relaxed module.
+
 Not claimed: a tangent or `PortTangent`; second-order accuracy of the
 coupled step, which is first order with endpoint coefficients as the module
 documents; the module's storage, reservoir-input, temporal and algebraic
-entropy terms, since the ledger books generation, not storage; the module's phase-dependent resistance at a latent plateau,
-which the fixture's single-phase cards do not reach; sources, conductances
-or reservoirs that the module's coefficients resolve from the state of each
-trial (the comparison uses constant sources only). The module is kept as the
-regression reference, and no `fs-couple` source changes. Its test fixture
-gains `sourced`, which `initial` now calls with no sources.
+entropy terms, since the ledger books generation, not storage; the module's
+phase-dependent resistance at a latent plateau, which the fixture's
+single-phase cards do not reach; sources, conductances or reservoirs that the
+module's coefficients resolve from the state of each trial (the comparison
+uses constant sources only). For conductivity, also not claimed:
+- the module's adaptive relaxation (`with_adaptive_relaxation`);
+- series electrical contacts and their own contact laws;
+- the module's relaxed fixture with a heat capacity that varies with
+  temperature, which the comparison's timeline of one caloric segment does
+  not hold;
+- relaxation of a magnitude coordinate. The kernel relaxes the signed voltage
+  and current, the module each bound coordinate, a magnitude on a magnitude
+  axis. The two agree while a resistor's voltage keeps its sign from trial to
+  trial, as in these fixtures.
+The module is kept as the regression reference, and no `fs-couple` source
+changes. Its test fixture gains `sourced`, which `initial` now calls with no
+sources.
 
 ## Equivalent-circuit battery Component with heat ports
 
@@ -3482,7 +3564,9 @@ exact across OCV knots; nothing is integrated here. A resistance given a
 `circuit::ResistanceLaw` with `following(loss, law)` takes `law.ohms(T)` at
 the temperature its heat port receives. A law with no answer, or with an
 answer that is not positive and finite, refuses the step with the loss
-(`BatteryComponentError::Law`); it never clamps.
+(`BatteryComponentError::Law`); it never clamps. A law that follows the
+operating point is refused when it is given: the battery asks its laws at
+temperature alone.
 
 **Heat and balance.** The heats and the terminal work are the owner's own
 interval accounts. Work minus stored change minus heat is booked as numerical
@@ -3515,8 +3599,8 @@ bits per charge.
 - `check_component` conformance with both laws;
 - refusals that publish nothing: a law with no answer and one answering a
   negative resistance, each by its loss; a cold port; a zero step; a step
-  that would empty the cell; a law given twice; a zero tolerance; a curve the
-  owner refuses;
+  that would empty the cell; a law given twice; a law that follows the
+  operating point; a zero tolerance; a curve the owner refuses;
 - the codec round trip, nonfinite and short words refused, and identities
   told apart by law, by loss and by curve.
 
@@ -3537,6 +3621,8 @@ one of these tests:
 - a law given twice admitted;
 - a nonfinite state decoded;
 - the heat booked as stored.
+A seventeenth, the refusal of a law that follows the operating point removed,
+fails the refusals test.
 
 `fs-couple`'s `tests/battery_enthalpy/graph.rs` builds the module's three
 stepping fixtures as graphs. Each graph is the battery, an

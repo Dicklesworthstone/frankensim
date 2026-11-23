@@ -36,7 +36,8 @@
 //! temperature `T` its heat port receives in that step. With a backward-Euler
 //! thermal timeline returning end-of-step temperatures, that is the endpoint
 //! material resistance of `fs_couple::circuit_enthalpy::battery`. A law with
-//! no answer refuses the step; it is never clamped.
+//! no answer refuses the step; it is never clamped. A law that follows the
+//! operating point is refused when it is given.
 //!
 //! Class: [`Class::Smooth`]. The chemical energy is the integral of a
 //! continuous piecewise-linear OCV, so it is continuously differentiable and
@@ -253,12 +254,20 @@ impl EquivalentCircuitBattery {
     /// temperature its heat port receives, in every proposal.
     ///
     /// # Errors
-    /// That resistance already follows a law.
+    /// That resistance already follows a law, or the law follows the
+    /// operating point
+    /// ([`ResistanceLaw::follows_operating_point`]), which the battery does
+    /// not solve: it asks its laws at temperature alone.
     pub fn following(
         mut self,
         loss: BatteryLoss,
         law: Arc<dyn ResistanceLaw>,
     ) -> Result<Self, BatteryComponentError> {
+        if law.follows_operating_point() {
+            return Err(invalid(
+                "a battery resistance follows temperature, not the operating point",
+            ));
+        }
         if self.laws[loss.index()].replace(law).is_some() {
             return Err(invalid("a resistance follows one law only"));
         }

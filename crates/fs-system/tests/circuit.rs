@@ -1,6 +1,6 @@
 //! A Kirchhoff circuit of fs-phs as one Component: closed forms on the
-//! kernel, a resistor that follows its temperature, conformance and
-//! refusals.
+//! kernel, a resistor that follows its temperature, resistors that follow
+//! their operating point, conformance and refusals.
 
 use std::sync::Arc;
 
@@ -9,7 +9,9 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_phs::circuit::{Branch, CircuitGraph, TransformerLink};
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, PortRole, Proposal};
-use fs_system::circuit::{CircuitComponentError, KirchhoffCircuit, ResistanceLaw};
+use fs_system::circuit::{
+    CircuitComponentError, KirchhoffCircuit, OperatingPointIteration, ResistanceLaw,
+};
 use fs_system::elements::HeatCapacity;
 use fs_system::{NodeId, System, SystemBuilder};
 
@@ -653,4 +655,308 @@ fn the_receipt_books_each_resistors_heat_at_the_temperature_its_port_receives() 
         4.0 * f64::EPSILON * scale / kelvin[1],
         "entropy",
     );
+}
+
+/// `r0 + slope |x|` at any temperature, `x` the voltage across the resistor
+/// or, if `current`, the current through it: a conductor of unit length and
+/// section whose resistivity rises with the field or the current density.
+#[derive(Debug, Clone, Copy)]
+struct Operating {
+    r0: f64,
+    slope: f64,
+    current: bool,
+}
+
+impl ResistanceLaw for Operating {
+    fn ohms(&self, _: f64) -> Result<f64, String> {
+        Ok(self.r0)
+    }
+
+    fn follows_operating_point(&self) -> bool {
+        true
+    }
+
+    fn ohms_at(&self, _: f64, volts: f64, amperes: f64) -> Result<f64, String> {
+        let x = if self.current { amperes } else { volts };
+        Ok(self.r0 + self.slope * x.abs())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([
+            self.r0.to_bits(),
+            self.slope.to_bits(),
+            u64::from(self.current),
+        ]);
+    }
+}
+
+/// The controls of the module's conductivity fixtures: 64 trials, 1e-12 ohm
+/// plus 1e-12 of the resistance, 1e-8 W.
+fn iteration(relaxation: f64) -> OperatingPointIteration {
+    OperatingPointIteration {
+        maximum_trials: 64,
+        absolute_resistance_tolerance_ohm: 1e-12,
+        relative_resistance_tolerance: 1e-12,
+        power_tolerance_w: 1e-8,
+        relaxation,
+    }
+}
+
+/// One 0.2 s proposal of a 1 F capacitor at 10 C discharged through resistor
+/// 1 following `law` and resistor 2 at 3 ohm, both ports at 300 K. Returns
+/// the charge at the end and the two resistors' heat rates \[W\].
+fn operating_step(
+    law: Operating,
+    iteration: OperatingPointIteration,
+) -> Result<(f64, [f64; 2]), CircuitComponentError> {
+    let circuit = KirchhoffCircuit::new(series_rc(1.0, 999.0, 3.0), vec![], 1.0e-12)?
+        .iterating(iteration)?
+        .following(1, Arc::new(law))?;
+    let old = circuit.state(&[], &[10.0])?;
+    let mut new = old.clone();
+    let mut outputs = [0.0; 2];
+    let proposal =
+        with_cx(|cx| circuit.propose(&old, 0.2, &[300.0, 300.0], &mut new, &mut outputs, cx))?;
+    assert!(matches!(proposal, Proposal::Step(_)), "{proposal:?}");
+    Ok((circuit.charges_c(&new)[0], outputs.map(|rate| -rate)))
+}
+
+#[test]
+fn a_resistor_following_its_field_meets_the_hand_solved_midpoint_step() {
+    // R1 = 1 + 0.05 |v| with v = I R1 is R1 = 1 / (1 - 0.05 I). The midpoint
+    // step holds the capacitor's mean voltage 10 - 0.1 I across R1 + 3 ohm;
+    // the current that does so is found by bisection.
+    let beta = 0.05;
+    let residual =
+        |current: f64| current * (1.0 / (1.0 - beta * current) + 3.0) + 0.1 * current - 10.0;
+    let (mut low, mut high) = (0.0_f64, 3.0_f64);
+    for _ in 0..200 {
+        let middle = 0.5 * (low + high);
+        if residual(middle) > 0.0 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let current = 0.5 * (low + high);
+    let r1 = 1.0 / (1.0 - beta * current);
+    let field = Operating {
+        r0: 1.0,
+        slope: beta,
+        current: false,
+    };
+    // Each run stops once R1 is within 2e-12 of itself. On the export of
+    // 1e611fdf33 with series 1-8 the charge is within 2.1e-13 C of the
+    // bisection's and the heat rates within 1.5e-11 W (of 6.3 and 16.7 W),
+    // the relaxed run the farther; the bounds sit about fifty times above.
+    for relaxation in [1.0, 0.5] {
+        let (charge, heat) = operating_step(field, iteration(relaxation)).unwrap();
+        close(charge, 10.0 - 0.2 * current, 1e-11, "charge");
+        close(heat[0], current * current * r1, 1e-9, "heat 1");
+        close(heat[1], current * current * 3.0, 1e-9, "heat 2");
+    }
+    // A resistance tolerance of half the resistance leaves the power one in
+    // charge: the first trial's R1 is within 0.13 ohm of the law's, but its
+    // power v i is 0.73 W off the law's R1 i^2. The ninth trial meets the
+    // power tolerance, 4.8e-11 C from the bisection's charge on the same
+    // export; the bound sits about fifty times above that.
+    let loose = OperatingPointIteration {
+        absolute_resistance_tolerance_ohm: 0.0,
+        relative_resistance_tolerance: 0.5,
+        ..iteration(1.0)
+    };
+    let (charge, _) = operating_step(field, loose).unwrap();
+    close(
+        charge,
+        10.0 - 0.2 * current,
+        2.5e-9,
+        "charge, power in charge",
+    );
+    // One trial is the circuit at zero field, where R1 is 1 ohm.
+    let once = OperatingPointIteration {
+        maximum_trials: 1,
+        ..iteration(1.0)
+    };
+    let refused = operating_step(field, once);
+    assert!(
+        matches!(
+            refused,
+            Err(CircuitComponentError::OperatingPoint { trials: 1, .. })
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_steep_current_law_meets_its_tolerances_only_relaxed() {
+    // R1 = 0.1 + 1000 |i|: the midpoint step 10 = I (R1 + 3.1) is
+    // 1000 I^2 + 3.2 I = 10. Unrelaxed, each trial near the answer misses it
+    // by about 0.95 of the last miss, on the other side, and 64 trials do not
+    // bring the resistance within 1e-12 of itself; trials halfway to the
+    // solved point do.
+    let steep = Operating {
+        r0: 0.1,
+        slope: 1000.0,
+        current: true,
+    };
+    let current = 20.0 / (3.2 + (3.2_f64.powi(2) + 4.0 * 1000.0 * 10.0).sqrt());
+    let refused = operating_step(steep, iteration(1.0));
+    assert!(
+        matches!(
+            refused,
+            Err(CircuitComponentError::OperatingPoint { trials: 64, .. })
+        ),
+        "{refused:?}"
+    );
+    // Relaxed, the trials close in fast: on the same export the charge is
+    // the closed form's to the bit and the heat rates within 2e-14 W.
+    let (charge, heat) = operating_step(steep, iteration(0.5)).unwrap();
+    close(charge, 10.0 - 0.2 * current, 1e-12, "charge");
+    close(
+        heat[0],
+        current * current * (0.1 + 1000.0 * current),
+        1e-12,
+        "heat 1",
+    );
+    close(heat[1], 3.0 * current * current, 1e-12, "heat 2");
+}
+
+#[test]
+fn the_iteration_comes_once_before_its_laws_with_its_controls_in_range() {
+    let field = Arc::new(Operating {
+        r0: 1.0,
+        slope: 0.05,
+        current: false,
+    });
+    let base = || KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12).unwrap();
+    // A law that follows the operating point before the iteration, and the
+    // iteration twice.
+    assert!(matches!(
+        base().following(1, field),
+        Err(CircuitComponentError::Invalid { .. })
+    ));
+    assert!(matches!(
+        base()
+            .iterating(iteration(1.0))
+            .unwrap()
+            .iterating(iteration(1.0)),
+        Err(CircuitComponentError::Invalid { .. })
+    ));
+    for bad in [
+        OperatingPointIteration {
+            maximum_trials: 0,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            absolute_resistance_tolerance_ohm: -1e-12,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            relative_resistance_tolerance: 1.0,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            absolute_resistance_tolerance_ohm: 0.0,
+            relative_resistance_tolerance: 0.0,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            power_tolerance_w: 0.0,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            relaxation: 0.0,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            relaxation: 1.5,
+            ..iteration(1.0)
+        },
+        OperatingPointIteration {
+            relaxation: f64::NAN,
+            ..iteration(1.0)
+        },
+    ] {
+        assert!(
+            matches!(
+                base().iterating(bad),
+                Err(CircuitComponentError::Invalid { .. })
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn the_iteration_joins_the_identity_and_passes_the_conformance_kit() {
+    let field = Arc::new(Operating {
+        r0: 1.0,
+        slope: 0.05,
+        current: false,
+    });
+    let base = || KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12).unwrap();
+    // A circuit whose law follows temperature alone takes one trial: the
+    // iteration changes its identity, not its step.
+    let linear = Arc::new(Linear {
+        r0: 1.0,
+        alpha: 0.01,
+        floor_k: 1.0,
+    });
+    let plain = base().following(1, linear.clone()).unwrap();
+    let iterated = base()
+        .iterating(iteration(0.5))
+        .unwrap()
+        .following(1, linear)
+        .unwrap();
+    let old = plain.state(&[], &[1.0]).unwrap();
+    let step = |circuit: &KirchhoffCircuit| {
+        let mut new = old.clone();
+        let mut outputs = [0.0; 2];
+        let proposal =
+            with_cx(|cx| circuit.propose(&old, 0.1, &[320.0, 310.0], &mut new, &mut outputs, cx))
+                .unwrap();
+        let Proposal::Step(receipt) = proposal else {
+            panic!("{proposal:?}");
+        };
+        new.iter()
+            .chain(&outputs)
+            .chain([&receipt.dissipated_j, &receipt.numerical_loss_j])
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(step(&plain), step(&iterated));
+    let words = |circuit: &KirchhoffCircuit| {
+        let mut words = Vec::new();
+        circuit.identity_words(&mut words);
+        words
+    };
+    assert_ne!(words(&plain), words(&iterated));
+    let relaxed = base()
+        .iterating(iteration(0.5))
+        .unwrap()
+        .following(1, field.clone())
+        .unwrap();
+    let unrelaxed = base()
+        .iterating(iteration(1.0))
+        .unwrap()
+        .following(1, field)
+        .unwrap();
+    assert_ne!(words(&relaxed), words(&unrelaxed));
+
+    // The iterated circuit passes the conformance kit.
+    let state = relaxed.state(&[], &[10.0]).unwrap();
+    let stale = relaxed.state(&[], &[-5.0]).unwrap();
+    with_cx(|cx| {
+        let case = Case {
+            state: &state,
+            stale: &stale,
+            dt_s: 0.2,
+            inputs: &[300.0, 300.0],
+        };
+        let observed = check_component(&relaxed, &case, cx).expect("component conformance");
+        assert!(
+            matches!(observed, Observed::Stepped { .. }),
+            "the circuit shortened the step"
+        );
+    });
 }

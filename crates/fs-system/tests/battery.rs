@@ -112,6 +112,24 @@ impl ResistanceLaw for Linear {
     }
 }
 
+/// A constant `r0` that says it follows the operating point.
+#[derive(Debug)]
+struct Operating(f64);
+
+impl ResistanceLaw for Operating {
+    fn ohms(&self, _: f64) -> Result<f64, String> {
+        Ok(self.0)
+    }
+
+    fn follows_operating_point(&self) -> bool {
+        true
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.0.to_bits());
+    }
+}
+
 #[test]
 fn the_ports_are_the_terminal_then_the_series_and_polarization_heat() {
     let ports: Vec<(String, PortRole, Carrier)> = battery(10.0, &FLAT)
@@ -466,13 +484,17 @@ fn refusals_publish_nothing() {
         BatteryComponentError::Step(_)
     ));
 
-    // Construction: a law given twice, no tolerance, a curve the owner
-    // refuses.
+    // Construction: a law given twice, a law that follows the operating
+    // point, no tolerance, a curve the owner refuses.
     assert!(matches!(
         battery(10.0, &FLAT)
             .following(BatteryLoss::Series, law(R[0], 0.0, 1.0))
             .unwrap()
             .following(BatteryLoss::Series, law(R[0], 0.0, 1.0)),
+        Err(BatteryComponentError::Invalid { .. })
+    ));
+    assert!(matches!(
+        battery(10.0, &FLAT).following(BatteryLoss::Polarization, Arc::new(Operating(R[1]))),
         Err(BatteryComponentError::Invalid { .. })
     ));
     let solve = SolveBudget::default();
