@@ -3336,10 +3336,12 @@ the step. Its entropy is that heat over the temperature its port received.
 Supplied work minus stored change minus the resistors' heat is booked as
 numerical loss and refused (`Balance`) beyond the arithmetic rounding floor
 plus the caller's `energy_tolerance_j`. The receipt's `energy_tolerance_j` is
-that rounding floor, as in `phs::PortHamiltonianComponent`. The circuit is
-`Class::Smooth` and declares no tangent. Identity words bind the netlist,
-transformers, mutual couplings, each law's own words and the tolerance; the
-codec is one word of `f64` bits per coordinate.
+that rounding floor, as in `phs::PortHamiltonianComponent`; its residual and
+tolerance are those of the owner's solve certificate, and a step without one
+is refused. The circuit is `Class::Smooth` and declares no tangent. Identity
+words bind the netlist, transformers, mutual couplings, each law's branch and
+its words, counted, and the tolerance; the codec is one word of `f64` bits per
+coordinate.
 
 Which temperature a law sees is a property of the graph, not of this
 Component. Joined by `common_effort` to an `elements::HeatCapacity`, it is the
@@ -3350,7 +3352,7 @@ it is the cell's end-of-step temperature. That is the protocol of
 `fs_couple::circuit_enthalpy`: backward Euler for the cells, circuit midpoint
 currents, endpoint material resistance.
 
-`tests/circuit.rs` (9 tests):
+`tests/circuit.rs` (11 tests):
 - the ports for a netlist with both kinds of source;
 - a series RC discharging into two heat capacities: charge equal to the
   midpoint rule's `q0 ((1 - a) / (1 + a))^n`, heats split as the
@@ -3360,17 +3362,26 @@ currents, endpoint material resistance.
 - an RC whose resistor follows the temperature of the body it heats, against
   a fixed point solved by bisection in the test, with the resistance moved
   by more than 5 %;
+- a current source into a resistor: the port returns `I R` and the resistor
+  takes `I^2 R`;
+- `fs-phs`'s own reflected-load case (12 V, 100 ohm, a 3:1 ideal transformer,
+  50 ohm), a circuit with no stored coordinate: primary current
+  `U / (R1 + N^2 R2)`, each resistor's heat rate, the step's heat;
 - `check_component` conformance with a source and a law;
 - refusals: a law without an answer, by branch; a cold port; a port
-  driving two sources; a law given to a capacitor or given twice; a zero
-  tolerance;
+  driving two sources; a port driving none; a law given to a capacitor or
+  given twice; a zero tolerance;
 - the receipt's heat and entropy at the received temperatures;
-- codec round trip and an identity that tells two laws apart.
-Ten defects planted one at a time in the Component each failed at least one
-of these tests: heat at the end potentials, the law asked at 300 K, the
+- codec round trip, a nonfinite word refused, and an identity that tells
+  two laws apart by value and by branch and keeps apart laws whose words run
+  together.
+Fourteen defects planted one at a time in the Component each failed at least
+one of these tests: heat at the end potentials, the law asked at 300 K, the
 heat-rate sign, the source-output sign, a state not advanced, entropy at
 300 K, every resistor at the first resistance, the stored-change sign, a law
-left out of the identity, temperatures given to the wrong resistors.
+left out of the identity, temperatures given to the wrong resistors, a port
+driving no source admitted, a port driving two sources admitted, the law
+words not counted, one resistor's heat rate left unwritten.
 
 `fs-couple`'s `tests/circuit_enthalpy/graph.rs` builds the module's own
 endpoint-feedback fixture (two material cards, one resistor rising 0.5 % per
@@ -3380,15 +3391,16 @@ the module, and the comparison is against `circuit_enthalpy::step_candidate`.
 On the export of 1e611fdf33 the cell temperatures and the charge agree bit
 for bit over the first four intervals and the Joule heat within 9e-16 J;
 after that all agree within 2e-9 K, 1.4e-12 C and 4e-12 J. The test's bounds are
-1e-7 K, 1e-10 C and 2e-10 J. Five defects planted in the graph each failed
+1e-7 K, 1e-10 C and 2e-10 J. Six defects planted in the graph each failed
 it: heat routed to the other cell, one resistor left at its placeholder
 resistance, resistors at a fixed 300 K, cells returning step-mean
-temperatures, the link conductance halved. The same file declares the
+temperatures, the link conductance halved, a resistor's cell volume doubled
+(the card then refuses the conductor's geometry). The same file declares the
 module's mutual-coil fixture (2 H and 3 H coupled by 1 H, each shunted by a
 card resistor rising 0.5 % and 0.2 % per kelvin, linkages 3.5 and 0.5 Wb, six
 intervals of 0.25 s) with the same graph and only the netlist changed: it
 agrees within 2e-9 K, 1.1e-11 Wb and 7.1e-12 J at every interval, under
-bounds of 1e-7 K, 5e-10 Wb and 4e-10 J. The five planted defects above fail
+bounds of 1e-7 K, 5e-10 Wb and 4e-10 J. The six planted defects above fail
 it as well, and three more fail it alone: the coupling left out, its sign
 flipped, the starting linkages swapped.
 

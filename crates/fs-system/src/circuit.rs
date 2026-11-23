@@ -4,12 +4,13 @@
 //! [`KirchhoffCircuit`] puts the descriptor port-Hamiltonian circuit of
 //! `fs_phs::circuit` behind `fs_ports::component::Component`. Any netlist
 //! that owner admits (resistors, inductors with mutual coupling, capacitors,
-//! voltage and current sources, ideal transformers) is one Component. Its
-//! resistors deliver their Joule heat to whatever the kernel joins their heat
-//! ports to, and a resistor may follow the temperature its heat port receives
-//! through a [`ResistanceLaw`]. Nothing is integrated here: a step is the
-//! owner's own `CircuitDae::step_audited` on the circuit assembled with the
-//! resistances of that step.
+//! voltage and current sources, ideal transformers) whose every external
+//! port drives exactly one source is one Component. Its resistors deliver
+//! their Joule heat to whatever the kernel joins their heat ports to, and a
+//! resistor may follow the temperature its heat port receives through a
+//! [`ResistanceLaw`]. Nothing is integrated here: a step is the owner's own
+//! `CircuitDae::step_audited` on the circuit assembled with the resistances
+//! of that step.
 //!
 //! Ports, in this order:
 //!
@@ -31,12 +32,14 @@
 //! step starts from them at zero, as `fs_couple::material_circuit` does.
 //!
 //! Heat: the heat of resistor `b` over a step is `dt v i` with `v` the
-//! voltage across it at the midpoint of the step (the mean of the step's two
-//! ends of its terminals' potentials, the algebraic midpoint the owner's
-//! dissipation uses) and `i = v / R`, `R` its resistance in that step. The
-//! sum over resistors equals the owner's dissipation to rounding; the
-//! difference, and the owner's own balance defect, are booked as numerical
-//! loss and refused beyond the declared energy tolerance.
+//! voltage across it at the midpoint of the step and `i = v / R`, `R` its
+//! resistance in that step. The midpoint potential of a node is the mean of
+//! its two ends, the effort the owner's dissipation uses; as the start is
+//! zero, it is half the owner's end value, which is therefore not the node's
+//! potential at the end of the step. The sum over resistors equals the
+//! owner's dissipation to rounding; the difference, and the owner's own
+//! balance defect, are booked as numerical loss and refused beyond the
+//! rounding of the step's arithmetic plus the declared energy tolerance.
 //!
 //! Resistance: a resistor with no law keeps the resistance in the graph. A
 //! resistor following a law is given `law.ohms(T)` at the temperature `T`
@@ -500,11 +503,19 @@ impl Component for KirchhoffCircuit {
                 coupling.henries.to_bits(),
             ]);
         }
-        for resistor in &self.resistors {
-            if let Some(law) = &resistor.law {
-                words.push(resistor.branch as u64);
-                law.identity_words(words);
-            }
+        // Each law's words are counted, so that no run of laws reads as
+        // another.
+        let laws = self
+            .resistors
+            .iter()
+            .filter_map(|resistor| resistor.law.as_ref().map(|law| (resistor.branch, law)));
+        words.push(laws.clone().count() as u64);
+        for (branch, law) in laws {
+            words.push(branch as u64);
+            let count = words.len();
+            words.push(0);
+            law.identity_words(words);
+            words[count] = (words.len() - count - 1) as u64;
         }
         words.push(self.energy_tolerance_j.to_bits());
     }
@@ -609,10 +620,9 @@ impl Component for KirchhoffCircuit {
                 tolerance_j: allowance,
             });
         }
-        let (residual, tolerance) = match &record.solver_certificate {
-            Some(certificate) => (certificate.residual, certificate.effective_budget),
-            None => (record.solver_residual, record.solver_residual),
-        };
+        let certificate = record
+            .solver_certificate
+            .ok_or_else(|| invalid("the owner's step carries no solve certificate"))?;
         cx.checkpoint()
             .map_err(|_| CircuitComponentError::Cancelled)?;
         outputs[..sources].copy_from_slice(&record.y);
@@ -623,8 +633,8 @@ impl Component for KirchhoffCircuit {
             numerical_loss_j,
             entropy_generated_j_per_k: entropy,
             energy_tolerance_j: rounding,
-            residual,
-            tolerance,
+            residual: certificate.residual,
+            tolerance: certificate.effective_budget,
         }))
     }
 }

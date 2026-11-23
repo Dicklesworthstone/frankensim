@@ -17,7 +17,7 @@
 //! The two sides solve the same equations with different solvers (the
 //! module's Newton--Krylov on cell energies and its own backward-Euler
 //! transport; the kernel's interface iteration and the implicit conduction
-//! graph), so they need agree only to the solves' tolerances.
+//! graph), so they agree only to within the solves' tolerances.
 
 use std::sync::Arc;
 
@@ -82,11 +82,14 @@ fn enthalpy_at(curve: &ResolvedHeatCapacityCurve, kelvin: f64) -> Result<f64, St
 
 /// The fixture's resistor, resolved as the module's `coefficients` resolves
 /// it: the card's conductor at the phase state of the cell, here the state
-/// at the temperature the resistor's heat port receives.
+/// at the temperature the resistor's heat port receives, its geometry
+/// checked against the cell's volume.
 #[derive(Debug)]
 struct CardResistance {
     card: &'static MaterialCard,
     curve: &'static ResolvedHeatCapacityCurve,
+    /// The destination cell's volume \[m^3\].
+    volume_m3: f64,
     /// Names the card in the circuit's identity: the fixture's index.
     tag: u64,
 }
@@ -111,13 +114,13 @@ impl ResistanceLaw for CardResistance {
             length_m: 1.0,
             area_m2: 1.0,
         };
-        body.resolve_conductor(phase, 1.0)
+        body.resolve_conductor(phase, self.volume_m3)
             .map(|conductor| conductor.resistance_ohm())
             .map_err(|error| format!("{error:?}"))
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
-        words.push(self.tag);
+        words.extend([self.tag, self.volume_m3.to_bits()]);
     }
 }
 
@@ -312,6 +315,7 @@ fn graph(
     dt_s: f64,
 ) -> (System, NodeId, NodeId) {
     let (timeline, cells_start) = timeline(curves, conductance_w_k, dt_s);
+    let start = initial(curves, conductance_w_k, None);
     let mut circuit =
         KirchhoffCircuit::new(device.netlist.clone(), device.mutual.clone(), 1e-8).unwrap();
     for (tag, (destination, (card, curve))) in
@@ -320,14 +324,19 @@ fn graph(
         circuit = circuit
             .following(
                 destination.branch,
-                Arc::new(CardResistance { card, curve, tag }),
+                Arc::new(CardResistance {
+                    card,
+                    curve,
+                    volume_m3: start.cells()[&destination.cell].geometry.volume_m3,
+                    tag,
+                }),
             )
             .unwrap();
     }
-    let start = circuit.state(&device.fluxes_wb, &device.charges_c).unwrap();
+    let state = circuit.state(&device.fluxes_wb, &device.charges_c).unwrap();
 
     let mut builder = SystemBuilder::new();
-    let electrical = builder.add("circuit", circuit, start).unwrap();
+    let electrical = builder.add("circuit", circuit, state).unwrap();
     let cells = builder.add("cells", timeline, cells_start).unwrap();
     for destination in DESTINATIONS {
         builder
@@ -418,6 +427,7 @@ fn compare(
     let module = module_run(device, cards, curves, conductance, dt, steps);
     let (mut system, electrical, cells) = graph(device, cards, curves, conductance, dt);
     let kernel = graph_run(&mut system, electrical, cells, dt, steps);
+    assert_eq!((kernel.len(), module.len()), (steps, steps));
     for (k, (ours, theirs)) in kernel.iter().zip(&module).enumerate() {
         for cell in 0..2 {
             let (x, y) = (ours.kelvin[cell], theirs.kelvin[cell]);

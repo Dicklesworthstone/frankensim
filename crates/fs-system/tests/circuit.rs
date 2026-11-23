@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_phs::circuit::{Branch, CircuitGraph};
+use fs_phs::circuit::{Branch, CircuitGraph, TransformerLink};
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, PortRole, Proposal};
 use fs_system::circuit::{CircuitComponentError, KirchhoffCircuit, ResistanceLaw};
@@ -421,7 +421,24 @@ fn a_netlist_whose_ports_do_not_each_drive_one_source_is_refused() {
     };
     // The owner itself may admit a port shared by two sources; this
     // boundary cannot give one port two roles or two outputs.
-    assert!(KirchhoffCircuit::new(twice, vec![], 1.0e-12).is_err());
+    assert!(matches!(
+        KirchhoffCircuit::new(twice, vec![], 1.0e-12),
+        Err(CircuitComponentError::Invalid { .. })
+    ));
+    // The owner counts ports up to the highest one named, so port 0 here
+    // is a port that drives nothing.
+    let gap = CircuitGraph {
+        node_count: 2,
+        branches: vec![
+            (1, 0, Branch::VoltageSource { port: 1 }),
+            (1, 0, Branch::Resistor { ohms: 1.0 }),
+        ],
+        transformers: vec![],
+    };
+    assert!(matches!(
+        KirchhoffCircuit::new(gap, vec![], 1.0e-12),
+        Err(CircuitComponentError::Invalid { .. })
+    ));
     let lawless = KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12).unwrap();
     let law = Arc::new(Linear {
         r0: 1.0,
@@ -440,7 +457,88 @@ fn a_netlist_whose_ports_do_not_each_drive_one_source_is_refused() {
         once.following(1, law),
         Err(CircuitComponentError::Invalid { .. })
     ));
-    assert!(KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 0.0).is_err());
+    assert!(matches!(
+        KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 0.0),
+        Err(CircuitComponentError::Invalid { .. })
+    ));
+}
+
+/// One proposal of a circuit with no inductor and no capacitor, every heat
+/// port at 300 K. Returns the outputs and the receipt's dissipation.
+fn resistive_step(graph: CircuitGraph, sources: &[f64]) -> (Vec<f64>, f64) {
+    let circuit = KirchhoffCircuit::new(graph, vec![], 1.0e-12).unwrap();
+    let old = circuit.state(&[], &[]).unwrap();
+    assert!(old.is_empty());
+    let heats = circuit.ports().len() - sources.len();
+    let mut inputs = sources.to_vec();
+    inputs.extend(std::iter::repeat_n(300.0, heats));
+    let mut new = vec![1.0];
+    let mut outputs = vec![0.0; inputs.len()];
+    let receipt =
+        with_cx(
+            |cx| match circuit.propose(&old, 0.5, &inputs, &mut new, &mut outputs, cx) {
+                Ok(Proposal::Step(receipt)) => receipt,
+                other => panic!("{other:?}"),
+            },
+        );
+    assert!(new.is_empty(), "{new:?}");
+    (outputs, receipt.dissipated_j)
+}
+
+#[test]
+fn a_current_source_returns_the_voltage_it_drives_its_load_at() {
+    // 2 A into a 5 ohm load: the port returns 10 V and the load takes 20 W.
+    let (amperes, ohms) = (2.0_f64, 5.0_f64);
+    let graph = CircuitGraph {
+        node_count: 2,
+        branches: vec![
+            (1, 0, Branch::CurrentSource { port: 0 }),
+            (1, 0, Branch::Resistor { ohms }),
+        ],
+        transformers: vec![],
+    };
+    let (outputs, dissipated) = resistive_step(graph, &[amperes]);
+    let power = amperes * amperes * ohms;
+    close(outputs[0], amperes * ohms, 1.0e-12, "port voltage");
+    close(outputs[1], -power, 1.0e-12, "heat rate");
+    close(dissipated, 0.5 * power, 1.0e-12, "heat");
+}
+
+#[test]
+fn an_ideal_transformer_passes_the_source_power_to_the_reflected_load() {
+    // fs-phs's own reflected-load case: 12 V, 100 ohm on the primary, a 3:1
+    // ideal transformer, 50 ohm on the secondary. The primary current is
+    // U / (R1 + N^2 R2); the secondary carries N times it.
+    let (volts, n, r1, r2) = (12.0_f64, 3.0_f64, 100.0_f64, 50.0_f64);
+    let graph = CircuitGraph {
+        node_count: 4,
+        branches: vec![
+            (1, 0, Branch::VoltageSource { port: 0 }),
+            (1, 2, Branch::Resistor { ohms: r1 }),
+            (3, 0, Branch::Resistor { ohms: r2 }),
+        ],
+        transformers: vec![TransformerLink {
+            primary: (2, 0),
+            secondary: (3, 0),
+            ratio: n,
+        }],
+    };
+    let (outputs, dissipated) = resistive_step(graph, &[volts]);
+    let current = volts / (r1 + n * n * r2);
+    close(outputs[0], current, 1.0e-14, "primary current");
+    close(
+        outputs[1],
+        -current * current * r1,
+        1.0e-12,
+        "primary heat rate",
+    );
+    close(
+        outputs[2],
+        -(n * current) * (n * current) * r2,
+        1.0e-12,
+        "secondary heat rate",
+    );
+    close(dissipated, 0.5 * volts * current, 1.0e-12, "heat");
 }
 
 #[test]
@@ -465,10 +563,46 @@ fn the_state_codec_round_trips_and_the_identity_names_the_law() {
     assert!(one.encode_state(&state, &mut words));
     assert_eq!(one.decode_state(&words), Some(state));
     assert_eq!(one.decode_state(&[]), None);
-    let (mut a, mut b) = (Vec::new(), Vec::new());
+    assert_eq!(one.decode_state(&[f64::NAN.to_bits()]), None);
+    let elsewhere = KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12)
+        .unwrap()
+        .following(2, law(0.01))
+        .unwrap();
+    let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
     one.identity_words(&mut a);
     two.identity_words(&mut b);
+    elsewhere.identity_words(&mut c);
     assert_ne!(a, b);
+    assert_ne!(a, c);
+
+    // Laws whose words run together the same way still differ: [2, 9] on
+    // resistor 1 against [] on resistor 1 and [9] on resistor 2.
+    let words = |laws: &[(usize, &[u64])]| {
+        let mut circuit = KirchhoffCircuit::new(series_rc(1.0, 1.0, 3.0), vec![], 1.0e-12).unwrap();
+        for &(branch, words) in laws {
+            circuit = circuit
+                .following(branch, Arc::new(Words(words.to_vec())))
+                .unwrap();
+        }
+        let mut identity = Vec::new();
+        circuit.identity_words(&mut identity);
+        identity
+    };
+    assert_ne!(words(&[(1, &[2, 9])]), words(&[(1, &[]), (2, &[9])]));
+}
+
+/// A constant 1 ohm whose identity is the given words.
+#[derive(Debug)]
+struct Words(Vec<u64>);
+
+impl ResistanceLaw for Words {
+    fn ohms(&self, _: f64) -> Result<f64, String> {
+        Ok(1.0)
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend(&self.0);
+    }
 }
 
 #[test]
