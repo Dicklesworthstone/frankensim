@@ -267,6 +267,45 @@ fn exact_zero_source_rows_preserve_admission_matrix_and_heat() {
 }
 
 #[test]
+fn a_general_source_cannot_hide_a_missing_or_changed_weak_resistor() {
+    let n = 3;
+    // The first source is not diagonally dominant. Its eigensolver allowance
+    // must not become a tolerance for an independently authored weak source.
+    for weak_root in [1e-15_f64, 1e-100] {
+        let rows = vec![1.0, 2.0, 0.0, 0.0, 0.0, weak_root];
+        let matrix = source_matrix(n, &rows);
+        let witness =
+            ResistanceWitness::try_from_source_rows(n, matrix.clone(), rows.clone()).unwrap();
+        assert_eq!(witness.rows()[5].to_bits(), weak_root.to_bits());
+
+        for altered in [0.0, 0.5 * weak_root, 2.0 * weak_root] {
+            let mut changed = rows.clone();
+            changed[5] = altered;
+            assert!(
+                ResistanceWitness::try_from_source_rows(n, matrix.clone(), changed).is_err(),
+                "a source of strength {weak_root:e} was replaced by {altered:e}"
+            );
+        }
+        assert!(
+            ResistanceWitness::try_from_source_rows(n, matrix.clone(), rows[..3].to_vec()).is_err(),
+            "the weak source cannot be omitted"
+        );
+
+        // The same problem with a weak cross-coordinate source also needs its
+        // original off-diagonal entries, not only its diagonal loss powers.
+        let coupled_rows = vec![1.0, 2.0, 0.0, weak_root, 0.0, weak_root];
+        let coupled_matrix = source_matrix(n, &coupled_rows);
+        assert!(
+            ResistanceWitness::try_from_source_rows(n, coupled_matrix.clone(), coupled_rows.clone())
+                .is_ok()
+        );
+        let mut changed = coupled_rows;
+        changed[3] = -weak_root;
+        assert!(ResistanceWitness::try_from_source_rows(n, coupled_matrix, changed).is_err());
+    }
+}
+
+#[test]
 fn source_witness_refuses_unsupported_entries_mismatched_laws_and_foreign_splits() {
     let witness = || {
         ResistanceWitness::try_from_source_rows(2, vec![1.0, -2.0, -2.0, 4.0], vec![1.0, -2.0])

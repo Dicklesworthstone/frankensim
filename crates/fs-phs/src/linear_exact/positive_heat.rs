@@ -555,9 +555,17 @@ fn passive_graph_form(resistance: &[f64], n: usize) -> bool {
     true
 }
 
-// Both graph and eigen factors must resolve each represented nonzero entry;
-// a large unrelated diagonal or cancellation inside QR cannot hide its loss.
-// At structural zeros only, use the local product sum as the roundoff scale.
+// Physical source rows already supply a positive factor; they have no
+// eigensolver backward error. Hold every represented nonzero entry to its own
+// scale even when another block of the matrix is not in passive-graph form.
+// Otherwise a strong unrelated source could admit the complete omission of a
+// weak resistor, or a different sign of one of its cross-coordinate products.
+pub(crate) fn check_source_resistance_root(
+    resistance: &[f64], root: &[f64], n: usize,
+) -> Result<(), PhsError> {
+    check_root_entries(resistance, root, n, 0.0)
+}
+
 pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(), PhsError> {
     // A matrix in passive-graph form (symmetric, every ground R_ii - sum_j |R_ij| nonnegative) has
     // an exact decomposition into edge and ground squares (`graph_root`) and keeps the
@@ -578,6 +586,20 @@ pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) 
         && (0..n).all(|i| resistance[i * n + i] >= 0.0)
         && !passive_graph_form(resistance, n);
     let largest = resistance.iter().fold(0.0_f64, |s, r| s.max(r.abs()));
+    let normwise_allowance = if general {
+        GENERAL_ROOT_BACKWARD_ERROR * n as f64 * f64::EPSILON * largest
+    } else {
+        0.0
+    };
+    check_root_entries(resistance, root, n, normwise_allowance)
+}
+
+// At structural zeros, use the local product sum as the roundoff scale.
+// Only factors recovered numerically from a matrix can have a nonzero
+// normwise allowance; a source witness must resolve each nonzero entry.
+fn check_root_entries(
+    resistance: &[f64], root: &[f64], n: usize, normwise_allowance: f64,
+) -> Result<(), PhsError> {
     for i in 0..n {
         for j in i..n {
             let mut gram = 0.0;
@@ -592,11 +614,8 @@ pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) 
             } else {
                 products
             };
-            let mut allowance = 128.0 * n as f64 * f64::EPSILON * magnitude;
-            if general {
-                allowance =
-                    allowance.max(GENERAL_ROOT_BACKWARD_ERROR * n as f64 * f64::EPSILON * largest);
-            }
+            let allowance =
+                (128.0 * n as f64 * f64::EPSILON * magnitude).max(normwise_allowance);
             if !gram.is_finite()
                 || !magnitude.is_finite()
                 || (gram - resistance[i * n + j]).abs() > allowance

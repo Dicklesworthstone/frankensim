@@ -802,7 +802,7 @@ impl ResistanceWitness {
             rows.resize(square, 0.0);
             rows
         };
-        linear_exact::positive_heat::check_resistance_root(&matrix, &root, n)?;
+        linear_exact::positive_heat::check_source_resistance_root(&matrix, &root, n)?;
         // Source products can differ by an ulp across the diagonal. Apply the
         // SAME reconstruction gate to the lower triangle too; global symmetry
         // admission alone must not hide an unsupported small matrix entry.
@@ -813,7 +813,7 @@ impl ResistanceWitness {
             }
         }
         if transpose != matrix {
-            linear_exact::positive_heat::check_resistance_root(&transpose, &root, n)?;
+            linear_exact::positive_heat::check_source_resistance_root(&transpose, &root, n)?;
         }
         Ok(Self { matrix, root })
     }

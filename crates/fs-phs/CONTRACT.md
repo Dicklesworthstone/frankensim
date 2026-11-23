@@ -1,5 +1,16 @@
 # fs-phs — Contract
 
+## Physical source resistance witnesses
+
+`ResistanceWitness::try_from_source_rows` checks the original source factors
+component by component, including both matrix triangles. This remains true
+when another block of the resistance is not diagonally dominant. The normwise
+backward-error allowance for a numerically recovered eigenfactor does not
+authorize a missing or changed weak physical source. The existing matrix-only
+factorization retains its separate numerical allowance. The source-resistance
+regressions cover independent weak loss and weak cross-coordinate products
+alongside a strong general block, at strengths near `1e-30` and `1e-200`.
+
 ## Squirrel-cage induction motor and generator
 
 `circuit::induction::InductionMotor` retains seven original states: two
