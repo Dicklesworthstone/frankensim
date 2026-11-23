@@ -126,17 +126,53 @@ jobs:
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
+        id: kernel
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
-        run: cargo +nightly-2026-07-06 test --no-fail-fast -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-07-06 test --no-fail-fast -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked 2>&1 | tee "${RUNNER_TEMP}/composition-kernel.log"
+      - name: Upload kernel test log
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: composition-kernel-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/composition-kernel.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Devices described as data
+        id: cli
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
-        run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked 2>&1 | tee "${RUNNER_TEMP}/composition-cli.log"
+      - name: Upload CLI test log
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: composition-cli-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/composition-cli.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Native source-backed gas Component
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-gas --features component --test component --locked
       - name: Native thermal Component
+        id: thermal
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
-        run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked 2>&1 | tee "${RUNNER_TEMP}/composition-thermal.log"
+      - name: Upload thermal test log
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: composition-thermal-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/composition-thermal.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Native mechanical and thermal slices
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-system --features slices --test thermal_timeline_slice --test rigid_body_slice --test viscous_network_slice --locked
