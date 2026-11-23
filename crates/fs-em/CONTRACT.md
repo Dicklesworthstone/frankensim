@@ -2944,7 +2944,8 @@ share the owner's topology and hold the same bits in every accepted coordinate.
 
 A proposal steps the owner once, with `step_to_candidate`:
 - from the accepted state, to its clock plus the step;
-- with the conductors given at construction;
+- with the conductors given at construction, or those its laws give at the
+  temperatures its heat ports received (below);
 - with cancellation polled through the context.
 
 The candidate's circuit is the new state. The receipt takes:
@@ -2967,15 +2968,48 @@ kernel `System` holds `'static` members, so a caller that adds this Component
 to a system gives it a problem that lives for `'static`. The state has no
 codec: a system holding it cannot be written to a durable snapshot.
 
+`PlanarWinding::at_port_temperatures` takes laws instead of conductors:
+- a `ConductorLaw` per receiver, asked for the source-bound conductor state
+  of each of its triangles at the temperature its port received;
+- a `ResistorLaw` per native graph resistor, asked for the source-bound
+  resistor (`ResolvedConductor`) at the temperature of the port its heat
+  leaves through.
+
+The owner's `with_graph_resistors` rebinds the resistors before the step. It
+refuses a source that is not a static Ohmic scalar, and checks that storage,
+ports and the Hamiltonian are unchanged, so a resistance change does no
+parameter work. The core and stranded triangles and the core regions are the
+construction circuit's own.
+
+Construction refuses:
+- a law count other than the receiver count;
+- a graph resistor without a law;
+- a law on a branch that is not a resistor.
+
+A law with no answer refuses the step (`Law`), naming the receiver, the
+element and the temperature; the temperature is never clamped. A law whose
+answer changes card, basis or claims meets the owner's continuity refusal.
+With laws, the topology check ignores resistor values, which the laws set at
+every step. With fixed conductors it compares them too. State equality
+compares the graph by value.
+
+A port's temperature is the one the kernel gives it, held over the step.
+Under a timeline built `returning_end_temperatures` it is the cell's end
+temperature, which is the endpoint-conductivity protocol of
+`fs_couple::circuit_enthalpy`. The Component claims no convergence of that
+fixed point.
+
 The identity words bind:
 - the graph;
-- every conductor's triangle, region, resistivity bits and card identity;
+- every fixed conductor's triangle, region, resistivity bits and card
+  identity, or, with laws, every cell's triangle and region and each law's
+  own words;
 - the receiver map;
 - the controls, by their `Debug` text, which prints each `f64` so that it
   parses back to the same bits;
 - the energy tolerance.
 
-`tests/winding_component.rs` (5 tests):
+`tests/winding_component.rs` (10 tests). With fixed conductors:
 - the ports of a graph with a voltage source, and of one with a current source
   driving a resistor of its own (`FlowIn`; 1.5 A into 2 ohm returns 3 V and
   4.5 W);
@@ -2994,7 +3028,29 @@ The identity words bind:
 - identity words that tell apart a core conductor at another temperature,
   swapped receivers, other controls and another tolerance.
 
-Eighteen defects planted one at a time each failed at least one of these tests:
+With laws, all reading the fixture's card. Its resistivity is affine in
+temperature, and at 400 K its conductivity is 2/3 of its 300 K value:
+- three steps with ports at different temperatures, each the owner's own
+  `with_graph_resistors` and `step_to_candidate`, bit for bit, with every
+  element resolved by hand at its receiver's temperature. The graph resistor
+  goes 0.45, 0.315 and 0.39 ohm. Each step passes `audit_step` with balance
+  defects of at most 2.4e-15 J;
+- a law that ignores temperature steps as fixed conductors do, bit for bit;
+- `check_component` conformance;
+- refusals:
+  - a law count, a missing resistor law and a resistor law on an inductor;
+  - a stranded law and a resistor law asked at 520 K, beyond the card's
+    500 K validity;
+  - another card's law, refused by the owner ("winding electrical source
+    basis or triangle correspondence changed");
+  - a state with another element across the resistor;
+  - with fixed conductors, a state whose resistor value is not the
+    Component's;
+- identity words that tell apart fixed conductors and laws, a frozen law,
+  another card's conductor or resistor law, and relabelled core regions.
+
+Eighteen defects in the fixed-conductor paths, planted one at a time, each
+failed at least one of these tests:
 1. the heat rate's sign;
 2. a graph resistor booked twice (the `Balance` refusal fires);
 3. the same with the `Balance` check off (the heat-sum assertion fires);
@@ -3014,14 +3070,34 @@ Eighteen defects planted one at a time each failed at least one of these tests:
 17. an unmapped resistor admitted;
 18. a doubly mapped element admitted.
 
+Eighteen in the laws' paths each did too:
+1. conductor laws asked at the next receiver's temperature;
+2. resistor laws asked at the first port's temperature;
+3. the temperature clamped to 500 K;
+4. resistor laws skipped;
+5. laws comparing the whole graph;
+6. the masked comparison ignoring element kinds;
+7. fixed conductors comparing the masked graph;
+8. states comparing the graph by pointer;
+9. the conductor laws' words dropped;
+10. the resistor laws' words dropped;
+11. the cells' regions dropped from the words;
+12. core cells read as stranded;
+13. the law count check dropped;
+14. a resistor law on a non-resistor admitted;
+15. a graph resistor without a law admitted;
+16. a conductor law's refusal named as a resistor's;
+17. the cold-port check dropped;
+18. the fixed topology check dropped.
+
 No fixture reaches the `UnaccountedWork` refusal, or a `Balance` refusal
 without a planted defect: the fixture's balance defects stay below 2.4e-15 J.
 No fixture reaches the step's refusal of a heat record that no receiver maps,
 because construction maps every conductor triangle.
 
 Not claimed:
-- laws at the temperatures the heat ports receive (the conductors are fixed
-  here);
+- convergence of the fixed point between a port's temperature and the heat
+  it returns;
 - the hysteretic owner;
 - magnetic temperature refresh, motion, a tangent, a codec;
 - any comparison with `fs_couple`'s winding modules.

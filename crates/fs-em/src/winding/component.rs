@@ -2,7 +2,9 @@
 //! contract (fs-ports).
 //!
 //! [`PlanarWinding`] steps [`NonlinearWindingCircuit`] once per proposal, from
-//! the accepted state, with conductors fixed at construction. Ports, in order:
+//! the accepted state, with conductors fixed at construction
+//! ([`PlanarWinding::new`]) or given by laws at the temperatures its heat
+//! ports receive ([`PlanarWinding::at_port_temperatures`]). Ports, in order:
 //! `source<p>` for each original external input `p` of the native graph
 //! (`EffortIn` for a voltage source, `FlowIn` for a current source),
 //! returning the native step-average conjugate `StepRecord::y[p]`; then
@@ -16,7 +18,11 @@
 //! Euler) dissipation and the heat that leaves through the heat ports. A
 //! step with magnetic parameter work or mechanical work refuses: the receipt
 //! has no term for either. The temperatures the heat ports receive enter
-//! only the generated entropy; laws at those temperatures are not here.
+//! the generated entropy and, with laws, the conductors and graph resistors
+//! of the step: a [`ConductorLaw`] per receiver for its triangles, and a
+//! [`ResistorLaw`] per graph resistor through the owner's
+//! `with_graph_resistors`. A law with no answer refuses the step; the
+//! Component never clamps a temperature.
 //!
 //! The Component borrows the owner's problem for `'m` and leaks nothing. A
 //! system of the kernel holds `'static` members, so a caller that adds one
@@ -27,8 +33,10 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::conductor::{ResolvedConductor, ResolvedConductorState};
 use fs_phs::arithmetic_rounding_floor;
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_ports::component::{
@@ -39,6 +47,7 @@ use fs_ports::{CoupleError, PortKind, StableId};
 
 use super::nonlinear::{
     NonlinearWindingCircuit, NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep,
+    resistors::GraphResistorMaterial,
 };
 use super::ohmic::WindingConductor;
 use crate::planar::eddy::EddyConductor;
@@ -51,6 +60,45 @@ pub struct HeatReceiver {
     pub triangles: Vec<usize>,
     /// Branch indices of native graph resistors.
     pub resistors: Vec<usize>,
+}
+
+/// The conductors of one receiver's triangles at the temperature its heat
+/// port received.
+pub trait ConductorLaw: fmt::Debug + Send + Sync {
+    /// The source-bound state of `triangle`'s conductor at `kelvin`. The
+    /// owner refuses a state whose card, basis or claims are not those of the
+    /// circuit's own conductor there.
+    ///
+    /// # Errors
+    /// Why the law has no answer there, for example a temperature outside the
+    /// validity of the card behind it. The step then refuses with
+    /// [`PlanarWindingError::Law`]; the temperature is never clamped.
+    fn conductor(&self, triangle: usize, kelvin: f64) -> Result<ResolvedConductorState, String>;
+
+    /// Words that identify the law. They join the Component's identity.
+    fn identity_words(&self, words: &mut Vec<u64>);
+}
+
+/// One native graph resistor at the temperature its heat port received.
+pub trait ResistorLaw: fmt::Debug + Send + Sync {
+    /// The source-bound resistor at `kelvin`, a static Ohmic scalar as the
+    /// owner's `with_graph_resistors` requires.
+    ///
+    /// # Errors
+    /// As [`ConductorLaw::conductor`].
+    fn conductor(&self, kelvin: f64) -> Result<ResolvedConductor, String>;
+
+    /// Words that identify the law. They join the Component's identity.
+    fn identity_words(&self, words: &mut Vec<u64>);
+}
+
+/// The element whose law had no answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LawElement {
+    /// A stranded or core conductor's mesh triangle.
+    Triangle(usize),
+    /// A native graph resistor's branch.
+    Resistor(usize),
 }
 
 /// Refusal of the winding owner or of its Component boundary.
@@ -85,6 +133,17 @@ pub enum PlanarWindingError {
         /// The allowance \[J\].
         tolerance_j: f64,
     },
+    /// A law had no answer at the temperature its port received.
+    Law {
+        /// The heat receiver whose port gave the temperature.
+        receiver: usize,
+        /// The element asked for.
+        element: LawElement,
+        /// The temperature \[K\].
+        kelvin: f64,
+        /// The law's reason.
+        message: String,
+    },
     /// Cancellation was requested.
     Cancelled,
 }
@@ -110,6 +169,16 @@ impl fmt::Display for PlanarWindingError {
             } => write!(
                 f,
                 "winding energy account does not close: defect {defect_j} J beyond {tolerance_j} J"
+            ),
+            Self::Law {
+                receiver,
+                element,
+                kelvin,
+                message,
+            } => write!(
+                f,
+                "winding law of {element:?} (receiver {receiver}) has no answer at {kelvin} K: \
+                 {message}"
             ),
             Self::Cancelled => f.write_str("winding component cancelled"),
         }
@@ -156,14 +225,15 @@ fn same_bits(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
-/// Equal states share the owner's topology (the same allocation) and hold
-/// the same bits in every accepted coordinate: clock, circuit state,
-/// currents, linkages, resistances, conductors and field potential, energy
-/// and clock.
+/// Equal states share the owner's problem (the same allocation) and graph,
+/// and hold the same bits in every accepted coordinate: clock, circuit
+/// state, currents, linkages, resistances, conductors and field potential,
+/// energy and clock. The graph is compared by value: a step with resistor
+/// laws builds a new one.
 impl PartialEq for PlanarWindingState<'_> {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
-        core::ptr::eq(a.graph(), b.graph())
+        a.graph() == b.graph()
             && core::ptr::eq(a.field().problem(), b.field().problem())
             && a.time_s().to_bits() == b.time_s().to_bits()
             && same_bits(a.state(), b.state())
@@ -188,13 +258,39 @@ impl fmt::Debug for PlanarWindingState<'_> {
     }
 }
 
+/// A step's circuit, when resistor laws rebuilt it, and its core and
+/// stranded conductors.
+type Supplied<'m> = (
+    Option<NonlinearWindingCircuit<'m>>,
+    Vec<EddyConductor>,
+    Vec<WindingConductor>,
+);
+
+/// Where a step's conductors and graph resistances come from.
+enum Supply {
+    /// Given at construction and used at every step.
+    Fixed {
+        core: Vec<EddyConductor>,
+        windings: Vec<WindingConductor>,
+    },
+    /// Laws asked at the temperatures the heat ports receive.
+    Laws {
+        /// Every conductor triangle, with its core region or `None` when
+        /// stranded, as the construction's circuit holds them.
+        cells: BTreeMap<usize, Option<u32>>,
+        /// One per heat receiver.
+        conductors: Vec<Arc<dyn ConductorLaw>>,
+        /// One per native graph resistor, by branch.
+        resistors: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+    },
+}
+
 /// The planar nonlinear winding owner behind the composition contract's
 /// source and heat ports. See the module documentation.
 pub struct PlanarWinding<'m> {
     graph: CircuitGraph,
     sources: usize,
-    core: Vec<EddyConductor>,
-    windings: Vec<WindingConductor>,
+    supply: Supply,
     receivers: Vec<HeatReceiver>,
     triangle_port: BTreeMap<usize, usize>,
     resistor_port: BTreeMap<usize, usize>,
@@ -242,6 +338,78 @@ impl<'m> PlanarWinding<'m> {
         controls: NonlinearWindingControls,
         energy_tolerance_j: f64,
     ) -> Result<Self, PlanarWindingError> {
+        let triangles: Vec<usize> = core_conductors
+            .iter()
+            .map(|c| c.triangle)
+            .chain(winding_conductors.iter().map(|c| c.triangle))
+            .collect();
+        let supply = Supply::Fixed {
+            core: core_conductors,
+            windings: winding_conductors,
+        };
+        Self::build(
+            circuit,
+            &triangles,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )
+    }
+
+    /// The Component of `circuit`'s topology whose conductors and graph
+    /// resistors follow the temperatures its heat ports receive: receiver
+    /// `k`'s law gives the conductor of each of its triangles at port `k`'s
+    /// temperature, and each graph resistor's law gives it at the
+    /// temperature of the port its heat leaves through. The core and
+    /// stranded triangles, and the core regions, are `circuit`'s own.
+    ///
+    /// # Errors
+    /// As [`Self::new`]; the number of conductor laws is not the number of
+    /// receivers; a graph resistor has no law, or a law names a branch that
+    /// is not a resistor.
+    pub fn at_port_temperatures(
+        circuit: &NonlinearWindingCircuit<'m>,
+        conductor_laws: Vec<Arc<dyn ConductorLaw>>,
+        resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+        receivers: Vec<HeatReceiver>,
+        controls: NonlinearWindingControls,
+        energy_tolerance_j: f64,
+    ) -> Result<Self, PlanarWindingError> {
+        if conductor_laws.len() != receivers.len() {
+            return Err(invalid("one conductor law per heat receiver required"));
+        }
+        let cells: BTreeMap<usize, Option<u32>> = circuit
+            .field()
+            .conductors()
+            .iter()
+            .map(|c| (c.triangle, Some(c.region)))
+            .chain(circuit.conductors().iter().map(|c| (c.triangle, None)))
+            .collect();
+        let triangles: Vec<usize> = cells.keys().copied().collect();
+        let supply = Supply::Laws {
+            cells,
+            conductors: conductor_laws,
+            resistors: resistor_laws,
+        };
+        Self::build(
+            circuit,
+            &triangles,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )
+    }
+
+    fn build(
+        circuit: &NonlinearWindingCircuit<'m>,
+        triangles: &[usize],
+        supply: Supply,
+        receivers: Vec<HeatReceiver>,
+        controls: NonlinearWindingControls,
+        energy_tolerance_j: f64,
+    ) -> Result<Self, PlanarWindingError> {
         if !(energy_tolerance_j.is_finite() && energy_tolerance_j > 0.0) {
             return Err(invalid("energy tolerance must be positive and finite"));
         }
@@ -272,9 +440,7 @@ impl<'m> PlanarWinding<'m> {
                 return Err(invalid("a heat receiver maps no element"));
             }
             for &triangle in &receiver.triangles {
-                if !core_conductors.iter().any(|c| c.triangle == triangle)
-                    && !winding_conductors.iter().any(|c| c.triangle == triangle)
-                {
+                if !triangles.contains(&triangle) {
                     return Err(invalid(
                         "a receiver names a triangle that carries no conductor",
                     ));
@@ -288,16 +454,27 @@ impl<'m> PlanarWinding<'m> {
                 place(&mut resistor_port, branch, port)?;
             }
         }
-        if core_conductors
+        if triangles
             .iter()
-            .map(|c| c.triangle)
-            .chain(winding_conductors.iter().map(|c| c.triangle))
-            .any(|triangle| !triangle_port.contains_key(&triangle))
+            .any(|triangle| !triangle_port.contains_key(triangle))
             || resistors
                 .iter()
                 .any(|branch| !resistor_port.contains_key(branch))
         {
             return Err(invalid("a dissipating element is mapped to no receiver"));
+        }
+        if let Supply::Laws {
+            resistors: laws, ..
+        } = &supply
+        {
+            if laws.keys().any(|branch| !resistors.contains(branch)) {
+                return Err(invalid(
+                    "a resistor law names a branch that is not a resistor",
+                ));
+            }
+            if resistors.iter().any(|branch| !laws.contains_key(branch)) {
+                return Err(invalid("a graph resistor has no law"));
+            }
         }
         let mut ports = Vec::with_capacity(roles.len() + receivers.len());
         for (port, role) in roles.iter().enumerate() {
@@ -322,8 +499,7 @@ impl<'m> PlanarWinding<'m> {
         Ok(Self {
             graph,
             sources: roles.len(),
-            core: core_conductors,
-            windings: winding_conductors,
+            supply,
             receivers,
             triangle_port,
             resistor_port,
@@ -332,6 +508,105 @@ impl<'m> PlanarWinding<'m> {
             ports,
             problem: PhantomData,
         })
+    }
+
+    /// The owner's clock at the end of a step of `dt_s` from `old`, when the
+    /// step, its ports and the state's topology are this Component's.
+    fn admit(
+        &self,
+        old: &PlanarWindingState<'m>,
+        dt_s: f64,
+        inputs: &[f64],
+        outputs: usize,
+    ) -> Result<f64, PlanarWindingError> {
+        let ports = self.sources + self.receivers.len();
+        if !(dt_s.is_finite() && dt_s > 0.0)
+            || inputs.len() != ports
+            || outputs != ports
+            || inputs.iter().any(|value| !value.is_finite())
+            || inputs[self.sources..].iter().any(|&kelvin| kelvin <= 0.0)
+        {
+            return Err(invalid(
+                "positive duration, complete finite ports and positive temperatures required",
+            ));
+        }
+        let same = match self.supply {
+            Supply::Fixed { .. } => old.0.graph() == &self.graph,
+            Supply::Laws { .. } => same_topology(old.0.graph(), &self.graph),
+        };
+        if !same {
+            return Err(invalid(
+                "the state's circuit is not this Component's topology",
+            ));
+        }
+        let target_s = old.0.time_s() + dt_s;
+        if !(target_s.is_finite() && target_s > old.0.time_s()) {
+            return Err(invalid("the step does not advance the owner's clock"));
+        }
+        Ok(target_s)
+    }
+
+    /// The circuit to step, when resistor laws rebuild it, and the core and
+    /// stranded conductors of a step whose heat ports received `kelvin`.
+    fn supply_at(
+        &self,
+        old: &NonlinearWindingCircuit<'m>,
+        kelvin: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Supplied<'m>, PlanarWindingError> {
+        let (cells, conductors, resistors) = match &self.supply {
+            Supply::Fixed { core, windings } => return Ok((None, core.clone(), windings.clone())),
+            Supply::Laws {
+                cells,
+                conductors,
+                resistors,
+            } => (cells, conductors, resistors),
+        };
+        let mut core = Vec::new();
+        let mut windings = Vec::new();
+        for (&triangle, &region) in cells {
+            let receiver = self.triangle_port[&triangle];
+            let kelvin = kelvin[receiver];
+            let conductor =
+                conductors[receiver]
+                    .conductor(triangle, kelvin)
+                    .map_err(|message| PlanarWindingError::Law {
+                        receiver,
+                        element: LawElement::Triangle(triangle),
+                        kelvin,
+                        message,
+                    })?;
+            match region {
+                Some(region) => core.push(EddyConductor {
+                    triangle,
+                    region,
+                    conductor,
+                }),
+                None => windings.push(WindingConductor {
+                    triangle,
+                    conductor,
+                }),
+            }
+        }
+        if resistors.is_empty() {
+            return Ok((None, core, windings));
+        }
+        let mut sources = Vec::with_capacity(resistors.len());
+        for (&branch, law) in resistors {
+            let receiver = self.resistor_port[&branch];
+            let kelvin = kelvin[receiver];
+            let conductor = law
+                .conductor(kelvin)
+                .map_err(|message| PlanarWindingError::Law {
+                    receiver,
+                    element: LawElement::Resistor(branch),
+                    kelvin,
+                    message,
+                })?;
+            sources.push(GraphResistorMaterial { branch, conductor });
+        }
+        let driven = old.with_graph_resistors(sources, cancelled)?;
+        Ok((Some(driven), core, windings))
     }
 
     /// The heat of each receiver over a step [J], from the owner's records
@@ -402,6 +677,30 @@ fn conductor_words(
     }
 }
 
+/// A law's words, preceded by their count.
+fn law_words(words: &mut Vec<u64>, law: impl FnOnce(&mut Vec<u64>)) {
+    let at = words.len();
+    words.push(0);
+    law(words);
+    words[at] = (words.len() - at - 1) as u64;
+}
+
+/// Equal graphs but for the values of their resistors, which resistor laws
+/// set at every step.
+fn same_topology(a: &CircuitGraph, b: &CircuitGraph) -> bool {
+    a.node_count == b.node_count
+        && a.transformers == b.transformers
+        && a.branches.len() == b.branches.len()
+        && a.branches.iter().zip(&b.branches).all(|(x, y)| {
+            x.0 == y.0
+                && x.1 == y.1
+                && (matches!(
+                    (x.2, y.2),
+                    (Branch::Resistor { .. }, Branch::Resistor { .. })
+                ) || x.2 == y.2)
+        })
+}
+
 fn branch_words(element: Branch, words: &mut Vec<u64>) {
     match element {
         Branch::Resistor { ohms } => words.extend([0, ohms.to_bits()]),
@@ -416,10 +715,11 @@ impl<'m> Component for PlanarWinding<'m> {
     type State = PlanarWindingState<'m>;
     type Error = PlanarWindingError;
 
-    /// The graph, the conductors' triangles, regions, resistivity bits and
-    /// card identities, the receiver map, the controls by their `Debug` text
-    /// (which prints each `f64` so that it parses back to the same bits) and
-    /// the energy tolerance. Each list is preceded by its length.
+    /// The graph; the fixed conductors' triangles, regions, resistivity bits
+    /// and card identities, or the laws' cells and words; the receiver map;
+    /// the controls by their `Debug` text (which prints each `f64` so that it
+    /// parses back to the same bits) and the energy tolerance. Each list is
+    /// preceded by its length.
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.extend([
             self.graph.node_count as u64,
@@ -439,15 +739,38 @@ impl<'m> Component for PlanarWinding<'m> {
                 link.ratio.to_bits(),
             ]);
         }
-        words.push(self.core.len() as u64);
-        for core in &self.core {
-            words.extend([core.triangle as u64, u64::from(core.region)]);
-            conductor_words(&core.conductor, words);
-        }
-        words.push(self.windings.len() as u64);
-        for winding in &self.windings {
-            words.push(winding.triangle as u64);
-            conductor_words(&winding.conductor, words);
+        match &self.supply {
+            Supply::Fixed { core, windings } => {
+                words.extend([0, core.len() as u64]);
+                for core in core {
+                    words.extend([core.triangle as u64, u64::from(core.region)]);
+                    conductor_words(&core.conductor, words);
+                }
+                words.push(windings.len() as u64);
+                for winding in windings {
+                    words.push(winding.triangle as u64);
+                    conductor_words(&winding.conductor, words);
+                }
+            }
+            Supply::Laws {
+                cells,
+                conductors,
+                resistors,
+            } => {
+                words.extend([1, cells.len() as u64]);
+                for (&triangle, &region) in cells {
+                    words.extend([triangle as u64, region.map_or(u64::MAX, u64::from)]);
+                }
+                words.push(conductors.len() as u64);
+                for law in conductors {
+                    law_words(words, |words| law.identity_words(words));
+                }
+                words.push(resistors.len() as u64);
+                for (&branch, law) in resistors {
+                    words.push(branch as u64);
+                    law_words(words, |words| law.identity_words(words));
+                }
+            }
         }
         words.push(self.receivers.len() as u64);
         for receiver in &self.receivers {
@@ -494,31 +817,14 @@ impl<'m> Component for PlanarWinding<'m> {
         cx: &Cx<'_>,
     ) -> Result<Proposal, PlanarWindingError> {
         cx.checkpoint().map_err(|_| PlanarWindingError::Cancelled)?;
-        let sources = self.sources;
-        let heats = self.receivers.len();
-        if !(dt_s.is_finite() && dt_s > 0.0)
-            || inputs.len() != sources + heats
-            || outputs.len() != sources + heats
-            || inputs.iter().any(|value| !value.is_finite())
-            || inputs[sources..].iter().any(|&kelvin| kelvin <= 0.0)
-        {
-            return Err(invalid(
-                "positive duration, complete finite ports and positive temperatures required",
-            ));
-        }
-        if old.0.graph() != &self.graph {
-            return Err(invalid(
-                "the state's circuit is not this Component's topology",
-            ));
-        }
-        let target_s = old.0.time_s() + dt_s;
-        if !(target_s.is_finite() && target_s > old.0.time_s()) {
-            return Err(invalid("the step does not advance the owner's clock"));
-        }
-        let candidate = old.0.step_to_candidate(
+        let target_s = self.admit(old, dt_s, inputs, outputs.len())?;
+        let (sources, heats) = (self.sources, self.receivers.len());
+        let (driven, core, windings) =
+            self.supply_at(&old.0, &inputs[sources..], &mut || cx.checkpoint().is_err())?;
+        let candidate = driven.as_ref().unwrap_or(&old.0).step_to_candidate(
             target_s,
-            self.core.clone(),
-            self.windings.clone(),
+            core,
+            windings,
             &inputs[..sources],
             self.controls,
             &mut || cx.checkpoint().is_err(),

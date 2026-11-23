@@ -1,32 +1,46 @@
 //! The planar nonlinear winding owner as one Component: its ports, a step
 //! that is the owner's own step bit for bit, heat that leaves through the
 //! ports as the owner books it, the kernel's audit, conformance, refusals
-//! and identity.
+//! and identity; then the same with conductor and resistor laws at the
+//! temperatures the heat ports receive.
 #![cfg(feature = "component")]
 
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod common;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use common::{conductors, controls, profiles};
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_em::planar::eddy::{EddyConductor, nonlinear::PlanarNonlinearEddy};
 use fs_em::planar::nonlinear::PlanarNonlinearMagnetostatics;
 use fs_em::winding::component::{
-    HeatReceiver, PlanarWinding, PlanarWindingError, PlanarWindingState,
+    ConductorLaw, HeatReceiver, LawElement, PlanarWinding, PlanarWindingError, PlanarWindingState,
+    ResistorLaw,
 };
 use fs_em::winding::nonlinear::{
-    NonlinearWindingCircuit, NonlinearWindingInitial, NonlinearWindings,
+    NonlinearWindingCandidate, NonlinearWindingCircuit, NonlinearWindingInitial,
+    NonlinearWindingStep, NonlinearWindings, resistors::GraphResistorMaterial,
 };
 use fs_em::winding::ohmic::WindingConductor;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::MaterialCard;
-use fs_material::conductor::ElectricalPropertyBasis;
+use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductor, ResolvedConductorState};
+use fs_material::field_storage::{
+    nonlinear::REVERSIBLE_FIELD_STRENGTH_PROPERTY, permanent::FIELD_STRENGTH_DIMS,
+};
+use fs_material::state_point::{
+    MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
+    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
+};
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_ports::PortKind;
 use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{
     Carrier, Class, Component, EndOfStep, PortLayout, PortRole, PortSpec, Proposal, audit_step,
 };
+use fs_qty::{Density, Dims};
 
 const DT: f64 = 0.2;
 const VOLTS: f64 = 9.0;
@@ -80,6 +94,22 @@ fn series<'m>(
     problem: &'m PlanarNonlinearMagnetostatics,
     card: &MaterialCard,
 ) -> NonlinearWindingCircuit<'m> {
+    series_on(
+        problem,
+        card,
+        core(card, 300.0),
+        Branch::Capacitor { farads: 0.05 },
+    )
+}
+
+/// [`series`] with these core conductors and this element across the graph
+/// resistor.
+fn series_on<'m>(
+    problem: &'m PlanarNonlinearMagnetostatics,
+    card: &MaterialCard,
+    core: Vec<EddyConductor>,
+    across: Branch,
+) -> NonlinearWindingCircuit<'m> {
     let zeros = problem
         .solve(
             &[0.0; 8],
@@ -91,7 +121,7 @@ fn series<'m>(
         .unwrap();
     let field = PlanarNonlinearEddy::new_with_impressed_current(
         &zeros,
-        core(card, 300.0),
+        core,
         &[0, 1, 4, 5],
         &common::boundary(),
         &[0.0; 8],
@@ -108,7 +138,7 @@ fn series<'m>(
                 (1, 0, Branch::VoltageSource { port: 0 }),
                 (1, 2, Branch::Inductor { henries: 123.0 }),
                 (2, 0, Branch::Resistor { ohms: GRAPH_OHM }),
-                (2, 0, Branch::Capacitor { farads: 0.05 }),
+                (2, 0, across),
             ],
             transformers: vec![],
         },
@@ -121,7 +151,11 @@ fn series<'m>(
         NonlinearWindingInitial {
             currents_a: vec![0.0],
             remaining_fluxes_wb: vec![],
-            charges_c: vec![0.0],
+            charges_c: if matches!(across, Branch::Capacitor { .. }) {
+                vec![0.0]
+            } else {
+                vec![]
+            },
             external_inputs: vec![0.0],
         },
         common::config(),
@@ -158,6 +192,22 @@ fn component<'m>(circuit: &NonlinearWindingCircuit<'m>, card: &MaterialCard) -> 
         TOLERANCE_J,
     )
     .unwrap()
+}
+
+/// The owner's heat records, booked to the three receivers by hand.
+fn booked(step: &NonlinearWindingStep) -> [f64; 3] {
+    let mut heat = [0.0; 3];
+    for cell in &step.cells {
+        heat[usize::from(cell.source.triangle >= 4)] += cell.heat_j;
+    }
+    for cell in &step.field.cells {
+        heat[usize::from(cell.source.triangle >= 4)] += cell.heat_j;
+    }
+    for resistor in &step.graph_resistors {
+        assert_eq!(resistor.branch, 2);
+        heat[2] += resistor.heat_j;
+    }
+    heat
 }
 
 #[test]
@@ -306,18 +356,7 @@ fn a_step_is_the_owners_own_step_and_its_heat_leaves_through_the_ports() {
             step.heat_j,
             receipt.energy_tolerance_j
         );
-        // The owner's records, booked to the receivers by hand.
-        let mut heat = [0.0; 3];
-        for cell in &step.cells {
-            heat[usize::from(cell.source.triangle >= 4)] += cell.heat_j;
-        }
-        for cell in &step.field.cells {
-            heat[usize::from(cell.source.triangle >= 4)] += cell.heat_j;
-        }
-        for resistor in &step.graph_resistors {
-            assert_eq!(resistor.branch, 2);
-            heat[2] += resistor.heat_j;
-        }
+        let heat = booked(step);
         for (k, q) in heat.iter().enumerate() {
             assert!(*q > 0.0, "receiver {k} received no heat at step {n}");
             assert_eq!(outputs[1 + k].to_bits(), (-q / DT).to_bits());
@@ -535,4 +574,484 @@ fn identity_words_tell_conductors_receivers_and_tolerances_apart() {
     for other in [&hot, &moved, &loose, &wider] {
         assert_ne!(base, words(other));
     }
+}
+
+/// The fixture's conductor at `kelvin`, as `common::material::conductor`
+/// resolves it, but refused rather than unwrapped outside the card's
+/// validity.
+fn resolve(card: &MaterialCard, kelvin: f64) -> Result<ResolvedConductorState, String> {
+    let basis = ElectricalPropertyBasis::Resistivity;
+    let scalar = |name: &str, dims: Dims, admissibility| {
+        ScalarPropertyRequirement::try_new(name, dims, admissibility).map_err(|e| format!("{e:?}"))
+    };
+    let requirements = [
+        basis.requirement().map_err(|e| format!("{e:?}"))?,
+        scalar(
+            REVERSIBLE_FIELD_STRENGTH_PROPERTY,
+            FIELD_STRENGTH_DIMS,
+            ScalarAdmissibility::NonNegative,
+        )?,
+        scalar(
+            "density",
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+        scalar(
+            "specific_heat_capacity",
+            SPECIFIC_HEAT_CAPACITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+        scalar(
+            "thermal_conductivity",
+            THERMAL_CONDUCTIVITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+    ];
+    let point = common::material::point(kelvin);
+    let bundle = resolve_material_state_point(
+        card,
+        &point,
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    ResolvedConductorState::try_from_material_with_basis(bundle, basis)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// The card's identity and resistivity at 300 K, as law words.
+fn card_words(card: &MaterialCard) -> Vec<u64> {
+    let state = resolve(card, 300.0).unwrap();
+    let mut words = vec![state.resistivity_ohm_m().to_bits()];
+    for chunk in state.material().card_identity().0.chunks(8) {
+        words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    words
+}
+
+/// The length of a unit-area path of the card with `GRAPH_OHM` at 300 K.
+fn path_length(card: &MaterialCard) -> f64 {
+    GRAPH_OHM / resolve(card, 300.0).unwrap().resistivity_ohm_m()
+}
+
+/// Every triangle's conductor from one card, at the port's temperature or,
+/// when frozen, at that fixed temperature.
+#[derive(Debug)]
+struct CardLaw {
+    card: MaterialCard,
+    frozen: Option<f64>,
+}
+
+impl ConductorLaw for CardLaw {
+    fn conductor(&self, _triangle: usize, kelvin: f64) -> Result<ResolvedConductorState, String> {
+        resolve(&self.card, self.frozen.unwrap_or(kelvin))
+    }
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend(card_words(&self.card));
+        words.push(self.frozen.map_or(0, f64::to_bits));
+    }
+}
+
+/// A uniform unit-area path of one card.
+#[derive(Debug)]
+struct PathLaw {
+    card: MaterialCard,
+    length_m: f64,
+    frozen: Option<f64>,
+}
+
+impl ResistorLaw for PathLaw {
+    fn conductor(&self, kelvin: f64) -> Result<ResolvedConductor, String> {
+        resolve(&self.card, self.frozen.unwrap_or(kelvin))?
+            .into_uniform_conductor(self.length_m, 1.0)
+            .map_err(|e| format!("{e:?}"))
+    }
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend(card_words(&self.card));
+        words.extend([self.length_m.to_bits(), self.frozen.map_or(0, f64::to_bits)]);
+    }
+}
+
+/// Conductor laws by receiver, and resistor laws by branch.
+type Laws = (
+    Vec<Arc<dyn ConductorLaw>>,
+    BTreeMap<usize, Arc<dyn ResistorLaw>>,
+);
+
+/// One card law per receiver and a path law for the graph resistor.
+fn laws(card: &MaterialCard, frozen: Option<f64>) -> Laws {
+    let cells: Arc<dyn ConductorLaw> = Arc::new(CardLaw {
+        card: card.clone(),
+        frozen,
+    });
+    let path: Arc<dyn ResistorLaw> = Arc::new(PathLaw {
+        card: card.clone(),
+        length_m: path_length(card),
+        frozen,
+    });
+    (
+        vec![cells.clone(), cells.clone(), cells],
+        BTreeMap::from([(2, path)]),
+    )
+}
+
+fn following<'m>(circuit: &NonlinearWindingCircuit<'m>, card: &MaterialCard) -> PlanarWinding<'m> {
+    let (cells, paths) = laws(card, None);
+    PlanarWinding::at_port_temperatures(circuit, cells, paths, receivers(), controls(), TOLERANCE_J)
+        .unwrap()
+}
+
+/// The owner's own step from `owner`, with every element resolved by hand at
+/// its receiver's temperature, and the graph resistor's resistance.
+fn owner_at<'m>(
+    owner: &NonlinearWindingCircuit<'m>,
+    card: &MaterialCard,
+    kelvin: [f64; 3],
+) -> (NonlinearWindingCandidate<'m>, f64) {
+    let at = |triangle: usize| resolve(card, kelvin[usize::from(triangle >= 4)]).unwrap();
+    let core = [2, 3, 6, 7]
+        .into_iter()
+        .map(|triangle| EddyConductor {
+            triangle,
+            region: if triangle < 4 { 7 } else { 8 },
+            conductor: at(triangle),
+        })
+        .collect();
+    let windings = [0, 1, 4, 5]
+        .into_iter()
+        .map(|triangle| WindingConductor {
+            triangle,
+            conductor: at(triangle),
+        })
+        .collect();
+    let path = resolve(card, kelvin[2])
+        .unwrap()
+        .into_uniform_conductor(path_length(card), 1.0)
+        .unwrap();
+    let ohms = path.resistance_ohm();
+    let driven = owner
+        .with_graph_resistors(
+            vec![GraphResistorMaterial {
+                branch: 2,
+                conductor: path,
+            }],
+            &mut || false,
+        )
+        .unwrap();
+    let candidate = driven
+        .step_to_candidate(
+            owner.time_s() + DT,
+            core,
+            windings,
+            &[VOLTS],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    (candidate, ohms)
+}
+
+#[test]
+fn laws_give_each_element_at_its_ports_temperature_as_the_owner_would() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    // The fallible resolution is the fixture's own inside the card's validity,
+    // and the conductivity moves by more than 5 % across 300-400 K.
+    assert_eq!(
+        resolve(&card, 300.0).unwrap(),
+        common::material::conductor(&card, 300.0, ElectricalPropertyBasis::Resistivity)
+    );
+    let ratio = resolve(&card, 300.0).unwrap().resistivity_ohm_m()
+        / resolve(&card, 400.0).unwrap().resistivity_ohm_m();
+    println!("laws: conductivity at 400 K is {ratio} of its value at 300 K");
+    assert!(ratio < 0.95);
+    let winding = following(&circuit, &card);
+    let layout = PortLayout::new(winding.ports()).unwrap();
+    let mut state = PlanarWindingState::new(circuit.clone());
+    let mut owner = circuit;
+    let steps = [
+        [300.0, 350.0, 400.0],
+        [330.0, 390.0, 310.0],
+        [400.0, 300.0, 360.0],
+    ];
+    for (n, kelvin) in steps.into_iter().enumerate() {
+        let inputs = [VOLTS, kelvin[0], kelvin[1], kelvin[2]];
+        let mut next = state.clone();
+        let mut outputs = [0.0; 4];
+        let proposal =
+            with_cx(|cx| winding.propose(&state, DT, &inputs, &mut next, &mut outputs, cx))
+                .unwrap();
+        let Proposal::Step(receipt) = proposal else {
+            panic!("the winding shortened the step");
+        };
+        let (expected, ohms) = owner_at(&owner, &card, kelvin);
+        let step = expected.step();
+        assert_eq!(next, PlanarWindingState::new(expected.circuit().clone()));
+        assert_eq!(
+            next.circuit().graph().branches[2].2,
+            Branch::Resistor { ohms }
+        );
+        assert_eq!(outputs[0].to_bits(), step.native.y[0].to_bits());
+        let heat = booked(step);
+        for (k, q) in heat.iter().enumerate() {
+            assert_eq!(outputs[1 + k].to_bits(), (-q / DT).to_bits());
+        }
+        assert_eq!(
+            receipt.stored_change_j.to_bits(),
+            step.stored_change_j.to_bits()
+        );
+        let entropy: f64 = heat.iter().zip(kelvin).map(|(q, t)| q / t).sum();
+        assert_eq!(
+            receipt.entropy_generated_j_per_k.to_bits(),
+            entropy.to_bits()
+        );
+        let old_j = winding.stored_energy_j(&state).unwrap();
+        let new_j = winding.stored_energy_j(&next).unwrap();
+        let audit = audit_step(
+            winding.ports(),
+            &layout,
+            DT,
+            &inputs,
+            &outputs,
+            &receipt,
+            old_j,
+            new_j,
+        )
+        .unwrap();
+        println!(
+            "laws against owner: step {}, ports at {kelvin:?} K, current {:.9} A, graph \
+             resistor {ohms:.9} ohm, heat {heat:?} J, balance defect {:.1e} J, endpoint \
+             defect {:.1e} J",
+            n + 1,
+            next.circuit().currents_a()[0],
+            audit.balance_defect_j,
+            audit.endpoint_defect_j
+        );
+        owner = expected.into_parts().0;
+        state = next;
+    }
+}
+
+#[test]
+fn a_law_that_ignores_temperature_steps_as_fixed_conductors_do() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    let (cells, paths) = laws(&card, Some(300.0));
+    let frozen = PlanarWinding::at_port_temperatures(
+        &circuit,
+        cells,
+        paths,
+        receivers(),
+        controls(),
+        TOLERANCE_J,
+    )
+    .unwrap();
+    // The fixed Component steps the circuit whose graph resistor already
+    // carries the law's resistance.
+    let path = resolve(&card, 300.0)
+        .unwrap()
+        .into_uniform_conductor(path_length(&card), 1.0)
+        .unwrap();
+    let bound = circuit
+        .with_graph_resistors(
+            vec![GraphResistorMaterial {
+                branch: 2,
+                conductor: path,
+            }],
+            &mut || false,
+        )
+        .unwrap();
+    let fixed = component(&bound, &card);
+    let mut a = PlanarWindingState::new(circuit);
+    let mut b = PlanarWindingState::new(bound);
+    for kelvin in [[300.0, 350.0, 400.0], [400.0, 330.0, 310.0]] {
+        let inputs = [VOLTS, kelvin[0], kelvin[1], kelvin[2]];
+        let (mut na, mut nb) = (a.clone(), b.clone());
+        let (mut oa, mut ob) = ([0.0; 4], [0.0; 4]);
+        with_cx(|cx| frozen.propose(&a, DT, &inputs, &mut na, &mut oa, cx)).unwrap();
+        with_cx(|cx| fixed.propose(&b, DT, &inputs, &mut nb, &mut ob, cx)).unwrap();
+        assert_eq!(na, nb);
+        assert_eq!(oa.map(f64::to_bits), ob.map(f64::to_bits));
+        (a, b) = (na, nb);
+    }
+}
+
+#[test]
+fn the_component_with_laws_passes_the_conformance_kit() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    let winding = following(&circuit, &card);
+    let state = PlanarWindingState::new(circuit);
+    let inputs = [VOLTS, 300.0, 350.0, 400.0];
+    let mut stale = state.clone();
+    let mut outputs = [0.0; 4];
+    with_cx(|cx| winding.propose(&state, DT, &inputs, &mut stale, &mut outputs, cx)).unwrap();
+    let case = Case {
+        state: &state,
+        stale: &stale,
+        dt_s: DT,
+        inputs: &inputs,
+    };
+    with_cx(|cx| check_component(&winding, &case, cx)).expect("component conformance");
+}
+
+#[test]
+fn laws_refuse_what_they_cannot_answer_and_constructions_they_cannot_drive() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    let (cells, paths) = laws(&card, None);
+    let build = |cells: Vec<Arc<dyn ConductorLaw>>,
+                 paths: BTreeMap<usize, Arc<dyn ResistorLaw>>| {
+        PlanarWinding::at_port_temperatures(
+            &circuit,
+            cells,
+            paths,
+            receivers(),
+            controls(),
+            TOLERANCE_J,
+        )
+    };
+    let refused = |result: Result<PlanarWinding<'_>, PlanarWindingError>, what: &str| match result {
+        Err(PlanarWindingError::Invalid { what: actual }) => assert_eq!(actual, what),
+        other => panic!("expected the refusal {what:?}, got {other:?}"),
+    };
+    refused(
+        build(cells[..2].to_vec(), paths.clone()),
+        "one conductor law per heat receiver required",
+    );
+    refused(
+        build(cells.clone(), BTreeMap::new()),
+        "a graph resistor has no law",
+    );
+    let mut inductor = paths.clone();
+    inductor.insert(1, paths[&2].clone());
+    refused(
+        build(cells.clone(), inductor),
+        "a resistor law names a branch that is not a resistor",
+    );
+
+    // The card's validity ends at 500 K. A law asked above it refuses with
+    // the element, its receiver and the temperature; nothing is clamped.
+    let winding = following(&circuit, &card);
+    let state = PlanarWindingState::new(circuit.clone());
+    let step = |winding: &PlanarWinding<'_>, inputs: &[f64], from: &PlanarWindingState<'_>| {
+        let mut next = from.clone();
+        let mut outputs = vec![0.0; inputs.len()];
+        with_cx(|cx| winding.propose(from, DT, inputs, &mut next, &mut outputs, cx))
+    };
+    match step(&winding, &[VOLTS, 300.0, 520.0, 310.0], &state) {
+        Err(PlanarWindingError::Law {
+            receiver: 1,
+            element: LawElement::Triangle(4),
+            kelvin,
+            ..
+        }) if kelvin.to_bits() == 520.0_f64.to_bits() => {}
+        other => panic!("expected the stranded law's refusal, got {other:?}"),
+    }
+    match step(&winding, &[VOLTS, 300.0, 310.0, 520.0], &state) {
+        Err(PlanarWindingError::Law {
+            receiver: 2,
+            element: LawElement::Resistor(2),
+            kelvin,
+            ..
+        }) if kelvin.to_bits() == 520.0_f64.to_bits() => {}
+        other => panic!("expected the resistor law's refusal, got {other:?}"),
+    }
+    // A law of another card meets the owner's own continuity refusal.
+    let (other, _) = laws(&common::source(true, 9.0), None);
+    let foreign = build(other, paths.clone()).unwrap();
+    match step(&foreign, &[VOLTS, 300.0, 310.0, 320.0], &state) {
+        Err(PlanarWindingError::Owner(error)) => println!("laws: another card: {error}"),
+        other => panic!("expected the owner's refusal, got {other:?}"),
+    }
+    // Resistor values may differ, the graph's shape may not.
+    let parallel = series_on(
+        &problem,
+        &card,
+        core(&card, 300.0),
+        Branch::Resistor { ohms: 1.0 },
+    );
+    match step(
+        &winding,
+        &[VOLTS, 300.0, 310.0, 320.0],
+        &PlanarWindingState::new(parallel),
+    ) {
+        Err(PlanarWindingError::Invalid { what }) => {
+            assert_eq!(what, "the state's circuit is not this Component's topology");
+        }
+        other => panic!("expected the topology refusal, got {other:?}"),
+    }
+    // Fixed conductors fix the resistor values too.
+    let hot = circuit
+        .with_graph_resistors(
+            vec![GraphResistorMaterial {
+                branch: 2,
+                conductor: paths[&2].conductor(400.0).unwrap(),
+            }],
+            &mut || false,
+        )
+        .unwrap();
+    match step(
+        &component(&circuit, &card),
+        &[VOLTS, 300.0, 310.0, 320.0],
+        &PlanarWindingState::new(hot),
+    ) {
+        Err(PlanarWindingError::Invalid { what }) => {
+            assert_eq!(what, "the state's circuit is not this Component's topology");
+        }
+        other => panic!("expected the topology refusal, got {other:?}"),
+    }
+    assert_eq!(state, PlanarWindingState::new(circuit));
+}
+
+#[test]
+fn identity_words_tell_laws_and_cells_apart() {
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = series(&problem, &card);
+    let words = |winding: &PlanarWinding<'_>| {
+        let mut words = Vec::new();
+        winding.identity_words(&mut words);
+        words
+    };
+    let at = |cells, paths| {
+        PlanarWinding::at_port_temperatures(
+            &circuit,
+            cells,
+            paths,
+            receivers(),
+            controls(),
+            TOLERANCE_J,
+        )
+        .unwrap()
+    };
+    let base = words(&following(&circuit, &card));
+    assert_eq!(base, words(&following(&circuit, &card)));
+    assert_ne!(base, words(&component(&circuit, &card)));
+    let (cells, paths) = laws(&card, Some(300.0));
+    assert_ne!(base, words(&at(cells, paths)));
+    let other = common::source(true, 9.0);
+    let (cells, paths) = laws(&card, None);
+    let (foreign_cells, foreign_paths) = laws(&other, None);
+    assert_ne!(base, words(&at(foreign_cells, paths.clone())));
+    assert_ne!(base, words(&at(cells, foreign_paths)));
+    // The same graph with its core regions labelled 9 and 10.
+    let relabelled = core(&card, 300.0)
+        .into_iter()
+        .map(|c| EddyConductor {
+            region: c.region + 2,
+            ..c
+        })
+        .collect();
+    let moved = series_on(
+        &problem,
+        &card,
+        relabelled,
+        Branch::Capacitor { farads: 0.05 },
+    );
+    assert_ne!(base, words(&following(&moved, &card)));
 }
