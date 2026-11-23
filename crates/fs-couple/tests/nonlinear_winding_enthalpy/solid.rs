@@ -48,7 +48,12 @@ fn config() -> CircuitEnthalpySolve {
 
 fn source(slope: f64) -> MaterialCard {
     let base = if slope == 0.0 {
-        linear::card(1.0 / 18.0, 0.005, 1.0, ElectricalPropertyBasis::Resistivity)
+        super::magnetic_thermal::absolute(&linear::card(
+            1.0 / 18.0,
+            0.005,
+            1.0,
+            ElectricalPropertyBasis::Resistivity,
+        ))
     } else {
         linear::absolute_affine_magnetic_card(
             1.0 / 18.0,

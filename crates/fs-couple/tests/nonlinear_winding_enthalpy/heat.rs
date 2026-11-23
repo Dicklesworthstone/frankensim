@@ -42,7 +42,12 @@ fn claim(name: &str, dims: fs_qty::Dims, value: PropertyValue, upper: f64) -> Pr
     PropertyClaim {
         key: PropertyKey::new(name, dims),
         value,
-        validity: fs_evidence::ValidityDomain::unconstrained().with("T", 200.0, upper),
+        validity: fs_evidence::ValidityDomain::unconstrained().with_quantity(
+            "T",
+            absolute_temperature(),
+            200.0,
+            upper,
+        ),
         uncertainty: UncertaintyModel::Unstated,
         interpolation,
         observations: vec![],
@@ -57,7 +62,12 @@ fn claim(name: &str, dims: fs_qty::Dims, value: PropertyValue, upper: f64) -> Pr
 fn cards(e: f64, upper: f64) -> [MaterialCard; 2] {
     [
         card(SLOPE),
-        linear::card(0.5, GRAPH_ALPHA, 1.0, ElectricalPropertyBasis::Resistivity),
+        absolute(&linear::card(
+            0.5,
+            GRAPH_ALPHA,
+            1.0,
+            ElectricalPropertyBasis::Resistivity,
+        )),
     ]
     .into_iter()
     .enumerate()
@@ -246,7 +256,10 @@ fn with_heat<R>(
                     start_m: [i as f64, 0.0, 0.0],
                     end_m: [i as f64 + 1.0, 0.0, 0.0],
                     volume_m3: VOLUME,
-                    surface_area_m2: 1.0,
+                    // Link 17 covers one square metre and each enclosure
+                    // trace needs one more that is exposed; with no ambient
+                    // exchange the area has no other role.
+                    surface_area_m2: 2.0,
                 },
                 boundary: Boundary {
                     ambient_k: 300.0,

@@ -27,16 +27,41 @@ const END_H: f64 = 0.2;
 const HEAT_CAPACITY: f64 = 4.0 * VOLUME;
 const RHO_SLOPE: f64 = 0.005;
 
+/// The quantity `linear::absolute_point` asks `T` with.
+pub(super) fn absolute_temperature() -> fs_qty::QuantitySpec {
+    fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+        fs_qty::semantic::QuantityKind::AbsoluteTemperature,
+        fs_qty::semantic::ValueForm::Static,
+    ))
+}
+
+/// `card` with every claim's `T` bounded as an absolute temperature, as
+/// `linear::absolute_affine_magnetic_card` bounds its own. These fixtures
+/// query at `linear::absolute_point`, and fs-matdb compares a claim's axis
+/// quantity with the query's exactly (fs-matdb CONTRACT.md: untyped is not
+/// a wildcard).
+pub(super) fn absolute(card: &MaterialCard) -> MaterialCard {
+    let mut claims = fs_matdb::ClaimSet::new();
+    for (_, source) in card.claims().claims_ordered() {
+        let mut claim = source.clone();
+        claim.validity = claim
+            .validity
+            .with_quantity("T", absolute_temperature(), 200.0, 2000.0);
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(card.id().clone(), claims, vec![]).unwrap()
+}
+
 fn card(slope: f64) -> MaterialCard {
     if slope == 0.0 {
-        linear::card(
+        absolute(&linear::card(
             1.0 / 18.0,
             RHO_SLOPE,
             1.0,
             ElectricalPropertyBasis::Resistivity,
-        )
+        ))
     } else {
-        linear::affine_magnetic_card(
+        linear::absolute_affine_magnetic_card(
             1.0 / 18.0,
             RHO_SLOPE,
             1.0,
