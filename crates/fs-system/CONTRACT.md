@@ -3404,13 +3404,29 @@ bounds of 1e-7 K, 5e-10 Wb and 4e-10 J. The six planted defects above fail
 it as well, and three more fail it alone: the coupling left out, its sign
 flipped, the starting linkages swapped.
 
+A third fixture is the module's independent-sources case: constant cards, a
+2 W/K link, 2 W into cell 30 and 1 W out of cell 10. The graph needs no new
+code for it. The sources become the cells' authored boundary sources, which
+the timeline books on its `environment` port and the kernel routes to the
+300 K sink. Over three intervals of 1 s the charge agrees bit for bit, the
+temperatures within 3e-12 K and the Joule heat within 4e-15 J. The heat from
+outside the circuit agrees exactly: 1 J an interval on both sides, the
+module's `non_electrical_heat_j` against what the sink gave. The bounds are
+1.5e-10 K, 1e-10 C and 2e-10 J. Four planted defects fail this fixture alone:
+the graph's cells without their sources, the sources swapped between the
+cells, the outside heat read with the sink's sign, and the module side without
+its sources. Four of the six graph defects above also fail it; resistors at
+300 K and step-mean cell temperatures do not, since its constant cards make
+the resistance independent of temperature.
+
 Not claimed: a tangent or `PortTangent`; second-order accuracy of the
 coupled step, which is first order with endpoint coefficients as the module
 documents; the module's phase-dependent resistance at a latent plateau,
 which the fixture's single-phase cards do not reach; sources, conductances
-or reservoirs that the module's coefficients can resolve per trial (the
-comparison uses none). The module is kept as the regression reference;
-nothing in `fs-couple` changes.
+or reservoirs that the module's coefficients resolve from the state of each
+trial (the comparison uses constant sources only). The module is kept as the
+regression reference, and no `fs-couple` source changes. Its test fixture
+gains `sourced`, which `initial` now calls with no sources.
 
 ## Signal-controlled power sources
 

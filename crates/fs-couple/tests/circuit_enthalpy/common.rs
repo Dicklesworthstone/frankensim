@@ -59,7 +59,10 @@ pub const DESTINATIONS: [ResistorCell;2] = [
     ResistorCell {branch:1,cell:CellId(30)},ResistorCell {branch:2,cell:CellId(10)}];
 pub fn boundary() -> Boundary { Boundary {ambient_k:300.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0} }
 pub fn initial<'a>(curves:&'a [ResolvedHeatCapacityCurve;2],conductance:f64,endpoint_event:Option<f64>)
-    -> DepositionSimulation<'a> {
+    -> DepositionSimulation<'a> { sourced(curves,conductance,endpoint_event,[0.0;2]) }
+/// [`initial`] with the cells' boundaries carrying authored sources \[W\], cell 30 then cell 10.
+pub fn sourced(curves:&[ResolvedHeatCapacityCurve;2],conductance:f64,endpoint_event:Option<f64>,
+    sources_w:[f64;2]) -> DepositionSimulation<'_> {
     let mut events=Vec::new();
     for (index,id) in [CellId(30),CellId(10)].into_iter().enumerate() {
         // Constant Cp inferred only for this exact authored test fixture.
@@ -69,7 +72,7 @@ pub fn initial<'a>(curves:&'a [ResolvedHeatCapacityCurve;2],conductance:f64,endp
             id,segment_id:index as u64,body_id:index as u64,material_id:MaterialId(index as u64),
             mass_kg:1.0,specific_h_j_kg:100.0*cp,geometry:CellGeometry {
                 start_m:[index as f64,0.0,0.0],end_m:[index as f64+1.0,0.0,0.0],volume_m3:1.0,surface_area_m2:6.0},
-            boundary:boundary()})});
+            boundary:Boundary {source_w:sources_w[index],..boundary()}})});
     }
     events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {
         id:7,a:CellId(30),b:CellId(10),area_m2:1.0,conductance_w_k:conductance})});

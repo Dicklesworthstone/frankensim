@@ -12,7 +12,10 @@
 //! - `fs_thermal::component::ThermalTimeline::implicit` with backward Euler,
 //!   returning end-of-step temperatures, so that temperature is the cell's
 //!   end temperature;
-//! - one heat route per resistor into the module's destination cell.
+//! - one heat route per resistor into the module's destination cell;
+//! - an independent heat source on a cell (the module's coefficient
+//!   `sources_w`) as that cell's authored boundary source, which the
+//!   timeline books on its `environment` port, routed to a sink at 300 K.
 //!
 //! The two sides solve the same equations with different solvers (the
 //! module's Newton--Krylov on cell energies and its own backward-Euler
@@ -22,7 +25,7 @@
 use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_couple::cavity_phs::piston::thermal::power::joule::MaterialOhmicBody;
+use fs_couple::cavity_phs::piston::thermal::power::joule::{JouleHeatingError, MaterialOhmicBody};
 use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;
 use fs_couple::circuit_enthalpy::step_candidate;
 use fs_couple::material_circuit::MaterialCircuit;
@@ -174,27 +177,32 @@ impl ImplicitConductionLaw for CardConduction {
 
 /// One accepted interval: the circuit's differential state (inductor flux
 /// linkages \[Wb\], then capacitor charges \[C\]), the two cells' temperatures
-/// \[K\] and the Joule heat \[J\].
+/// \[K\], the Joule heat \[J\] and the heat \[J\] that entered the cells
+/// from outside the circuit.
 #[derive(Debug, Clone)]
 struct Row {
     state: Vec<f64>,
     kelvin: [f64; 2],
     joule_j: f64,
+    outside_j: f64,
 }
 
 const CELLS: [CellId; 2] = [CellId(30), CellId(10)];
 
 /// A device of the module's tests: its netlist, whose resistances are
-/// placeholders the cards replace, its mutual inductances and its start.
+/// placeholders the cards replace, its mutual inductances, its start, and
+/// the independent heat sources \[W\] on the cells, in [`CELLS`] order.
 struct Device {
     netlist: CircuitGraph,
     mutual: Vec<MutualInductance>,
     fluxes_wb: Vec<f64>,
     charges_c: Vec<f64>,
+    sources_w: [f64; 2],
 }
 
 /// The module's run: `steps` intervals of `dt_s` with `step_candidate`, the
-/// device built as the module's tests build it.
+/// device built as the module's tests build it. Its sources are the
+/// coefficients' `sources_w` of every trial.
 fn module_run(
     device: &Device,
     cards: &[MaterialCard; 2],
@@ -221,7 +229,15 @@ fn module_run(
             input(&electrical),
             config(),
             &[0.0; 2],
-            |s| coefficients(s, cards, curves),
+            |s| {
+                let mut found = coefficients(s, cards, curves)?;
+                for (&cell, &watts) in CELLS.iter().zip(&device.sources_w) {
+                    if watts != 0.0 {
+                        found.sources_w.insert(cell, watts);
+                    }
+                }
+                Ok::<_, JouleHeatingError>(found)
+            },
             || false,
         )
         .unwrap();
@@ -235,6 +251,7 @@ fn module_run(
                 .collect(),
             kelvin: CELLS.map(|id| next.thermal().temperature_k(id).unwrap()),
             joule_j: next.report().deposited_joule_j,
+            outside_j: next.report().non_electrical_heat_j,
         });
         let (t, c, _) = next.into_parts();
         thermal = t;
@@ -244,16 +261,19 @@ fn module_run(
 }
 
 /// The fixture's two cells as one backward-Euler timeline whose cell ports
-/// return end-of-step temperatures, and its start. The link's conductance
+/// return end-of-step temperatures, and its start, each cell's boundary
+/// carrying its source of `sources_w` (the timeline books that heat on its
+/// `environment` port). The link's conductance
 /// comes from the cards' conductivity `k` across two half-cells of 0.5 m and
 /// the link's 1 m^2: `1 / (0.5 / k + 0.5 / k)`, the fixture's authored
 /// conductance when `k` is that conductance.
 fn timeline(
     curves: &'static [ResolvedHeatCapacityCurve; 2],
     conductance_w_k: f64,
+    sources_w: [f64; 2],
     dt_s: f64,
 ) -> (ThermalTimeline<'static>, TimelineState<'static>) {
-    let start: DepositionSimulation<'static> = initial(curves, conductance_w_k, None);
+    let start: DepositionSimulation<'static> = sourced(curves, conductance_w_k, None, sources_w);
     let laws: &'static [CardConduction; 2] =
         Box::leak(Box::new(core::array::from_fn(|i| CardConduction {
             curve: &curves[i],
@@ -314,8 +334,8 @@ fn graph(
     conductance_w_k: f64,
     dt_s: f64,
 ) -> (System, NodeId, NodeId) {
-    let (timeline, cells_start) = timeline(curves, conductance_w_k, dt_s);
-    let start = initial(curves, conductance_w_k, None);
+    let (timeline, cells_start) = timeline(curves, conductance_w_k, device.sources_w, dt_s);
+    let start = sourced(curves, conductance_w_k, None, device.sources_w);
     let mut circuit =
         KirchhoffCircuit::new(device.netlist.clone(), device.mutual.clone(), 1e-8).unwrap();
     for (tag, (destination, (card, curve))) in
@@ -381,7 +401,7 @@ fn graph_run(
     steps: usize,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    let mut joule_before = 0.0;
+    let (mut joule_before, mut outside_before) = (0.0, 0.0);
     with_cx(|cx| {
         for _ in 0..steps {
             let report = system.step(dt_s, cx).unwrap();
@@ -390,40 +410,43 @@ fn graph_run(
                 dt_s.to_bits(),
                 "the kernel took the whole interval"
             );
-            let joule = system.ledger().nodes[electrical.index()]
-                .dissipated_j
-                .value();
+            let ledger = system.ledger();
+            let joule = ledger.nodes[electrical.index()].dissipated_j.value();
+            // The environment sink receives what the cells' sources took in.
+            let outside = -ledger.sinks[0].heat_j.value();
             let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
             rows.push(Row {
                 state: system.state::<Vec<f64>>(electrical).unwrap().clone(),
                 kelvin: CELLS.map(|id| timeline.simulation().temperature_k(id).unwrap()),
                 joule_j: joule - joule_before,
+                outside_j: outside - outside_before,
             });
-            joule_before = joule;
+            (joule_before, outside_before) = (joule, outside);
         }
     });
     rows
 }
 
 /// Bounds of one comparison: temperature \[K\], state coordinate \[Wb or C\]
-/// and Joule heat per interval \[J\].
+/// and Joule and outside heat per interval \[J\].
 struct Bounds {
     kelvin: f64,
     state: f64,
     joule_j: f64,
 }
 
-/// Runs the device both ways and holds every interval to `bounds`. Returns
-/// the module's rows. The kernel's ledger closes, and the energy that left
-/// the circuit is in the cells.
+/// Runs the device both ways, the cells joined by `conductance` \[W/K\],
+/// and holds every interval to `bounds`. Returns the module's rows. The
+/// kernel's ledger closes, the environment sink gave the cells what their
+/// sources took in, and the energy that left the circuit is in the cells
+/// beside it.
 fn compare(
     device: &Device,
     cards: &'static [MaterialCard; 2],
     curves: &'static [ResolvedHeatCapacityCurve; 2],
-    (dt, steps): (f64, usize),
+    (conductance, dt, steps): (f64, f64, usize),
     bounds: &Bounds,
 ) -> Vec<Row> {
-    let conductance = 1.0;
     let module = module_run(device, cards, curves, conductance, dt, steps);
     let (mut system, electrical, cells) = graph(device, cards, curves, conductance, dt);
     let kernel = graph_run(&mut system, electrical, cells, dt, steps);
@@ -449,6 +472,12 @@ fn compare(
             ours.joule_j,
             theirs.joule_j
         );
+        assert!(
+            (ours.outside_j - theirs.outside_j).abs() <= bounds.joule_j,
+            "interval {k}, outside heat: {} vs {}",
+            ours.outside_j,
+            theirs.outside_j
+        );
     }
     let ledger = system.ledger();
     assert!(
@@ -456,11 +485,18 @@ fn compare(
         "{}",
         ledger.energy_residual_j()
     );
+    let sources_j = device.sources_w.iter().sum::<f64>() * dt * steps as f64;
+    assert_eq!(ledger.sinks.len(), 1);
+    let outside = -ledger.sinks[0].heat_j.value();
+    assert!(
+        (outside - sources_j).abs() <= 1e-8,
+        "{outside} vs {sources_j}"
+    );
     let released = -ledger.nodes[electrical.index()].stored_change_j.value();
     let stored = ledger.nodes[cells.index()].stored_change_j.value();
     assert!(
-        released > 1.0 && (stored - released).abs() <= 1e-8,
-        "{stored} vs {released}"
+        released > 1.0 && (stored - released - outside).abs() <= 1e-8,
+        "{stored} vs {released} + {outside}"
     );
     module
 }
@@ -495,6 +531,7 @@ fn the_declared_graph_reproduces_the_endpoint_resistance_feedback() {
         mutual: vec![],
         fluxes_wb: vec![],
         charges_c: vec![10.0],
+        sources_w: [0.0; 2],
     };
     // Temperatures and charge agree bit for bit over the first four
     // intervals and the Joule heat within 9e-16 J; after that all agree
@@ -507,7 +544,7 @@ fn the_declared_graph_reproduces_the_endpoint_resistance_feedback() {
         state: 1e-10,
         joule_j: 2e-10,
     };
-    let module = compare(&device, cards, curves, (0.25, 8), &bounds);
+    let module = compare(&device, cards, curves, (1.0, 0.25, 8), &bounds);
     // The feedback is real: cell 30 warms by kelvins, so resistor 0 moves by
     // several percent of itself over the run.
     assert!(module[7].kelvin[0] > 302.0, "{:?}", module[7]);
@@ -536,6 +573,7 @@ fn the_declared_graph_reproduces_mutual_coils_with_both_resistors_following_thei
         }],
         fluxes_wb: vec![3.5, 0.5],
         charges_c: vec![],
+        sources_w: [0.0; 2],
     };
     // On the export of 1e611fdf33 the two agree within 2e-9 K, 1.1e-11 Wb
     // and 7.1e-12 J at every interval; the bounds sit about fifty times
@@ -545,6 +583,47 @@ fn the_declared_graph_reproduces_mutual_coils_with_both_resistors_following_thei
         state: 5e-10,
         joule_j: 4e-10,
     };
-    let module = compare(&device, cards, curves, (0.25, 6), &bounds);
+    let module = compare(&device, cards, curves, (1.0, 0.25, 6), &bounds);
     assert!(module[5].kelvin[0] > 300.5, "{:?}", module[5]);
+}
+
+#[test]
+fn the_declared_graph_keeps_independent_cell_sources_apart_from_the_joule_heat() {
+    // The module's independent-sources fixture: the capacitor device with
+    // constant cards, a 2 W/K link, 2 W into cell 30 and 1 W out of cell 10,
+    // which the module resolves as coefficients and the graph as the cells'
+    // authored boundary sources. The module steps one second; this runs
+    // three.
+    let (cards, curves) = cards([0.0, 0.0]);
+    let device = Device {
+        netlist: CircuitGraph {
+            node_count: 3,
+            branches: vec![
+                (1, 0, Branch::Capacitor { farads: 1.0 }),
+                (1, 2, Branch::Resistor { ohms: 999.0 }),
+                (2, 0, Branch::Resistor { ohms: 999.0 }),
+            ],
+            transformers: vec![],
+        },
+        mutual: vec![],
+        fluxes_wb: vec![],
+        charges_c: vec![10.0],
+        sources_w: [2.0, -1.0],
+    };
+    // On the export of 1e611fdf33 the charge agrees bit for bit at every
+    // interval, the temperatures within 3e-12 K, the Joule heat within
+    // 4e-15 J, and the outside heat exactly: 1 J an interval on both sides.
+    // The temperature bound sits about fifty times above that; the others
+    // are those of the capacitor fixture above.
+    let bounds = Bounds {
+        kelvin: 1.5e-10,
+        state: 1e-10,
+        joule_j: 2e-10,
+    };
+    let module = compare(&device, cards, curves, (2.0, 1.0, 3), &bounds);
+    // The module's own check: one joule an interval that is not electrical.
+    assert!(
+        module.iter().all(|row| (row.outside_j - 1.0).abs() < 3e-6),
+        "{module:?}"
+    );
 }
