@@ -1540,6 +1540,7 @@ dependencies = [
 name = "fs-em"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-evidence",
  "fs-exec",
  "fs-feec",

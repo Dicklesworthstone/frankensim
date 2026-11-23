@@ -19,6 +19,10 @@ dielectric-hysteresis = ["fs-material/experimental-dielectric-hysteresis", "dep:
 resolved-leaky-dielectric = []
 plane-wave = ["dep:fs-fft", "dep:fs-matdb"]
 harmonic-exposure = ["dep:fs-fft"]
+# The planar nonlinear winding owner as a Component of the composition
+# contract (fs-ports): `winding::component`. Off by default; the default
+# build has no dependency on fs-exec.
+component = ["dep:fs-exec"]
 
 [dependencies]
 fs-math = { path = "../fs-math" }
@@ -30,12 +34,15 @@ fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb", optional = true }
 fs-phs = { path = "../fs-phs" }
 fs-ports = { path = "../fs-ports" }
+fs-exec = { path = "../fs-exec", optional = true }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+# The execution context of the composition contract's conformance kit.
+fs-alloc = { path = "../fs-alloc" }
 fs-gas = { path = "../fs-gas" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-evidence = { path = "../fs-evidence" }

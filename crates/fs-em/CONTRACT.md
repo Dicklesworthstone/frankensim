@@ -2909,6 +2909,123 @@ Synthetic `nonlinear_winding_circuit` regressions exercise independent nonlinear
 RL and coupled-winding/capacitor equations, source-only H(B)/resistivity swaps,
 core/strand loss separation, temperature refresh and transactional failure.
 
+### The planar nonlinear winding as one Component
+
+Behind the optional `component` feature, which is off by default and adds the
+fs-exec dependency, `winding::component::PlanarWinding` is
+`NonlinearWindingCircuit` as one Component of the composition contract
+(fs-ports; epic `frankensim-rc-1109-root-3gc12`, the planar winding pair of
+`fs_couple::circuit_enthalpy`).
+
+Ports, in order:
+- `source<p>` for each original external input `p` of the native graph:
+  - `EffortIn` when the input drives a voltage source, `FlowIn` when it drives
+    a current source;
+  - each returns the native step-average conjugate `StepRecord::y[p]`;
+  - the owner's private winding ports stay inside, and its `supplied_work_j`
+    is exactly the work on these wires.
+- `heat<k>` for each declared `HeatReceiver`. It receives temperature and
+  returns minus the mean heat rate of the elements mapped to it: stranded
+  cells (`WindingCellHeat`) and core cells (`EddyCellHeat`) by triangle, and
+  native graph resistors (`WindingGraphResistorHeat`) by branch.
+
+Every dissipating element maps to exactly one receiver, or construction
+refuses. The owner is backward Euler with held inputs, so every port answers
+`EndOfStep::Untold`. The Component is `Class::Smooth`.
+
+The state is the owner's accepted circuit, which carries the field history.
+Its stored energy, measured from the state alone, is:
+- the native descriptor's Hamiltonian at the circuit state;
+- plus the field energy;
+- plus the end-mode energy at the accepted currents.
+
+The owner sums `stored_before_j` the same way. Two states are equal when they
+share the owner's topology and hold the same bits in every accepted coordinate.
+
+A proposal steps the owner once, with `step_to_candidate`:
+- from the accepted state, to its clock plus the step;
+- with the conductors given at construction;
+- with cancellation polled through the context.
+
+The candidate's circuit is the new state. The receipt takes:
+- the owner's stored change;
+- the heat that leaves through the ports, as dissipation;
+- the generated entropy: each receiver's heat over the temperature its port
+  received.
+
+Its numerical loss is the supplied work minus the stored change minus that
+heat. The step refuses (`Balance`) when this differs from the owner's
+backward-Euler `numerical_dissipation_j` by more than the arithmetic rounding
+floor plus the caller's energy tolerance. The receipt's `energy_tolerance_j` is
+that floor. Its residual and tolerance are the interface Newton solve's final
+residual and its own convergence target. A step with magnetic parameter work or
+mechanical work refuses (`UnaccountedWork`): the receipt has no term for
+either. No fixture here produces either.
+
+The Component borrows the owner's problem for `'m` and leaks nothing. A
+kernel `System` holds `'static` members, so a caller that adds this Component
+to a system gives it a problem that lives for `'static`. The state has no
+codec: a system holding it cannot be written to a durable snapshot.
+
+The identity words bind:
+- the graph;
+- every conductor's triangle, region, resistivity bits and card identity;
+- the receiver map;
+- the controls, by their `Debug` text, which prints each `f64` so that it
+  parses back to the same bits;
+- the energy tolerance.
+
+`tests/winding_component.rs` (5 tests):
+- the ports of a graph with a voltage source, and of one with a current source
+  driving a resistor of its own (`FlowIn`; 1.5 A into 2 ohm returns 3 V and
+  4.5 W);
+- three steps of a voltage source driving the winding into a graph resistor
+  with a capacitor across it, with core conductors and an end inductance. Each
+  step is the owner's own `step_to_candidate`, bit for bit, in state, source
+  output, per-receiver heat rate, stored change and entropy. What the heat ports
+  return equals the owner's `heat_j` within the receipt's floor. Each step
+  passes the kernel's `audit_step` with balance defects of at most 2.4e-15 J
+  and endpoint defects of at most 1.1e-16 J;
+- `check_component` conformance;
+- refusals: an element mapped to no receiver (a triangle, a resistor) or to
+  two, an empty receiver, a receiver naming a non-resistor branch or a triangle
+  without a conductor, a zero tolerance, a cold port, a short or non-finite
+  input, and a state of another topology;
+- identity words that tell apart a core conductor at another temperature,
+  swapped receivers, other controls and another tolerance.
+
+Eighteen defects planted one at a time each failed at least one of these tests:
+1. the heat rate's sign;
+2. a graph resistor booked twice (the `Balance` refusal fires);
+3. the same with the `Balance` check off (the heat-sum assertion fires);
+4. a source port returning a private port's output;
+5. entropy at 300 K;
+6. the stored change's sign;
+7. the state not advanced;
+8. each triangle mapped to the next receiver;
+9. the receiver map left out of the identity;
+10. the end-mode term left out of the stored energy;
+11. the native circuit left out of the stored energy;
+12. the cold-port check dropped;
+13. the topology check dropped;
+14. ports telling the midpoint end;
+15. a current source read as `EffortIn`;
+16. an unmapped triangle admitted;
+17. an unmapped resistor admitted;
+18. a doubly mapped element admitted.
+
+No fixture reaches the `UnaccountedWork` refusal, or a `Balance` refusal
+without a planted defect: the fixture's balance defects stay below 2.4e-15 J.
+No fixture reaches the step's refusal of a heat record that no receiver maps,
+because construction maps every conductor triangle.
+
+Not claimed:
+- laws at the temperatures the heat ports receive (the conductors are fixed
+  here);
+- the hysteretic owner;
+- magnetic temperature refresh, motion, a tangent, a codec;
+- any comparison with `fs_couple`'s winding modules.
+
 ## Accepted induction and nonlinear circuit fields drive mechanical loads
 
 `PlanarEddy::maxwell_wrench` and `PlanarNonlinearEddy::maxwell_wrench` recover

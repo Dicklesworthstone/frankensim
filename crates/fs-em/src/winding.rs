@@ -19,6 +19,9 @@
 //! from the same spatial material/profile data and retains explicit graph losses.
 
 pub mod circuit;
+/// The planar nonlinear winding owner behind the composition contract's ports.
+#[cfg(feature = "component")]
+pub mod component;
 /// Passive self/mutual storage for explicitly unresolved end-winding flux.
 pub mod end;
 /// Circuit-driven vector magnetic history with distinct pinning and Joule heat.
