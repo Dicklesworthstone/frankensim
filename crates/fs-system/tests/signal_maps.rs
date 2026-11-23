@@ -222,7 +222,14 @@ fn mapped_signal_admission_is_atomic_and_coefficients_bind_problem_identity() {
         Err(AdmissionError::Role { .. })
     ));
     let body = builder
-        .add_with_tangent("body", Mass::new(1.0).unwrap(), Motion::default())
+        .add_with_tangent(
+            "body",
+            Mass::new(1.0).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.0,
+            },
+        )
         .unwrap();
     let physical = builder.port(body, "p").unwrap();
     assert!(matches!(

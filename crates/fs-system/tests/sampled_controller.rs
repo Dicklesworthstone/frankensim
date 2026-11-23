@@ -358,7 +358,7 @@ fn sampled_gain_needs_no_memory_and_proposals_shorten_before_the_next_sample() {
             .propose(&old, 0.125, &[2.0], &mut candidate, &mut output, cx)
             .unwrap();
         assert_eq!(output, [6.0]);
-        assert_eq!(candidate.coordinates(), &[]);
+        assert!(candidate.coordinates().is_empty());
         let sampled = candidate.clone();
         controller
             .propose(&sampled, 0.125, &[-3.0], &mut candidate, &mut output, cx)
