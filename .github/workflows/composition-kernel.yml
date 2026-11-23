@@ -7,14 +7,18 @@ on:
       - .github/workflows/composition-kernel.yml
       - Cargo.lock
       - crates/fs-cli/src/system_command.rs
+      - crates/fs-cli/src/system_command/**
       - crates/fs-cli/tests/system_command.rs
+      - crates/fs-cli/tests/system_command/**
       - examples/system/**
       - crates/fs-system/**
       - crates/fs-ports/**
       - crates/fs-gas/Cargo.toml
       - crates/fs-gas/src/lib.rs
       - crates/fs-gas/src/component.rs
+      - crates/fs-gas/src/component/**
       - crates/fs-gas/tests/component.rs
+      - crates/fs-gas/tests/component/**
       - crates/fs-mbd/src/component.rs
       - crates/fs-mbd/src/component/**
       - crates/fs-mbd/src/spatial_loads/internal_motion/viscous/network.rs
@@ -75,6 +79,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install the pinned compiler and sibling constellation
+        id: constellation
         run: |
           rustup toolchain install nightly-2026-07-06 --profile minimal
           if ! bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"; then
@@ -121,12 +126,17 @@ jobs:
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
-        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
+        run: cargo +nightly-2026-07-06 test --no-fail-fast -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
       - name: Devices described as data
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
       - name: Native source-backed gas Component
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-gas --features component --test component --locked
       - name: Native thermal Component
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-thermal --test component --locked
       - name: Native mechanical and thermal slices
+        if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         run: cargo +nightly-2026-07-06 test -p fs-system --features slices --test thermal_timeline_slice --test rigid_body_slice --test viscous_network_slice --locked
