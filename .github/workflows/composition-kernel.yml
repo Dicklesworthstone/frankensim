@@ -48,9 +48,29 @@ jobs:
       RUSTFLAGS: '-Z threads=1'
       RUST_BACKTRACE: '1'
     steps:
+      - name: Resolve pushed validation candidate
+        id: push_candidate
+        if: github.event_name == 'push'
+        working-directory: ${{ github.workspace }}
+        env:
+          PUSH_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          candidates = [line for line in os.environ.get('PUSH_COMMIT_MESSAGE', '').splitlines() if line.startswith('Validate-Candidate:')]
+          if len(candidates) > 1:
+              raise SystemExit('expected at most one Validate-Candidate trailer')
+          if candidates:
+              match = re.fullmatch(r'Validate-Candidate: ([0-9a-f]{40})', candidates[0])
+              if match is None:
+                  raise SystemExit('Validate-Candidate must contain exactly one lowercase 40-hex commit SHA')
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write('sha=' + match.group(1) + '\n')
+          PY
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate || github.sha }}
+          ref: ${{ inputs.candidate || steps.push_candidate.outputs.sha || github.sha }}
           path: frankensim
           fetch-depth: 1
           persist-credentials: false
@@ -58,15 +78,50 @@ jobs:
         run: |
           rustup toolchain install nightly-2026-07-06 --profile minimal
           if ! bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"; then
-            # This pinned file has eol=crlf, but the source verifier compares
-            # raw Git blobs. Restore its canonical bytes and recheck all pins.
-            git -C "$GITHUB_WORKSPACE/franken_numpy" show HEAD:legacy_numpy_code/numpy/doc/make.bat > "$GITHUB_WORKSPACE/franken_numpy/legacy_numpy_code/numpy/doc/make.bat"
+            # Restore the known CRLF vendor file only in the fresh pinned clone.
+            # Disable its text transforms before refreshing index stat metadata,
+            # then require the original source blob and unchanged staged content.
+            python3 - <<'PY'
+          import json, pathlib, stat, subprocess
+          root = pathlib.Path('../franken_numpy')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          expected = 'bf42cca10b732e4277a3737f605b00d30b82b69c'
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          pin = next(r['git_head'] for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          if git('rev-parse', 'HEAD').decode().strip() != pin or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy checkout')
+          if git('rev-parse', 'HEAD:' + name).decode().strip() != expected or git('rev-parse', ':' + name).decode().strip() != expected:
+              raise SystemExit('unexpected committed or staged source; refusing repair')
+          for path in [root, root / '.git', *(root / name).parents][:-1]:
+              if path.is_symlink() or not path.is_dir():
+                  raise SystemExit('redirected or non-directory source path')
+          path = root / name
+          if not stat.S_ISREG(path.lstat().st_mode):
+              raise SystemExit('expected an ordinary tracked source file')
+          raw = git('cat-file', 'blob', expected)
+          actual = path.read_bytes()
+          if actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only discrepancy; refusing repair')
+          info = root / '.git' / 'info'
+          if info.is_symlink() or (info.exists() and not info.is_dir()):
+              raise SystemExit('invalid Git info directory')
+          info.mkdir(exist_ok=True)
+          with (info / 'attributes').open('x') as attributes:
+              attributes.write(name + ' -text -filter -ident -working-tree-encoding\n')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if path.read_bytes() != raw or git('rev-parse', ':' + name).decode().strip() != expected:
+              raise SystemExit('repair changed the pinned source or index')
+          if git('status', '--porcelain=v1', '--untracked-files=no', '--', name).strip():
+              raise SystemExit('exact-source repair did not clear the checkout discrepancy')
+          PY
             bash scripts/ci/checkout_constellation.sh "$GITHUB_WORKSPACE"
           fi
           rustc +nightly-2026-07-06 --version
           git rev-parse HEAD
       - name: Kernel and library elements
-        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
+        run: cargo +nightly-2026-07-06 test -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked
       - name: Devices described as data
         run: cargo +nightly-2026-07-06 test -p fs-cli --test system_command --locked
       - name: Native source-backed gas Component
