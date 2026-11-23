@@ -1,7 +1,9 @@
-//! The gate fixtures as declared graphs (`battery_motor/graph.rs`).
+//! The gate fixtures as declared graphs (`battery_motor/graph.rs`), the
+//! test module of the gate lane that `battery_motor::gate` coupled by hand
+//! until it retired.
 //!
 //! The drive runs in the `GateStorage` lane. Its storage is the package
-//! card's, read once ([`card_storage`]), since the module holds it constant.
+//! card's, read once ([`card_storage`]), since the module held it constant.
 //! Each switch's channel follows the card's G(Vgs, T) line at its package
 //! ([`CardChannel`]); each gate's on and off resistances follow the card at
 //! its driver cell. The four driver cells join the timeline after the seven,
@@ -10,26 +12,357 @@
 
 use std::sync::Arc;
 
-use fs_couple::circuit_enthalpy::converter::commutation::GateChannelBinding;
 use fs_matdb::{ClaimSelection, MaterialAnswer};
 use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
-use fs_phs::circuit::converter::commutation::gate::{GateChannelLaw, GateChannelResponse};
+use fs_phs::circuit::capacitance::CapacitorChargeCurve;
+use fs_phs::circuit::converter::commutation::{
+    capacitance::{battery_motor::PreparedGateBatteryMotorCycle, gate::GateCommutationParameters},
+    gate::{GateChannelLaw, GateChannelResponse, GateConductanceCurve, GateDriver},
+};
+use fs_qty::{Capacitance, Conductance, ElectricCharge};
 use fs_system::commutated_drive::{
     ChannelLaw, CommutatedBatteryMotorDrive, GateDriverResistances, GateRail, GateStorage,
     SwitchPosition,
 };
 
-use super::super::graph::{
-    Card, CardResistance, Case, Coolant, Drivers, Lane, Row, cell_ids, cells_start, compare,
-    heat_assembly, held_to_owner, kernel_rows, leak, owner_drive, text,
+use super::graph::{
+    Card, CardResistance, Case, Coolant, Drivers, Lane, Row, held_to_owner, kernel_rows, leak,
+    owner_drive, text,
 };
-use super::super::nine_state::coolant;
+use super::nine_state::coolant;
 use super::*;
 
+#[path = "current/graph.rs"]
+mod current;
+
+const DRIVER: [CellId; 4] = [CellId(80), CellId(90), CellId(100), CellId(110)];
+const CDS: [f64; 4] = [0.025, 0.04, 0.035, 0.05];
+const G0: [f64; 4] = [10.0, 0.01, 0.01, 0.01];
+
+fn gate_context() -> QueryPoint {
+    common::point(300.0)
+        .with_quantity("Vds", QuantitySpec::dimensional(Voltage::DIMS), 0.0)
+        .unwrap()
+        .with_quantity("Vgs", QuantitySpec::dimensional(Voltage::DIMS), 0.0)
+        .unwrap()
+        .with("lot", 7.0)
+        .unwrap()
+}
+fn g(device: usize, gate_v: f64, temperature_k: f64, feedback: bool) -> f64 {
+    G0[device]
+        * if feedback {
+            1.0 + 0.1 * gate_v + 0.05 * (temperature_k - 300.0)
+        } else {
+            1.0
+        }
+}
+fn drivers() -> [GateDriver; 4] {
+    core::array::from_fn(|i| GateDriver {
+        on_voltage_v: if i == 0 { 2.0 } else { 0.0 },
+        off_voltage_v: if i == 0 { 1.0 } else { 0.0 },
+        on_resistance_ohm: 0.25,
+        off_resistance_ohm: 2.0,
+        maximum_current_a: 20.0,
+    })
+}
+fn authored(miller_f: f64, feedback: bool) -> GateCommutationParameters {
+    GateCommutationParameters {
+        converter: parameters(),
+        intrinsic_drain_charge_curves: core::array::from_fn(|i| {
+            CapacitorChargeCurve::try_new(vec![
+                (-100.0 * CDS[i], -100.0),
+                (0.0, 0.0),
+                (100.0 * CDS[i], 100.0),
+            ])
+            .unwrap()
+        }),
+        gate_source_capacitance_f: [1.0; 4],
+        gate_drain_capacitance_f: [miller_f; 4],
+        channel_conductance: core::array::from_fn(|i| {
+            GateConductanceCurve::try_new(
+                [-4.0, 0.0, 4.0]
+                    .map(|v| (v, g(i, v, 300.0, feedback)))
+                    .to_vec(),
+            )
+            .unwrap()
+        }),
+        gate_drivers: drivers(),
+        maximum_cells_per_chord: 4096,
+    }
+}
+struct GateFixture {
+    base: Fixture,
+    charge: [PropertyKey; 4],
+    capacitance: [PropertyKey; 2],
+    conductance: [PropertyKey; 4],
+    driver_resistance: [PropertyKey; 2],
+}
+fn gate_fixture(miller_f: f64, feedback: bool, resistance_slope: f64) -> GateFixture {
+    let base = fixture(1.0, 0.0, 350.0, 100.0);
+    let charge = core::array::from_fn(|i| {
+        PropertyKey::new(format!("intrinsic_drain_charge_{i}"), ElectricCharge::DIMS)
+    });
+    let capacitance = [
+        "intrinsic_gate_source_capacitance",
+        "intrinsic_gate_drain_capacitance",
+    ]
+    .map(|key| PropertyKey::new(key, Capacitance::DIMS));
+    let conductance = core::array::from_fn(|i| {
+        PropertyKey::new(format!("gate_channel_conductance_{i}"), Conductance::DIMS)
+    });
+    let driver_resistance = ["gate_driver_on_resistance", "gate_driver_off_resistance"]
+        .map(|key| PropertyKey::new(key, Resistance::DIMS));
+    let thermal_domain = || {
+        ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            299.0,
+            350.0,
+        )
+    };
+    let mut claims = ClaimSet::new();
+    for (_, claim) in base.card.claims().claims_ordered() {
+        claims.insert_claim(claim.clone()).unwrap();
+    }
+    let mut add = |key: &PropertyKey, value, validity| {
+        // A scalar is a constant law: LinearInside has no knot span to interpolate inside on it.
+        let interpolation = if matches!(value, PropertyValue::Scalar { .. }) {
+            InterpolationPolicy::ConstantWithinValidity
+        } else {
+            InterpolationPolicy::LinearInside
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value,
+                validity,
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation,
+                observations: vec![],
+                provenance: Provenance {
+                    source:
+                        "synthetic intrinsic gate/storage fixture, not qualified transistor data"
+                            .into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    };
+    for i in 0..4 {
+        add(
+            &charge[i],
+            PropertyValue::Curve {
+                abscissa: "Vds".into(),
+                abscissa_dims: Voltage::DIMS,
+                knots: vec![
+                    (-100.0, -100.0 * CDS[i]),
+                    (0.0, 0.0),
+                    (100.0, 100.0 * CDS[i]),
+                ],
+                dims: ElectricCharge::DIMS,
+            },
+            thermal_domain().with_quantity(
+                "Vds",
+                QuantitySpec::dimensional(Voltage::DIMS),
+                -100.0,
+                100.0,
+            ),
+        );
+        let value = if feedback {
+            let mut samples = Vec::new();
+            for t in [299.0, 350.0] {
+                samples.extend([-4.0, 0.0, 4.0].map(|v| ([v, t], g(i, v, t, true))));
+            }
+            PropertyValue::Surface2D {
+                axes: ["Vgs".into(), "T".into()],
+                axis_dims: [Voltage::DIMS, Temperature::DIMS],
+                samples,
+                triangles: vec![[0, 1, 3], [1, 4, 3], [1, 2, 4], [2, 5, 4]],
+                dims: Conductance::DIMS,
+            }
+        } else {
+            PropertyValue::Curve {
+                abscissa: "Vgs".into(),
+                abscissa_dims: Voltage::DIMS,
+                knots: vec![(-4.0, G0[i]), (0.0, G0[i]), (4.0, G0[i])],
+                dims: Conductance::DIMS,
+            }
+        };
+        let domain = thermal_domain().with_quantity(
+            "Vgs",
+            QuantitySpec::dimensional(Voltage::DIMS),
+            -4.0,
+            4.0,
+        );
+        add(&conductance[i], value, domain);
+    }
+    for (key, value) in capacitance.iter().zip([1.0, miller_f]) {
+        let law = PropertyValue::Scalar {
+            value,
+            dims: Capacitance::DIMS,
+        };
+        add(key, law, thermal_domain());
+    }
+    for (i, key) in driver_resistance.iter().enumerate() {
+        let (value, slope) = if i == 0 {
+            (0.25, resistance_slope)
+        } else {
+            (2.0, 0.0)
+        };
+        add(
+            key,
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(299.0, value - slope), (350.0, value + 50.0 * slope)],
+                dims: Resistance::DIMS,
+            },
+            thermal_domain(),
+        );
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic-device".into(),
+            phase: "solid".into(),
+            process: "authored intrinsic gate decomposition".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(
+        &card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+            density: &PropertyKey::new("density", Density::DIMS),
+            temperature_axis: "T",
+            lower: &common::point(299.0),
+            upper: &common::point(350.0),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        1e-6,
+    )
+    .unwrap();
+    GateFixture {
+        base: Fixture {
+            card,
+            caloric,
+            keys: base.keys,
+            cp: 1.0,
+        },
+        charge,
+        capacitance,
+        conductance,
+        driver_resistance,
+    }
+}
+impl GateFixture {
+    /// All eleven bodies born at one common temperature (the caloric curve starts at 299 K), time 0.
+    fn thermal_at(&self, kelvin: f64) -> DepositionSimulation<'_> {
+        let mut events: Vec<_> = self
+            .base
+            .thermal_at(kelvin)
+            .cells()
+            .values()
+            .map(|cell| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell.clone()),
+            })
+            .collect();
+        for (i, id) in DRIVER.into_iter().enumerate() {
+            events.push(TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id,
+                    segment_id: 7 + i as u64,
+                    body_id: 7 + i as u64,
+                    material_id: MaterialId(0),
+                    mass_kg: 1.0,
+                    specific_h_j_kg: kelvin - 299.0,
+                    geometry: CellGeometry {
+                        start_m: [20.0 + i as f64, 0.0, 0.0],
+                        end_m: [21.0 + i as f64, 0.0, 0.0],
+                        volume_m3: 1.0,
+                        surface_area_m2: 6.0,
+                    },
+                    boundary: common::boundary(),
+                }),
+            });
+        }
+        DepositionSimulation::new(
+            events,
+            &[(MaterialId(0), self.base.caloric.curve() as &dyn ThermalLaw)],
+            DepositionBudget {
+                max_cells: 11,
+                max_links: 0,
+                max_events: 11,
+                max_substeps: 1000,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-9,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0
+    }
+}
+fn initial(steady: &SteadyDrive, p: &GateCommutationParameters) -> [f64; 15] {
+    let current = steady.state[3] / p.converter.inductance_h;
+    let input = steady.state[4] / p.converter.bus_capacitance_f[0];
+    let output = steady.state[5] / p.converter.bus_capacitance_f[1];
+    let left = (10.0 * input - current) / 10.01;
+    let right = left - 0.1 * current;
+    let converter = p
+        .state(current, [input, output], [left, right], [0.0; 4])
+        .unwrap();
+    let mut state = [0.0; 15];
+    state[..3].copy_from_slice(&steady.state[..3]);
+    state[3..12].copy_from_slice(&converter);
+    state[12..].copy_from_slice(&steady.state[6..]);
+    state
+}
+// Independent linear intrinsic branch electrostatics, not native energy queries.
+// qg=(Cgs+Cgd)*Vgs-Cgd*Vds. Eliminating the two gates preserves the
+// reciprocal bus/node charge matrix with Cds+Cgs*Cgd/(Cgs+Cgd).
+// The native grouped node contains the high-side gate electrode as well.
+fn voltages(state: &[f64; 15], miller: f64) -> ([f64; 4], [f64; 4]) {
+    let mut drain = [0.0; 4];
+    let mut gate = [0.0; 4];
+    let sum = 1.0 + miller;
+    let alpha = miller / sum;
+    for leg in 0..2 {
+        let hi = 2 * leg;
+        let lo = hi + 1;
+        let ch = CDS[hi] + miller / sum;
+        let cl = CDS[lo] + miller / sum;
+        let cb = parameters().bus_capacitance_f[leg];
+        let qb = state[4 + leg] + alpha * state[8 + hi];
+        let qn = state[6 + leg] - alpha * state[8 + hi] + alpha * state[8 + lo];
+        let det = cb * (ch + cl) + ch * cl;
+        let bus = ((ch + cl) * qb + ch * qn) / det;
+        let node = (ch * qb + (cb + ch) * qn) / det;
+        drain[hi] = bus - node;
+        drain[lo] = node;
+        gate[hi] = (state[8 + hi] + miller * drain[hi]) / sum;
+        gate[lo] = (state[8 + lo] + miller * drain[lo]) / sum;
+    }
+    (drain, gate)
+}
+
 /// The timeline's cells with ports: the seven, then the drivers'.
-pub(super) const CELLS: usize = 11;
+const CELLS: usize = 11;
 
 impl Lane for GateStorage {
     /// Each gate's on and off resistances follow the card at its driver
@@ -64,7 +397,7 @@ impl Lane for GateStorage {
     }
 }
 
-/// A switch's channel from its package's card, as the module resolves it:
+/// A switch's channel from its package's card, as the module resolved it:
 /// the card's G line over the module's gate voltages, -4 V to 4 V, at the
 /// package's state, under the claim its lower end selects.
 #[derive(Debug)]
@@ -113,7 +446,7 @@ impl ChannelLaw for CardChannel {
 
 /// The lane's storage from the package card at 300 K: each package's Q(Vds)
 /// line over the module's -100 V to 100 V, its Cgs and its Cgd. The module
-/// requires the storage constant, so one reading stands for every step. The
+/// required the storage constant, so one reading stands for every step. The
 /// channels follow [`CardChannel`]; the drivers' resistances are the
 /// module's authored ones until their laws answer.
 fn card_storage(f: &'static GateFixture, card: Card) -> GateStorage {
@@ -152,10 +485,10 @@ fn card_storage(f: &'static GateFixture, card: Card) -> GateStorage {
 }
 
 /// A gate case of the module's fixture `f` authored as `p`: the drive
-/// started as the module starts it, every cell at `start_k`, one step of
+/// started as the module started it, every cell at `start_k`, one step of
 /// `dt_s` per program. The card's storage must be the authored storage, as
-/// the module's bind requires.
-pub(super) fn gate_case<'s>(
+/// the module's bind required.
+fn gate_case<'s>(
     f: &'static GateFixture,
     steady: &'s SteadyDrive,
     p: &GateCommutationParameters,
@@ -208,145 +541,10 @@ pub(super) fn gate_case<'s>(
     }
 }
 
-/// The temperatures of the case's timeline cells in `thermal`, in
-/// `cell_ids` order.
-fn kelvin<const N: usize>(
-    case: &Case<'_, GateStorage>,
-    thermal: &DepositionSimulation<'_>,
-) -> [f64; N] {
-    let ids = cell_ids(case);
-    assert_eq!(ids.len(), N);
-    core::array::from_fn(|i| thermal.temperature_k(ids[i]).unwrap())
-}
-
-/// The module's `steps` steps of the case from its drive bound at the case's
-/// start, authored as `p`.
-fn module_run(
-    f: &GateFixture,
-    case: &Case<'_, GateStorage>,
-    p: &GateCommutationParameters,
-    steps: usize,
-) -> Vec<Row<[f64; 15], [f64; CELLS]>> {
-    let context = gate_context();
-    let cells = f.cells(&context);
-    let (resistors, devices) = (drive_resistors(&f.base), f.base.devices());
-    let (q, cgs, cgd) = (f.charges(), f.caps(false), f.caps(true));
-    let (conductance, driver_r) = (f.conductances(), f.driver_resistors());
-    let bindings = gate_bindings(&q, &cgs, &cgd, &conductance, &driver_r);
-    module_steps(
-        &coupled(&cells, &resistors, &devices, bindings),
-        case,
-        p,
-        steps,
-    )
-}
-
-/// The module's `steps` steps of the case on `network`, its drive bound at
-/// the case's start, authored as `p`.
-pub(super) fn module_steps<B: GateChannelBinding>(
-    network: &GateBatteryMotorThermalNetwork<'_, B>,
-    case: &Case<'_, GateStorage>,
-    p: &GateCommutationParameters,
-    steps: usize,
-) -> Vec<Row<[f64; 15], [f64; CELLS]>> {
-    let mut thermal = cells_start(case);
-    let native = &case.steady.native;
-    let mut drive = network
-        .bind(&thermal, native, p, case.start, || false)
-        .unwrap();
-    let mut rows = Vec::new();
-    for k in 0..steps {
-        let intervals = [CommutationInterval {
-            gates: case.gates(k),
-            duration_s: case.dt_s,
-        }];
-        let next = network
-            .step_candidate(
-                &thermal,
-                thermal.time_s() + case.dt_s,
-                &drive,
-                &intervals,
-                &[case.steady.command],
-                case.substeps,
-                case.load_cell,
-                power_controls(),
-                cycle_controls(),
-                drive_controls(CELLS),
-                &[0.0; CELLS],
-                || false,
-            )
-            .unwrap();
-        rows.push(Row {
-            state: *next.drive().state(),
-            kelvin: kelvin(case, next.thermal()),
-        });
-        (thermal, drive, _) = next.into_parts();
-    }
-    rows
-}
-
-/// The module's `steps` steps of the case through its heat assembly, which
-/// carries the case's coolant and link (`FixedCooling`).
-fn module_linked_run(
-    f: &GateFixture,
-    case: &Case<'_, GateStorage>,
-    p: &GateCommutationParameters,
-    steps: usize,
-) -> Vec<Row<[f64; 15], [f64; CELLS + 1]>> {
-    let start = &cells_start(case);
-    heat_assembly(case, start, |cx, assembly| {
-        let (resistors, devices) = (drive_resistors(&f.base), f.base.devices());
-        let (q, cgs, cgd) = (f.charges(), f.caps(false), f.caps(true));
-        let (conductance, driver_r) = (f.conductances(), f.driver_resistors());
-        let network = GateBatteryMotorHeatNetwork {
-            drive: CommutatedBatteryMotorHeatNetwork {
-                assembly,
-                resistors: &resistors,
-                devices: &devices,
-                bearing_cell: IDS[0],
-            },
-            gate: gate_bindings(&q, &cgs, &cgd, &conductance, &driver_r),
-            maximum_cells_per_chord: 4096,
-        };
-        let native = &case.steady.native;
-        let mut drive = network.bind(cx, start, native, p, case.start).unwrap();
-        let mut thermal = start.clone();
-        let mut rows = Vec::new();
-        for k in 0..steps {
-            let intervals = [CommutationInterval {
-                gates: case.gates(k),
-                duration_s: case.dt_s,
-            }];
-            let next = network
-                .step_candidate(
-                    cx,
-                    &thermal,
-                    thermal.time_s() + case.dt_s,
-                    &drive,
-                    &intervals,
-                    &[case.steady.command],
-                    case.substeps,
-                    case.load_cell,
-                    power_controls(),
-                    cycle_controls(),
-                    drive_controls(CELLS + 1),
-                    &[0.0; CELLS + 1],
-                )
-                .unwrap();
-            rows.push(Row {
-                state: *next.drive().state(),
-                kelvin: kelvin(case, next.thermal()),
-            });
-            (thermal, drive, _) = next.into_parts();
-        }
-        rows
-    })
-}
-
 /// The owner's step built by hand for a gate case (`held_to_owner`), with
 /// the parameters `at` gives at the cells' end temperatures. The new state,
 /// then the seven cells' heats and the four drivers'.
-pub(super) fn gate_owner<C: GateChannelResponse + Clone + 'static>(
+fn gate_owner<C: GateChannelResponse + Clone + 'static>(
     case: &Case<'_, GateStorage>,
     at: impl Fn(&[f64]) -> GateCommutationParameters<C>,
 ) -> impl Fn(usize, &[f64; 15], &[f64]) -> ([f64; 15], Vec<f64>) {
@@ -405,7 +603,7 @@ fn a_gate_graph_drives_its_gate_on_and_off_through_a_finite_driver() {
     // cell. A step of 1 s with the steady gates, then one with every gate
     // off.
     let laws = (0.0, false, 0.125);
-    let f = leak(gate_fixture(0.0, false, 0.125, false, false));
+    let f = leak(gate_fixture(0.0, false, 0.125));
     let steady = steady_drive(false);
     let p = authored(0.0, false);
     let off = DeviceGateState { on: [false; 4] };
@@ -413,10 +611,8 @@ fn a_gate_graph_drives_its_gate_on_and_off_through_a_finite_driver() {
         schedule: vec![steady.gates, off],
         ..gate_case(f, &steady, &p, 300.0, 1.0)
     };
-    let module = module_run(f, &case, &p, 2);
-    let graph = kernel_rows(&case, 2);
-    compare(&module, &graph, [5e-13, 5e-12]);
-    // Without the module: the owner by hand, and its closed form.
+    let graph: Vec<Row<_, [f64; CELLS]>> = kernel_rows(&case, 2);
+    // The owner by hand, and its closed form.
     held_to_owner(
         &case,
         &graph,
@@ -441,22 +637,20 @@ fn a_gate_graph_carries_the_thermal_channel_surface_and_the_miller_charge() {
     // surface rising 0.1 per volt and 0.05 per kelvin, the input high gate's
     // on resistance rising 0.125 ohm/K. Steps of 1/8 s.
     let laws = (0.05, true, 0.125);
-    let f = leak(gate_fixture(0.05, true, 0.125, false, false));
+    let f = leak(gate_fixture(0.05, true, 0.125));
     let steady = steady_drive(false);
     let p = authored(0.05, true);
     let case = gate_case(f, &steady, &p, 300.0, 0.125);
-    let module = module_run(f, &case, &p, 3);
-    let graph = kernel_rows(&case, 3);
-    compare(&module, &graph, [5e-13, 5e-12]);
-    // Without the module: the owner by hand, its surface `g` on three
-    // knots where the card's line has more, so not bit for bit.
+    let graph: Vec<Row<_, [f64; CELLS]>> = kernel_rows(&case, 3);
+    // The owner by hand, its surface `g` on three knots where the card's
+    // line has more, so not bit for bit.
     held_to_owner(
         &case,
         &graph,
         gate_owner(&case, closed_form(laws)),
         [2e-13, 1e-12],
     );
-    // The Miller charge is real, as the module checks: a gate-drain
+    // The Miller charge is real, as the module checked: a gate-drain
     // voltage moves by more than 1 uV in the first step.
     let (v0, g0) = voltages(&case.start, 0.05);
     let (v1, g1) = voltages(&graph[0].state, 0.05);
@@ -471,7 +665,7 @@ fn a_gate_graph_shares_a_finite_liquid_coolant_with_a_driver_cell() {
     // high gate's driver cell at 0.5 W/K. The on resistance rises
     // 0.175 ohm/K; steps of 1 s.
     let laws = (0.0, false, 0.175);
-    let f = leak(gate_fixture(0.0, false, 0.175, false, false));
+    let f = leak(gate_fixture(0.0, false, 0.175));
     let steady = steady_drive(false);
     let p = authored(0.0, false);
     let base = coolant(&f.base);
@@ -496,11 +690,9 @@ fn a_gate_graph_shares_a_finite_liquid_coolant_with_a_driver_cell() {
         coolant: Some(liquid),
         ..gate_case(f, &steady, &p, 300.0, 1.0)
     };
-    let module = module_linked_run(f, &case, &p, 2);
-    let graph = kernel_rows(&case, 2);
-    compare(&module, &graph, [5e-13, 5e-12]);
-    // Without the module: the owner by hand, the coolant's energy by its
-    // own caloric curve, and the closed form.
+    let graph: Vec<Row<_, [f64; CELLS + 1]>> = kernel_rows(&case, 2);
+    // The owner by hand, the coolant's energy by its own caloric curve, and
+    // the closed form.
     held_to_owner(
         &case,
         &graph,
@@ -516,7 +708,7 @@ fn a_gate_graph_shares_a_finite_liquid_coolant_with_a_driver_cell() {
     near(graph[0].state[8], 2.0);
 }
 
-/// The module's drive bound at one accepted state refuses a step from
+/// The module's drive, bound at one accepted state, refused a step from
 /// another (`gate_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state`
 /// and `gate_conductance_bound_at_one_state_refuses_a_step_from_another_accepted_state`).
 /// The graph binds nothing: from that other state it takes the step at the
@@ -528,16 +720,13 @@ fn a_gate_graph_steps_from_another_accepted_state_at_the_answers_there() {
     // Miller charge (1/8 s).
     let fixtures = [((0.0, false, 0.125), 1.0), ((0.05, true, 0.0), 0.125)];
     for (laws @ (miller, feedback, slope), dt_s) in fixtures {
-        let f = leak(gate_fixture(miller, feedback, slope, false, false));
+        let f = leak(gate_fixture(miller, feedback, slope));
         let steady = steady_drive(false);
         let p = authored(miller, feedback);
         let case = gate_case(f, &steady, &p, 320.0, dt_s);
-        let graph = kernel_rows(&case, 1);
-        // The module bound at that state takes the same step.
-        let module = module_run(f, &case, &p, 1);
-        compare(&module, &graph, [1e-14, 1e-12]);
-        // Without the module: the owner by hand at the laws' closed forms
-        // there, its new state bit for bit.
+        let graph: Vec<Row<_, [f64; CELLS]>> = kernel_rows(&case, 1);
+        // The owner by hand at the laws' closed forms there, its new state
+        // bit for bit.
         let owner = gate_owner(&case, closed_form(laws));
         let (next, _) = owner(0, &case.start, &graph[0].kelvin);
         assert_eq!(next.map(f64::to_bits), graph[0].state.map(f64::to_bits));

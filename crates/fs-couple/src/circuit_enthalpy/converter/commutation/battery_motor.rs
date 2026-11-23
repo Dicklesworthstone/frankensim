@@ -9,16 +9,14 @@
 //! OCV, capacitances, inductances, inertias, motor reciprocity and bearing drag
 //! stay fixed. Endpoint material feedback needs time refinement. Native sampled
 //! device limits do not certify unresolved peaks or semiconductor safe area.
-//! The default nine-state lane has no device capacitor states; device output
-//! storage with material heat is a declared graph of fs-system's
-//! `commutated_drive`. The `gate` child adds finite gate charge, Miller coupling and independently
-//! sourced gate-driver heat/work. Reverse recovery, avalanche and temperature-varying
-//! charge laws remain outside these fixed-storage material connections.
+//! The default nine-state lane has no device capacitor states. Device output
+//! storage with material heat, and finite gate charge with Miller coupling and
+//! driver heat, are declared graphs of fs-system's `commutated_drive`. Reverse
+//! recovery, avalanche and temperature-varying charge laws remain outside these
+//! fixed-storage material connections.
 
 use super::*;
 
-/// Finite gate charge, reciprocal Miller storage and separately received driver heat.
-pub mod gate;
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError, closed_balance};
 use crate::circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatError;

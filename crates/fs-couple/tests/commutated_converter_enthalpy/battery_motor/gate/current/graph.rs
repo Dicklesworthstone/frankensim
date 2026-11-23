@@ -3,9 +3,9 @@
 //!
 //! Each switch's channel follows its package card's complete I(Vds, Vgs)
 //! surface times the card's thermal multiplier at the package's temperature
-//! ([`CardSurface`]). Both are resolved and evaluated as the module's
-//! `GateCurrentSurfaceMaterial` does, through public fs-material and
-//! fs-matdb calls. The rest of the lane is the gate fixture's.
+//! ([`CardSurface`]). Both are resolved and evaluated as the retired module's
+//! `GateCurrentSurfaceMaterial` did, through public fs-material and fs-matdb
+//! calls. The rest of the lane is the gate fixture's.
 
 use std::sync::Arc;
 
@@ -17,13 +17,156 @@ use fs_phs::PhsError;
 use fs_phs::circuit::converter::commutation::gate::{
     GateChannelLaw, GateChannelPoint, GateChannelResponse,
 };
+use fs_qty::{Current, Dims};
 use fs_system::commutated_drive::{ChannelLaw, GateStorage};
 
-use super::super::super::graph::{Card, Case, compare, held_to_owner, kernel_rows, leak, text};
-use super::super::graph::{CELLS, gate_case, gate_owner, module_steps};
+use super::super::graph::{Card, Case, Row, held_to_owner, kernel_rows, leak, text};
 use super::*;
+use super::{CELLS, gate_case, gate_owner};
 
-/// A switch's channel from its package's card, as the module resolves it:
+struct CurrentFixture {
+    gate: GateFixture,
+    current: [PropertyKey; 4],
+    scale: PropertyKey,
+}
+fn current_fixture(miller: f64, slope: f64) -> CurrentFixture {
+    let mut gate = gate_fixture(miller, false, 0.0);
+    let current = core::array::from_fn(|i| {
+        PropertyKey::new(format!("channel_current_surface_{i}"), Current::DIMS)
+    });
+    let scale = PropertyKey::new("channel_temperature_multiplier", Dims::NONE);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in gate.base.card.claims().claims_ordered() {
+        claims.insert_claim(claim.clone()).unwrap();
+    }
+    let thermal = || {
+        ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            299.0,
+            350.0,
+        )
+    };
+    let mut add = |key: &PropertyKey, value, validity| {
+        claims.insert_claim(PropertyClaim{key:key.clone(),value,validity,
+            uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::LinearInside,observations:vec![],
+            provenance:Provenance{source:"manufactured original triangular channel-only current; not qualified transistor data".into(),license:"CC0-1.0".into(),artifact:None}}).unwrap();
+    };
+    for (device, key) in current.iter().enumerate() {
+        let drain: [f64; 5] = [-100.0, -1.0, 0.0, 1.0, 100.0];
+        let gate_v: [f64; 4] = [-4.0, 0.0, 1.0, 4.0];
+        let reversed = device % 2 == 1;
+        let mut samples = Vec::new();
+        for &vg in &gate_v {
+            for &vd in &drain {
+                let amps = vd.signum()
+                    * vd.abs().min(1.0)
+                    * vg.max(0.0)
+                    * if vd < 0.0 { 0.4 } else { 1.0 };
+                samples.push((if reversed { [vg, vd] } else { [vd, vg] }, amps));
+            }
+        }
+        let mut triangles = Vec::new();
+        for row in 0..gate_v.len() - 1 {
+            for col in 0..drain.len() - 1 {
+                let a = (row * drain.len() + col) as u32;
+                let b = a + 1;
+                let d = a + drain.len() as u32;
+                let e = d + 1;
+                for mut triangle in [[a, b, d], [b, e, d]] {
+                    if reversed {
+                        triangle.swap(1, 2);
+                    }
+                    triangles.push(triangle);
+                }
+            }
+        }
+        add(
+            key,
+            PropertyValue::Surface2D {
+                axes: if reversed {
+                    ["Vgs".into(), "Vds".into()]
+                } else {
+                    ["Vds".into(), "Vgs".into()]
+                },
+                axis_dims: [Voltage::DIMS; 2],
+                samples,
+                triangles,
+                dims: Current::DIMS,
+            },
+            thermal()
+                .with_quantity(
+                    "Vds",
+                    QuantitySpec::dimensional(Voltage::DIMS),
+                    -100.0,
+                    100.0,
+                )
+                .with_quantity("Vgs", QuantitySpec::dimensional(Voltage::DIMS), -4.0, 4.0),
+        );
+    }
+    add(
+        &scale,
+        PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(299.0, 1.0 - slope), (350.0, 1.0 + 50.0 * slope)],
+            dims: Dims::NONE,
+        },
+        thermal(),
+    );
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic-device".into(),
+            phase: "solid".into(),
+            process: "original signed triangular current and explicit thermal multiplier".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(
+        &card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+            density: &PropertyKey::new("density", Density::DIMS),
+            temperature_axis: "T",
+            lower: &common::point(299.0),
+            upper: &common::point(350.0),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        1e-6,
+    )
+    .unwrap();
+    gate.base.card = card;
+    gate.base.caloric = caloric;
+    CurrentFixture {
+        gate,
+        current,
+        scale,
+    }
+}
+fn current_initial(steady: &SteadyDrive, p: &GateCommutationParameters) -> [f64; 15] {
+    let mut state = initial(steady, p);
+    state[3..12].copy_from_slice(
+        &p.state(0.3, [12.0, 6.0], [10.0, 7.5], [2.0, 0.2, 2.0, 0.2])
+            .unwrap(),
+    );
+    state
+}
+fn command(steady: &SteadyDrive) -> BatteryMotorSwitchCommand {
+    BatteryMotorSwitchCommand {
+        auxiliary_load: None,
+        ..steady.command
+    }
+}
+fn approx(a: f64, b: f64) {
+    assert!((a - b).abs() < 2e-10, "{a:.17e} != {b:.17e}");
+}
+
+/// A switch's channel from its package's card, as the module resolved it:
 /// the complete surface of `current`, under the claim its reference point
 /// (0 V drain, -4 V gate) selects, times the multiplier `scale`.
 #[derive(Debug, Clone, Copy)]
@@ -74,7 +217,7 @@ impl ChannelLaw for CardSurface {
 }
 
 /// A surface times `factor` on the module's support, -20 V to 20 V drain
-/// and -4 V to 4 V gate, evaluated as the module's response evaluates it.
+/// and -4 V to 4 V gate, evaluated as the module's response evaluated it.
 #[derive(Debug, Clone)]
 struct Scaled {
     surface: Arc<PreparedSurfaceResponse>,
@@ -177,55 +320,65 @@ fn surface_case(
     (case, laws)
 }
 
-/// `run` on the module's thermal network for the fixture, its channels the
-/// module's current surfaces.
-fn module_network<R>(
-    f: &CurrentFixture,
-    run: impl FnOnce(&GateBatteryMotorThermalNetwork<'_, GateCurrentSurfaceBinding<'_>>) -> R,
-) -> R {
-    let context = gate_context();
-    let cells = f.gate.cells(&context);
-    let (r, d) = (drive_resistors(&f.gate.base), f.gate.base.devices());
-    let (q, cgs, cgd) = (f.gate.charges(), f.gate.caps(false), f.gate.caps(true));
-    let (current, driver) = (f.bindings(), f.gate.driver_resistors());
-    let bindings = material_bindings(&q, &cgs, &cgd, &current, &driver);
-    run(&current_network(&cells, &r, &d, bindings))
-}
-
-fn bits(point: GateChannelPoint) -> [u64; 3] {
-    let values = [
-        point.current_a,
-        point.drain_derivative_s,
-        point.gate_derivative_s,
-    ];
-    values.map(f64::to_bits)
-}
-
+/// The module test
+/// `original_triangles_retain_signed_saturation_cutoff_zero_mesh_and_named_partials`
+/// on the graph's copy of the module's surface law. Until the module
+/// retired, the copy was also held bit for bit to the module's bound
+/// sources, at 63 points per channel.
 #[test]
-fn a_current_graph_channel_answers_as_the_module_surface_does() {
-    // The module's sources bound at 300 K against the graph's laws there:
-    // a grid over the support, bit for bit, and the support's edges.
-    let f = leak(current_fixture(0.05, 0.2, Defect::None));
+fn a_current_graph_channel_keeps_the_signed_saturation_cutoff_zero_row_and_partials() {
+    let f = leak(current_fixture(0.05, 0.2));
     let p = authored(0.05, false);
-    let (case, laws) = surface_case(f, &p, 300.0);
-    let bound: CurrentDrive = module_network(f, |network| {
-        let thermal = f.gate.thermal();
-        let native = &case.steady.native;
-        network
-            .bind(&thermal, native, &p, case.start, || false)
-            .unwrap()
-    });
-    let module = bound.gate_material().channel_conductance();
-    for (law, module) in laws.iter().zip(module) {
-        let (graph, module) = (law.channel(300.0).unwrap(), module.native_response());
-        for vd in [-20.0, -2.0, -1.0, -0.75, 0.0, 0.75, 1.0, 2.0, 20.0] {
-            for vg in [-4.0, -1.0, 0.0, 0.75, 1.0, 2.0, 4.0] {
-                let [a, b] = [&graph, &module].map(|law| law.evaluate(vd, vg).unwrap());
-                assert_eq!(bits(a), bits(b), "{vd} V, {vg} V");
+    let (_, laws) = surface_case(f, &p, 300.0);
+    for (i, law) in laws.iter().enumerate() {
+        // The claim's own surface, drain first on the even packages, and the
+        // multiplier 1 at 300 K.
+        let scaled = law.at(300.0).unwrap();
+        assert_eq!(scaled.drain, i % 2);
+        near(scaled.factor, 1.0);
+        let mut claims = law.card.material.claims().claims_ordered();
+        let mut current = claims
+            .by_ref()
+            .filter(|(_, claim)| claim.key == f.current[i]);
+        let (_, claim) = current.next().unwrap();
+        assert!(current.next().is_none(), "one current claim per package");
+        let PropertyValue::Surface2D {
+            samples, triangles, ..
+        } = &claim.value
+        else {
+            panic!("original surface lost")
+        };
+        assert_eq!(scaled.surface.samples(), samples.as_slice());
+        assert_eq!(scaled.surface.triangles(), triangles.as_slice());
+        // Saturation, signed reverse current, the linear cell and cutoff,
+        // each with its partials and their finite differences.
+        let channel = law.channel(300.0).unwrap();
+        for (vd, vg, expected) in [
+            (2.0, 2.0, [2.0, 0.0, 1.0]),
+            (-2.0, 2.0, [-0.8, 0.0, -0.4]),
+            (0.75, 0.75, [0.5, 1.0, 1.0]),
+            (2.0, -1.0, [0.0, 0.0, 0.0]),
+        ] {
+            let point = channel.evaluate(vd, vg).unwrap();
+            let values = [
+                point.current_a,
+                point.drain_derivative_s,
+                point.gate_derivative_s,
+            ];
+            for (a, b) in values.into_iter().zip(expected) {
+                approx(a, b);
             }
+            let e = 1e-5;
+            let amps = |vd, vg| channel.evaluate(vd, vg).unwrap().current_a;
+            approx((amps(vd + e, vg) - amps(vd - e, vg)) / (2.0 * e), values[1]);
+            approx((amps(vd, vg + e) - amps(vd, vg - e)) / (2.0 * e), values[2]);
+        }
+        // No current along the 0 V drain row, and none outside the support.
+        for vg in [-4.0, -0.2, 0.0, 0.7, 2.0, 4.0] {
+            assert_eq!(channel.evaluate(0.0, vg).unwrap().current_a, 0.0);
         }
         for (vd, vg) in [(20.01, 1.0), (-20.01, 1.0), (1.0, 4.01)] {
-            assert!(graph.evaluate(vd, vg).is_err());
+            assert!(channel.evaluate(vd, vg).is_err());
         }
     }
 }
@@ -234,13 +387,11 @@ fn a_current_graph_channel_answers_as_the_module_surface_does() {
 fn a_current_graph_scales_its_channel_power_at_the_accepted_temperature() {
     // The module's fixture: Cgd 0.05 F, the multiplier rising 0.2 per K, two
     // steps of 1/1024 s from the module's current state.
-    let f = leak(current_fixture(0.05, 0.2, Defect::None));
+    let f = leak(current_fixture(0.05, 0.2));
     let p = authored(0.05, false);
     let (case, _) = surface_case(f, &p, 300.0);
-    let graph = kernel_rows(&case, 2);
-    let module = module_network(f, |network| module_steps(network, &case, &p, 2));
-    compare(&module, &graph, [1e-14, 1e-12]);
-    // Without the module: the owner by hand with the surface in closed form.
+    let graph: Vec<Row<_, [f64; CELLS]>> = kernel_rows(&case, 2);
+    // The owner by hand with the surface in closed form.
     let closed = parameters_at(0.05, |_, t| ClosedSurface(1.0 + 0.2 * (t - 300.0)));
     held_to_owner(&case, &graph, gate_owner(&case, closed), [1e-14, 2e-13]);
     // The module's closed forms for the first step: each package warms by
@@ -271,7 +422,7 @@ fn a_current_graph_scales_its_channel_power_at_the_accepted_temperature() {
     }
 }
 
-/// The module's drive bound at one accepted state refuses a step from
+/// The module's drive, bound at one accepted state, refused a step from
 /// another (`current_surface_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state`).
 /// The graph binds nothing: from that other state it takes the step at the
 /// laws' answers there.
@@ -279,15 +430,12 @@ fn a_current_graph_scales_its_channel_power_at_the_accepted_temperature() {
 fn a_current_graph_steps_from_another_accepted_state_at_the_answers_there() {
     // The refusal's fixture from 320 K: only the channels' multiplier
     // varies with temperature.
-    let f = leak(current_fixture(0.05, 0.2, Defect::None));
+    let f = leak(current_fixture(0.05, 0.2));
     let p = authored(0.05, false);
     let (case, laws) = surface_case(f, &p, 320.0);
-    let graph = kernel_rows(&case, 1);
-    // The module bound at that state takes the same step.
-    let module = module_network(f, |network| module_steps(network, &case, &p, 1));
-    compare(&module, &graph, [1e-14, 1e-12]);
-    // Without the module: the owner by hand at the laws' answers at the
-    // graph's end temperatures, its new state bit for bit.
+    let graph: Vec<Row<_, [f64; CELLS]>> = kernel_rows(&case, 1);
+    // The owner by hand at the laws' answers at the graph's end
+    // temperatures, its new state bit for bit.
     let owner = gate_owner(&case, parameters_at(0.05, |i, t| laws[i].at(t).unwrap()));
     let (next, _) = owner(0, &case.start, &graph[0].kelvin);
     assert_eq!(next.map(f64::to_bits), graph[0].state.map(f64::to_bits));

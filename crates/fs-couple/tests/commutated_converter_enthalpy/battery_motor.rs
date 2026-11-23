@@ -3,7 +3,7 @@
 mod capacitance;
 #[path = "battery_motor/charge/graph.rs"]
 mod charge;
-#[path = "battery_motor/gate.rs"]
+#[path = "battery_motor/gate/graph.rs"]
 mod gate;
 #[path = "battery_motor/graph.rs"]
 mod graph;

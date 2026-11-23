@@ -2626,12 +2626,11 @@ manufactured fixtures, not measured device qualification.
 
 ### Finite gate charge, Miller feedback and separately received driver heat
 
-`converter::commutation::battery_motor::gate` connects the original
+`converter::commutation::battery_motor::gate` coupled the original
 fifteen-state gate-controlled finite battery/converter/motor trajectory to the
-same material and finite-cell/`HeatAssembly` enthalpy owners. Its nine converter
-coordinates retain four gate charges in addition to flux, two bus charges and
-two node charges grouped with the high-side gate electrodes. All accepted
-coordinates continue through commands and thermal boundaries.
+same material and finite-cell/`HeatAssembly` enthalpy owners by hand. It
+retired; its fixtures run only as the declared graphs below. The gate materials
+of `converter::commutation` that it bound remain, and no lane binds them:
 
 `GateMaterialBindings<B>` requires four complete intrinsic drain-source Q(V)
 sources, four positive constant Cgs sources, four nonnegative constant Cgd
@@ -2677,28 +2676,14 @@ reinterpreted incoming charge and incomplete receivers refuse. Intrinsic Qds,
 Cgs and Cgd remain unchanged along accepted charge history; temperature-dependent
 reversible storage requires its own caloric model and is refused here.
 
-Every proposal uses the same native gate-controlled solve and original
-electrical/thermal loop. The numerical cache compares the complete current
-response axes, samples, triangulation, voltage ranges and exact scale, or the
-complete resolved legacy G(Vgs) curves, together with all driver coefficients
-and the existing 33-word drive key. Retained immutable surface data is shared;
-allocation identity alone never proves coefficient equality. Fresh source
-admission and full subdivision-budget charging precede reuse.
-
-Converter storage includes the separate intrinsic drain, Cgs and Cgd energy
-changes. The same represented channel current supplies electrical flow and
-Vds*I device heat. Four signed gate-supply works and four nonnegative driver
-heats extend the original fourteen-loss physical balance; driver recovery
-does not become negative heat or an inferred battery transfer. The original
-finite coolant, contact and radiation owners transport the deposited heat.
-
 On the composition kernel, `tests/commutated_converter_enthalpy/battery_motor/
 gate/graph.rs` declares this lane's fixtures as graphs. fs-system's
 `CommutatedBatteryMotorDrive` runs in its `GateStorage` lane:
 - its storage is read once from the package card (Qds over -100 V to 100 V,
-  Cgs, Cgd at 300 K) and must equal the module's authored storage;
+  Cgs, Cgd at 300 K) and must equal the authored storage, as the module's
+  bind required;
 - each channel follows the card's G line over -4 V to 4 V at its package's
-  temperature, resolved as the module resolves it;
+  temperature, resolved as the module resolved it;
 - each gate's on and off resistances follow the card at its driver cell.
 
 The card laws live in the test file and use only public fs-material and
@@ -2708,7 +2693,8 @@ authored on and off voltages. A coolant is a timeline cell without a port,
 joined to the input high gate's driver cell by the stand-in for
 `FixedCooling`.
 
-Held to the module step for step, within 5e-13 relative and 5e-12 K:
+Until the module retired, these were held to it step for step, within
+5e-13 relative and 5e-12 K:
 - the finite driver on, then off (steps of 1 s);
 - the Miller fixture with the G(Vgs, T) surface (three steps of 1/8 s);
 - the driver's coolant through the module's heat assembly (2 kg, joined at
@@ -2729,14 +2715,13 @@ Also held without the module:
 - with the coolant, 300 + 10/7 K and 300 + 2/7 K;
 - the Miller charge moving a gate-drain voltage by more than 1 uV.
 
-The module's drive is bound at one accepted state, and it refuses a step from
-another state when a driver resistance or a channel line varies with
+The module's drive was bound at one accepted state, and it refused a step
+from another state when a driver resistance or a channel line varied with
 temperature. The graph binds nothing. From the 320 K state of those two
-fixtures, it takes the step at the laws' answers there. That step:
-- equals the module's step with its drive bound at 320 K, within 1e-14
-  relative and 1e-12 K;
-- has the owner's new state bit for bit, and each cell balanced within
-  5e-13 J.
+fixtures, it takes the step at the laws' answers there. That step has the
+owner's new state bit for bit, and each cell balanced within 5e-13 J. Until
+the module retired, the step also equaled the module's step with its drive
+bound at 320 K, within 1e-14 relative and 1e-12 K.
 
 Every cell ends at or above 320 K. At those end temperatures, the driver
 resistance and each channel line differ in their bits from their 300 K
@@ -2791,18 +2776,29 @@ Not carried by the graph:
 lane. Each channel follows its package card's complete I(Vds, Vgs) surface
 times the card's thermal multiplier at the package's temperature. The
 harness resolves both through public fs-material and fs-matdb calls as the
-module does: the claim that the reference point (0 V drain, -4 V gate)
+module did: the claim that the reference point (0 V drain, -4 V gate)
 selects, then that claim's surface. It evaluates the surface on the
 module's support, -20 V to 20 V drain and -4 V to 4 V gate. As in the
 module's tests, the steps of 1/1024 s run without the auxiliary load, so
 the graph routes no load port.
 
-Held to the module:
-- each channel law at 300 K equals the module's bound source bit for bit,
-  on a grid of 63 points over the support, and refuses three points just
-  outside it;
-- two steps from the module's current state (Cgd 0.05 F, the multiplier
-  rising 0.2 per K), within 1e-14 relative and 1e-12 K.
+Each channel law at 300 K meets the module test
+`original_triangles_retain_signed_saturation_cutoff_zero_mesh_and_named_partials`'s
+own point values, applied to the harness's copy of the module's surface law
+(`a_current_graph_channel_keeps_the_signed_saturation_cutoff_zero_row_and_partials`):
+- 2 A at 2 V drain and 2 V gate, -0.8 A at -2 V and 2 V, 0.5 A at 0.75 V
+  and 0.75 V, and none at 2 V and -1 V, each with both partials, within
+  2e-10. Each partial is also within 2e-10 of a central difference over
+  1e-5 V;
+- no current on the 0 V drain row, and a refusal at three points just
+  outside the support;
+- the selected claim's own samples and triangles, the drain axis first on
+  the even packages, and the multiplier 1.
+
+Until the module retired, the copy was also held bit for bit to the
+module's bound sources, on a grid of 63 points per channel. Two steps from
+the module's current state (Cgd 0.05 F, the multiplier rising 0.2 per K)
+were held to the module within 1e-14 relative and 1e-12 K.
 
 Held without the module:
 - to `PreparedGateBatteryMotorCycle` built by hand at the graph's end
@@ -2815,15 +2811,15 @@ Held without the module:
   scaled by 1 + 0.2 (T - 300 K) at its end temperature. Each driver cell
   warms by its resistor's heat.
 
-The module's drive is bound at one accepted state, and it refuses a step
-from another state when the channels' multiplier varies with temperature
+The module's drive was bound at one accepted state, and it refused a step
+from another state when the channels' multiplier varied with temperature
 (`current_surface_drive_bound_at_one_state_refuses_a_step_from_another_accepted_state`).
 From that fixture's 320 K state, the graph takes the step at the laws'
-answers there. That step:
-- equals the module's step with its drive bound at 320 K, within 1e-14
-  relative and 1e-12 K;
-- has the new state of the owner built by hand at the laws' answers at the
-  end temperatures bit for bit, and each cell balanced within 2e-13 J.
+answers there. That step has the new state of the owner built by hand at
+the laws' answers at the end temperatures bit for bit, and each cell
+balanced within 2e-13 J. Until the module retired, the step also equaled
+the module's step with its drive bound at 320 K, within 1e-14 relative and
+1e-12 K.
 
 Every cell ends at or above 320 K. At those end temperatures, each
 multiplier differs in its bits from its 300 K value.
@@ -2862,23 +2858,12 @@ Not carried by the current-surface graph:
   no record;
 - the module's step through its generic heat assembly
   (`current_surface_thermal_feedback_uses_the_original_generic_heat_assembly`)
-  is not compared with the graph. Its closed forms and its energy balance
+  was not compared with the graph. Its closed forms and its energy balance
   hold on the graph's step (above).
 
 The surface law makes none of these checks. It evaluates the card's surface
 wherever the drive asks. It refuses only a point outside the support or
 outside every surface cell.
-
-Focused G0/G1 fixtures specify source-owned current saturation/cutoff and signed
-reverse current, original-cell derivatives, explicit thermal scaling,
-full-rectangle support and source/receiver/continuation refusals, in addition
-to the existing finite-RC/temperature-feedback and Miller energy-account cases.
-The coupled extension and fixtures passed pinned Rust syntax formatting and
-source/API review. Full coupled typechecking and execution remain unverified
-because the complete native dependency graph is unavailable. Endpoint thermal
-feedback requires time refinement. Manufactured surfaces and thermal scales
-do not qualify measured devices or unresolved waveform peaks; reverse
-recovery, avalanche and finite-energy gate-rail dynamics remain separate gaps.
 
 Equality of the retained source snapshots (`DeviceConductionMaterial`,
 `DeviceCapacitanceMaterial`, `DeviceChargeMaterial`, `GateConductanceMaterial`,
