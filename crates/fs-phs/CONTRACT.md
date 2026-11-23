@@ -4127,6 +4127,14 @@ uses the full heat and signed source-work account. Gate-driver recovery is
 negative external source work, never negative resistor heat or an invented
 battery transfer.
 
+Each gate's account also keeps the signed charge drawn from its on rail and
+from its off rail (`rail_charge_c`). A command selects one rail for its
+interval, and the represented current that supplies the source work also
+supplies that charge, so each rail's work is its authored voltage times its
+charge. A caller that holds each rail at its voltage receives the source work
+of a program that switches the gate; a single port at the program's mean
+voltage and mean current would not.
+
 The gate and channel evaluations enforce original voltage/current support at
 initial, accepted discrete-effort and endpoint states. They do not certify
 unresolved inter-step peaks. Temporal refinement remains explicit for small
@@ -4140,9 +4148,12 @@ source-owned saturation, exact cutoff,
 asymmetric reverse current and passive negative differential slope. The finite
 drive checks all fifteen state equations and eighteen physical heat terms at
 the same effort, saturated motoring and regeneration, and transactional
-rollback on late source/device/cancellation refusal. State, heat and work
-converge under 8/16/32 temporal refinement against an independently written SI
-ODE reference. These manufactured laws and bounded reference cases establish
+rollback on late source/device/cancellation refusal. A two-interval program
+with a negative off rail draws each interval's gate charge from its command's
+rail alone; the program's rail charges equal its intervals' own bit for bit,
+sum to the gate charge change, and times the rail voltages give the source
+work. State, heat and work converge under 8/16/32 temporal refinement against
+an independently written SI ODE reference. These manufactured laws and bounded reference cases establish
 numerical behavior, not measured semiconductor qualification.
 
 ## Finite battery and motor shafts with device capacitor charge

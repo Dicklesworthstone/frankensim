@@ -73,6 +73,9 @@ pub struct GatePowerAccount {
     pub gate_source_energy_change_j: [f64; 4],
     pub gate_drain_energy_change_j: [f64; 4],
     pub source_work_j: [f64; 4],
+    /// Per gate, the signed charge drawn from its on rail, then its off rail.
+    /// A rail holds one voltage, so its work is that voltage times this charge.
+    pub rail_charge_c: [[f64; 2]; 4],
     pub resistor_heat_j: [f64; 4],
     /// Work-conjugate mean Vgs, not absolute high-side gate potential.
     pub mean_voltage_v: [f64; 4],

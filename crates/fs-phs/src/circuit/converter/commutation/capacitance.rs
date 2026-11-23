@@ -539,6 +539,10 @@ impl<const N: usize> ConverterCore<N> {
                 gate_source_energy_change_j: core::array::from_fn(|k| s[7 + k]),
                 gate_drain_energy_change_j: core::array::from_fn(|k| s[11 + k]),
                 source_work_j: g.driver.map(|p| (Dd::from_f64(dt) * p.supplied).to_f64()),
+                rail_charge_c: g.driver.map(|p| {
+                    let q = (Dd::from_f64(dt) * p.current).to_f64();
+                    if p.on { [q, 0.0] } else { [0.0, q] }
+                }),
                 resistor_heat_j: g.driver.map(|p| (Dd::from_f64(dt) * p.loss).to_f64()),
                 mean_voltage_v: core::array::from_fn(|k| e[5 + k]),
                 mean_current_a: g.driver.map(|p| p.current_a),
@@ -688,6 +692,7 @@ struct ConverterAccumulator {
     means: [Dd; 5],
     last: Option<([f64; 5], [DeviceConductionPoint; 4])>,
     gate_work: [Dd; 4],
+    rail_charge: [[Dd; 2]; 4],
     gate_voltage: [Dd; 4],
     gate_current: [Dd; 4],
     last_gate: Option<([f64; 4], [f64; 4], [f64; 4])>,
@@ -704,6 +709,7 @@ impl ConverterAccumulator {
             means: [Dd::ZERO; 5],
             last: None,
             gate_work: [Dd::ZERO; 4],
+            rail_charge: [[Dd::ZERO; 2]; 4],
             gate_voltage: [Dd::ZERO; 4],
             gate_current: [Dd::ZERO; 4],
             last_gate: None,
@@ -730,6 +736,10 @@ impl ConverterAccumulator {
             for k in 0..4 {
                 self.gate_work[k] = self.gate_work[k] + Dd::from_f64(g.source_work_j[k]);
                 self.absolute_work = self.absolute_work + Dd::from_f64(g.source_work_j[k].abs());
+                for r in 0..2 {
+                    self.rail_charge[k][r] =
+                        self.rail_charge[k][r] + Dd::from_f64(g.rail_charge_c[k][r]);
+                }
                 self.gate_voltage[k] =
                     self.gate_voltage[k] + Dd::from_f64(dt) * Dd::from_f64(g.mean_voltage_v[k]);
                 self.gate_current[k] =
@@ -776,6 +786,7 @@ impl ConverterAccumulator {
                     gate_source_energy_change_j: core::array::from_fn(|k| s[7 + k]),
                     gate_drain_energy_change_j: core::array::from_fn(|k| s[11 + k]),
                     source_work_j: self.gate_work.map(Dd::to_f64),
+                    rail_charge_c: self.rail_charge.map(|q| q.map(Dd::to_f64)),
                     resistor_heat_j: [heat[9], heat[10], heat[11], heat[12]],
                     mean_voltage_v: if plan.integration_steps == 1 {
                         voltage

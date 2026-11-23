@@ -563,6 +563,92 @@ fn fifteen_state_miller_drive_uses_one_effort_for_all_kcl_storage_work_and_eight
     close(step.native.dissipated, all_heat.iter().sum(), 3e-10);
 }
 
+// Each driver rail holds one voltage, so its work is that voltage times the
+// charge drawn from it. A program that switches every gate draws on both
+// rails, and the whole program's rail charges are its intervals' own.
+#[test]
+fn a_switching_program_draws_each_gate_charge_from_the_rail_its_command_selects() {
+    let mut p = gate_parameters(GATE_CAP, MILLER_CAP);
+    // A negative off rail, so that both rails do work.
+    let rails = GateDriver {
+        off_voltage_v: -1.5,
+        ..DRIVER
+    };
+    p.gate_drivers = [rails; 4];
+    let dt = 1.0 / 1024.0;
+    let first = [true, false, true, false];
+    let deck = [interval(first, dt), interval(first.map(|on| !on), dt)];
+    let prepare = |deck: &[CommutationInterval]| {
+        PreparedGateBatteryMotorCycle::new_gate_controlled(
+            drive_model(),
+            p.clone(),
+            deck,
+            3,
+            electrical(),
+            controls(),
+            || false,
+        )
+        .unwrap()
+    };
+    let command = BatteryMotorSwitchCommand {
+        shaft_torque_nm: [-0.2, 0.03],
+        auxiliary_load: None,
+    };
+    let mut whole = prepare(&deck);
+    let before = gate_drive_state(
+        &whole,
+        &p,
+        [52.0, 0.1, 12.1, 0.5, 11.8, 6.4, 10.75, 4.0, 0.1, 4.0, -0.4],
+        [1.4, 0.2, 1.3, 0.1],
+    );
+    let mut next = [0.0; 15];
+    let step = whole
+        .step_controlled(&before, command, &mut next, || false)
+        .unwrap();
+    let g = step.converter.gate.as_ref().unwrap();
+    // Each interval alone, from where the one before it ended.
+    let mut middle = [0.0; 15];
+    let mut end = [0.0; 15];
+    let pieces = [
+        prepare(&deck[..1])
+            .step_controlled(&before, command, &mut middle, || false)
+            .unwrap(),
+        prepare(&deck[1..])
+            .step_controlled(&middle, command, &mut end, || false)
+            .unwrap(),
+    ];
+    assert_eq!(end.map(f64::to_bits), next.map(f64::to_bits));
+    let c = controls();
+    let (mut work_defect, mut charge_defect) = (0.0_f64, 0.0_f64);
+    for k in 0..4 {
+        for (piece, interval) in pieces.iter().zip(deck) {
+            let q = piece.converter.gate.as_ref().unwrap().rail_charge_c[k];
+            // The command's rail: on charges the gate, off takes charge back.
+            let (rail, sign) = if interval.gates.on[k] {
+                (0, 1.0)
+            } else {
+                (1, -1.0)
+            };
+            assert!(sign * q[rail] > 0.0);
+            assert_eq!(q[1 - rail].to_bits(), 0);
+            assert_eq!(g.rail_charge_c[k][rail].to_bits(), q[rail].to_bits());
+        }
+        let [on, off] = g.rail_charge_c[k];
+        let defect = rails.on_voltage_v * on + rails.off_voltage_v * off - g.source_work_j[k];
+        assert!(
+            defect.abs()
+                <= c.absolute_energy_tolerance_j
+                    + c.relative_energy_tolerance * g.source_work_j[k].abs()
+        );
+        work_defect = work_defect.max(defect.abs());
+        charge_defect = charge_defect.max((on + off - (next[8 + k] - before[8 + k])).abs());
+    }
+    close(charge_defect, 0.0, 1e-15);
+    println!(
+        "rail work against source work {work_defect:e} J; rail charge against gate charge {charge_defect:e} C"
+    );
+}
+
 #[test]
 fn fifteen_state_steady_regeneration_recharges_the_finite_battery_without_resetting_gates() {
     let p = gate_parameters(GATE_CAP, MILLER_CAP);

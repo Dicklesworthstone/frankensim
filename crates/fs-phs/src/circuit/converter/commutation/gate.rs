@@ -297,6 +297,8 @@ pub struct GateDriverBranch {
     resistance_ohm: f64,
     maximum_current_a: f64,
     conductance_s: f64,
+    /// Whether the command selected the on rail.
+    on: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -316,6 +318,8 @@ pub struct GateDriverPoint {
     pub(super) supplied: Dd,
     pub(super) delivered: Dd,
     pub(super) loss: Dd,
+    /// The rail the current is drawn from: on (`true`) or off.
+    pub(super) on: bool,
 }
 
 impl GateDriver {
@@ -346,6 +350,7 @@ impl GateDriver {
             resistance_ohm,
             maximum_current_a: self.maximum_current_a,
             conductance_s: 1.0 / resistance_ohm,
+            on,
         })
     }
 
@@ -412,6 +417,7 @@ impl GateDriverBranch {
             supplied,
             delivered,
             loss,
+            on: self.on,
         })
     }
 }
