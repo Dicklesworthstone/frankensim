@@ -32,6 +32,9 @@
 //! Kirchhoff netlist of fs-phs as one Component whose resistors heat what
 //! their heat ports are joined to, and `battery` does the same for the
 //! equivalent-circuit battery of fs-phs and its two resistances.
+//! `commutated_drive` runs the battery-fed commutated motor drive of fs-phs,
+//! one gate program per step, its resistances and switches heating their
+//! ports.
 //!
 //! # Version 0
 //!
@@ -54,6 +57,8 @@ mod adaptive;
 pub mod battery;
 #[cfg(feature = "phs")]
 pub mod circuit;
+#[cfg(feature = "phs")]
+pub mod commutated_drive;
 #[cfg(feature = "constitutive")]
 pub mod constitutive;
 pub mod elements;

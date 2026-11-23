@@ -4071,3 +4071,114 @@ Not claimed:
 - its gap-limit and budget refusals as graph behaviour;
 - a field coefficient that depends on temperature;
 - fringing.
+
+## Commutated battery-motor drive Component with heat ports
+
+The optional `phs` feature also exposes
+`commutated_drive::CommutatedBatteryMotorDrive` (bead
+`frankensim-rc-1109-root-3gc12.6.6`, under `.9.2`). It is the drive that
+`fs_couple::circuit_enthalpy::converter::commutation::battery_motor` couples
+in its `capacitance` and `charge` lanes. Its owner is the drive of
+`fs_phs::circuit::converter::commutation::capacitance::battery_motor`: the
+equivalent-circuit battery and its lead, a two-leg converter of four switches
+(channel, body diode and output storage each) and a DC motor whose rotor and
+stator both turn.
+
+A step is the owner's whole gate program, `step_interval_commands_controlled`
+over every interval and substep in one native workspace; nothing is
+integrated here. The owner is built with the resistances and switches of the
+step. A step is one period of the program; any other length is refused.
+
+Ports, in order:
+- `rotor`, `stator`: rotational, `EffortIn`. Each receives the torque on its
+  shaft, held through the program, and returns the owner's time-weighted mean
+  shaft velocity. Torque times mean velocity times the step is the owner's
+  shaft work.
+- The ten heat ports of `HEAT_PORTS`: the converter winding; the four
+  switches, each with its channel and diode heat together; the battery's two
+  resistances; the lead; the motor winding; the bearing.
+- `heat_auxiliary_load` when the program has an auxiliary load: the work the
+  load took.
+
+Each heat port receives the temperature where its heat leaves and returns
+minus that heat over the step divided by the step.
+
+State is the owner's eleven coordinates. Stored energy is the owner's
+Hamiltonian: the battery's, the converter's (switch storage included) and the
+motor's. The switch storage is one `DeviceStorage` parameter: four constant
+capacitances or four charge-voltage curves. It is fixed; storage that changed
+with temperature would need its entropy.
+
+**Laws.** `following(resistor, law)` gives one of the five resistances a
+`circuit::ResistanceLaw`. `switch_following(position, law)` gives a switch a
+`SwitchLaw`: its channel, diode and limits at a temperature. Each is asked at
+the temperature its heat port receives. A law with no answer, or a resistance
+that is not positive and finite, refuses the step with the port's name
+(`CommutatedDriveError::Law`); nothing is clamped. Inductances, capacitances,
+the OCV, the motor's coupling and inertias and the bearing drag are fixed.
+The error type is the drive's own, as for the battery: `ElementError` has no
+variant for an owner's refusal or a balance defect.
+
+**Heat and balance.** The heats, the load's work and the shaft works are the
+owner's cycle accounts. Each of the following is refused (`Balance`) beyond
+the rounding floor plus the caller's `energy_tolerance_j`:
+- the owner's balance residual, booked as numerical loss;
+- the differences of stored change, heat and supplied work from the owner's
+  native record;
+- the difference of each shaft port's work from the owner's shaft work.
+
+A refused step writes neither outputs nor state. The owner keeps each
+substep's Newton residual within its budget and gives the cycle no
+certificate, so the receipt reports the largest substep residual as both
+residual and tolerance.
+
+**Class and identity.** The drive is `Class::Smooth` with no tangent: the
+kernel differences the port map. The map is smooth except where a body diode
+starts or stops conducting, a switch reaches a limit or the load changes
+branch as the inputs move. Identity words bind the curve, every parameter,
+the storage law, the program, both controls, each law's words (counted) and
+the tolerance. The codec is eleven words of `f64` bits; encode and decode
+refuse a state whose energy the laws do not admit.
+
+`tests/commutated_drive.rs` (3 tests, both storage laws each), on a program
+of a dead time then input low and output high on, with an auxiliary load;
+both the input low and output high diodes conduct:
+- a step with all five resistances and four switches following laws against
+  the owner built by hand at the laws' answers: state, mean velocities and
+  every heat port bit for bit; stored change, entropy; the conformance kit;
+- six periods on the kernel with two torque sources and eleven heat
+  capacities. Proposed again at the temperatures the bodies returned, the
+  drive takes the kernel's step within 1.5e-16 relative (bound 1.5e-15) and
+  gives each body its heat within 2.6e-14 J (bound 2.5e-13). The ledger
+  closes within 6.2e-18 J (bound 1e-16), and the input high body warms
+  past 330 K, so its diode threshold feeds back;
+- refusals:
+  - construction;
+  - a second law on the same resistance or switch;
+  - a step that is not one period;
+  - a non-finite torque or temperature, and a zero temperature;
+  - a switch law out of its range (`Law` naming `heat_input_low`);
+  - the owner's channel limit (`Step`);
+  - cancellation.
+
+  Each leaves outputs and candidate untouched. The codec refuses a short
+  word list and a state outside the curve, and the identity changes with
+  the storage law and with every law followed.
+
+Planted defects, one at a time, each failed at least one test:
+- a switch's heat taken with another switch's diode;
+- the load's work not routed;
+- the stator given the rotor's torque;
+- two resistance laws asked at each other's ports;
+- a switch law asked at its neighbour's temperature;
+- a step of any length;
+- a decode that admits any state;
+- a switch law with no answer replaced by the authored switch;
+- an identity without the resistance laws;
+- the program's end velocity in place of its mean;
+- entropy without the load.
+
+Not claimed: torques that change within the program; gate charge and
+gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
+avalanche; storage, OCV or bearing drag that change with temperature. The
+graphs of the module's fixtures are a separate package.
