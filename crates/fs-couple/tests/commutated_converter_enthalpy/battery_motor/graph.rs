@@ -10,8 +10,9 @@
 //!   fixture's lane ([`Lane`]), its five resistances following
 //!   [`CardResistance`] and its four switches following [`CardSwitch`];
 //! - two `elements::Force` sources holding the command's shaft torques;
-//! - the seven cells as one backward-Euler timeline whose cell ports return
-//!   end-of-step temperatures;
+//! - the seven cells, and the fixture's coolant if it has one ([`Coolant`]),
+//!   as one backward-Euler timeline whose cell ports return end-of-step
+//!   temperatures. The coolant has no port;
 //! - one heat route per heat port into the module's receiving cell;
 //! - where the fixture links two cells, the same link in the timeline at the
 //!   module's fixed conductance ([`FixedCoolingStandIn`]).
@@ -76,6 +77,33 @@ pub(super) struct Case<'s, L: Lane = DeviceStorage> {
     pub(super) schedule: Vec<DeviceGateState>,
     /// Whether the cells carry the module's heat-assembly link ([`LINK`]).
     pub(super) linked: bool,
+    /// The module's finite liquid coolant, linked to the inductor's cell.
+    pub(super) coolant: Option<&'static Coolant>,
+}
+
+/// The module's finite liquid coolant: an eighth cell with a caloric law of
+/// its own, joined to the inductor's cell by the link [`LINK`] names.
+pub(super) struct Coolant {
+    pub(super) card: MaterialCard,
+    pub(super) caloric: ResolvedHeatCapacityCurve,
+    pub(super) context: QueryPoint,
+    pub(super) cell: DepositedCell,
+}
+
+/// The case's link: [`LINK`], or with a coolant the same link from the
+/// inductor's cell to the coolant's.
+fn link<L: Lane>(case: &Case<'_, L>) -> Option<(u64, [CellId; 2], f64)> {
+    match case.coolant {
+        Some(coolant) => Some((LINK.0, [IDS[0], coolant.cell.id], LINK.2)),
+        None => case.linked.then_some(LINK),
+    }
+}
+
+/// The timeline's cells: the seven, then the coolant if any.
+fn cell_ids<L: Lane>(case: &Case<'_, L>) -> Vec<CellId> {
+    IDS.into_iter()
+        .chain(case.coolant.map(|coolant| coolant.cell.id))
+        .collect()
 }
 
 /// A drive lane whose owner the harness steps by hand (`owner_step`).
@@ -179,12 +207,12 @@ impl<L: Lane> Case<'_, L> {
     }
 }
 
-/// One accepted step: the drive's coordinates and the seven cells'
-/// temperatures \[K\].
+/// One accepted step: the drive's coordinates and the cells' temperatures
+/// \[K\], the seven in `IDS` order, then the coolant if any.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Row<S = [f64; 11]> {
+pub(super) struct Row<S = [f64; 11], K = [f64; 7]> {
     pub(super) state: S,
-    pub(super) kelvin: [f64; 7],
+    pub(super) kelvin: K,
 }
 
 pub(super) fn leak<T>(value: T) -> &'static T {
@@ -338,8 +366,8 @@ impl SwitchLaw for CardSwitch {
     }
 }
 
-/// The fixture's caloric curve as the implicit timeline's law. No link
-/// joins the cells, so the conductivity is never used.
+/// A caloric curve as the implicit timeline's law. No conductive link joins
+/// the cells, so the conductivity is never used.
 struct Caloric(&'static ResolvedHeatCapacityCurve);
 
 impl ConductivityLaw for Caloric {
@@ -384,13 +412,14 @@ impl ImplicitConductionLaw for Caloric {
 
 /// The graph's stand-in for the module's `FixedCooling`, local to these
 /// tests and not a material law: the link at the fixed conductance the
-/// heat-assembly fixtures give it. The timeline takes `Q = G (T_a - T_b)`;
-/// the law gives its derivatives in both cells' enthalpies.
-struct FixedCoolingStandIn(&'static Caloric);
+/// heat-assembly fixtures give it, between cells of the two caloric laws.
+/// The timeline takes `Q = G (T_a - T_b)`; the law gives its derivatives in
+/// both cells' enthalpies.
+struct FixedCoolingStandIn([&'static Caloric; 2]);
 
 impl ImplicitLinkLaw for FixedCoolingStandIn {
     fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
-        [self.0.0.curve(); 2]
+        self.0.map(|law| law.0.curve() as &dyn ThermalLaw)
     }
 
     fn state_at_specific_enthalpies(
@@ -402,8 +431,8 @@ impl ImplicitLinkLaw for FixedCoolingStandIn {
     ) -> Result<ImplicitLinkState, DepositionError> {
         checkpoint()?;
         let [a, b] = enthalpies_j_kg;
-        let a = ImplicitConductionLaw::state_at_specific_enthalpy(self.0, a)?;
-        let b = ImplicitConductionLaw::state_at_specific_enthalpy(self.0, b)?;
+        let a = ImplicitConductionLaw::state_at_specific_enthalpy(self.0[0], a)?;
+        let b = ImplicitConductionLaw::state_at_specific_enthalpy(self.0[1], b)?;
         let g = LINK.2;
         Ok(ImplicitLinkState {
             conductance_w_k: g,
@@ -415,19 +444,20 @@ impl ImplicitLinkLaw for FixedCoolingStandIn {
     }
 }
 
-/// The cells at the start: with the link, born as the module's
-/// heat-assembly fixtures bear them, the seven cells and one contact.
+/// The cells at the start: with a link, born as the module's heat-assembly
+/// fixtures bear them, the seven cells, the coolant if any and one contact.
 pub(super) fn cells_start<L: Lane>(case: &Case<'_, L>) -> DepositionSimulation<'static> {
     let f = case.fixture;
-    if !case.linked {
+    let Some((id, [a, b], _)) = link(case) else {
         return f.thermal();
-    }
+    };
     let birth = |cell: &DepositedCell| TimedEvent {
         time_s: 0.0,
         event: Event::Birth(cell.clone()),
     };
     let mut events: Vec<_> = f.thermal().cells().values().map(birth).collect();
-    let (id, [a, b], _) = LINK;
+    events.extend(case.coolant.map(|coolant| birth(&coolant.cell)));
+    let cells = events.len();
     let link = ThermalLink {
         id,
         a,
@@ -440,29 +470,45 @@ pub(super) fn cells_start<L: Lane>(case: &Case<'_, L>) -> DepositionSimulation<'
         event: Event::Contact(link),
     });
     let budget = DepositionBudget {
-        max_cells: 7,
+        max_cells: cells,
         max_links: 1,
-        max_events: 8,
+        max_events: cells + 1,
         max_substeps: 1000,
     };
     let config = StepConfig {
         max_dt_s: 0.1,
         energy_tolerance_j: 1e-9,
     };
-    let laws = [(MaterialId(0), f.caloric.curve() as &dyn ThermalLaw)];
+    let mut laws = vec![(MaterialId(0), f.caloric.curve() as &dyn ThermalLaw)];
+    laws.extend(
+        case.coolant
+            .map(|coolant| (MaterialId(1), coolant.caloric.curve() as &dyn ThermalLaw)),
+    );
     let cells = DepositionSimulation::new(events, &laws, budget).unwrap();
     cells.advance_to(0.0, config, || Ok(())).unwrap().0
 }
 
 /// Runs `body` with a context and the module's heat assembly around the
-/// case's cells, the link at the conductance its heat-assembly fixtures
-/// give it (`FixedCooling`).
+/// case's cells, the coolant's included, the link at the conductance its
+/// heat-assembly fixtures give it (`FixedCooling`).
 pub(super) fn heat_assembly<L: Lane, R>(
     case: &Case<'_, L>,
     start: &DepositionSimulation<'_>,
     body: impl FnOnce(&Cx<'_>, &FixedCooling<'_, '_, '_>) -> R,
 ) -> R {
-    let cells = case.fixture.cells(case.context);
+    let mut cells: Vec<_> = case.fixture.cells(case.context).into_iter().collect();
+    cells.extend(case.coolant.map(|coolant| MaterialCell {
+        cell: coolant.cell.id,
+        material_id: MaterialId(1),
+        curve: coolant.caloric.curve(),
+        point: ThermalMaterialPoint {
+            material: &coolant.card,
+            context: &coolant.context,
+            temperature_axis: "T",
+            liquid_fraction_axis: None,
+        },
+        conductivity: None,
+    }));
     let bulk = MaterialNetwork {
         cells: &cells,
         links: &[],
@@ -491,13 +537,24 @@ pub(super) fn heat_assembly<L: Lane, R>(
     })
 }
 
-/// The module's seven cells as one backward-Euler timeline whose ports
-/// return end-of-step temperatures, and its start. Its longest interval is
-/// the cells' own (`Fixture::thermal_at`), so it does not cap the step.
+/// The module's cells as one backward-Euler timeline whose ports, one for
+/// each of the seven, return end-of-step temperatures, and its start. Its
+/// longest interval is the cells' own (`Fixture::thermal_at`), so it does
+/// not cap the step.
 fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineState<'static>) {
     let f = case.fixture;
     let start = cells_start(case);
     let law: &'static Caloric = leak(Caloric(&f.caloric));
+    let fluid = case
+        .coolant
+        .map(|coolant| -> &'static Caloric { leak(Caloric(&coolant.caloric)) });
+    let mut conductivity = vec![(MaterialId(0), law as &dyn ConductivityLaw)];
+    let mut caloric = vec![(MaterialId(0), law as &dyn ImplicitConductionLaw)];
+    if let Some(fluid) = fluid {
+        conductivity.push((MaterialId(1), fluid));
+        caloric.push((MaterialId(1), fluid));
+    }
+    let linked = link(case).is_some();
     // The link's geometry is bound as the observer requires; the stand-in
     // replaces the conduction it would give.
     let geometry = [ConductiveLink {
@@ -507,8 +564,8 @@ fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineS
     }];
     let observer = ConductionObserver::new(
         &start,
-        &[(MaterialId(0), law as &dyn ConductivityLaw)],
-        &geometry[..usize::from(case.linked)],
+        &conductivity,
+        &geometry[..usize::from(linked)],
         &[],
         || Ok(()),
     )
@@ -516,13 +573,14 @@ fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineS
     let conduction = ImplicitConductionGraph::new(
         &start,
         &observer,
-        &[(MaterialId(0), law as &dyn ImplicitConductionLaw)],
+        &caloric,
         ImplicitConductionLinearControls::default(),
         || Ok(()),
     )
     .unwrap();
-    let conduction = if case.linked {
-        let link: &'static FixedCoolingStandIn = leak(FixedCoolingStandIn(law));
+    let conduction = if linked {
+        let laws = [law, fluid.unwrap_or(law)];
+        let link: &'static FixedCoolingStandIn = leak(FixedCoolingStandIn(laws));
         let links = [(LINK.0, link as &dyn ImplicitLinkLaw)];
         conduction
             .with_link_laws(&start, &links, || Ok(()))
@@ -729,7 +787,7 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
     let q = per_body(case.steady.heat_w.map(|p| h * p), 0.0);
     let x = h * g * (q[0] - q[6]) / (1.0 + 2.0 * h * g);
     let exchange = [-x, 0.0, 0.0, 0.0, 0.0, 0.0, x];
-    let kelvin = kernel_run(case, 1)[0].kelvin;
+    let kelvin = kernel_run::<DeviceStorage, [f64; 7]>(case, 1)[0].kelvin;
     let error = |i: usize| (kelvin[i] - (300.0 + q[i] + exchange[i])).abs();
     (0..7).map(error).fold(0.0, f64::max)
 }
@@ -745,7 +803,7 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
 fn owner_step<L: Lane>(
     case: &Case<'_, L>,
     k: usize,
-    (old, kelvin): (&L::State, &[f64; 7]),
+    (old, kelvin): (&L::State, &[f64]),
     slope_v_k: f64,
 ) -> (L::State, [f64; 7]) {
     let p = parameters();
@@ -812,29 +870,46 @@ fn within(what: &str, worst: [f64; 2], bounds: [f64; 2]) {
 /// The graph's steps against the owner's step built by hand (`owner_step`)
 /// from the graph's old state at its end temperatures, and each cell's
 /// backward-Euler balance: its energy change is the heat routed to it and,
-/// where linked, the link's `G h (T_a - T_b)` at the end temperatures.
+/// where linked, the link's `G h (T_a - T_b)` at the end temperatures. The
+/// coolant's energy is its mass times its caloric curve's enthalpy.
 /// Bounds on the coordinates (relative) and the cells' energies \[J\].
-pub(super) fn owner_check<L: Lane>(
+pub(super) fn owner_check<L: Lane, K: AsRef<[f64]>>(
     case: &Case<'_, L>,
-    rows: &[Row<L::State>],
+    rows: &[Row<L::State, K>],
     slope_v_k: f64,
     bounds: [f64; 2],
 ) {
-    let (mut old, mut before, mut worst) = (case.start, [300.0; 7], [0.0_f64; 2]);
+    let ids = cell_ids(case);
+    let at = |cell| ids.iter().position(|&id| id == cell).unwrap();
+    let mut before = vec![300.0; 7];
+    before.extend(case.coolant.map(|coolant| {
+        let h = coolant.cell.specific_h_j_kg;
+        coolant.caloric.curve().temperature_k(h).unwrap()
+    }));
+    let (mut old, mut worst) = (case.start, [0.0_f64; 2]);
     for (k, row) in rows.iter().enumerate() {
-        let (next, mut heat) = owner_step(case, k, (&old, &row.kelvin), slope_v_k);
-        if case.linked {
-            let flux = LINK.2 * case.dt_s * (row.kelvin[0] - row.kelvin[6]);
-            (heat[0], heat[6]) = (heat[0] - flux, heat[6] + flux);
+        let kelvin = row.kelvin.as_ref();
+        let (next, by_body) = owner_step(case, k, (&old, kelvin), slope_v_k);
+        let mut heat = by_body.to_vec();
+        heat.resize(ids.len(), 0.0);
+        if let Some((_, [a, b], g)) = link(case) {
+            let flux = g * case.dt_s * (kelvin[at(a)] - kelvin[at(b)]);
+            (heat[at(a)], heat[at(b)]) = (heat[at(a)] - flux, heat[at(b)] + flux);
         }
         for (a, b) in row.state.as_ref().iter().zip(next.as_ref()) {
             worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
         }
         for (i, q) in heat.into_iter().enumerate() {
-            let change = case.fixture.cp * (row.kelvin[i] - before[i]);
+            let change = match case.coolant.filter(|_| i == IDS.len()) {
+                Some(c) => {
+                    let h = |kelvin| enthalpy_at(&c.caloric, kelvin).unwrap();
+                    c.cell.mass_kg * (h(kelvin[i]) - h(before[i]))
+                }
+                None => case.fixture.cp * (kelvin[i] - before[i]),
+            };
             worst[1] = worst[1].max((change - q).abs());
         }
-        (old, before) = (row.state, row.kelvin);
+        (old, before) = (row.state, kelvin.to_vec());
     }
     within("graph against the owner by hand", worst, bounds);
 }
@@ -844,7 +919,11 @@ pub(super) fn owner_check<L: Lane>(
 /// (and the routed load), and the drive is at its start but for the
 /// battery's charge, k dt `cell_current_a` lower. Bounds on the coordinates
 /// (relative) and the temperatures \[K\].
-pub(super) fn steady_check<L: Lane>(case: &Case<'_, L>, rows: &[Row<L::State>], bounds: [f64; 2]) {
+pub(super) fn steady_check<L: Lane, K: AsRef<[f64]>>(
+    case: &Case<'_, L>,
+    rows: &[Row<L::State, K>],
+    bounds: [f64; 2],
+) {
     let (s, dt) = (case.steady, case.dt_s);
     let load = s
         .command
@@ -863,7 +942,7 @@ pub(super) fn steady_check<L: Lane>(case: &Case<'_, L>, rows: &[Row<L::State>], 
         for (a, b) in row.state.as_ref().iter().zip(state.as_ref()) {
             worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
         }
-        for (kelvin, q) in row.kelvin.iter().zip(q) {
+        for (kelvin, q) in row.kelvin.as_ref().iter().zip(q) {
             worst[1] = worst[1].max((kelvin - 300.0 - k * q).abs());
         }
     }
@@ -871,7 +950,11 @@ pub(super) fn steady_check<L: Lane>(case: &Case<'_, L>, rows: &[Row<L::State>], 
 }
 
 /// `steps` steps of the case's graph. The kernel's ledger closes.
-pub(super) fn kernel_run<L: Lane>(case: &Case<'_, L>, steps: usize) -> Vec<Row<L::State>> {
+pub(super) fn kernel_run<L: Lane, K: Default + AsMut<[f64]>>(
+    case: &Case<'_, L>,
+    steps: usize,
+) -> Vec<Row<L::State, K>> {
+    let ids = cell_ids(case);
     let (mut system, drive, cells) = declare(case);
     let rows = with_cx(|cx| {
         (0..steps)
@@ -879,9 +962,14 @@ pub(super) fn kernel_run<L: Lane>(case: &Case<'_, L>, steps: usize) -> Vec<Row<L
                 let report = system.step(case.dt_s, cx).unwrap();
                 assert_eq!(report.dt_s.to_bits(), case.dt_s.to_bits());
                 let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+                let mut kelvin = K::default();
+                assert_eq!(kelvin.as_mut().len(), ids.len());
+                for (t, &id) in kelvin.as_mut().iter_mut().zip(&ids) {
+                    *t = timeline.simulation().temperature_k(id).unwrap();
+                }
                 Row {
                     state: *system.state::<L::State>(drive).unwrap(),
-                    kelvin: IDS.map(|id| timeline.simulation().temperature_k(id).unwrap()),
+                    kelvin,
                 }
             })
             .collect()
@@ -920,7 +1008,11 @@ pub(super) fn kernel_refusal<L: Lane>(case: &Case<'_, L>, dt_s: f64) -> String {
 /// Holds every step of the kernel's run to the module's: each coordinate
 /// within `bounds[0]` of its size (at least 1), each temperature within
 /// `bounds[1]` K. Prints the largest differences.
-pub(super) fn compare<S: AsRef<[f64]>>(module: &[Row<S>], kernel: &[Row<S>], bounds: [f64; 2]) {
+pub(super) fn compare<S: AsRef<[f64]>, K: AsRef<[f64]>>(
+    module: &[Row<S, K>],
+    kernel: &[Row<S, K>],
+    bounds: [f64; 2],
+) {
     assert_eq!(module.len(), kernel.len());
     let mut worst = [0.0_f64; 2];
     for (k, (theirs, ours)) in module.iter().zip(kernel).enumerate() {
@@ -933,7 +1025,8 @@ pub(super) fn compare<S: AsRef<[f64]>>(module: &[Row<S>], kernel: &[Row<S>], bou
                 "step {k}, coordinate {i}: {a} vs {b}"
             );
         }
-        for (i, (a, b)) in ours.kelvin.iter().zip(theirs.kelvin).enumerate() {
+        let (a, b) = (ours.kelvin.as_ref(), theirs.kelvin.as_ref());
+        for (i, (a, b)) in a.iter().zip(b).enumerate() {
             worst[1] = worst[1].max((a - b).abs());
             assert!(
                 (a - b).abs() <= bounds[1],

@@ -31,6 +31,7 @@ fn charge_case<'s>(
         load_cell,
         schedule: Vec::new(),
         linked: false,
+        coolant: None,
     }
 }
 

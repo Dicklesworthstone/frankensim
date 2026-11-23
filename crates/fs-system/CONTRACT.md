@@ -4356,11 +4356,30 @@ the lead's heat in the polarization's cell; the owner at half the threshold
 slope; the steady closed form keeping the battery's charge; the owner by
 hand with one more substep.
 
+The module's finite liquid coolant on its heat assembly (the fixture's
+claims as a liquid, 2 kg at 299.5 K) is an eighth timeline cell with no
+port and its own caloric law, joined to the inductor's cell by the
+stand-in at the heat assembly's conductance. Over three steps of 1/64 s:
+- against the module, the drive bit for bit and the cells within 1.1e-13 K,
+  held to 1e-14 relative and 1e-11 K;
+- against the owner by hand, the drive bit for bit and each cell's balance
+  within 8.1e-14 J, the coolant's by its own caloric curve; held to
+  1e-14 relative and 1e-12 J;
+- the first step meets the module's backward-Euler closed form exactly,
+  held to 1e-12 K, and the coolant warms.
+
+Planted with the module comparison switched off, each failed: the link's
+conductance doubled in the stand-in; the coolant's temperature read from
+the inductor's cell; the coolant linked to the motor's cell; the owner's
+coolant starting at 300 K. One plant cannot fire: swapping the coolant's
+caloric law for the fixture's swaps a law identical by construction, since
+the module's liquid card copies the fixture's claims. What holds the
+coolant instead is the closed form from 299.5 K with a cell of 2 J/K.
+
 Not carried from the module's nine-state tests: its clock budget and final
 cancellation (a step out of circuit trials, or cancelled at its last poll,
 publishes nothing), its single-claim binding, and its drive bound at one
-state refusing a step from another. Not yet a graph: its finite liquid
-coolant on the heat assembly.
+state refusing a step from another.
 
 Not claimed: torques that change within the program; gate charge and
 gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
