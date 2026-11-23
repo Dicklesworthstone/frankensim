@@ -34,8 +34,9 @@ use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
 use fs_ports::PortKind;
 use fs_system::circuit::ResistanceLaw;
 use fs_system::commutated_drive::{
-    CommutatedBatteryMotorDrive, DeviceStorage, DriveLane, DriveParameters, DriveResistor,
-    GateProgram, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, SwitchLaw, SwitchPosition,
+    CommutatedBatteryMotorDrive, DRIVER_HEAT_PORTS, DeviceStorage, DriveLane, DriveParameters,
+    DriveResistor, GateProgram, GateRail, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, RAIL_PORTS,
+    SwitchLaw, SwitchPosition,
 };
 use fs_system::elements::{Force, SignalClock, SignalSource, SourceAccount, Waveform};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
@@ -77,36 +78,63 @@ pub(super) struct Case<'s, L: Lane = DeviceStorage> {
     pub(super) schedule: Vec<DeviceGateState>,
     /// Whether the cells carry the module's heat-assembly link ([`LINK`]).
     pub(super) linked: bool,
-    /// The module's finite liquid coolant, linked to the inductor's cell.
+    /// The module's finite liquid coolant, linked to one of the cells.
     pub(super) coolant: Option<&'static Coolant>,
+    /// The gate lane's drivers; none in the other lanes.
+    pub(super) drivers: Option<&'static Drivers>,
 }
 
-/// The module's finite liquid coolant: an eighth cell with a caloric law of
-/// its own, joined to the inductor's cell by the link [`LINK`] names.
+/// The module's finite liquid coolant: one more cell with a caloric law of
+/// its own, joined by the link [`LINK`] names to the cell `partner` names,
+/// at the conductance it gives \[W/K\].
 pub(super) struct Coolant {
     pub(super) card: MaterialCard,
     pub(super) caloric: ResolvedHeatCapacityCurve,
     pub(super) context: QueryPoint,
     pub(super) cell: DepositedCell,
+    pub(super) partner: (CellId, f64),
 }
 
-/// The case's link: [`LINK`], or with a coolant the same link from the
-/// inductor's cell to the coolant's.
+/// The gate lane's drivers as the module's gate fixture authors them: a
+/// cell per gate for its driver's heat, the card keys of the on and off
+/// resistances, and the rails' voltages \[V\] in [`RAIL_PORTS`] order.
+/// `start` holds every cell at the start, the seven and the four.
+pub(super) struct Drivers {
+    pub(super) cells: [CellId; 4],
+    pub(super) keys: [PropertyKey; 2],
+    pub(super) rails: [f64; 8],
+    pub(super) start: DepositionSimulation<'static>,
+}
+
+/// The case's link: [`LINK`], or with a coolant the same link from its
+/// partner's cell to the coolant's.
 fn link<L: Lane>(case: &Case<'_, L>) -> Option<(u64, [CellId; 2], f64)> {
     match case.coolant {
-        Some(coolant) => Some((LINK.0, [IDS[0], coolant.cell.id], LINK.2)),
+        Some(coolant) => {
+            let (cell, conductance_w_k) = coolant.partner;
+            Some((LINK.0, [cell, coolant.cell.id], conductance_w_k))
+        }
         None => case.linked.then_some(LINK),
     }
 }
 
-/// The timeline's cells: the seven, then the coolant if any.
-fn cell_ids<L: Lane>(case: &Case<'_, L>) -> Vec<CellId> {
+/// The cells with timeline ports: the seven, then the drivers' if any.
+fn port_cells<L: Lane>(case: &Case<'_, L>) -> Vec<CellId> {
     IDS.into_iter()
-        .chain(case.coolant.map(|coolant| coolant.cell.id))
+        .chain(case.drivers.into_iter().flat_map(|drivers| drivers.cells))
         .collect()
 }
 
-/// A drive lane whose owner the harness steps by hand (`owner_step`).
+/// The timeline's cells: those with ports, then the coolant if any.
+pub(super) fn cell_ids<L: Lane>(case: &Case<'_, L>) -> Vec<CellId> {
+    let mut ids = port_cells(case);
+    ids.extend(case.coolant.map(|coolant| coolant.cell.id));
+    ids
+}
+
+/// A drive lane on the graph. The harness steps its owner by hand
+/// (`owner_step`), but for the gate lane's: its channels and drivers take
+/// their cells' temperatures, so `gate/graph.rs` builds that owner itself.
 pub(super) trait Lane: DriveLane {
     /// One owner cycle of `intervals` from `old` under `command`: the new
     /// state, the fourteen heats and the load's work \[J\].
@@ -119,6 +147,17 @@ pub(super) trait Lane: DriveLane {
         command: BatteryMotorSwitchCommand,
         old: &Self::State,
     ) -> (Self::State, [f64; 14], f64);
+
+    /// `drive` with the resistance between the gate of `switch` and its
+    /// `rail` following `law`. Only the gate lane has drivers.
+    fn driver_following(
+        _: CommutatedBatteryMotorDrive<Self>,
+        _: SwitchPosition,
+        _: GateRail,
+        _: Arc<dyn ResistanceLaw>,
+    ) -> CommutatedBatteryMotorDrive<Self> {
+        unreachable!("only the gate lane has drivers")
+    }
 }
 
 impl Lane for NoDeviceStorage {
@@ -219,7 +258,7 @@ pub(super) fn leak<T>(value: T) -> &'static T {
     Box::leak(Box::new(value))
 }
 
-fn text(error: impl Debug) -> String {
+pub(super) fn text(error: impl Debug) -> String {
     format!("{error:?}")
 }
 
@@ -243,18 +282,15 @@ fn enthalpy_at(curve: &ResolvedHeatCapacityCurve, kelvin: f64) -> Result<f64, St
 /// queried at the module's cell context: what the module reads for a cell
 /// at its end-of-step state.
 #[derive(Debug, Clone, Copy)]
-struct Card {
-    material: &'static MaterialCard,
-    curve: &'static ResolvedHeatCapacityCurve,
-    context: &'static QueryPoint,
+pub(super) struct Card {
+    pub(super) material: &'static MaterialCard,
+    pub(super) curve: &'static ResolvedHeatCapacityCurve,
+    pub(super) context: &'static QueryPoint,
 }
 
 impl Card {
-    fn values(
-        &self,
-        kelvin: f64,
-        wanted: &[(&PropertyKey, ScalarAdmissibility)],
-    ) -> Result<Vec<f64>, String> {
+    /// The module's query for a cell at `kelvin`.
+    pub(super) fn query(&self, kelvin: f64) -> Result<QueryPoint, String> {
         let h = enthalpy_at(self.curve, kelvin)?;
         let phase = self
             .curve
@@ -267,7 +303,15 @@ impl Card {
             temperature_axis: "T",
             liquid_fraction_axis: None,
         };
-        let query = point.at(phase).map_err(text)?;
+        point.at(phase).map_err(text)
+    }
+
+    pub(super) fn values(
+        &self,
+        kelvin: f64,
+        wanted: &[(&PropertyKey, ScalarAdmissibility)],
+    ) -> Result<Vec<f64>, String> {
+        let query = self.query(kelvin)?;
         let requirements = wanted
             .iter()
             .map(|(key, rule)| ScalarPropertyRequirement::try_with_key(key, *rule))
@@ -415,7 +459,7 @@ impl ImplicitConductionLaw for Caloric {
 /// heat-assembly fixtures give it, between cells of the two caloric laws.
 /// The timeline takes `Q = G (T_a - T_b)`; the law gives its derivatives in
 /// both cells' enthalpies.
-struct FixedCoolingStandIn([&'static Caloric; 2]);
+struct FixedCoolingStandIn([&'static Caloric; 2], f64);
 
 impl ImplicitLinkLaw for FixedCoolingStandIn {
     fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
@@ -433,7 +477,7 @@ impl ImplicitLinkLaw for FixedCoolingStandIn {
         let [a, b] = enthalpies_j_kg;
         let a = ImplicitConductionLaw::state_at_specific_enthalpy(self.0[0], a)?;
         let b = ImplicitConductionLaw::state_at_specific_enthalpy(self.0[1], b)?;
-        let g = LINK.2;
+        let g = self.1;
         Ok(ImplicitLinkState {
             conductance_w_k: g,
             power_enthalpy_derivatives_w_kg_j: [
@@ -444,18 +488,22 @@ impl ImplicitLinkLaw for FixedCoolingStandIn {
     }
 }
 
-/// The cells at the start: with a link, born as the module's heat-assembly
-/// fixtures bear them, the seven cells, the coolant if any and one contact.
+/// The cells at the start: the seven at 300 K, or the drivers' `start`.
+/// With a link they are born again as the module's heat-assembly fixtures
+/// bear them, with the coolant if any and one contact.
 pub(super) fn cells_start<L: Lane>(case: &Case<'_, L>) -> DepositionSimulation<'static> {
     let f = case.fixture;
+    let born = case
+        .drivers
+        .map_or_else(|| f.thermal(), |drivers| drivers.start.clone());
     let Some((id, [a, b], _)) = link(case) else {
-        return f.thermal();
+        return born;
     };
     let birth = |cell: &DepositedCell| TimedEvent {
         time_s: 0.0,
         event: Event::Birth(cell.clone()),
     };
-    let mut events: Vec<_> = f.thermal().cells().values().map(birth).collect();
+    let mut events: Vec<_> = born.cells().values().map(birth).collect();
     events.extend(case.coolant.map(|coolant| birth(&coolant.cell)));
     let cells = events.len();
     let link = ThermalLink {
@@ -489,14 +537,28 @@ pub(super) fn cells_start<L: Lane>(case: &Case<'_, L>) -> DepositionSimulation<'
 }
 
 /// Runs `body` with a context and the module's heat assembly around the
-/// case's cells, the coolant's included, the link at the conductance its
-/// heat-assembly fixtures give it (`FixedCooling`).
+/// case's cells, the drivers' and the coolant's included, the link at the
+/// conductance its heat-assembly fixtures give it (`FixedCooling`).
 pub(super) fn heat_assembly<L: Lane, R>(
     case: &Case<'_, L>,
     start: &DepositionSimulation<'_>,
     body: impl FnOnce(&Cx<'_>, &FixedCooling<'_, '_, '_>) -> R,
 ) -> R {
-    let mut cells: Vec<_> = case.fixture.cells(case.context).into_iter().collect();
+    let f = case.fixture;
+    let mut cells: Vec<_> = f.cells(case.context).into_iter().collect();
+    let drivers = case.drivers.into_iter().flat_map(|drivers| drivers.cells);
+    cells.extend(drivers.map(|cell| MaterialCell {
+        cell,
+        material_id: MaterialId(0),
+        curve: f.caloric.curve(),
+        point: ThermalMaterialPoint {
+            material: &f.card,
+            context: case.context,
+            temperature_axis: "T",
+            liquid_fraction_axis: None,
+        },
+        conductivity: None,
+    }));
     cells.extend(case.coolant.map(|coolant| MaterialCell {
         cell: coolant.cell.id,
         material_id: MaterialId(1),
@@ -531,14 +593,14 @@ pub(super) fn heat_assembly<L: Lane, R>(
             .unwrap();
         let transport = FixedCooling {
             prepared: &prepared,
-            conductance_w_k: LINK.2,
+            conductance_w_k: link(case).map_or(LINK.2, |(_, _, g)| g),
         };
         body(cx, &transport)
     })
 }
 
 /// The module's cells as one backward-Euler timeline whose ports, one for
-/// each of the seven, return end-of-step temperatures, and its start. Its
+/// each of `port_cells`, return end-of-step temperatures, and its start. Its
 /// longest interval is the cells' own (`Fixture::thermal_at`), so it does
 /// not cap the step.
 fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineState<'static>) {
@@ -580,7 +642,8 @@ fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineS
     .unwrap();
     let conduction = if linked {
         let laws = [law, fluid.unwrap_or(law)];
-        let link: &'static FixedCoolingStandIn = leak(FixedCoolingStandIn(laws));
+        let g = link(case).map_or(LINK.2, |(_, _, g)| g);
+        let link: &'static FixedCoolingStandIn = leak(FixedCoolingStandIn(laws, g));
         let links = [(LINK.0, link as &dyn ImplicitLinkLaw)];
         conduction
             .with_link_laws(&start, &links, || Ok(()))
@@ -595,7 +658,7 @@ fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineS
         ..Default::default()
     };
     let timeline = ThermalTimeline::implicit(
-        IDS.to_vec(),
+        port_cells(case),
         conduction,
         controls,
         ImplicitScheme::BackwardEuler,
@@ -683,6 +746,17 @@ fn drive<L: Lane>(case: &Case<'_, L>) -> CommutatedBatteryMotorDrive<L> {
         };
         drive = drive.switch_following(position, Arc::new(law)).unwrap();
     }
+    // Each gate's on and off resistances follow the card at its driver cell.
+    if let Some(drivers) = case.drivers {
+        let rails = switches
+            .into_iter()
+            .flat_map(|switch| [(switch, GateRail::On), (switch, GateRail::Off)]);
+        let keys = drivers.keys.iter().cycle();
+        for ((tag, (switch, rail)), key) in (5..).zip(rails).zip(keys) {
+            let law = CardResistance { card, key, tag };
+            drive = L::driver_following(drive, switch, rail, Arc::new(law));
+        }
+    }
 
     drive
 }
@@ -692,15 +766,18 @@ pub(super) fn declare<L: Lane>(case: &Case<'_, L>) -> (System, NodeId, NodeId) {
     let mut builder = SystemBuilder::new();
     let node = builder.add("drive", drive(case), case.start).unwrap();
     let torques = case.steady.command.shaft_torque_nm;
-    for (shaft, torque) in ["rotor", "stator"].into_iter().zip(torques) {
-        let kind = PortKind::RotationalTorqueAngularVelocity;
-        let source = Force::in_domain(kind, Waveform::constant(torque).unwrap());
-        let source = builder
-            .add(shaft, source, SourceAccount::default())
-            .unwrap();
+    let shafts = ["rotor", "stator"].into_iter().zip(torques);
+    let shafts =
+        shafts.map(|(name, torque)| (name, torque, PortKind::RotationalTorqueAngularVelocity));
+    let rails = case.drivers.map_or(&[][..], |drivers| &drivers.rails[..]);
+    let rails = RAIL_PORTS.into_iter().zip(rails.iter().copied());
+    let rails = rails.map(|(name, volts)| (name, volts, PortKind::ElectricalVoltageCurrent));
+    for (port, effort, kind) in shafts.chain(rails) {
+        let source = Force::in_domain(kind, Waveform::constant(effort).unwrap());
+        let source = builder.add(port, source, SourceAccount::default()).unwrap();
         let (a, b) = (
             builder.port(source, "p").unwrap(),
-            builder.port(node, shaft).unwrap(),
+            builder.port(node, port).unwrap(),
         );
         builder.bond(a, b).unwrap();
     }
@@ -724,6 +801,8 @@ pub(super) fn declare<L: Lane>(case: &Case<'_, L>) -> (System, NodeId, NodeId) {
     let cells = builder.add("cells", timeline, start).unwrap();
     let mut routes: Vec<_> = HEAT_PORTS.into_iter().zip(RECEIVERS.map(Some)).collect();
     routes.push((LOAD_PORT, case.load_cell));
+    let drivers = case.drivers.into_iter().flat_map(|drivers| drivers.cells);
+    routes.extend(DRIVER_HEAT_PORTS.into_iter().zip(drivers.map(Some)));
     for &(name, receiver) in &routes {
         let port = builder.port(node, name).unwrap();
         match receiver {
@@ -807,6 +886,35 @@ fn owner_step<L: Lane>(
     slope_v_k: f64,
 ) -> (L::State, [f64; 7]) {
     let p = parameters();
+    let devices = core::array::from_fn(|i| {
+        let mut device = p.devices[i];
+        device.body_diode.forward_voltage_v = 0.5 + slope_v_k * (kelvin[i + 1] - 300.0);
+        device
+    });
+    let intervals = [CommutationInterval {
+        gates: case.gates(k),
+        duration_s: case.dt_s,
+    }];
+    let (next, heat, load_work_j) = case.storage.cycle(
+        owner_drive(),
+        devices,
+        &intervals,
+        case.substeps,
+        case.steady.command,
+        old,
+    );
+    let routed = if case.load_cell.is_some() {
+        load_work_j
+    } else {
+        0.0
+    };
+    (next, per_body(heat, routed))
+}
+
+/// The drive of `owner_step`'s owner: the converter's, battery's and lead's
+/// resistances of 0.1 ohm, the battery's flat 12 V curve and `motor()`.
+pub(super) fn owner_drive() -> BatteryMotorDrive {
+    let p = parameters();
     let converter = BuckBoostParameters {
         inductance_h: p.inductance_h,
         bus_capacitance_f: p.bus_capacitance_f,
@@ -825,34 +933,11 @@ fn owner_step<L: Lane>(
         bus_capacitance_f: 0.5,
     };
     let curve = BatteryOcvCurve::new(100.0, &[(0.0, 12.0), (1.0, 12.0)]).unwrap();
-    let original = AveragedBuckBoost::new(converter, bridge)
+    AveragedBuckBoost::new(converter, bridge)
         .and_then(|c| c.with_battery_source(BatterySource::new(curve, battery)?, 0.1))
         .unwrap()
         .with_dc_motor(DcMotor::new(motor()).unwrap())
-        .unwrap();
-    let devices = core::array::from_fn(|i| {
-        let mut device = p.devices[i];
-        device.body_diode.forward_voltage_v = 0.5 + slope_v_k * (kelvin[i + 1] - 300.0);
-        device
-    });
-    let intervals = [CommutationInterval {
-        gates: case.gates(k),
-        duration_s: case.dt_s,
-    }];
-    let (next, heat, load_work_j) = case.storage.cycle(
-        original,
-        devices,
-        &intervals,
-        case.substeps,
-        case.steady.command,
-        old,
-    );
-    let routed = if case.load_cell.is_some() {
-        load_work_j
-    } else {
-        0.0
-    };
-    (next, per_body(heat, routed))
+        .unwrap()
 }
 
 /// Holds the largest differences of a reference check within `bounds`.
@@ -867,21 +952,43 @@ fn within(what: &str, worst: [f64; 2], bounds: [f64; 2]) {
     );
 }
 
-/// The graph's steps against the owner's step built by hand (`owner_step`)
-/// from the graph's old state at its end temperatures, and each cell's
-/// backward-Euler balance: its energy change is the heat routed to it and,
-/// where linked, the link's `G h (T_a - T_b)` at the end temperatures. The
-/// coolant's energy is its mass times its caloric curve's enthalpy.
-/// Bounds on the coordinates (relative) and the cells' energies \[J\].
+/// The graph's steps against the owner's step built by hand (`owner_step`);
+/// see [`held_to_owner`].
 pub(super) fn owner_check<L: Lane, K: AsRef<[f64]>>(
     case: &Case<'_, L>,
     rows: &[Row<L::State, K>],
     slope_v_k: f64,
     bounds: [f64; 2],
 ) {
+    let owner = |k, old: &L::State, kelvin: &[f64]| {
+        let (next, heat) = owner_step(case, k, (old, kelvin), slope_v_k);
+        (next, heat.to_vec())
+    };
+    held_to_owner(case, rows, owner, bounds);
+}
+
+/// The graph's steps against `owner`, the owner's step k built by hand from
+/// the graph's old state at its end temperatures (the new state and the
+/// heat of each port cell), and each cell's backward-Euler balance: its
+/// energy change is the heat routed to it and, where linked, the link's
+/// `G h (T_a - T_b)` at the end temperatures. The coolant's energy is its
+/// mass times its caloric curve's enthalpy. Bounds on the coordinates
+/// (relative) and the cells' energies \[J\].
+pub(super) fn held_to_owner<L: Lane, K: AsRef<[f64]>>(
+    case: &Case<'_, L>,
+    rows: &[Row<L::State, K>],
+    owner: impl Fn(usize, &L::State, &[f64]) -> (L::State, Vec<f64>),
+    bounds: [f64; 2],
+) {
     let ids = cell_ids(case);
     let at = |cell| ids.iter().position(|&id| id == cell).unwrap();
-    let mut before = vec![300.0; 7];
+    let mut before = match case.drivers {
+        Some(drivers) => port_cells(case)
+            .into_iter()
+            .map(|id| drivers.start.temperature_k(id).unwrap())
+            .collect(),
+        None => vec![300.0; 7],
+    };
     before.extend(case.coolant.map(|coolant| {
         let h = coolant.cell.specific_h_j_kg;
         coolant.caloric.curve().temperature_k(h).unwrap()
@@ -889,8 +996,7 @@ pub(super) fn owner_check<L: Lane, K: AsRef<[f64]>>(
     let (mut old, mut worst) = (case.start, [0.0_f64; 2]);
     for (k, row) in rows.iter().enumerate() {
         let kelvin = row.kelvin.as_ref();
-        let (next, by_body) = owner_step(case, k, (&old, kelvin), slope_v_k);
-        let mut heat = by_body.to_vec();
+        let (next, mut heat) = owner(k, &old, kelvin);
         heat.resize(ids.len(), 0.0);
         if let Some((_, [a, b], g)) = link(case) {
             let flux = g * case.dt_s * (kelvin[at(a)] - kelvin[at(b)]);
@@ -900,7 +1006,7 @@ pub(super) fn owner_check<L: Lane, K: AsRef<[f64]>>(
             worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
         }
         for (i, q) in heat.into_iter().enumerate() {
-            let change = match case.coolant.filter(|_| i == IDS.len()) {
+            let change = match case.coolant.filter(|_| i + 1 == ids.len()) {
                 Some(c) => {
                     let h = |kelvin| enthalpy_at(&c.caloric, kelvin).unwrap();
                     c.cell.mass_kg * (h(kelvin[i]) - h(before[i]))

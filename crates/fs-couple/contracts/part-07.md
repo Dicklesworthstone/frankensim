@@ -2786,6 +2786,103 @@ heats extend the original fourteen-loss physical balance; driver recovery
 does not become negative heat or an inferred battery transfer. The original
 finite coolant, contact and radiation owners transport the deposited heat.
 
+On the composition kernel, `tests/commutated_converter_enthalpy/battery_motor/
+gate/graph.rs` declares this lane's fixtures as graphs. fs-system's
+`CommutatedBatteryMotorDrive` runs in its `GateStorage` lane:
+- its storage is read once from the package card (Qds over -100 V to 100 V,
+  Cgs, Cgd at 300 K) and must equal the module's authored storage;
+- each channel follows the card's G line over -4 V to 4 V at its package's
+  temperature, resolved as the module resolves it;
+- each gate's on and off resistances follow the card at its driver cell.
+
+The card laws live in the test file and use only public fs-material and
+fs-matdb calls. The four driver cells join the backward-Euler timeline after
+the seven, each receiving its gate's driver heat. Eight rail ports hold the
+authored on and off voltages. A coolant is a timeline cell without a port,
+joined to the input high gate's driver cell by the stand-in for
+`FixedCooling`.
+
+Held to the module step for step, within 5e-13 relative and 5e-12 K:
+- the finite driver on, then off (steps of 1 s);
+- the Miller fixture with the G(Vgs, T) surface (three steps of 1/8 s);
+- the driver's coolant through the module's heat assembly (2 kg, joined at
+  0.5 W/K).
+
+Held without the module, to `PreparedGateBatteryMotorCycle` built by hand at
+the graph's end temperatures with the card's laws in closed form:
+- the new state within 1e-14 relative, or 2e-13 for the Miller fixture
+  (the owner's surface has three knots, the card's line more) and for the
+  coolant;
+- each cell's energy change equal to the owner's heat routed to it, plus
+  the link's `G h (T_a - T_b)` over a step h, within 5e-12 J (1e-12 J for
+  the Miller fixture).
+
+Also held without the module:
+- the module's closed forms: the gate at 2 V with its driver cell at 302 K,
+  then at 1.6 V and 302.32 K, while the other driver cells stay at 300 K;
+- with the coolant, 300 + 10/7 K and 300 + 2/7 K;
+- the Miller charge moving a gate-drain voltage by more than 1 uV.
+
+The module's drive is bound at one accepted state, and it refuses a step from
+another state when a driver resistance or a channel line varies with
+temperature. The graph binds nothing. From the 320 K state of those two
+fixtures, it takes the step at the laws' answers there. That step:
+- equals the module's step with its drive bound at 320 K, within 1e-14
+  relative and 1e-12 K;
+- has the owner's new state bit for bit, and each cell balanced within
+  5e-13 J.
+
+Every cell ends at or above 320 K. At those end temperatures, the driver
+resistance and each channel line differ in their bits from their 300 K
+values.
+
+Each defect below was planted on its own with the module comparison switched
+off. Each one failed at least one of these tests:
+- each channel answering at 300 K;
+- each resistance law answering at 300 K;
+- each driver heat routed to the next gate's cell;
+- the on and off rails swapped;
+- the on and off resistance claims swapped;
+- each channel read from the next package's claim (the drive refuses its
+  step: "actual commutated device voltage/current leaves authored support");
+- Cgd given the Cgs value, or each Qds read from the next package's claim
+  (the storage check);
+- the coolant linked to the inductor's cell;
+- the cells started at 300 K;
+- in fs-system's drive, each channel asked at its gate driver's port, or
+  each driver law asked at its switch's package port.
+
+Not carried by the graph:
+- the drive bound at one state refusing a step from another accepted state
+  (above);
+- the refusals in
+  `storage_authority_gate_bias_and_driver_receivers_are_retained_without_state_reinterpretation`.
+  At bind:
+  - "device capacitance requires an original constant law with owned
+    applicability; variable charge laws cannot be frozen";
+  - "gate-only conductance cannot freeze an unowned drain-bias, frequency or
+    other response coordinate";
+  - "incoming gate/electrode charge must retain its authored intrinsic Qds,
+    Cgs, Cgd and bus storage";
+  - "gate conductance needs a siemens property and an ordered finite voltage
+    domain";
+  - "intrinsic drain charge, gate storage, channel law and diode must share
+    their original semiconductor package";
+  - "one gate driver's on/off resistors need the same explicitly authored
+    heat receiver".
+
+  At a step: "switching device cannot change its held original source
+  context".
+
+  The graph keeps no authored storage beside the cards, so it has no copy to
+  compare with them. It does not check which package's claim a law reads; a
+  claim from another package is caught only by its numbers. Both resistances
+  of a driver heat that driver's one port.
+- the Cgs and Cgd claims at each step's temperatures, after the first
+  reading.
+
+The current-surface lane (`gate/current.rs`) is not on the graph yet.
+
 Focused G0/G1 fixtures specify source-owned current saturation/cutoff and signed
 reverse current, original-cell derivatives, explicit thermal scaling,
 full-rectangle support and source/receiver/continuation refusals, in addition

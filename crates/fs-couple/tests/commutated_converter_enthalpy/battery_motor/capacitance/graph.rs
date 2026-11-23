@@ -29,6 +29,7 @@ fn capacitive_case<'s>(
         schedule: Vec::new(),
         linked: false,
         coolant: None,
+        drivers: None,
     }
 }
 

@@ -32,12 +32,13 @@ fn nine_state_case<'s>(
         schedule: Vec::new(),
         linked: false,
         coolant: None,
+        drivers: None,
     }
 }
 
 /// The module's coolant: the fixture's claims as a liquid, 2 kg at 299.5 K
 /// (`commutated_battery_drive_and_finite_liquid_coolant_share_the_original_heat_assembly`).
-fn coolant(f: &Fixture) -> Coolant {
+pub(super) fn coolant(f: &Fixture) -> Coolant {
     let mut claims = ClaimSet::new();
     for (_, claim) in f.card.claims().claims_ordered() {
         claims.insert_claim(claim.clone()).unwrap();
@@ -80,6 +81,7 @@ fn coolant(f: &Fixture) -> Coolant {
         caloric,
         context: common::point(299.5),
         cell,
+        partner: (IDS[0], super::graph::LINK.2),
     }
 }
 
