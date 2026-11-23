@@ -4323,6 +4323,45 @@ these tests:
 - the link's conductance doubled;
 - the timeline without the link's law.
 
+`battery_motor/nine_state.rs` declares the module's own lane, switches
+without output storage, the same way: the drive in the `NoDeviceStorage`
+lane, its switches asking no storage claim. The harness takes the lane as a
+type parameter (`Lane`, which builds each lane's owner by hand). Against
+the module, three steps of each fixture:
+- steady motoring and regeneration (1/64 s, four substeps, the load's work
+  into a package): bit for bit, held to 1e-14 relative and 1e-11 K;
+- the feedback fixture (cells of 0.001 J/K, a diode threshold rising
+  20 mV/K, 1/1024 s, one substep): within 4.4e-14 relative and 1.2e-9 K
+  (1.2e-12 J in these cells), held to 5e-13 and 1e-8 K. The output high
+  package passes 300.1 K in the first step.
+
+Without the module, the steady runs meet the closed form within 1.1e-15
+relative and 2.7e-14 K, held to 2e-14 and 1e-12 K. The feedback run meets
+the owner, `PreparedCommutatedBatteryMotorCycle` built by hand, bit for bit,
+and each cell's balance within 5.3e-17 J, held to 1e-14 relative and
+1e-14 J.
+
+Both sides refuse:
+- a card qualified only up to 300.0001 K, cells and devices alike, which
+  the step passes. The module refuses the cells' state
+  (`MaterialDomain`). In the graph the cells' solve rejects the step, the
+  timeline asks for half of it, and the drive refuses a step that is not
+  one period; drive and cells keep their states. Qualified to 350 K, the
+  graph takes the step;
+- a channel limit of 0.01 A: the owner's refusal on both sides;
+- a step that is not one program.
+
+Planted with the module comparison switched off, one at a time, each failed:
+the lead's heat in the polarization's cell; the owner at half the threshold
+slope; the steady closed form keeping the battery's charge; the owner by
+hand with one more substep.
+
+Not carried from the module's nine-state tests: its clock budget and final
+cancellation (a step out of circuit trials, or cancelled at its last poll,
+publishes nothing), its single-claim binding, and its drive bound at one
+state refusing a step from another. Not yet a graph: its finite liquid
+coolant on the heat assembly.
+
 Not claimed: torques that change within the program; gate charge and
 gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
 avalanche; storage, OCV or bearing drag that change with temperature. The

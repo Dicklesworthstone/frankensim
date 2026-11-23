@@ -7,6 +7,8 @@ mod charge;
 mod gate;
 #[path = "battery_motor/graph.rs"]
 mod graph;
+#[path = "battery_motor/nine_state.rs"]
+mod nine_state;
 
 use super::*;
 use fs_couple::circuit_enthalpy::{

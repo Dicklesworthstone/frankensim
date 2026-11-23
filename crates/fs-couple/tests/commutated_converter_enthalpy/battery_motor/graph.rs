@@ -1,14 +1,14 @@
-//! The battery-motor drive's storage fixtures as declared graphs on the
-//! composition kernel.
+//! The battery-motor drive's fixtures as declared graphs on the composition
+//! kernel.
 //!
-//! `battery_motor::{capacitance, charge}` couple fs-phs's commutated drive to
-//! the enthalpy timeline by hand. A step runs the gate program once, each
-//! resistance and switch at its receiving cell's card at the END
-//! temperature, with Newton on the cell energies. The graph says the same
-//! with no code for the pair:
-//! - `fs_system::commutated_drive::CommutatedBatteryMotorDrive` with the
-//!   fixture's storage, its five resistances following [`CardResistance`]
-//!   and its four switches following [`CardSwitch`];
+//! `battery_motor` and its `capacitance` and `charge` lanes couple fs-phs's
+//! commutated drive to the enthalpy timeline by hand. A step runs the gate
+//! program once, each resistance and switch at its receiving cell's card at
+//! the END temperature, with Newton on the cell energies. The graph says the
+//! same with no code for the pair:
+//! - `fs_system::commutated_drive::CommutatedBatteryMotorDrive` in the
+//!   fixture's lane ([`Lane`]), its five resistances following
+//!   [`CardResistance`] and its four switches following [`CardSwitch`];
 //! - two `elements::Force` sources holding the command's shaft torques;
 //! - the seven cells as one backward-Euler timeline whose cell ports return
 //!   end-of-step temperatures;
@@ -26,14 +26,15 @@ use fs_material::state_point::{
     ResolvedScalarProperty, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
 };
+use fs_phs::circuit::converter::commutation::battery_motor::PreparedCommutatedBatteryMotorCycle;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
     PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
 };
 use fs_ports::PortKind;
 use fs_system::circuit::ResistanceLaw;
 use fs_system::commutated_drive::{
-    CommutatedBatteryMotorDrive, DeviceStorage, DriveParameters, DriveResistor, GateProgram,
-    HEAT_PORTS, LOAD_PORT, SwitchLaw, SwitchPosition,
+    CommutatedBatteryMotorDrive, DeviceStorage, DriveLane, DriveParameters, DriveResistor,
+    GateProgram, HEAT_PORTS, LOAD_PORT, NoDeviceStorage, SwitchLaw, SwitchPosition,
 };
 use fs_system::elements::{Force, SignalClock, SignalSource, SourceAccount, Waveform};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
@@ -54,16 +55,17 @@ const RECEIVERS: [CellId; 10] = [
     IDS[0], IDS[1], IDS[2], IDS[3], IDS[4], IDS[5], IDS[6], IDS[5], IDS[6], IDS[0],
 ];
 
-/// One fixture of a storage file, for both sides.
-pub(super) struct Case<'s> {
+/// One fixture of a lane, for both sides.
+pub(super) struct Case<'s, L: Lane = DeviceStorage> {
     pub(super) fixture: &'static Fixture,
     /// The query context of the module's cells.
     pub(super) context: &'static QueryPoint,
-    /// Each package's storage claim, in switch order.
-    pub(super) storage_keys: &'static [PropertyKey; 4],
-    pub(super) storage: DeviceStorage,
+    /// Each package's storage claim, in switch order; none without switch
+    /// storage.
+    pub(super) storage_keys: &'static [PropertyKey],
+    pub(super) storage: L,
     pub(super) steady: &'s SteadyDrive,
-    pub(super) start: [f64; 11],
+    pub(super) start: L::State,
     pub(super) dt_s: f64,
     pub(super) substeps: usize,
     /// The cell that receives the auxiliary load's work; none leaves it
@@ -76,22 +78,112 @@ pub(super) struct Case<'s> {
     pub(super) linked: bool,
 }
 
+/// A drive lane whose owner the harness steps by hand (`owner_step`).
+pub(super) trait Lane: DriveLane {
+    /// One owner cycle of `intervals` from `old` under `command`: the new
+    /// state, the fourteen heats and the load's work \[J\].
+    fn cycle(
+        &self,
+        original: BatteryMotorDrive,
+        devices: [SwitchDevice; 4],
+        intervals: &[CommutationInterval],
+        substeps: usize,
+        command: BatteryMotorSwitchCommand,
+        old: &Self::State,
+    ) -> (Self::State, [f64; 14], f64);
+}
+
+impl Lane for NoDeviceStorage {
+    fn cycle(
+        &self,
+        original: BatteryMotorDrive,
+        devices: [SwitchDevice; 4],
+        intervals: &[CommutationInterval],
+        substeps: usize,
+        command: BatteryMotorSwitchCommand,
+        old: &[f64; 9],
+    ) -> ([f64; 9], [f64; 14], f64) {
+        let (e, c) = (power_controls(), cycle_controls());
+        let mut next = [0.0; 9];
+        let step = PreparedCommutatedBatteryMotorCycle::new_controlled(
+            original,
+            devices,
+            intervals,
+            substeps,
+            e,
+            c,
+            || false,
+        )
+        .unwrap()
+        .step_interval_commands_controlled(old, &[command], &mut next, || false)
+        .unwrap();
+        (next, step.heat_joules(), step.load_work_j)
+    }
+}
+
+impl Lane for DeviceStorage {
+    fn cycle(
+        &self,
+        original: BatteryMotorDrive,
+        devices: [SwitchDevice; 4],
+        intervals: &[CommutationInterval],
+        n: usize,
+        command: BatteryMotorSwitchCommand,
+        old: &[f64; 11],
+    ) -> ([f64; 11], [f64; 14], f64) {
+        let (commands, e, c) = ([command], power_controls(), cycle_controls());
+        let mut next = [0.0; 11];
+        let step = match self {
+            Self::Capacitance(storage) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
+                original,
+                devices,
+                *storage,
+                intervals,
+                n,
+                e,
+                c,
+                || false,
+            )
+            .unwrap()
+            .step_interval_commands_controlled(old, &commands, &mut next, || false),
+            Self::Charge {
+                curves,
+                maximum_cells_per_chord: chords,
+            } => PreparedChargeBatteryMotorCycle::new_charge_controlled(
+                original,
+                devices,
+                curves.clone(),
+                *chords,
+                intervals,
+                n,
+                e,
+                c,
+                || false,
+            )
+            .unwrap()
+            .step_interval_commands_controlled(old, &commands, &mut next, || false),
+        }
+        .unwrap();
+        (next, step.heat_joules(), step.load_work_j)
+    }
+}
+
 /// The link of the module's heat-assembly fixtures: its id, its two cells
 /// and the conductance `FixedCooling` gives it \[W/K\].
 pub(super) const LINK: (u64, [CellId; 2], f64) = (77, [IDS[0], IDS[6]], 0.25);
 
-impl Case<'_> {
+impl<L: Lane> Case<'_, L> {
     /// The gates of step `k`.
     pub(super) fn gates(&self, k: usize) -> DeviceGateState {
         self.schedule.get(k).copied().unwrap_or(self.steady.gates)
     }
 }
 
-/// One accepted step: the drive's eleven coordinates and the seven cells'
+/// One accepted step: the drive's coordinates and the seven cells'
 /// temperatures \[K\].
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Row {
-    pub(super) state: [f64; 11],
+pub(super) struct Row<S = [f64; 11]> {
+    pub(super) state: S,
     pub(super) kelvin: [f64; 7],
 }
 
@@ -194,13 +286,13 @@ impl ResistanceLaw for CardResistance {
 }
 
 /// A switch from its package's card, with the module's admissibility (the
-/// diode threshold may be zero). The package's storage claim must admit the
-/// temperature too; its value is the drive's fixed storage.
+/// diode threshold may be zero). The package's storage claim, if any, must
+/// admit the temperature too; its value is the drive's fixed storage.
 #[derive(Debug)]
 struct CardSwitch {
     card: Card,
     keys: &'static [PropertyKey; 7],
-    storage: &'static PropertyKey,
+    storage: Option<&'static PropertyKey>,
     tag: u64,
 }
 
@@ -222,7 +314,9 @@ impl SwitchLaw for CardSwitch {
                 )
             })
             .collect();
-        wanted.push((self.storage, Finite));
+        if let Some(storage) = self.storage {
+            wanted.push((storage, Finite));
+        }
         let v = self.card.values(kelvin, &wanted)?;
         Ok(SwitchDevice {
             on_resistance_ohm: v[0],
@@ -323,7 +417,7 @@ impl ImplicitLinkLaw for FixedCoolingStandIn {
 
 /// The cells at the start: with the link, born as the module's
 /// heat-assembly fixtures bear them, the seven cells and one contact.
-pub(super) fn cells_start(case: &Case<'_>) -> DepositionSimulation<'static> {
+pub(super) fn cells_start<L: Lane>(case: &Case<'_, L>) -> DepositionSimulation<'static> {
     let f = case.fixture;
     if !case.linked {
         return f.thermal();
@@ -363,8 +457,8 @@ pub(super) fn cells_start(case: &Case<'_>) -> DepositionSimulation<'static> {
 /// Runs `body` with a context and the module's heat assembly around the
 /// case's cells, the link at the conductance its heat-assembly fixtures
 /// give it (`FixedCooling`).
-pub(super) fn heat_assembly<R>(
-    case: &Case<'_>,
+pub(super) fn heat_assembly<L: Lane, R>(
+    case: &Case<'_, L>,
     start: &DepositionSimulation<'_>,
     body: impl FnOnce(&Cx<'_>, &FixedCooling<'_, '_, '_>) -> R,
 ) -> R {
@@ -400,7 +494,7 @@ pub(super) fn heat_assembly<R>(
 /// The module's seven cells as one backward-Euler timeline whose ports
 /// return end-of-step temperatures, and its start. Its longest interval is
 /// the cells' own (`Fixture::thermal_at`), so it does not cap the step.
-fn timeline(case: &Case<'_>) -> (ThermalTimeline<'static>, TimelineState<'static>) {
+fn timeline<L: Lane>(case: &Case<'_, L>) -> (ThermalTimeline<'static>, TimelineState<'static>) {
     let f = case.fixture;
     let start = cells_start(case);
     let law: &'static Caloric = leak(Caloric(&f.caloric));
@@ -457,7 +551,7 @@ fn timeline(case: &Case<'_>) -> (ThermalTimeline<'static>, TimelineState<'static
 
 /// The native drive of `steady_drive` running the case's gate program,
 /// its resistances and switches following the fixture's card.
-fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
+fn drive<L: Lane>(case: &Case<'_, L>) -> CommutatedBatteryMotorDrive<L> {
     let f = case.fixture;
     let program = |k| GateProgram {
         intervals: vec![CommutationInterval {
@@ -521,11 +615,12 @@ fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
         SwitchPosition::OutputHigh,
         SwitchPosition::OutputLow,
     ];
-    for ((tag, position), storage) in (0..).zip(switches).zip(case.storage_keys) {
+    let mut storage = case.storage_keys.iter();
+    for (tag, position) in (0..).zip(switches) {
         let law = CardSwitch {
             card,
             keys: &f.keys,
-            storage,
+            storage: storage.next(),
             tag,
         };
         drive = drive.switch_following(position, Arc::new(law)).unwrap();
@@ -535,7 +630,7 @@ fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
 }
 
 /// The case as a graph. Returns the system, the drive and the cells.
-pub(super) fn declare(case: &Case<'_>) -> (System, NodeId, NodeId) {
+pub(super) fn declare<L: Lane>(case: &Case<'_, L>) -> (System, NodeId, NodeId) {
     let mut builder = SystemBuilder::new();
     let node = builder.add("drive", drive(case), case.start).unwrap();
     let torques = case.steady.command.shaft_torque_nm;
@@ -647,12 +742,12 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
 /// 0.2 ohm, and every limit is 100 (`parameters()`). The battery's flat
 /// 12 V curve and `motor()` are `steady_drive`'s. The new state and the
 /// heat each cell receives \[J\].
-fn owner_step(
-    case: &Case<'_>,
+fn owner_step<L: Lane>(
+    case: &Case<'_, L>,
     k: usize,
-    (old, kelvin): (&[f64; 11], &[f64; 7]),
+    (old, kelvin): (&L::State, &[f64; 7]),
     slope_v_k: f64,
-) -> ([f64; 11], [f64; 7]) {
+) -> (L::State, [f64; 7]) {
     let p = parameters();
     let converter = BuckBoostParameters {
         inductance_h: p.inductance_h,
@@ -686,50 +781,20 @@ fn owner_step(
         gates: case.gates(k),
         duration_s: case.dt_s,
     }];
-    let (commands, n, e, c) = (
-        [case.steady.command],
+    let (next, heat, load_work_j) = case.storage.cycle(
+        original,
+        devices,
+        &intervals,
         case.substeps,
-        power_controls(),
-        cycle_controls(),
+        case.steady.command,
+        old,
     );
-    let mut next = [0.0; 11];
-    let step = match &case.storage {
-        DeviceStorage::Capacitance(storage) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
-            original,
-            devices,
-            *storage,
-            &intervals,
-            n,
-            e,
-            c,
-            || false,
-        )
-        .unwrap()
-        .step_interval_commands_controlled(old, &commands, &mut next, || false),
-        DeviceStorage::Charge {
-            curves,
-            maximum_cells_per_chord: chords,
-        } => PreparedChargeBatteryMotorCycle::new_charge_controlled(
-            original,
-            devices,
-            curves.clone(),
-            *chords,
-            &intervals,
-            n,
-            e,
-            c,
-            || false,
-        )
-        .unwrap()
-        .step_interval_commands_controlled(old, &commands, &mut next, || false),
-    }
-    .unwrap();
     let routed = if case.load_cell.is_some() {
-        step.load_work_j
+        load_work_j
     } else {
         0.0
     };
-    (next, per_body(step.heat_joules(), routed))
+    (next, per_body(heat, routed))
 }
 
 /// Holds the largest differences of a reference check within `bounds`.
@@ -749,7 +814,12 @@ fn within(what: &str, worst: [f64; 2], bounds: [f64; 2]) {
 /// backward-Euler balance: its energy change is the heat routed to it and,
 /// where linked, the link's `G h (T_a - T_b)` at the end temperatures.
 /// Bounds on the coordinates (relative) and the cells' energies \[J\].
-pub(super) fn owner_check(case: &Case<'_>, rows: &[Row], slope_v_k: f64, bounds: [f64; 2]) {
+pub(super) fn owner_check<L: Lane>(
+    case: &Case<'_, L>,
+    rows: &[Row<L::State>],
+    slope_v_k: f64,
+    bounds: [f64; 2],
+) {
     let (mut old, mut before, mut worst) = (case.start, [300.0; 7], [0.0_f64; 2]);
     for (k, row) in rows.iter().enumerate() {
         let (next, mut heat) = owner_step(case, k, (&old, &row.kelvin), slope_v_k);
@@ -757,7 +827,7 @@ pub(super) fn owner_check(case: &Case<'_>, rows: &[Row], slope_v_k: f64, bounds:
             let flux = LINK.2 * case.dt_s * (row.kelvin[0] - row.kelvin[6]);
             (heat[0], heat[6]) = (heat[0] - flux, heat[6] + flux);
         }
-        for (a, b) in row.state.iter().zip(next) {
+        for (a, b) in row.state.as_ref().iter().zip(next.as_ref()) {
             worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
         }
         for (i, q) in heat.into_iter().enumerate() {
@@ -774,7 +844,7 @@ pub(super) fn owner_check(case: &Case<'_>, rows: &[Row], slope_v_k: f64, bounds:
 /// (and the routed load), and the drive is at its start but for the
 /// battery's charge, k dt `cell_current_a` lower. Bounds on the coordinates
 /// (relative) and the temperatures \[K\].
-pub(super) fn steady_check(case: &Case<'_>, rows: &[Row], bounds: [f64; 2]) {
+pub(super) fn steady_check<L: Lane>(case: &Case<'_, L>, rows: &[Row<L::State>], bounds: [f64; 2]) {
     let (s, dt) = (case.steady, case.dt_s);
     let load = s
         .command
@@ -789,8 +859,8 @@ pub(super) fn steady_check(case: &Case<'_>, rows: &[Row], bounds: [f64; 2]) {
     let mut worst = [0.0_f64; 2];
     for (k, row) in (1..).map(f64::from).zip(rows) {
         let mut state = case.start;
-        state[0] -= k * dt * s.cell_current_a;
-        for (a, b) in row.state.iter().zip(state) {
+        state.as_mut()[0] -= k * dt * s.cell_current_a;
+        for (a, b) in row.state.as_ref().iter().zip(state.as_ref()) {
             worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
         }
         for (kelvin, q) in row.kelvin.iter().zip(q) {
@@ -801,7 +871,7 @@ pub(super) fn steady_check(case: &Case<'_>, rows: &[Row], bounds: [f64; 2]) {
 }
 
 /// `steps` steps of the case's graph. The kernel's ledger closes.
-pub(super) fn kernel_run(case: &Case<'_>, steps: usize) -> Vec<Row> {
+pub(super) fn kernel_run<L: Lane>(case: &Case<'_, L>, steps: usize) -> Vec<Row<L::State>> {
     let (mut system, drive, cells) = declare(case);
     let rows = with_cx(|cx| {
         (0..steps)
@@ -810,7 +880,7 @@ pub(super) fn kernel_run(case: &Case<'_>, steps: usize) -> Vec<Row> {
                 assert_eq!(report.dt_s.to_bits(), case.dt_s.to_bits());
                 let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
                 Row {
-                    state: *system.state::<[f64; 11]>(drive).unwrap(),
+                    state: *system.state::<L::State>(drive).unwrap(),
                     kelvin: IDS.map(|id| timeline.simulation().temperature_k(id).unwrap()),
                 }
             })
@@ -823,9 +893,16 @@ pub(super) fn kernel_run(case: &Case<'_>, steps: usize) -> Vec<Row> {
 
 /// One step of `dt_s` on the case's graph, which must be refused with the
 /// drive and the cells as they were. Returns the refusal's text.
-pub(super) fn kernel_refusal(case: &Case<'_>, dt_s: f64) -> String {
+pub(super) fn kernel_refusal<L: Lane>(case: &Case<'_, L>, dt_s: f64) -> String {
     let (mut system, drive, cells) = declare(case);
-    let bits = |system: &System| system.state::<[f64; 11]>(drive).unwrap().map(f64::to_bits);
+    let bits = |system: &System| {
+        let state = system.state::<L::State>(drive).unwrap();
+        state
+            .as_ref()
+            .iter()
+            .map(|q| q.to_bits())
+            .collect::<Vec<_>>()
+    };
     let state = bits(&system);
     let timeline = system
         .state::<TimelineState<'static>>(cells)
@@ -843,11 +920,12 @@ pub(super) fn kernel_refusal(case: &Case<'_>, dt_s: f64) -> String {
 /// Holds every step of the kernel's run to the module's: each coordinate
 /// within `bounds[0]` of its size (at least 1), each temperature within
 /// `bounds[1]` K. Prints the largest differences.
-pub(super) fn compare(module: &[Row], kernel: &[Row], bounds: [f64; 2]) {
+pub(super) fn compare<S: AsRef<[f64]>>(module: &[Row<S>], kernel: &[Row<S>], bounds: [f64; 2]) {
     assert_eq!(module.len(), kernel.len());
     let mut worst = [0.0_f64; 2];
     for (k, (theirs, ours)) in module.iter().zip(kernel).enumerate() {
-        for (i, (a, b)) in ours.state.iter().zip(theirs.state).enumerate() {
+        let (a, b) = (ours.state.as_ref(), theirs.state.as_ref());
+        for (i, (a, b)) in a.iter().zip(b).enumerate() {
             let relative = (a - b).abs() / a.abs().max(1.0);
             worst[0] = worst[0].max(relative);
             assert!(
