@@ -525,6 +525,33 @@ fn memory_is_stored_energy_and_its_release_is_motion_and_heat() {
 }
 
 #[test]
+fn preloaded_three_body_network_can_leave_rest() {
+    let component = network(Gravity::ZERO);
+    let p = properties();
+    let state = RelaxationState {
+        bodies: moving()
+            .iter()
+            .zip(&p)
+            .map(|(start, &properties)| {
+                body(properties, start.pose().position_world(), Vec3::ZERO, Vec3::ZERO)
+            })
+            .collect(),
+        memory: preloaded(),
+    };
+    let gate = CancelGate::new_clock_free();
+    let inputs = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 300.0, 300.0];
+    for dt_s in [0.01, 0.0125] {
+        let (next, receipt, outputs) =
+            propose(&component, &state, dt_s, &inputs, &gate).expect("preloaded network leaves rest");
+        let heat_j = -dt_s * (outputs[9] + outputs[10]);
+        assert!(heat_j > 0.0);
+        assert!(next.bodies.iter().any(|body| body.linear_momentum_world() != Vec3::ZERO));
+        assert!((component.stored_energy_j(&next).expect("energy") + heat_j - PRELOAD_J).abs() < 1e-9);
+        assert!(receipt.numerical_loss_j.abs() < 1e-9);
+    }
+}
+
+#[test]
 fn an_equilibrium_branch_stores_and_returns_energy_and_never_heats() {
     let gate = CancelGate::new_clock_free();
     // The pair with a lossless branch: only the Kelvin viscosity heats.

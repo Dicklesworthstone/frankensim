@@ -765,6 +765,270 @@ fn a_one_way_graph_is_swept_once_and_matches_a_hand_staggered_run_bitwise() {
     assert!(ledger.connections[0].energy_defect_j.value().abs() <= 1.0e-14 * routed);
 }
 
+/// A genuine nonlinear storage law offered at the monotone tier, with no
+/// tangent. Its finite support deliberately rejects exploratory proposals.
+struct MonotoneSpring {
+    spring: Spring,
+    support_m_s: f64,
+    max_step_s: f64,
+    refused: Rc<Cell<u32>>,
+    cancel_on_refusal: Rc<Cell<bool>>,
+}
+
+impl Component for MonotoneSpring {
+    type State = f64;
+    type Error = ElementError;
+
+    fn ports(&self) -> &[PortSpec] {
+        self.spring.ports()
+    }
+    fn class(&self) -> Class {
+        Class::Monotone1d
+    }
+    fn stored_energy_j(&self, state: &f64) -> Result<f64, ElementError> {
+        self.spring.stored_energy_j(state).map_err(Into::into)
+    }
+    fn propose(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        new: &mut f64,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, ElementError> {
+        cx.checkpoint()?;
+        if dt_s > self.max_step_s {
+            return Ok(Proposal::Shorten {
+                dt_s: self.max_step_s,
+            });
+        }
+        if inputs[0].abs() > self.support_m_s {
+            self.refused.set(self.refused.get() + 1);
+            if self.cancel_on_refusal.get() {
+                cx.cancel_gate().request();
+            }
+            return Err(ElementError::Law {
+                reason: "outside declared rate support".into(),
+            });
+        }
+        self.spring
+            .propose(old, dt_s, inputs, new, outputs, cx)
+            .map_err(Into::into)
+    }
+}
+
+fn monotone_oscillator(
+    support_m_s: f64,
+    max_step_s: f64,
+    reverse: bool,
+    refused: Rc<Cell<u32>>,
+    cancel_on_refusal: Rc<Cell<bool>>,
+) -> (System, NodeId, NodeId) {
+    let mut builder = SystemBuilder::new();
+    let element = MonotoneSpring {
+        spring: Spring::new(4.0, 8.0),
+        support_m_s,
+        max_step_s,
+        refused,
+        cancel_on_refusal,
+    };
+    let (mass, spring) = if reverse {
+        let spring = builder.add("spring", element, 0.0).unwrap();
+        (
+            builder
+                .add_with_tangent("mass", Inertia::new(1.0), 1.0)
+                .unwrap(),
+            spring,
+        )
+    } else {
+        let mass = builder
+            .add_with_tangent("mass", Inertia::new(1.0), 1.0)
+            .unwrap();
+        (mass, builder.add("spring", element, 0.0).unwrap())
+    };
+    builder
+        .bond(
+            builder.port(mass, "p").unwrap(),
+            builder.port(spring, "p").unwrap(),
+        )
+        .unwrap();
+    (builder.seal().unwrap(), mass, spring)
+}
+
+#[test]
+fn monotone_storage_without_a_tangent_matches_the_monolithic_cubic_and_closes_energy() {
+    // For m=1, k=4, k3=8, q0=0 and v0=1 the step-mean velocity obeys
+    // dt^4 v^3 + (1 + dt^2) v - 1 = 0. This independent scalar equation
+    // contains neither the graph nor the kernel's bracketing implementation.
+    for reverse in [false, true] {
+        for support in [f64::INFINITY, 0.6] {
+            let refused = Rc::new(Cell::new(0));
+            let (mut system, mass, spring) = monotone_oscillator(
+                support,
+                f64::INFINITY,
+                reverse,
+                Rc::clone(&refused),
+                Rc::new(Cell::new(false)),
+            );
+            let gate = CancelGate::new_clock_free();
+            let report = with_cx(&gate, |cx| system.step(1.0, cx)).expect("monotone step");
+            let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+            for _ in 0..80 {
+                let v = 0.5 * (lo + hi);
+                if v * v * v + 2.0 * v < 1.0 {
+                    lo = v;
+                } else {
+                    hi = v;
+                }
+            }
+            let mean = 0.5 * (lo + hi);
+            assert!((*system.state::<f64>(mass).unwrap() - (2.0 * mean - 1.0)).abs() < 2.0e-11);
+            assert!((*system.state::<f64>(spring).unwrap() + mean).abs() < 2.0e-11);
+            assert_eq!(
+                report.shortenings, 0,
+                "a refused search probe is not a physical step"
+            );
+            assert!(system.ledger().energy_residual_j().abs() < 2.0e-12);
+            assert!(system.ledger().stored_change_j().abs() < 2.0e-12);
+            if support.is_finite() {
+                assert!(refused.get() > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn monotone_feedback_tracks_a_tangent_reference_across_repeated_steps() {
+    let (mut system, mass, spring) = monotone_oscillator(
+        1.1,
+        f64::INFINITY,
+        false,
+        Rc::new(Cell::new(0)),
+        Rc::new(Cell::new(false)),
+    );
+    let mut builder = SystemBuilder::new();
+    let reference_mass = builder
+        .add_with_tangent("mass", Inertia::new(1.0), 1.0)
+        .unwrap();
+    let reference_spring = builder
+        .add_with_tangent("spring", Spring::new(4.0, 8.0), 0.0)
+        .unwrap();
+    builder
+        .bond(
+            builder.port(reference_mass, "p").unwrap(),
+            builder.port(reference_spring, "p").unwrap(),
+        )
+        .unwrap();
+    let mut reference = builder.seal().unwrap();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        for step in 0..128 {
+            // Warm starts must follow the accepted state even when the next
+            // physical step has a different duration or crosses a turning point.
+            let dt_s = [0.02, 0.11, 0.03, 0.17][step % 4];
+            system.step(dt_s, cx).expect("monotone trajectory");
+            reference.step(dt_s, cx).expect("tangent reference");
+            for (actual, expected) in [(mass, reference_mass), (spring, reference_spring)] {
+                assert!(
+                    (system.state::<f64>(actual).unwrap()
+                        - reference.state::<f64>(expected).unwrap())
+                    .abs()
+                        < 2.0e-9,
+                    "trajectory diverged at step {step}"
+                );
+            }
+        }
+    });
+    assert_eq!(system.steps(), 128);
+    assert_eq!(system.time_s(), reference.time_s());
+    assert!(system.ledger().stored_change_j().abs() < 1.0e-10);
+    assert!(system.ledger().energy_residual_j().abs() < 1.0e-10);
+}
+
+#[test]
+fn monotone_search_exhaustion_rolls_back_and_retry_replays_exactly() {
+    let (mut system, mass, spring) = monotone_oscillator(
+        0.6,
+        f64::INFINITY,
+        false,
+        Rc::new(Cell::new(0)),
+        Rc::new(Cell::new(false)),
+    );
+    let initial = system.checkpoint().unwrap();
+    let config = SolveConfig::default();
+    system.set_config(SolveConfig {
+        max_iterations: 1,
+        ..config
+    });
+    let gate = CancelGate::new_clock_free();
+    assert!(matches!(
+        with_cx(&gate, |cx| system.step(1.0, cx)),
+        Err(SystemError::NotConverged { .. })
+    ));
+    assert_eq!(*system.state::<f64>(mass).unwrap(), 1.0);
+    assert_eq!(*system.state::<f64>(spring).unwrap(), 0.0);
+    assert_eq!(system.ledger(), initial.ledger());
+    assert_eq!((system.time_s(), system.steps()), (0.0, 0));
+    system.set_config(config);
+    with_cx(&gate, |cx| system.step(1.0, cx)).unwrap();
+    let result = (
+        *system.state::<f64>(mass).unwrap(),
+        *system.state::<f64>(spring).unwrap(),
+    );
+    let ledger = system.ledger().clone();
+    system.restore(&initial).unwrap();
+    with_cx(&gate, |cx| system.step(1.0, cx)).unwrap();
+    assert_eq!(
+        result,
+        (
+            *system.state::<f64>(mass).unwrap(),
+            *system.state::<f64>(spring).unwrap()
+        )
+    );
+    assert_eq!(system.ledger(), &ledger);
+}
+
+#[test]
+fn monotone_search_cancellation_is_never_recovered_as_a_domain_boundary() {
+    let cancel = Rc::new(Cell::new(true));
+    let (mut system, mass, spring) = monotone_oscillator(
+        0.6,
+        f64::INFINITY,
+        false,
+        Rc::new(Cell::new(0)),
+        Rc::clone(&cancel),
+    );
+    let ledger = system.ledger().clone();
+    let gate = CancelGate::new_clock_free();
+    assert!(matches!(
+        with_cx(&gate, |cx| system.step(1.0, cx)),
+        Err(SystemError::Cancelled)
+    ));
+    assert_eq!(*system.state::<f64>(mass).unwrap(), 1.0);
+    assert_eq!(*system.state::<f64>(spring).unwrap(), 0.0);
+    assert_eq!((system.time_s(), system.steps()), (0.0, 0));
+    assert_eq!(system.ledger(), &ledger);
+    cancel.set(false);
+    with_cx(&CancelGate::new_clock_free(), |cx| system.step(1.0, cx))
+        .expect("retry after cancellation");
+}
+
+#[test]
+fn monotone_owner_can_negotiate_a_shorter_physical_step() {
+    let (mut system, _, _) = monotone_oscillator(
+        f64::INFINITY,
+        0.25,
+        false,
+        Rc::new(Cell::new(0)),
+        Rc::new(Cell::new(false)),
+    );
+    let report = with_cx(&CancelGate::new_clock_free(), |cx| system.step(1.0, cx)).unwrap();
+    assert_eq!(report.shortenings, 1);
+    assert_eq!(system.time_s(), 0.25);
+    assert!(system.ledger().energy_residual_j().abs() < 2.0e-12);
+}
+
 #[test]
 fn a_nonlinear_spring_without_a_tangent_converges_and_conserves_energy() {
     let gate = CancelGate::new_clock_free();

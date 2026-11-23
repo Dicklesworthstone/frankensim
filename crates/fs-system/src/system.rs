@@ -25,11 +25,13 @@ use crate::wiring::{
 };
 
 mod line;
+mod scalar;
 mod snapshot;
 
 pub use snapshot::SystemImage;
 
 use line::Line;
+use scalar::ScalarPlan;
 
 /// A prescribed port input: `(t0, dt, values)` fills the value held over the
 /// step that starts at `t0` and lasts `dt`.
@@ -170,7 +172,7 @@ pub struct SolveConfig {
     pub relative_tolerance: f64,
     /// Interface residual always allowed, in the unknown's own unit.
     pub absolute_tolerance: f64,
-    /// Newton iterations allowed per block and trial.
+    /// Scalar bracket probes and Newton iterations allowed per block and trial.
     pub max_iterations: u32,
     /// Times one step may be shortened at a component's request.
     pub max_shortenings: u32,
@@ -1881,6 +1883,9 @@ impl SystemBuilder {
                 });
                 let mut work =
                     BlockWork::plan(block, &drivers, &input_owner, &output_start, affine);
+                if line.is_empty() {
+                    work.scalar = self.scalar_plan(block, &drivers, &input_owner, &output_owner);
+                }
                 if !line.is_empty() {
                     let declares = |node: usize| self.nodes[node].has_tangent();
                     work.found =
@@ -2128,6 +2133,9 @@ struct StepScratch {
 /// that is affine throughout, the factors of its interface Jacobian.
 #[derive(Default)]
 struct BlockWork {
+    /// A single monotone feedback coordinate, with the remaining graph
+    /// evaluated in dependency order before the ordinary convergence audit.
+    scalar: Option<ScalarPlan>,
     residual: Vec<f64>,
     /// First-order size of the rounding in each residual: how strongly its
     /// driver's sources depend on the block's inputs, times the size of
@@ -2278,6 +2286,7 @@ impl BlockWork {
         }
         let entries = slots.len();
         Self {
+            scalar: None,
             residual: vec![0.0; m],
             rounding: vec![0.0; m],
             allowance: vec![0.0; m],
@@ -2774,6 +2783,7 @@ impl System {
         local: usize,
         dt_s: f64,
         group_scale: &[f64],
+        bracketed: bool,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
         let (inputs, outputs) = (self.node_inputs(node), self.node_outputs(node));
@@ -2803,6 +2813,7 @@ impl System {
         // warms a body).
         if self.nodes[node].line_ports().is_none()
             && !matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth)
+            && !(bracketed && self.nodes[node].class() == Class::Monotone1d)
         {
             return Err(SystemError::Unsupported {
                 node: self.names[node].clone(),
@@ -2829,43 +2840,71 @@ impl System {
         let step = f64::EPSILON.sqrt() * if scale > 0.0 { scale } else { 1.0 };
         let mut asked: Option<f64> = None;
         let mut first_refusal: Option<OwnerError> = None;
-        for side in [step, -step] {
-            self.inputs[index] = base + side;
-            let proposal = self.propose_perturbed(node, dt_s, cx);
-            self.inputs[index] = base;
-            match proposal {
-                Err(error) => {
-                    if cx.is_cancel_requested() {
-                        return Err(SystemError::Cancelled);
+        // A bracketed monotone law can have support much narrower than the
+        // usual difference step. Its accepted iterate is in that support;
+        // shrink refused probes toward it instead of refusing the whole
+        // step. Other classes retain the original two-probe policy.
+        let narrow_support = bracketed && self.nodes[node].class() == Class::Monotone1d;
+        let mut probe_step = step;
+        for _ in 0..if narrow_support { 64 } else { 1 } {
+            let mut representable = false;
+            for side in [probe_step, -probe_step] {
+                let next = base + side;
+                let displacement = if narrow_support { next - base } else { side };
+                if narrow_support {
+                    cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
+                    if !next.is_finite() || displacement == 0.0 {
+                        continue;
                     }
-                    if first_refusal.is_none() {
-                        first_refusal = Some(error);
-                    }
+                    representable = true;
                 }
-                Ok(Proposal::Shorten { dt_s: shorter }) => {
-                    let shorter = self.shorter(node, dt_s, shorter)?;
-                    asked = match (asked, shorter) {
-                        (Some(first), Some(second)) => Some(first.min(second)),
-                        (first, second) => first.or(second),
-                    };
-                }
-                Ok(Proposal::Step(_)) => {
-                    for (column, current) in self.scratch_outputs[..width]
-                        .iter_mut()
-                        .zip(&self.outputs[outputs])
-                    {
-                        *column = (*column - current) / side;
+                self.inputs[index] = next;
+                let proposal = self.propose_perturbed(node, dt_s, cx);
+                self.inputs[index] = base;
+                match proposal {
+                    Err(error) => {
+                        if cx.is_cancel_requested() {
+                            return Err(SystemError::Cancelled);
+                        }
+                        if first_refusal.is_none() {
+                            first_refusal = Some(error);
+                        }
                     }
-                    // No step longer than `2^-10` of the input's scale, or
-                    // of one unit where that is less.
-                    let widest = scale.max(1.0) * WIDEST;
-                    self.resolve_column(node, index, side, widest, dt_s, cx)?;
-                    return Ok(None);
+                    Ok(Proposal::Shorten { dt_s: shorter }) => {
+                        let shorter = self.shorter(node, dt_s, shorter)?;
+                        asked = match (asked, shorter) {
+                            (Some(first), Some(second)) => Some(first.min(second)),
+                            (first, second) => first.or(second),
+                        };
+                    }
+                    Ok(Proposal::Step(_)) => {
+                        for (column, current) in self.scratch_outputs[..width]
+                            .iter_mut()
+                            .zip(&self.outputs[outputs])
+                        {
+                            // Near the support's edge the requested move
+                            // can round to a different representable step.
+                            *column = (*column - current) / displacement;
+                        }
+                        // No step longer than `2^-10` of the input's scale,
+                        // or of one unit where that is less.
+                        let widest = scale.max(1.0) * WIDEST;
+                        self.resolve_column(node, index, displacement, widest, dt_s, cx)?;
+                        return Ok(None);
+                    }
                 }
             }
+            if !narrow_support || !representable {
+                break;
+            }
+            probe_step *= 0.5;
         }
         match first_refusal {
             Some(error) => Err(self.refused(node, error, cx)),
+            None if narrow_support && asked.is_none() => Err(SystemError::Unsupported {
+                node: self.names[node].clone(),
+                needs: "a representable in-domain perturbation or a port tangent",
+            }),
             None => Ok(asked),
         }
     }
@@ -3228,7 +3267,16 @@ impl System {
         {
             return Ok(Err(shorter));
         }
+        let mut iterations = if let Some(plan) = &work.scalar {
+            match self.scalar_seed(plan, unknowns, nodes, dt_s, cx)? {
+                Ok(spent) => spent,
+                Err(shorter) => return Ok(Err(shorter)),
+            }
+        } else {
+            0
+        };
         let BlockWork {
+            scalar,
             residual,
             rounding,
             allowance,
@@ -3275,7 +3323,6 @@ impl System {
         if !self.lines[block].is_empty() {
             self.release(block, unknowns, residual, condensed)?;
         }
-        let mut iterations = 0_u32;
         loop {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
             for (position, &node) in nodes.iter().enumerate() {
@@ -3522,7 +3569,7 @@ impl System {
                         let width = self.node_outputs(node).len();
                         self.scratch_outputs[..width].fill(0.0);
                     } else if let Some(shorter) =
-                        self.tangent_column(node, local, dt_s, group_scale, cx)?
+                        self.tangent_column(node, local, dt_s, group_scale, scalar.is_some(), cx)?
                     {
                         return Ok(Err(shorter));
                     }

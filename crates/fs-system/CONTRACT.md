@@ -8,6 +8,29 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## Scalar monotone feedback
+
+A `Class::Monotone1d` component without `PortTangent` can close a feedback loop
+when it has one unknown input and removing that input's incoming dependencies
+makes the rest of the block acyclic. Sealing retains that evaluation order.
+Each trial evaluates the original components and connections in that order;
+an expanding, safeguarded scalar bracket locates the feedback solution.
+Refused exploratory inputs narrow the search domain without inventing a
+residual sign or publishing a candidate. The initial owner's refusal or
+shortening request remains authoritative, and cancellation always propagates.
+
+The resulting candidate still passes the ordinary per-wire and propagated
+residual checks, independent conservation audits, and atomic admission.
+Bracket probes and subsequent Newton corrections share `max_iterations`.
+The path allocates its plan at sealing and reuses the original step buffers.
+The native nonlinear-storage regression compares with an independently solved
+monolithic cubic and checks energy, finite support, declaration order,
+shortening, cancellation, exhausted work and exact checkpoint replay.
+Multiple remaining feedback coordinates and general set-valued relations do
+not acquire a scalar solve; they retain their existing tier requirements.
+This supplies a numerical solve for an admitted continuous relation, without
+a global uniqueness, global error or physical model-accuracy certificate.
+
 ## Purpose and layer
 
 Layer: L3. The composition kernel: a system of `fs_ports::component::Component`s
