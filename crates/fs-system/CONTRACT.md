@@ -4178,7 +4178,48 @@ Planted defects, one at a time, each failed at least one test:
 - the program's end velocity in place of its mean;
 - entropy without the load.
 
+fs-couple's `tests/commutated_converter_enthalpy/battery_motor/graph.rs`
+declares the drive of the module's `capacitance` and `charge` lanes as a
+graph:
+- this drive with the fixture's storage, its five resistances and four
+  switches following the fixture's card at the temperature each heat port
+  receives. A switch's law also asks its package's storage claim, so a
+  temperature outside that claim is refused as the module refuses it;
+- two `Force` sources holding the command's shaft torques;
+- the seven cells as the backward-Euler timeline returning end-of-step
+  temperatures, and one heat route per heat port.
+
+Against the module, three steps of each fixture, for both storage files:
+- steady motoring and regeneration (1/64 s, four substeps, the load's work
+  into a package): bit for bit, held to 1e-14 relative and 1e-11 K;
+- the hot dynamic fixture (cells of 0.01 J/K, a diode threshold rising
+  20 mV/K, 1/1024 s):
+  - constant capacitances: within 4.2e-15 relative and 2.2e-11 K;
+  - charge curves: within 9.3e-15 relative and 4.9e-11 K;
+
+  held to 1e-13 (2e-13 for charge curves) and 1e-9 K. The output high
+  package passes 300.75 K, so its diode threshold feeds back.
+
+Both sides refuse two steps:
+- a storage claim qualified only up to 300.000001 K (the graph with `Law`
+  naming `heat_input_high`);
+- a step that is not one program.
+
+After each refusal the graph's drive and cells keep their states. The
+kernel's ledger closes within 1e-9 J.
+
+Six defects planted in the graph, one at a time, each failed at least one of
+these tests:
+- the lead's heat in the polarization's cell;
+- the stator given the rotor's torque;
+- a switch law that does not ask its storage claim;
+- the timeline returning mean temperatures;
+- the storage claims in reverse order;
+- the load's work left outside.
+
 Not claimed: torques that change within the program; gate charge and
 gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
 avalanche; storage, OCV or bearing drag that change with temperature. The
-graphs of the module's fixtures are a separate package.
+graphs do not cover the module's links between cells (its heat-assembly
+fixtures), a gate program that changes from step to step, or its refusals of
+a source that changed or was bound another way.

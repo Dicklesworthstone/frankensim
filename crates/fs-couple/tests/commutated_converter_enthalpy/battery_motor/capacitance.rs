@@ -1,4 +1,6 @@
 //! Original node-charge storage, semiconductor calorimetry and source continuity.
+#[path = "capacitance/graph.rs"]
+mod graph;
 use super::*;
 use fs_couple::circuit_enthalpy::converter::commutation::battery_motor::capacitance::*;
 use fs_phs::circuit::converter::commutation::capacitance::{

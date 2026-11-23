@@ -1,4 +1,6 @@
 //! Full Q(V) source continuity, integral storage and finite material heat.
+#[path = "charge/graph.rs"]
+mod graph;
 use super::*;
 use fs_couple::circuit_enthalpy::converter::commutation::battery_motor::charge::*;
 use fs_phs::circuit::capacitance::CapacitorChargeCurve;
