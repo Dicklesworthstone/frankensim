@@ -4,7 +4,7 @@ use fs_system::commutated_drive::DeviceStorage;
 
 use super::super::graph::{
     Case, Row, cells_start, closed_form_step, compare, heat_assembly, kernel_refusal, kernel_run,
-    leak,
+    leak, owner_check, steady_check,
 };
 use super::*;
 
@@ -149,9 +149,13 @@ fn charge_curves_as_a_graph_keep_the_steady_motoring_and_regenerative_drive() {
         let start = initial(&steady, [0.0; 2]);
         let case = charge_case(f, &steady, start, 1.0 / 64.0, 4, Some(IDS[3]));
         let module = module_run(f, &case, case.dt_s, 3).unwrap();
-        // On the export of 1e611fdf33 the two agree bit for bit. The bounds
+        // On 38d60e3722 the two agree bit for bit. The bounds
         // allow for rounding on another platform.
-        compare(&module, &kernel_run(&case, 3), [1e-14, 1e-11]);
+        let graph = kernel_run(&case, 3);
+        compare(&module, &graph, [1e-14, 1e-11]);
+        // Without the module: within 1.1e-15 relative and 2.7e-14 K of the
+        // closed form.
+        steady_check(&case, &graph, [2e-14, 1e-12]);
     }
 }
 
@@ -164,9 +168,13 @@ fn charge_curves_as_a_graph_follow_the_hot_diode_threshold() {
     let start = initial(&steady, [-0.45, 0.4]);
     let case = charge_case(f, &steady, start, 1.0 / 1024.0, 1, None);
     let module = module_run(f, &case, case.dt_s, 3).unwrap();
-    // On the export of 1e611fdf33 the two agree within 9.3e-15 relative and
+    // On 38d60e3722 the two agree within 9.3e-15 relative and
     // 4.9e-11 K over three steps; the bounds sit 21 and 20 times above.
-    compare(&module, &kernel_run(&case, 3), [2e-13, 1e-9]);
+    let graph = kernel_run(&case, 3);
+    compare(&module, &graph, [2e-13, 1e-9]);
+    // Without the module: the owner by hand bit for bit, each cell's
+    // balance within 5.5e-16 J.
+    owner_check(&case, &graph, 0.02, [1e-14, 1e-14]);
     // The feedback is real: the output high package, whose diode conducts,
     // warms past 300.75 K, so its threshold rises by more than 15 mV.
     assert!(module[2].kelvin[3] > 300.75, "{:?}", module[2].kelvin);
@@ -190,7 +198,11 @@ fn charge_curves_as_a_graph_follow_a_gate_program_that_changes() {
     let module = module_run(f, &case, dt, 3).unwrap();
     // On a8d5a7f02c the two agree within 5.5e-15 relative and 2.7e-11 K
     // over three steps; the bounds sit 18 and 37 times above.
-    compare(&module, &kernel_run(&case, 3), [1e-13, 1e-9]);
+    let graph = kernel_run(&case, 3);
+    compare(&module, &graph, [1e-13, 1e-9]);
+    // Without the module: the owner by hand bit for bit, each cell's
+    // balance within 5.5e-16 J.
+    owner_check(&case, &graph, 0.02, [1e-14, 1e-14]);
     // The schedule matters: with the first gates kept, the second step ends
     // elsewhere.
     let kept = module_run(f, &charge_case(f, &steady, start, dt, 1, None), dt, 3).unwrap();
@@ -207,34 +219,26 @@ fn charge_curves_as_a_graph_carry_the_link_between_cells() {
     // dynamic fixture with the same link.
     let steady = steady_drive(false);
     let fixtures = [
-        (
-            charge_fixture(1.0, 0.0, 350.0, false, 1.0),
-            [0.0; 2],
-            1.0 / 64.0,
-            4,
-            [1e-14, 1e-11],
-        ),
-        (
-            charge_fixture(0.01, 0.02, 350.0, false, 1.0),
-            [-0.45, 0.4],
-            1.0 / 1024.0,
-            1,
-            [1e-13, 1e-9],
-        ),
+        ((1.0, 0.0), [0.0; 2], 1.0 / 64.0, 4, [1e-14, 1e-11]),
+        ((0.01, 0.02), [-0.45, 0.4], 1.0 / 1024.0, 1, [1e-13, 1e-9]),
     ];
     // On 72250ec7fc the steady fixture agrees bit for bit in the drive and
     // within 1.7e-13 K in the cells, the hot one within 7.8e-16 relative and
     // 1.6e-11 K. The bounds are those of the same fixtures without the link,
     // 1e-13 in place of 2e-13 for the hot drive.
-    for (f, offset, dt, substeps, bounds) in fixtures {
-        let f = leak(f);
+    for ((cp, slope), offset, dt, substeps, bounds) in fixtures {
+        let f = leak(charge_fixture(cp, slope, 350.0, false, 1.0));
         let start = initial(&steady, offset);
         let case = Case {
             linked: true,
             ..charge_case(f, &steady, start, dt, substeps, None)
         };
         let module = module_linked_run(f, &case, 3);
-        compare(&module, &kernel_run(&case, 3), bounds);
+        let graph = kernel_run(&case, 3);
+        compare(&module, &graph, bounds);
+        // Without the module: the owner by hand bit for bit, each cell's
+        // balance within 4.4e-14 J.
+        owner_check(&case, &graph, slope, [1e-14, 1e-12]);
         // The steady fixture's first step also meets the module's own
         // closed form on the graph: within 5.7e-14 K.
         assert!(substeps != 4 || closed_form_step(&case) < 1e-12);

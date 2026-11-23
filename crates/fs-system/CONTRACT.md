@@ -4246,6 +4246,25 @@ Against the module, three steps of each fixture, for both storage files:
   5.7e-14 K, held to 1e-12 K. The drive's laws at the two linked cells do
   not vary with temperature here, so the link reaches the cells only.
 
+Each run is also checked without the module:
+- the steady runs against `steady_drive`'s closed form over the three
+  periods: each cell k times its steady heat, the drive back at its start
+  but for the battery's charge, k dt `cell_current_a` lower. Within
+  1.1e-15 relative and 2.7e-14 K, held to 2e-14 and 1e-12 K;
+- the other runs against the owner's step built by hand from the graph's
+  old state at its end temperatures, and each cell's backward-Euler
+  balance (with the link's flux where linked). The owner is the card's
+  authored laws in closed form: constant resistances, a diode threshold of
+  0.5 V + 0.02 V/K (T - 300 K). The owner agrees bit for bit and the
+  balances within 5.5e-16 J (4.4e-14 J with the steady link), held to
+  1e-14 relative and 1e-14 J (1e-12 J with the link).
+
+With the module comparison switched off, the lead's heat in the
+polarization's cell and the timeline returning mean temperatures still
+failed these checks. The references themselves failed with the owner at
+the start temperatures, with half the threshold slope, and with the
+battery's charge kept in the steady closed form.
+
 Both sides refuse two steps:
 - a storage claim qualified only up to 300.000001 K (the graph with `Law`
   naming `heat_input_high`);

@@ -26,6 +26,9 @@ use fs_material::state_point::{
     ResolvedScalarProperty, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
 };
+use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
+    PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
+};
 use fs_ports::PortKind;
 use fs_system::circuit::ResistanceLaw;
 use fs_system::commutated_drive::{
@@ -634,6 +637,167 @@ pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
     let kelvin = kernel_run(case, 1)[0].kelvin;
     let error = |i: usize| (kelvin[i] - (300.0 + q[i] + exchange[i])).abs();
     (0..7).map(error).fold(0.0, f64::max)
+}
+
+/// The owner's step built by hand for step `k` of the case, from `old` at the
+/// cells' temperatures `kelvin`: the card in closed form, not a second
+/// engine. As `fixture` authors the card, every resistance is 0.1 ohm, a
+/// channel is off at 100 ohm, each body diode conducts from
+/// 0.5 V + `slope_v_k` (T - 300 K) at its package's temperature through
+/// 0.2 ohm, and every limit is 100 (`parameters()`). The battery's flat
+/// 12 V curve and `motor()` are `steady_drive`'s. The new state and the
+/// heat each cell receives \[J\].
+fn owner_step(
+    case: &Case<'_>,
+    k: usize,
+    (old, kelvin): (&[f64; 11], &[f64; 7]),
+    slope_v_k: f64,
+) -> ([f64; 11], [f64; 7]) {
+    let p = parameters();
+    let converter = BuckBoostParameters {
+        inductance_h: p.inductance_h,
+        bus_capacitance_f: p.bus_capacitance_f,
+        winding_resistance_ohm: 0.1,
+        input_on_resistance_ohm: [0.1; 2],
+        output_on_resistance_ohm: [0.1; 2],
+    };
+    let bridge = BridgeModulation {
+        input_high_fraction: 0.0,
+        output_high_fraction: 0.0,
+    };
+    let battery = BatteryParameters {
+        series_resistance_ohm: 0.1,
+        polarization_resistance_ohm: 0.1,
+        polarization_capacitance_f: 2.0,
+        bus_capacitance_f: 0.5,
+    };
+    let curve = BatteryOcvCurve::new(100.0, &[(0.0, 12.0), (1.0, 12.0)]).unwrap();
+    let original = AveragedBuckBoost::new(converter, bridge)
+        .and_then(|c| c.with_battery_source(BatterySource::new(curve, battery)?, 0.1))
+        .unwrap()
+        .with_dc_motor(DcMotor::new(motor()).unwrap())
+        .unwrap();
+    let devices = core::array::from_fn(|i| {
+        let mut device = p.devices[i];
+        device.body_diode.forward_voltage_v = 0.5 + slope_v_k * (kelvin[i + 1] - 300.0);
+        device
+    });
+    let intervals = [CommutationInterval {
+        gates: case.gates(k),
+        duration_s: case.dt_s,
+    }];
+    let (commands, n, e, c) = (
+        [case.steady.command],
+        case.substeps,
+        power_controls(),
+        cycle_controls(),
+    );
+    let mut next = [0.0; 11];
+    let step = match &case.storage {
+        DeviceStorage::Capacitance(storage) => PreparedCapacitiveBatteryMotorCycle::new_controlled(
+            original,
+            devices,
+            *storage,
+            &intervals,
+            n,
+            e,
+            c,
+            || false,
+        )
+        .unwrap()
+        .step_interval_commands_controlled(old, &commands, &mut next, || false),
+        DeviceStorage::Charge {
+            curves,
+            maximum_cells_per_chord: chords,
+        } => PreparedChargeBatteryMotorCycle::new_charge_controlled(
+            original,
+            devices,
+            curves.clone(),
+            *chords,
+            &intervals,
+            n,
+            e,
+            c,
+            || false,
+        )
+        .unwrap()
+        .step_interval_commands_controlled(old, &commands, &mut next, || false),
+    }
+    .unwrap();
+    let routed = if case.load_cell.is_some() {
+        step.load_work_j
+    } else {
+        0.0
+    };
+    (next, per_body(step.heat_joules(), routed))
+}
+
+/// Holds the largest differences of a reference check within `bounds`.
+fn within(what: &str, worst: [f64; 2], bounds: [f64; 2]) {
+    println!(
+        "{what}: coordinates {:.1e} relative, cells {:.1e}",
+        worst[0], worst[1]
+    );
+    assert!(
+        worst[0] <= bounds[0] && worst[1] <= bounds[1],
+        "{what}: {worst:?} beyond {bounds:?}"
+    );
+}
+
+/// The graph's steps against the owner's step built by hand (`owner_step`)
+/// from the graph's old state at its end temperatures, and each cell's
+/// backward-Euler balance: its energy change is the heat routed to it and,
+/// where linked, the link's `G h (T_a - T_b)` at the end temperatures.
+/// Bounds on the coordinates (relative) and the cells' energies \[J\].
+pub(super) fn owner_check(case: &Case<'_>, rows: &[Row], slope_v_k: f64, bounds: [f64; 2]) {
+    let (mut old, mut before, mut worst) = (case.start, [300.0; 7], [0.0_f64; 2]);
+    for (k, row) in rows.iter().enumerate() {
+        let (next, mut heat) = owner_step(case, k, (&old, &row.kelvin), slope_v_k);
+        if case.linked {
+            let flux = LINK.2 * case.dt_s * (row.kelvin[0] - row.kelvin[6]);
+            (heat[0], heat[6]) = (heat[0] - flux, heat[6] + flux);
+        }
+        for (a, b) in row.state.iter().zip(next) {
+            worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
+        }
+        for (i, q) in heat.into_iter().enumerate() {
+            let change = case.fixture.cp * (row.kelvin[i] - before[i]);
+            worst[1] = worst[1].max((change - q).abs());
+        }
+        (old, before) = (row.state, row.kelvin);
+    }
+    within("graph against the owner by hand", worst, bounds);
+}
+
+/// The steady fixtures' closed form (`steady_drive`), as the module checks
+/// it: after k periods each cell of 1 J/K holds k times its steady heat
+/// (and the routed load), and the drive is at its start but for the
+/// battery's charge, k dt `cell_current_a` lower. Bounds on the coordinates
+/// (relative) and the temperatures \[K\].
+pub(super) fn steady_check(case: &Case<'_>, rows: &[Row], bounds: [f64; 2]) {
+    let (s, dt) = (case.steady, case.dt_s);
+    let load = s
+        .command
+        .auxiliary_load
+        .map_or(0.0, |l| l.requested_power_w());
+    let routed = if case.load_cell.is_some() {
+        load * dt
+    } else {
+        0.0
+    };
+    let q = per_body(s.heat_w.map(|p| p * dt), routed);
+    let mut worst = [0.0_f64; 2];
+    for (k, row) in (1..).map(f64::from).zip(rows) {
+        let mut state = case.start;
+        state[0] -= k * dt * s.cell_current_a;
+        for (a, b) in row.state.iter().zip(state) {
+            worst[0] = worst[0].max((a - b).abs() / a.abs().max(1.0));
+        }
+        for (kelvin, q) in row.kelvin.iter().zip(q) {
+            worst[1] = worst[1].max((kelvin - 300.0 - k * q).abs());
+        }
+    }
+    within("graph against the closed form", worst, bounds);
 }
 
 /// `steps` steps of the case's graph. The kernel's ledger closes.
