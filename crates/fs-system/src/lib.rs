@@ -29,7 +29,8 @@
 //! Mechanical, electrical and thermal devices can be described as data and
 //! run through the same kernel. With feature `phs`, `circuit` runs any
 //! Kirchhoff netlist of fs-phs as one Component whose resistors heat what
-//! their heat ports are joined to.
+//! their heat ports are joined to, and `battery` does the same for the
+//! equivalent-circuit battery of fs-phs and its two resistances.
 //!
 //! # Version 0
 //!
@@ -48,6 +49,8 @@
 #![warn(missing_docs)]
 
 mod adaptive;
+#[cfg(feature = "phs")]
+pub mod battery;
 #[cfg(feature = "phs")]
 pub mod circuit;
 #[cfg(feature = "constitutive")]

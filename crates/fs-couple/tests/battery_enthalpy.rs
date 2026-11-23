@@ -1,6 +1,10 @@
 //! Native finite battery work heats original material cells and feeds back R(T).
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "battery_enthalpy/graph.rs"]
+mod graph;
+#[path = "circuit_enthalpy/kernel.rs"]
+mod kernel;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,

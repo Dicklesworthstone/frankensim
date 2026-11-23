@@ -3,6 +3,8 @@
 mod common;
 #[path = "circuit_enthalpy/graph.rs"]
 mod graph;
+#[path = "circuit_enthalpy/kernel.rs"]
+mod kernel;
 use common::*;
 use fs_couple::circuit_enthalpy::*;
 use fs_thermal::enthalpy::{CellId,StepConfig};

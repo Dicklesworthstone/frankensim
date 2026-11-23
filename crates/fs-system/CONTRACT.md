@@ -3428,6 +3428,131 @@ trial (the comparison uses constant sources only). The module is kept as the
 regression reference, and no `fs-couple` source changes. Its test fixture
 gains `sourced`, which `initial` now calls with no sources.
 
+## Equivalent-circuit battery Component with heat ports
+
+The optional `phs` feature also exposes `battery::EquivalentCircuitBattery`
+(bead `frankensim-rc-1109-root-3gc12.9.2`, the battery coupling of
+`fs_couple::circuit_enthalpy::battery`). It owns the battery of
+`fs_phs::circuit::battery`: an OCV/SOC curve that owns the chemical energy, a
+series resistance, one polarization RC pair and a bus capacitor. Ports, in
+order:
+- `terminal`, electrical and `FlowIn`: it receives the current entering the
+  bus and returns the owner's discrete bus voltage;
+- `heat_series` and `heat_polarization`, each receiving the temperature where
+  that resistance's heat leaves and returning minus its heat over the step
+  divided by the step.
+
+State is the owner's `[chemical, polarization, bus]` charge in coulombs.
+Stored energy is the owner's Hamiltonian, which no resistance changes.
+
+A proposal builds the owner at the resistances of the step and runs its own
+`PreparedBatterySource::step_controlled`, the componentwise discrete gradient,
+exact across OCV knots; nothing is integrated here. A resistance given a
+`circuit::ResistanceLaw` with `following(loss, law)` takes `law.ohms(T)` at
+the temperature its heat port receives. A law with no answer, or with an
+answer that is not positive and finite, refuses the step with the loss
+(`BatteryComponentError::Law`); it never clamps.
+
+**Heat and balance.** The heats and the terminal work are the owner's own
+interval accounts. Work minus stored change minus heat is booked as numerical
+loss, and that loss and the differences between these accounts and the owner's
+native step record are each refused (`Balance`) beyond the arithmetic rounding
+floor plus the caller's `energy_tolerance_j`. A refused step writes neither
+outputs nor state. The receipt's residual and tolerance come from the owner's
+solve certificate, and a step without one is refused.
+
+**Class and identity.** The battery is `Class::Smooth`: the chemical energy
+integrates a continuous piecewise-linear OCV, so it and its discrete gradient
+are continuously differentiable. No tangent is declared. Identity words bind
+the capacity, the knots, the parameters, the solve budget and its halvings,
+each law's words (counted), and the tolerance. The codec is one word of `f64`
+bits per charge.
+
+`tests/battery.rs` (8 tests):
+- the port order and kinds;
+- a flat curve's stationary state under discharge and charge: only the
+  chemical charge moves, each resistance takes `R I^2`, the terminal returns
+  `U + I (R_s + R_p)`;
+- both resistances following their temperatures, against the bus and
+  polarization midpoint equations eliminated by hand (the module's own
+  oracle);
+- a step across an OCV knot whose stored change is the curve's closed-form
+  chemical energy plus both capacitors';
+- five steps on the kernel with a current source and two heat capacities:
+  charges, both temperatures and the source's energy in closed form, and the
+  ledger closed;
+- `check_component` conformance with both laws;
+- refusals that publish nothing: a law with no answer and one answering a
+  negative resistance, each by its loss; a cold port; a zero step; a step
+  that would empty the cell; a law given twice; a zero tolerance; a curve the
+  owner refuses;
+- the codec round trip, nonfinite and short words refused, and identities
+  told apart by law, by loss and by curve.
+
+Sixteen defects planted one at a time in the Component each failed at least
+one of these tests:
+- the law asked at 300 K;
+- the laws given to the other loss;
+- the port temperatures swapped;
+- the heat-rate sign;
+- the heat rates on the other port;
+- the terminal returning the OCV;
+- the state not advanced;
+- the entropy at 300 K;
+- the terminal current's sign;
+- the law's answer ignored;
+- a negative answer passed to the owner;
+- the laws, and then the knots, left out of the identity;
+- a law given twice admitted;
+- a nonfinite state decoded;
+- the heat booked as stored.
+
+`fs-couple`'s `tests/battery_enthalpy/graph.rs` builds the module's three
+stepping fixtures as graphs. Each graph is the battery, an
+`elements::FlowSource` drawing the terminal current, the backward-Euler
+timeline of `tests/circuit_enthalpy/kernel.rs`, and one `SinkEquivalent` heat
+route per loss into the module's receiving cell. A cell that receives no loss
+gets a zero heat boundary. Resistances that the module resolves from the
+receiving cell's card follow that card through the same state-point
+resolution. On the export of 1e611fdf33:
+- **The knot fixture** (no current, one step of 30 ms across the 0.5 SOC knot)
+  agrees bit for bit.
+- **The card fixture** (both resistances rising 0.4 % per kelvin of their
+  cell's end temperature, 1 A drawn for four steps of 0.2 s, cell 30 warming
+  by more than 15 K): the first step agrees bit for bit, and every step
+  within 3.9e-12 K, 4.7e-15 C and 5.6e-16 J.
+- **The common-receiver fixture** (both losses into cell 30, both signs of the
+  current) agrees bit for bit except one rounding of 5.7e-14 K.
+
+The bounds are 2e-10 K, 2.5e-13 C and 3e-14 J for the card fixture and
+1e-11 K, 1e-13 C and 1e-13 J for the others. The kernel's ledger closes, and
+the cells hold the heat the battery released. Eight defects planted in the
+graph each failed it:
+- the losses routed to the other cell;
+- a law from the other cell's card;
+- the resistances not following their cards;
+- cells returning step-mean temperatures;
+- the load current's sign;
+- the card law asked at 300 K;
+- the unused cell heated by 1 W;
+- the module side at fixed resistances.
+
+The kernel side shared by both comparisons is in
+`tests/circuit_enthalpy/kernel.rs`: the cell timeline, its conduction law and
+the execution context, moved there from `graph.rs` unchanged.
+
+Not claimed:
+- OCV that depends on temperature, reversible entropic heat, capacitance
+  drift, ageing, or protection events;
+- second-order accuracy of the coupled step, which is first order with
+  endpoint resistances, as the module documents.
+
+The module stays as the regression reference, and no `fs-couple` source
+changes. The module's fourth test,
+`unsupported_sources_exhaustion_events_and_cancellation_publish_neither_history`,
+fails on the unmodified export of 1e611fdf33 (a card query outside its
+claim's domain at line 530) and is not touched here.
+
 ## Signal-controlled power sources
 
 `elements::ControlledSource::effort(kind)` and `flow(kind)` connect controller
