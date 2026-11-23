@@ -77,7 +77,9 @@
 //! `fs_couple::circuit_enthalpy::converter::commutation::battery_motor`. A
 //! law with no answer refuses the step ([`CommutatedDriveError::Law`]); it
 //! is never clamped. In the gate lane a [`ChannelLaw`] gives each switch's
-//! channel at that temperature too; the driver resistances are fixed.
+//! channel at that temperature too, and a driver resistance following a
+//! [`ResistanceLaw`] ([`CommutatedBatteryMotorDrive::driver_following`]) is
+//! given its answer at its gate's driver heat port.
 //! Inductances, capacitances, the OCV, the motor's coupling, its inertias
 //! and the bearing drag stay fixed.
 //!
@@ -96,8 +98,8 @@
 //! differences the same map.
 //!
 //! Not claimed: torques and rail voltages that change within the program;
-//! driver resistances that follow temperature; reverse recovery and
-//! avalanche; temperature-dependent storage, OCV or bearing drag.
+//! reverse recovery and avalanche; temperature-dependent storage, OCV or
+//! bearing drag.
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -280,6 +282,16 @@ pub enum DeviceStorage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoDeviceStorage;
 
+/// One of a gate driver's two rails: the one its command selects to turn the
+/// switch on, or the one that turns it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateRail {
+    /// The rail that turns the switch on.
+    On,
+    /// The rail that turns the switch off.
+    Off,
+}
+
 /// A gate's driver: its on and off resistances and the current it supports.
 /// Its rail voltages are the efforts its two rail ports receive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -346,8 +358,8 @@ mod lane {
     use super::{
         Arc, CapacitiveCommutationParameters, ChannelLaw, ChargeCommutationParameters,
         CommutatedDriveError, CommutationParameters, DeviceStorage, GateChannelLaw,
-        GateCommutationParameters, GateDriver, GateStorage, NoDeviceStorage, StandInChannel,
-        StateIdentityCharterV2, averaged, fmt, invalid,
+        GateCommutationParameters, GateDriver, GateStorage, NoDeviceStorage, ResistanceLaw,
+        StandInChannel, StateIdentityCharterV2, averaged, fmt, invalid,
     };
 
     /// The lane's state and storage law, for the drive alone.
@@ -378,6 +390,8 @@ mod lane {
         pub storage: GateCommutationParameters<GateChannelLaw>,
         /// Each switch's channel.
         pub channels: [Arc<dyn ChannelLaw>; 4],
+        /// Each gate's on and off driver resistance laws, if any.
+        pub driver_laws: [[Option<Arc<dyn ResistanceLaw>>; 2]; 4],
     }
 
     /// The converter's storage law with the converter it belongs to.
@@ -502,6 +516,7 @@ mod lane {
             Ok(Storage::Gate(Box::new(Gated {
                 storage,
                 channels: self.channels,
+                driver_laws: Default::default(),
             })))
         }
     }
@@ -820,6 +835,38 @@ impl<L: DriveLane> fmt::Debug for CommutatedBatteryMotorDrive<L> {
     }
 }
 
+impl CommutatedBatteryMotorDrive<GateStorage> {
+    /// The same drive with the resistance between the gate of `switch` and
+    /// its `rail` following `law` at the temperature that gate's driver heat
+    /// port receives, in every proposal.
+    ///
+    /// # Errors
+    /// That resistance already follows a law, or the law follows the
+    /// operating point, as for [`Self::following`].
+    pub fn driver_following(
+        mut self,
+        switch: SwitchPosition,
+        rail: GateRail,
+        law: Arc<dyn ResistanceLaw>,
+    ) -> Result<Self, CommutatedDriveError> {
+        if law.follows_operating_point() {
+            return Err(invalid(
+                "a gate driver resistance follows temperature, not the operating point",
+            ));
+        }
+        let Storage::Gate(g) = &mut self.storage else {
+            return Err(invalid("the gate lane's storage holds its drivers"));
+        };
+        if g.driver_laws[switch.index()][rail as usize]
+            .replace(law)
+            .is_some()
+        {
+            return Err(invalid("a driver resistance follows one law only"));
+        }
+        Ok(self)
+    }
+}
+
 impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
     /// The drive of `parameters` whose switches store charge as `storage`
     /// says, or not at all ([`NoDeviceStorage`]),
@@ -1082,7 +1129,8 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
     }
 
     /// The gate lane's channels at the temperatures their switches' heat
-    /// ports received, and its drivers at the rails' voltages.
+    /// ports received, and its drivers at the rails' voltages and at what
+    /// their laws answer at the driver heat ports' temperatures.
     fn gates_at(
         &self,
         kelvin: &[f64],
@@ -1102,11 +1150,31 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
         let channels = channels
             .try_into()
             .map_err(|_| invalid("one channel per switch"))?;
-        let drivers = core::array::from_fn(|k| GateDriver {
-            on_voltage_v: rails[2 * k],
-            off_voltage_v: rails[2 * k + 1],
-            ..g.storage.gate_drivers[k]
-        });
+        let mut drivers = g.storage.gate_drivers;
+        for (k, driver) in drivers.iter_mut().enumerate() {
+            driver.on_voltage_v = rails[2 * k];
+            driver.off_voltage_v = rails[2 * k + 1];
+            let (port, temperature) = (DRIVER_HEAT_PORTS[k], kelvin[HEAT_PORTS.len() + k]);
+            let ohms = [
+                &mut driver.on_resistance_ohm,
+                &mut driver.off_resistance_ohm,
+            ];
+            for (law, ohms) in g.driver_laws[k].iter().zip(ohms) {
+                let Some(law) = law else { continue };
+                let answer = law
+                    .ohms(temperature)
+                    .map_err(|reason| CommutatedDriveError::Law { port, reason })?;
+                if !(answer.is_finite() && answer > 0.0) {
+                    return Err(CommutatedDriveError::Law {
+                        port,
+                        reason: format!(
+                            "{answer} ohm at {temperature} K is not positive and finite"
+                        ),
+                    });
+                }
+                *ohms = answer;
+            }
+        }
         Ok(Some((channels, drivers)))
     }
 
@@ -1330,6 +1398,13 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
                 }
                 for law in &g.channels {
                     counted(words, Some(|w: &mut Vec<u64>| law.identity_words(w)));
+                }
+                for law in g.driver_laws.as_flattened() {
+                    counted(
+                        words,
+                        law.as_ref()
+                            .map(|law| |w: &mut Vec<u64>| law.identity_words(w)),
+                    );
                 }
             }
         }

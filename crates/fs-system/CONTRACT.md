@@ -4099,7 +4099,8 @@ switches' storage, the state and the owner the drive prepares:
   `PreparedGateBatteryMotorCycle`. Each switch keeps an intrinsic
   drain-source charge curve, a gate-source and a gate-drain capacitance and
   a `ChannelLaw`; each gate a driver with on and off resistances and a
-  current limit. Its fifteen coordinates are the eleven's, with each node
+  current limit. Either resistance may follow a `ResistanceLaw`
+  (`driver_following(switch, rail, law)`). Its fifteen coordinates are the eleven's, with each node
   charge grouped with its high-side gate electrode, then four gate charges.
   The rail voltages are not in the lane: each step takes them from the rail
   ports, so a source holding a rail and the drive cannot disagree.
@@ -4156,8 +4157,9 @@ that is not positive and finite, refuses the step with the port's name
 the OCV, the motor's coupling and inertias and the bearing drag are fixed.
 In the gate lane each switch's `ChannelLaw` is asked at its heat port's
 temperature too; the `SwitchLaw` there gives only the body diode and the
-limits, since fs-phs takes the channel from the response. The driver
-resistances are fixed.
+limits, since fs-phs takes the channel from the response. A driver
+resistance following a law is given its answer at its gate's driver heat
+port; a law that follows the operating point is refused there too.
 The error type is the drive's own, as for the battery: `ElementError` has no
 variant for an owner's refusal or a balance defect.
 
@@ -4193,8 +4195,8 @@ starts or stops conducting, a switch reaches a limit or the load changes
 branch as the inputs move. Identity words bind the curve, every parameter,
 the storage law (a tag, 0 for capacitances, 1 for charge curves, 2 for
 none and 3 for driven gates, then its words; for gates the chord budget,
-the curves, both capacitances, the drivers and each channel law's words,
-counted), the program, both controls, each law's words (counted) and the
+the curves, both capacitances, the drivers, and each channel and driver
+law's words, counted), the program, both controls, each law's words (counted) and the
 tolerance, then any further programs. The codec is one
 word of `f64` bits per coordinate; encode and decode refuse a state whose
 energy the laws do not admit. Each lane has its own state charter.
@@ -4244,16 +4246,18 @@ both the input low and output high diodes conduct:
   capacitance drive's at the storage tag, 2 against 0;
 - in `tests/commutated_drive/gate.rs`, the gate lane equals
   `PreparedGateBatteryMotorCycle` built by hand at the laws' answers and
-  the rails' voltages, bit for bit, with Miller coupling and channel laws
-  that vary with temperature; each channel law is asked once, at its
-  switch's heat port. It refuses a non-finite rail, a zero driver
-  temperature, a rail past its driver's current limit (`Step`) and a
-  channel law with no answer (`Law`), leaving outputs and candidate
-  untouched. Its identity changes with the Miller capacitances, a driver
-  resistance and the channel laws;
+  the rails' voltages, bit for bit, with Miller coupling, channel laws that
+  vary with temperature and six of the eight driver resistances following
+  laws; each channel law is asked once, at its switch's heat port. It
+  refuses a non-finite rail, a zero driver temperature, a rail past its
+  driver's current limit (`Step`), and a channel or driver law with no
+  answer or a negative one (`Law` naming the heat port), leaving outputs
+  and candidate untouched. `driver_following` refuses a second law and one
+  that follows the operating point. Its identity changes with the Miller
+  capacitances, a driver resistance, the channel laws and the driver laws;
 - without Miller coupling and with channels that conduct nothing, each
   gate's voltage, rail charges and driver heat meet the closed form of the
-  owner's implicit midpoint, (2RC - h)/(2RC + h) per substep, within 1e-12
+  owner's implicit midpoint at its driver laws' answers, (2RC - h)/(2RC + h) per substep, within 1e-12
   relative. Every other coordinate and port equals, bit for bit, that of a
   program whose gates never switch;
 - on the kernel, with a source on every rail and shaft, the ledger closes
@@ -4268,7 +4272,12 @@ driver heats left out of the drive's heat; each rail's work at the other
 rail's voltage; the identity without the Miller capacitances, the drivers'
 resistances or the channel laws; the Miller capacitances taken from the
 gate-source ones, which fails the closed form and, with the closed form
-switched off, the run whose gates never switch. Not carried from fs-phs's
+switched off, the run whose gates never switch; each driver law asked at
+the next gate's driver port; the on and off driver laws swapped; a driver
+law's answer ignored; the identity without the driver laws; a second
+driver law replacing the first; a driver law following the operating point
+accepted; a driver law's refusal naming its switch's heat port; a negative
+driver resistance passed to the owner. Not carried from fs-phs's
 gate tests: the channel's refusals of a gate voltage outside its support
 or a current past its limit, and final cancellation.
 
@@ -4441,7 +4450,7 @@ publishes nothing), its single-claim binding, and its drive bound at one
 state refusing a step from another.
 
 Not claimed: torques and rail voltages that change within the program;
-driver resistances that follow temperature; reverse recovery and avalanche;
-storage, OCV or bearing drag that change with temperature. The
+reverse recovery and avalanche; storage, OCV or bearing drag that change
+with temperature. The
 graphs do not cover the module's refusals of a source that changed or was
 bound another way.

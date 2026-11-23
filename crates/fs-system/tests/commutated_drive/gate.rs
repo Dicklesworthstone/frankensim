@@ -13,7 +13,7 @@ use fs_phs::circuit::converter::commutation::gate::{
 };
 use fs_ports::component::Carrier;
 use fs_system::commutated_drive::{
-    ChannelLaw, DRIVER_HEAT_PORTS, GateDriverResistances, GateStorage, RAIL_PORTS,
+    ChannelLaw, DRIVER_HEAT_PORTS, GateDriverResistances, GateRail, GateStorage, RAIL_PORTS,
 };
 
 const CGS: [f64; 4] = [0.003, 0.004, 0.005, 0.006];
@@ -26,6 +26,9 @@ const DRIVERS: [GateDriverResistances; 4] = [
 ];
 /// Each gate's on rail, then its off rail \[V\].
 const RAILS: [f64; 8] = [3.0, -1.5, 2.8, -1.2, 3.2, -1.0, 2.6, -1.4];
+/// Per gate, whether its on and its off driver resistance follow [`Driver`]:
+/// both, the on one alone, the off one alone, neither.
+const FOLLOWING: [[bool; 2]; 4] = [[true, true], [true, false], [false, true], [false, false]];
 
 const fn driver(on_resistance_ohm: f64, off_resistance_ohm: f64) -> GateDriverResistances {
     GateDriverResistances {
@@ -112,6 +115,63 @@ fn channels() -> [Arc<Channel>; 4] {
     })
 }
 
+/// A driver resistance of `.0` ohm at 300 K rising as [`Linear`] does,
+/// refused above 400 K. It follows the operating point when `.1` says so.
+#[derive(Debug)]
+struct Driver(f64, bool);
+
+impl ResistanceLaw for Driver {
+    fn ohms(&self, kelvin: f64) -> Result<f64, String> {
+        if kelvin > 400.0 {
+            return Err(format!("driver: {kelvin} K is above 400 K"));
+        }
+        Linear(self.0).ohms(kelvin)
+    }
+
+    fn follows_operating_point(&self) -> bool {
+        self.1
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.push(self.0.to_bits());
+    }
+}
+
+/// `drive` with the driver resistances of [`FOLLOWING`] following [`Driver`].
+fn driven(
+    mut drive: CommutatedBatteryMotorDrive<GateStorage>,
+) -> CommutatedBatteryMotorDrive<GateStorage> {
+    for (k, switch) in SWITCHES.into_iter().enumerate() {
+        let d = DRIVERS[k];
+        for (rail, ohm) in [
+            (GateRail::On, d.on_resistance_ohm),
+            (GateRail::Off, d.off_resistance_ohm),
+        ] {
+            if FOLLOWING[k][rail as usize] {
+                let law = Arc::new(Driver(ohm, false));
+                drive = drive.driver_following(switch, rail, law).unwrap();
+            }
+        }
+    }
+    drive
+}
+
+/// The drivers of [`driven`] where the driver heat ports receive `kelvin`.
+fn resistances(kelvin: &[f64]) -> [GateDriverResistances; 4] {
+    core::array::from_fn(|k| {
+        let [on, off] = [0, 1].map(|rail| {
+            let ohm = [DRIVERS[k].on_resistance_ohm, DRIVERS[k].off_resistance_ohm][rail];
+            let law = FOLLOWING[k][rail].then(|| Linear(ohm).ohms(kelvin[k]).unwrap());
+            law.unwrap_or(ohm)
+        });
+        GateDriverResistances {
+            on_resistance_ohm: on,
+            off_resistance_ohm: off,
+            ..DRIVERS[k]
+        }
+    })
+}
+
 fn gates(cgd: [f64; 4], channels: [Arc<dyn ChannelLaw>; 4]) -> GateStorage {
     GateStorage {
         intrinsic_drain_charge: charge_curves(),
@@ -123,13 +183,14 @@ fn gates(cgd: [f64; 4], channels: [Arc<dyn ChannelLaw>; 4]) -> GateStorage {
     }
 }
 
-/// The owner's gate parameters on `converter`, with `channels` and the
-/// drivers at `rails`.
+/// The owner's gate parameters on `converter`, with `channels` and
+/// `drivers` at `rails`.
 fn gate_parameters(
     converter: CommutationParameters,
     cgd: [f64; 4],
     channels: [GateChannelLaw; 4],
     rails: &[f64],
+    drivers: &[GateDriverResistances; 4],
 ) -> GateCommutationParameters<GateChannelLaw> {
     GateCommutationParameters {
         converter,
@@ -140,9 +201,9 @@ fn gate_parameters(
         gate_drivers: core::array::from_fn(|k| GateDriver {
             on_voltage_v: rails[2 * k],
             off_voltage_v: rails[2 * k + 1],
-            on_resistance_ohm: DRIVERS[k].on_resistance_ohm,
-            off_resistance_ohm: DRIVERS[k].off_resistance_ohm,
-            maximum_current_a: DRIVERS[k].maximum_current_a,
+            on_resistance_ohm: drivers[k].on_resistance_ohm,
+            off_resistance_ohm: drivers[k].off_resistance_ohm,
+            maximum_current_a: drivers[k].maximum_current_a,
         }),
         maximum_cells_per_chord: 4096,
     }
@@ -153,7 +214,7 @@ fn gate_parameters(
 fn gate_start(cgd: [f64; 4], vgs: [f64; 4]) -> [f64; 15] {
     let eleven = start(&DeviceStorage::Capacitance(COSS));
     let channels = [300.0; 4].map(conductance);
-    let p = gate_parameters(parameters(100.0).converter, cgd, channels, &RAILS);
+    let p = gate_parameters(parameters(100.0).converter, cgd, channels, &RAILS, &DRIVERS);
     let mut state = [0.0; 15];
     state[..3].copy_from_slice(&eleven[..3]);
     let converter = p.state(1.0, [12.0, 7.0], [-0.6, 7.6], vgs).unwrap();
@@ -175,7 +236,7 @@ fn gate_inputs(spread_k: f64) -> Vec<f64> {
 fn the_gate_lane_is_the_owners_fifteen_state_cycle_at_its_rails_and_laws() {
     let laws = channels();
     let erased = laws.clone().map(|law| law as Arc<dyn ChannelLaw>);
-    let component = following(drive(gates(CGD, erased), 100.0), 400.0);
+    let component = driven(following(drive(gates(CGD, erased), 100.0), 400.0));
     let ports = component.ports();
     let names: Vec<_> = ports.iter().map(|port| port.id().as_str()).collect();
     let heat_ports = [HEAT_PORTS.as_slice(), &DRIVER_HEAT_PORTS, &[LOAD_PORT]].concat();
@@ -204,7 +265,13 @@ fn the_gate_lane_is_the_owners_fifteen_state_cycle_at_its_rails_and_laws() {
     let mut next = [0.0; 15];
     let step = PreparedGateBatteryMotorCycle::new_gate_controlled(
         original,
-        gate_parameters(converter, CGD, at, &inputs[2..10]),
+        gate_parameters(
+            converter,
+            CGD,
+            at,
+            &inputs[2..10],
+            &resistances(&kelvin[10..]),
+        ),
         &g.intervals,
         g.substeps_per_interval,
         electrical,
@@ -266,7 +333,7 @@ fn the_gate_lane_is_the_owners_fifteen_state_cycle_at_its_rails_and_laws() {
 fn a_refused_gate_step_leaves_nothing_behind_and_the_identity_names_the_lane() {
     let laws = channels().map(|law| law as Arc<dyn ChannelLaw>);
     // The switch laws answer to 450 K, so the channel's own refusal shows.
-    let component = following(drive(gates(CGD, laws.clone()), 100.0), 450.0);
+    let component = driven(following(drive(gates(CGD, laws.clone()), 100.0), 450.0));
     let old = gate_start(CGD, [-0.5, 2.6, 2.9, -0.8]);
     let inputs = gate_inputs(7.0);
     let refuse = |inputs: &[f64]| refused(&component, &old, PERIOD, inputs);
@@ -292,6 +359,48 @@ fn a_refused_gate_step_leaves_nothing_behind_and_the_identity_names_the_lane() {
         panic!("{error}");
     };
     assert!(port == "heat_input_low" && reason.starts_with("channel"));
+    // The input high gate's driver laws above their range, and an off rail
+    // driver law answering a negative resistance.
+    let mut hot = inputs.clone();
+    hot[20] = 410.0;
+    let negative = drive(gates(CGD, laws.clone()), 100.0)
+        .driver_following(
+            SwitchPosition::OutputLow,
+            GateRail::Off,
+            Arc::new(Driver(-1.0, false)),
+        )
+        .unwrap();
+    for (component, inputs, name, text) in [
+        (&component, &hot, "heat_gate_input_high", "driver"),
+        (&negative, &inputs, "heat_gate_output_low", "-"),
+    ] {
+        let CommutatedDriveError::Law { port, reason } = refused(component, &old, PERIOD, inputs)
+        else {
+            panic!("{name}");
+        };
+        assert!(port == name && reason.starts_with(text), "{port}: {reason}");
+    }
+    // A driver resistance follows one law, of temperature alone.
+    let once = |rail, law| {
+        drive(gates(CGD, laws.clone()), 100.0)
+            .driver_following(
+                SwitchPosition::InputHigh,
+                GateRail::On,
+                Arc::new(Driver(2.0, false)),
+            )
+            .unwrap()
+            .driver_following(SwitchPosition::InputHigh, rail, Arc::new(law))
+    };
+    assert!(once(GateRail::Off, Driver(2.0, false)).is_ok());
+    for (rail, law) in [
+        (GateRail::On, Driver(2.0, false)),
+        (GateRail::Off, Driver(2.0, true)),
+    ] {
+        assert!(matches!(
+            once(rail, law),
+            Err(CommutatedDriveError::Invalid { .. })
+        ));
+    }
     // The codec keeps fifteen words; the identity names the lane.
     let mut words = Vec::new();
     assert!(component.encode_state(&old, &mut words));
@@ -313,6 +422,9 @@ fn a_refused_gate_step_leaves_nothing_behind_and_the_identity_names_the_lane() {
     slower.drivers[2].off_resistance_ohm = 5.0;
     assert_ne!(gated, identity(slower));
     assert_ne!(gated, identity(gates(CGD, laws)));
+    let mut words = Vec::new();
+    driven(drive(gates(CGD, open()), 100.0)).identity_words(&mut words);
+    assert_ne!(gated, words);
 }
 
 /// Every gate commanded `on` for half a period, then off; no load.
@@ -343,11 +455,12 @@ fn a_gate_without_miller_coupling_charges_in_closed_form_and_moves_nothing_else(
             cycle,
             1e-9,
         );
-        following(drive.unwrap(), 400.0)
+        driven(following(drive.unwrap(), 400.0))
     };
     let old = gate_start([0.0; 4], [0.0; 4]);
     let all = gate_inputs(5.0);
     let inputs = &all[..24];
+    let drivers = resistances(&inputs[20..]);
     let run = |on| {
         with_cx(|cx| {
             let (mut new, mut outputs) = ([0.0; 15], [0.0; 24]);
@@ -368,8 +481,8 @@ fn a_gate_without_miller_coupling_charges_in_closed_form_and_moves_nothing_else(
         let edge = |v: f64, rail: f64, ohm: f64| {
             rail + (v - rail) * ((2.0 * ohm * c - h) / (2.0 * ohm * c + h)).powi(4)
         };
-        let v1 = edge(0.0, on, DRIVERS[k].on_resistance_ohm);
-        let v2 = edge(v1, off, DRIVERS[k].off_resistance_ohm);
+        let v1 = edge(0.0, on, drivers[k].on_resistance_ohm);
+        let v2 = edge(v1, off, drivers[k].off_resistance_ohm);
         let charge = [c * v1, c * (v2 - v1)];
         // Each rail's work less the gate's stored change.
         let heat = on * charge[0] + off * charge[1] - 0.5 * c * v2 * v2;
