@@ -37,6 +37,9 @@ use fs_system::commutated_drive::{
 };
 use fs_system::elements::{Force, HeatCapacity, SourceAccount, Waveform};
 
+#[path = "commutated_drive/gate.rs"]
+mod gate;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = ArenaPool::new(ArenaConfig::default());
@@ -556,14 +559,17 @@ fn untouched(values: &[f64], sentinel: f64) -> bool {
         .all(|value| value.to_bits() == sentinel.to_bits())
 }
 
-fn refused(
-    drive: &CommutatedBatteryMotorDrive,
-    old: &[f64; 11],
+fn refused<L: DriveLane, const N: usize>(
+    drive: &CommutatedBatteryMotorDrive<L>,
+    old: &[f64; N],
     dt_s: f64,
     inputs: &[f64],
-) -> CommutatedDriveError {
+) -> CommutatedDriveError
+where
+    CommutatedBatteryMotorDrive<L>: Component<State = [f64; N], Error = CommutatedDriveError>,
+{
     with_cx(|cx| {
-        let mut new = [7.0; 11];
+        let mut new = [7.0; N];
         let mut outputs = vec![9.0; inputs.len()];
         let error = drive
             .propose(old, dt_s, inputs, &mut new, &mut outputs, cx)

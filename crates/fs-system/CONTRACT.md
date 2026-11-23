@@ -4094,10 +4094,18 @@ switches' storage, the state and the owner the drive prepares:
   coordinates are the battery's three, the converter's flux linkage and two
   bus charges, and the motor's three. It is the drive that
   `fs_couple::circuit_enthalpy::converter::commutation::battery_motor`
-  itself couples by hand.
+  itself couples by hand;
+- `GateStorage`: switches with driven gates, the owner
+  `PreparedGateBatteryMotorCycle`. Each switch keeps an intrinsic
+  drain-source charge curve, a gate-source and a gate-drain capacitance and
+  a `ChannelLaw`; each gate a driver with on and off resistances and a
+  current limit. Its fifteen coordinates are the eleven's, with each node
+  charge grouped with its high-side gate electrode, then four gate charges.
+  The rail voltages are not in the lane: each step takes them from the rail
+  ports, so a source holding a rail and the drive cannot disagree.
 
-Ports, laws, programs, heat, balance and refusals are the same in both
-lanes; what follows holds for both unless it names one.
+Ports, laws, programs, heat, balance and refusals are the same in every
+lane; what follows holds for all unless it names one.
 
 A step is the owner's whole gate program, `step_interval_commands_controlled`
 over every interval and substep in one native workspace; nothing is
@@ -4109,22 +4117,35 @@ Ports, in order:
   shaft, held through the program, and returns the owner's time-weighted mean
   shaft velocity. Torque times mean velocity times the step is the owner's
   shaft work.
+- In the gate lane, the eight rails of `RAIL_PORTS`, electrical, `EffortIn`:
+  each switch's on rail, then its off rail. Each receives its voltage, held
+  through the program, and returns the mean current its gate drew from it,
+  from fs-phs's per-rail charge (`GatePowerAccount::rail_charge_c`). Voltage
+  times mean current times the step is the rail's work exactly; one port per
+  gate at its mean voltage and current would not be, since a gate switches
+  rails within the program.
 - The ten heat ports of `HEAT_PORTS`: the converter winding; the four
   switches, each with its channel and diode heat together; the battery's two
-  resistances; the lead; the motor winding; the bearing.
+  resistances; the lead; the motor winding; the bearing. In the gate lane
+  the four of `DRIVER_HEAT_PORTS` follow, each gate's on and off driver
+  resistances together.
 - `heat_auxiliary_load` when the program has an auxiliary load: the work the
   load took.
 
 Each heat port receives the temperature where its heat leaves and returns
 minus that heat over the step divided by the step.
 
-State is the owner's coordinates, eleven or nine by lane. Stored energy is
-the owner's Hamiltonian: the battery's, the converter's (switch storage
+State is the owner's coordinates, eleven, nine or fifteen by lane. Stored
+energy is the owner's Hamiltonian: the battery's, the converter's (switch storage
 included) and the motor's. Without switch storage the converter's is its
 averaged bridge's: the inductor's and the two buses'. The switch storage is
 one `DeviceStorage` parameter: four constant capacitances or four
 charge-voltage curves. It is fixed; storage that changed with temperature
-would need its entropy.
+would need its entropy. fs-phs builds the gate storage from a whole
+parameter set, though neither the channel nor the drivers enter its energy.
+The gate lane builds it with a stand-in channel that refuses every
+evaluation and the drivers at zero rail voltage, and admits each program on
+it when built; no step runs on it.
 
 **Laws.** `following(resistor, law)` gives one of the five resistances a
 `circuit::ResistanceLaw`. `switch_following(position, law)` gives a switch a
@@ -4133,6 +4154,10 @@ the temperature its heat port receives. A law with no answer, or a resistance
 that is not positive and finite, refuses the step with the port's name
 (`CommutatedDriveError::Law`); nothing is clamped. Inductances, capacitances,
 the OCV, the motor's coupling and inertias and the bearing drag are fixed.
+In the gate lane each switch's `ChannelLaw` is asked at its heat port's
+temperature too; the `SwitchLaw` there gives only the body diode and the
+limits, since fs-phs takes the channel from the response. The driver
+resistances are fixed.
 The error type is the drive's own, as for the battery: `ElementError` has no
 variant for an owner's refusal or a balance defect.
 
@@ -4152,7 +4177,10 @@ the rounding floor plus the caller's `energy_tolerance_j`:
 - the owner's balance residual, booked as numerical loss;
 - the differences of stored change, heat and supplied work from the owner's
   native record;
-- the difference of each shaft port's work from the owner's shaft work.
+- the difference of each shaft port's work from the owner's shaft work;
+- in the gate lane, the difference of each gate's two rail works from the
+  owner's source work for that gate. The supplied work there adds the rails'
+  works, and the heat the drivers'.
 
 A refused step writes neither outputs nor state. The owner keeps each
 substep's Newton residual within its budget and gives the cycle no
@@ -4163,9 +4191,11 @@ residual and tolerance.
 kernel differences the port map. The map is smooth except where a body diode
 starts or stops conducting, a switch reaches a limit or the load changes
 branch as the inputs move. Identity words bind the curve, every parameter,
-the storage law (a tag, 0 for capacitances, 1 for charge curves and 2 for
-none, then its words), the program, both controls, each law's words
-(counted) and the tolerance, then any further programs. The codec is one
+the storage law (a tag, 0 for capacitances, 1 for charge curves, 2 for
+none and 3 for driven gates, then its words; for gates the chord budget,
+the curves, both capacitances, the drivers and each channel law's words,
+counted), the program, both controls, each law's words (counted) and the
+tolerance, then any further programs. The codec is one
 word of `f64` bits per coordinate; encode and decode refuse a state whose
 energy the laws do not admit. Each lane has its own state charter.
 
@@ -4211,7 +4241,36 @@ both the input low and output high diodes conduct:
   out of its range (`Law` naming `heat_input_low`), are refused, leaving
   outputs and candidate untouched. The codec keeps nine words and refuses
   the eleven of a stored drive's state. The identity parts from a
-  capacitance drive's at the storage tag, 2 against 0.
+  capacitance drive's at the storage tag, 2 against 0;
+- in `tests/commutated_drive/gate.rs`, the gate lane equals
+  `PreparedGateBatteryMotorCycle` built by hand at the laws' answers and
+  the rails' voltages, bit for bit, with Miller coupling and channel laws
+  that vary with temperature; each channel law is asked once, at its
+  switch's heat port. It refuses a non-finite rail, a zero driver
+  temperature, a rail past its driver's current limit (`Step`) and a
+  channel law with no answer (`Law`), leaving outputs and candidate
+  untouched. Its identity changes with the Miller capacitances, a driver
+  resistance and the channel laws;
+- without Miller coupling and with channels that conduct nothing, each
+  gate's voltage, rail charges and driver heat meet the closed form of the
+  owner's implicit midpoint, (2RC - h)/(2RC + h) per substep, within 1e-12
+  relative. Every other coordinate and port equals, bit for bit, that of a
+  program whose gates never switch;
+- on the kernel, with a source on every rail and shaft, the ledger closes
+  within 1e-15 J.
+
+Planted in the gate lane with the comparison to the owner by hand switched
+off, one at a time, each failed at least one gate test: each gate's rails
+swapped; each channel asked at the next switch's port; the driver heat
+ports given nothing, or in reverse order; each rail returning its charge
+for its mean current; the rails' work left out of the supplied work; the
+driver heats left out of the drive's heat; each rail's work at the other
+rail's voltage; the identity without the Miller capacitances, the drivers'
+resistances or the channel laws; the Miller capacitances taken from the
+gate-source ones, which fails the closed form and, with the closed form
+switched off, the run whose gates never switch. Not carried from fs-phs's
+gate tests: the channel's refusals of a gate voltage outside its support
+or a current past its limit, and final cancellation.
 
 Planted defects, one at a time, each failed at least one test:
 - a switch's heat taken with another switch's diode;
@@ -4381,8 +4440,8 @@ cancellation (a step out of circuit trials, or cancelled at its last poll,
 publishes nothing), its single-claim binding, and its drive bound at one
 state refusing a step from another.
 
-Not claimed: torques that change within the program; gate charge and
-gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
-avalanche; storage, OCV or bearing drag that change with temperature. The
+Not claimed: torques and rail voltages that change within the program;
+driver resistances that follow temperature; reverse recovery and avalanche;
+storage, OCV or bearing drag that change with temperature. The
 graphs do not cover the module's refusals of a source that changed or was
 bound another way.

@@ -6,8 +6,8 @@
 //! `capacitance` lanes behind `fs_ports::component::Component`. It joins the
 //! equivalent-circuit battery and its lead to a two-leg converter and a DC
 //! motor whose rotor and stator both turn. The converter has four switches,
-//! each a channel with its body diode, with or without output charge storage
-//! ([`DriveLane`]). Nothing is integrated
+//! each a channel with its body diode, with or without output charge storage,
+//! or with driven gates ([`DriveLane`]). Nothing is integrated
 //! here. A step is the owner's whole gate program
 //! (`step_interval_commands_controlled`): every interval and substep in one
 //! native workspace, on the owner built with the resistances and switches of
@@ -20,6 +20,11 @@
 //!   returns the shaft's mean angular velocity \[rad/s\], the owner's
 //!   time-weighted mean of its discrete velocities, so torque times mean
 //!   velocity times the step is the owner's shaft work.
+//! - In the gate lane ([`GateStorage`]), eight rails, electrical,
+//!   [`PortRole::EffortIn`], in [`RAIL_PORTS`] order: each switch's on rail,
+//!   then its off rail. Each receives its voltage \[V\], held through the
+//!   program, and returns the mean current its gate drew from it \[A\], so
+//!   voltage times mean current times the step is the rail's work.
 //! - Ten heat ports, [`PortRole::EffortIn`], in [`HEAT_PORTS`] order:
 //!   - the converter winding;
 //!   - the four switches, a channel and its body diode together;
@@ -27,7 +32,9 @@
 //!     motor winding;
 //!   - the bearing.
 //!
-//!   If the program has an auxiliary load, an eleventh,
+//!   In the gate lane, four driver heat ports follow, in
+//!   [`DRIVER_HEAT_PORTS`] order: each gate's on and off driver resistances
+//!   together. If the program has an auxiliary load, a last heat port,
 //!   `heat_auxiliary_load`, carries the work the load took. Each heat port
 //!   receives the temperature \[K\] where its heat leaves and returns minus
 //!   that heat over the step divided by the step \[W\].
@@ -40,10 +47,12 @@
 //! - the motor's flux linkage \[Wb\] and its rotor and stator angular
 //!   momenta \[N m s\].
 //!
-//! That is nine coordinates without switch storage ([`NoDeviceStorage`]) and
-//! eleven with it ([`DeviceStorage`], the default lane). Its stored energy is
-//! the owner's Hamiltonian, the switches' output storage included; no
-//! resistance or switch changes it.
+//! That is nine coordinates without switch storage ([`NoDeviceStorage`]),
+//! eleven with it ([`DeviceStorage`], the default lane), and fifteen with
+//! driven gates ([`GateStorage`]): there the node charges are grouped with
+//! their high-side gate electrodes and four gate charges follow. Its stored
+//! energy is the owner's Hamiltonian, the switches' output and gate storage
+//! included; no resistance, switch or channel changes it.
 //!
 //! Switch storage ([`DeviceStorage`]) is either four constant output
 //! capacitances or four voltage-charge curves whose energy is the integral
@@ -53,7 +62,7 @@
 //! Heat and work:
 //! - Heat is the owner's fourteen accounts, routed to the heat ports. The
 //!   auxiliary load's work leaves through its own port.
-//! - Supplied work is the shaft work.
+//! - Supplied work is the shaft work and, in the gate lane, the rails' work.
 //! - The difference of heat and work from the stored change is booked as
 //!   numerical loss. It is refused beyond the rounding of the step's
 //!   arithmetic plus the declared energy tolerance, as is any difference
@@ -67,8 +76,10 @@
 //! temperatures, that is the endpoint material resistance and conduction of
 //! `fs_couple::circuit_enthalpy::converter::commutation::battery_motor`. A
 //! law with no answer refuses the step ([`CommutatedDriveError::Law`]); it
-//! is never clamped. Inductances, capacitances, the OCV, the motor's
-//! coupling, its inertias and the bearing drag stay fixed.
+//! is never clamped. In the gate lane a [`ChannelLaw`] gives each switch's
+//! channel at that temperature too; the driver resistances are fixed.
+//! Inductances, capacitances, the OCV, the motor's coupling, its inertias
+//! and the bearing drag stay fixed.
 //!
 //! Programs: a drive runs the program it was built with every step, unless
 //! it was given further programs with
@@ -84,9 +95,9 @@
 //! the auxiliary load changes branch. The module's own thermal Newton
 //! differences the same map.
 //!
-//! Not claimed: torques that change within the program; gate charge and
-//! gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery
-//! and avalanche; temperature-dependent storage, OCV or bearing drag.
+//! Not claimed: torques and rail voltages that change within the program;
+//! driver resistances that follow temperature; reverse recovery and
+//! avalanche; temperature-dependent storage, OCV or bearing drag.
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -102,8 +113,13 @@ use fs_phs::circuit::converter::commutation::battery_motor::PreparedCommutatedBa
 use fs_phs::circuit::converter::commutation::capacitance::CapacitiveCommutationParameters;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
     PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
+    PreparedGateBatteryMotorCycle,
 };
 use fs_phs::circuit::converter::commutation::capacitance::charge::ChargeCommutationParameters;
+use fs_phs::circuit::converter::commutation::capacitance::gate::GateCommutationParameters;
+use fs_phs::circuit::converter::commutation::gate::{
+    GateChannelLaw, GateChannelPoint, GateChannelResponse, GateDriver,
+};
 use fs_phs::circuit::converter::commutation::{
     CommutationInterval, CommutationParameters, SwitchDevice,
 };
@@ -138,6 +154,28 @@ pub const HEAT_PORTS: [&str; 10] = [
 /// The port of the auxiliary load's work, after [`HEAT_PORTS`].
 pub const LOAD_PORT: &str = "heat_auxiliary_load";
 
+/// The gate lane's rails, after `rotor` and `stator`: each switch's on rail,
+/// then its off rail, in the owner's switch order.
+pub const RAIL_PORTS: [&str; 8] = [
+    "gate_input_high_on",
+    "gate_input_high_off",
+    "gate_input_low_on",
+    "gate_input_low_off",
+    "gate_output_high_on",
+    "gate_output_high_off",
+    "gate_output_low_on",
+    "gate_output_low_off",
+];
+
+/// The gate lane's driver heat ports, after [`HEAT_PORTS`]: one per gate,
+/// for its on and off resistances together.
+pub const DRIVER_HEAT_PORTS: [&str; 4] = [
+    "heat_gate_input_high",
+    "heat_gate_input_low",
+    "heat_gate_output_high",
+    "heat_gate_output_low",
+];
+
 /// A switch as a function of the temperature of the package it heats.
 pub trait SwitchLaw: fmt::Debug + Send + Sync {
     /// The switch's channel, body diode and operating limits at `kelvin`.
@@ -147,6 +185,23 @@ pub trait SwitchLaw: fmt::Debug + Send + Sync {
     /// the validity of the card behind it. The drive then refuses the step
     /// with [`CommutatedDriveError::Law`]; it never clamps the temperature.
     fn switch(&self, kelvin: f64) -> Result<SwitchDevice, String>;
+
+    /// Words that identify the law; they join the drive's identity.
+    fn identity_words(&self, words: &mut Vec<u64>);
+}
+
+/// A driven switch's channel as a function of the temperature of the package
+/// it heats, in the gate lane ([`GateStorage`]). The channel's current comes
+/// from this law alone; a [`SwitchLaw`] there gives the body diode and the
+/// limits.
+pub trait ChannelLaw: fmt::Debug + Send + Sync {
+    /// The channel's response to its drain-source and gate-source voltages
+    /// at `kelvin`.
+    ///
+    /// # Errors
+    /// Why the law has no answer there. The drive then refuses the step with
+    /// [`CommutatedDriveError::Law`]; it never clamps the temperature.
+    fn channel(&self, kelvin: f64) -> Result<GateChannelLaw, String>;
 
     /// Words that identify the law; they join the drive's identity.
     fn identity_words(&self, words: &mut Vec<u64>);
@@ -225,19 +280,74 @@ pub enum DeviceStorage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoDeviceStorage;
 
+/// A gate's driver: its on and off resistances and the current it supports.
+/// Its rail voltages are the efforts its two rail ports receive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GateDriverResistances {
+    /// Between the on rail and the gate \[ohm\].
+    pub on_resistance_ohm: f64,
+    /// Between the off rail and the gate \[ohm\].
+    pub off_resistance_ohm: f64,
+    /// The largest current either branch supports \[A\].
+    pub maximum_current_a: f64,
+}
+
+/// Switches with driven gates: the owner's fifteen-coordinate lane,
+/// `PreparedGateBatteryMotorCycle`. Each switch keeps its intrinsic
+/// drain-source charge curve, a gate-source and a gate-drain (Miller)
+/// capacitance, and a [`ChannelLaw`]; each gate a finite driver. The storage
+/// is fixed.
+#[derive(Debug, Clone)]
+pub struct GateStorage {
+    /// The intrinsic drain-source curves, charge \[C\] against voltage \[V\].
+    pub intrinsic_drain_charge: [CapacitorChargeCurve; 4],
+    /// Positive gate-source capacitances \[F\].
+    pub gate_source_capacitance_f: [f64; 4],
+    /// Nonnegative gate-drain capacitances \[F\]; zero is the exact limit
+    /// without Miller coupling.
+    pub gate_drain_capacitance_f: [f64; 4],
+    /// The owner's bound on the cells one chord may cross.
+    pub maximum_cells_per_chord: usize,
+    /// Each switch's channel, asked at its heat port's temperature.
+    pub channels: [Arc<dyn ChannelLaw>; 4],
+    /// Each gate's driver.
+    pub drivers: [GateDriverResistances; 4],
+}
+
+/// fs-phs builds the gate storage from a whole parameter set, though neither
+/// the channel nor the drivers enter its energy. The drive's energy, and its
+/// admission of each program when built, use this channel, which refuses
+/// every evaluation, so no step can run on it.
+#[derive(Debug, Clone, Copy)]
+struct StandInChannel;
+
+impl GateChannelResponse for StandInChannel {
+    fn gate_voltage_range_v(&self) -> [f64; 2] {
+        [-1.0, 1.0]
+    }
+
+    fn evaluate(&self, _: f64, _: f64) -> Result<GateChannelPoint, PhsError> {
+        Err(PhsError::Unadmitted {
+            what: "the drive's stand-in channel is never evaluated",
+        })
+    }
+}
+
 /// What the switches store, which fixes the drive's state:
-/// [`NoDeviceStorage`], nine coordinates, or [`DeviceStorage`], eleven.
-/// Sealed: the lanes are the owner's.
+/// [`NoDeviceStorage`], nine coordinates, [`DeviceStorage`], eleven, or
+/// [`GateStorage`], fifteen. Sealed: the lanes are the owner's.
 pub trait DriveLane: lane::Sealed + fmt::Debug + Clone + Send + Sync + 'static {}
 
 impl DriveLane for NoDeviceStorage {}
 impl DriveLane for DeviceStorage {}
+impl DriveLane for GateStorage {}
 
 mod lane {
     use super::{
-        CapacitiveCommutationParameters, ChargeCommutationParameters, CommutatedDriveError,
-        CommutationParameters, DeviceStorage, NoDeviceStorage, StateIdentityCharterV2, averaged,
-        fmt, invalid,
+        Arc, CapacitiveCommutationParameters, ChannelLaw, ChargeCommutationParameters,
+        CommutatedDriveError, CommutationParameters, DeviceStorage, GateChannelLaw,
+        GateCommutationParameters, GateDriver, GateStorage, NoDeviceStorage, StandInChannel,
+        StateIdentityCharterV2, averaged, fmt, invalid,
     };
 
     /// The lane's state and storage law, for the drive alone.
@@ -254,8 +364,20 @@ mod lane {
             + 'static;
         /// The state's identity charter.
         const CHARTER: StateIdentityCharterV2;
+        /// Whether the lane drives its gates, with rail and driver heat ports.
+        const GATED: bool = false;
         /// The switches' storage law on `converter`.
-        fn law(self, converter: CommutationParameters) -> Storage;
+        fn law(self, converter: CommutationParameters) -> Result<Storage, CommutatedDriveError>;
+    }
+
+    /// The gate lane's storage, with the stand-in channel and the drivers at
+    /// zero rail voltage, and its channel laws.
+    #[derive(Debug, Clone)]
+    pub struct Gated {
+        /// The storage the drive's energy is taken from.
+        pub storage: GateCommutationParameters<GateChannelLaw>,
+        /// Each switch's channel.
+        pub channels: [Arc<dyn ChannelLaw>; 4],
     }
 
     /// The converter's storage law with the converter it belongs to.
@@ -267,6 +389,8 @@ mod lane {
         Capacitance(CapacitiveCommutationParameters),
         /// Voltage-charge curves.
         Charge(ChargeCommutationParameters),
+        /// Driven gates.
+        Gate(Box<Gated>),
     }
 
     impl Storage {
@@ -288,6 +412,10 @@ mod lane {
                 Self::Charge(p) => p
                     .stored_energy_j(converter.try_into().map_err(|_| shape())?)
                     .map_err(model),
+                Self::Gate(g) => g
+                    .storage
+                    .stored_energy_j(converter.try_into().map_err(|_| shape())?)
+                    .map_err(model),
             }
         }
     }
@@ -303,8 +431,8 @@ mod lane {
             codec_grammar: "one word per coordinate, the f64 bits, in schema order",
             codec_version: 1,
         };
-        fn law(self, converter: CommutationParameters) -> Storage {
-            Storage::Plain(converter)
+        fn law(self, converter: CommutationParameters) -> Result<Storage, CommutatedDriveError> {
+            Ok(Storage::Plain(converter))
         }
     }
 
@@ -319,8 +447,8 @@ mod lane {
             codec_grammar: "one word per coordinate, the f64 bits, in schema order",
             codec_version: 1,
         };
-        fn law(self, converter: CommutationParameters) -> Storage {
-            match self {
+        fn law(self, converter: CommutationParameters) -> Result<Storage, CommutatedDriveError> {
+            Ok(match self {
                 Self::Capacitance(output_capacitance_f) => {
                     Storage::Capacitance(CapacitiveCommutationParameters {
                         converter,
@@ -335,7 +463,46 @@ mod lane {
                     output_charge_curves: curves,
                     maximum_cells_per_chord,
                 }),
-            }
+            })
+        }
+    }
+
+    impl Sealed for GateStorage {
+        type State = [f64; 15];
+        const CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
+            owner: "fs-system::commutated_drive::CommutatedBatteryMotorDrive<GateStorage>",
+            state_family: "fs_phs commutated battery-motor drive coordinates with driven gates",
+            schema_grammar: "[f64; 15]: battery chemical, polarization and bus charges [C]; \
+                converter flux linkage [Wb], two bus charges, two switching-node charges with \
+                their high-side gate electrodes and four gate charges [C]; motor flux linkage \
+                [Wb], rotor and stator angular momenta [N m s]; finite energy",
+            codec_grammar: "one word per coordinate, the f64 bits, in schema order",
+            codec_version: 1,
+        };
+        const GATED: bool = true;
+        fn law(self, converter: CommutationParameters) -> Result<Storage, CommutatedDriveError> {
+            let model = CommutatedDriveError::Model;
+            let stand_in = GateChannelLaw::new(StandInChannel).map_err(model)?;
+            let storage = GateCommutationParameters {
+                converter,
+                intrinsic_drain_charge_curves: self.intrinsic_drain_charge,
+                gate_source_capacitance_f: self.gate_source_capacitance_f,
+                gate_drain_capacitance_f: self.gate_drain_capacitance_f,
+                channel_conductance: core::array::from_fn(|_| stand_in.clone()),
+                gate_drivers: self.drivers.map(|d| GateDriver {
+                    on_voltage_v: 0.0,
+                    off_voltage_v: 0.0,
+                    on_resistance_ohm: d.on_resistance_ohm,
+                    off_resistance_ohm: d.off_resistance_ohm,
+                    maximum_current_a: d.maximum_current_a,
+                }),
+                maximum_cells_per_chord: self.maximum_cells_per_chord,
+            };
+            storage.validate().map_err(model)?;
+            Ok(Storage::Gate(Box::new(Gated {
+                storage,
+                channels: self.channels,
+            })))
         }
     }
 }
@@ -468,6 +635,18 @@ struct Cycle {
     mean_shaft_speed_rad_s: [f64; 2],
     integration_steps: usize,
     native: PreparedStepRecord,
+    /// The gate lane's driver accounts.
+    gate: Option<GateCycle>,
+}
+
+/// The gate lane's driver accounts over the program.
+struct GateCycle {
+    /// Each driver's resistor heat \[J\].
+    heat_j: [f64; 4],
+    /// Each gate's source work \[J\].
+    source_work_j: [f64; 4],
+    /// Each gate's charge from its on rail, then its off rail \[C\].
+    rail_charge_c: [[f64; 2]; 4],
 }
 
 /// A [`Cycle`] from either owner's receipt, whose fields share their names.
@@ -483,8 +662,48 @@ macro_rules! cycle {
             mean_shaft_speed_rad_s: step.mean_shaft_speed_rad_s,
             integration_steps: step.integration_steps,
             native: step.native,
+            gate: None,
         }
     }};
+}
+
+/// The gate lane's channels and drivers for one step.
+type Gates = ([GateChannelLaw; 4], [GateDriver; 4]);
+
+/// The gate lane's rails over a step of `dt_s`: each rail's mean current,
+/// each gate's two rail works less the owner's source work for it, and the
+/// magnitudes of those works for the rounding floor. A rail's voltage is held
+/// through the program, so voltage times mean current times the step is its
+/// work. The other lanes have no rails.
+fn rail_accounts(gate: Option<&GateCycle>, rails: &[f64], dt_s: f64) -> (Vec<f64>, Vec<f64>, f64) {
+    let Some(gate) = gate else {
+        return (Vec::new(), Vec::new(), 0.0);
+    };
+    let currents: Vec<f64> = gate
+        .rail_charge_c
+        .as_flattened()
+        .iter()
+        .map(|charge| charge / dt_s)
+        .collect();
+    let work_j: Vec<f64> = rails
+        .iter()
+        .zip(&currents)
+        .map(|(volts, amperes)| volts * amperes * dt_s)
+        .collect();
+    let defects_j = work_j
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(gate.source_work_j)
+        .map(|(&[on, off], source)| on + off - source)
+        .collect();
+    let magnitude_j = gate
+        .source_work_j
+        .iter()
+        .chain(&work_j)
+        .map(|w| w.abs())
+        .sum();
+    (currents, defects_j, magnitude_j)
 }
 
 /// A prepared native cycle of the drive's lane.
@@ -492,6 +711,7 @@ enum Prepared {
     Plain(PreparedCommutatedBatteryMotorCycle),
     Capacitance(PreparedCapacitiveBatteryMotorCycle),
     Charge(PreparedChargeBatteryMotorCycle),
+    Gate(Box<PreparedGateBatteryMotorCycle<GateChannelLaw>>),
 }
 
 impl Prepared {
@@ -500,6 +720,7 @@ impl Prepared {
             Self::Plain(native) => native.period_s(),
             Self::Capacitance(native) => native.period_s(),
             Self::Charge(native) => native.period_s(),
+            Self::Gate(native) => native.period_s(),
         }
     }
 
@@ -536,6 +757,24 @@ impl Prepared {
                     cancelled,
                 )
                 .map(|step| cycle!(step)),
+            Self::Gate(native) => native
+                .step_interval_commands_controlled(
+                    old.try_into().map_err(|_| shape())?,
+                    commands,
+                    next.try_into().map_err(|_| shape())?,
+                    cancelled,
+                )
+                .map(|step| {
+                    let gate = step.converter.gate.as_ref().map(|g| GateCycle {
+                        heat_j: g.resistor_heat_j,
+                        source_work_j: g.source_work_j,
+                        rail_charge_c: g.rail_charge_c,
+                    });
+                    Cycle {
+                        gate,
+                        ..cycle!(step)
+                    }
+                }),
         }
         .map_err(step_error)
     }
@@ -616,9 +855,9 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             BatteryOcvCurve::new(parameters.capacity_c, &parameters.soc_voltage).map_err(model)?;
         let battery = BatterySource::new(curve.clone(), parameters.battery).map_err(model)?;
         let motor = DcMotor::new(parameters.motor).map_err(model)?;
-        let storage = storage.law(parameters.converter);
+        let storage = storage.law(parameters.converter)?;
         let loaded = program.auxiliary_loads.iter().any(Option::is_some);
-        let ports = port_specs(loaded, false)?;
+        let ports = port_specs(loaded, false, L::GATED)?;
         let mut drive = Self {
             parameters,
             curve,
@@ -641,7 +880,7 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
         let p = &drive.parameters;
         let original = drive.original(&p.converter, p.battery, p.lead_resistance_ohm, p.motor)?;
         drive.period_s = drive
-            .prepare(original, p.converter.devices, &drive.program, || false)?
+            .prepare(original, &p.converter, &drive.program, None, || false)?
             .period_s();
         Ok(drive)
     }
@@ -669,7 +908,7 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             let original =
                 self.original(&p.converter, p.battery, p.lead_resistance_ohm, p.motor)?;
             let period_s = self
-                .prepare(original, p.converter.devices, program, || false)?
+                .prepare(original, &p.converter, program, None, || false)?
                 .period_s();
             if (period_s - self.period_s).abs() > 64.0 * f64::EPSILON * self.period_s {
                 return Err(invalid("every program has the drive's period"));
@@ -679,7 +918,7 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             .chain(&programs)
             .flat_map(|program| &program.auxiliary_loads)
             .any(Option::is_some);
-        self.ports = port_specs(loaded, true)?;
+        self.ports = port_specs(loaded, true, L::GATED)?;
         self.scheduled = programs;
         Ok(self)
     }
@@ -774,13 +1013,18 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             .map_err(model)
     }
 
+    /// The owner of `program` on `original` and `converter`; in the gate
+    /// lane, with `gates`' channels and drivers, or when built, the stand-in
+    /// channel and drivers at zero rail voltage.
     fn prepare(
         &self,
         original: BatteryMotorDrive,
-        switches: [SwitchDevice; 4],
+        converter: &CommutationParameters,
         program: &GateProgram,
+        gates: Option<Gates>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Prepared, CommutatedDriveError> {
+        let switches = converter.devices;
         match &self.storage {
             Storage::Plain(_) => PreparedCommutatedBatteryMotorCycle::new_controlled(
                 original,
@@ -815,8 +1059,55 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
                 cancelled,
             )
             .map(Prepared::Charge),
+            Storage::Gate(g) => {
+                let mut parameters = g.storage.clone();
+                parameters.converter = *converter;
+                if let Some((channels, drivers)) = gates {
+                    parameters.channel_conductance = channels;
+                    parameters.gate_drivers = drivers;
+                }
+                PreparedGateBatteryMotorCycle::new_gate_controlled(
+                    original,
+                    parameters,
+                    &program.intervals,
+                    program.substeps_per_interval,
+                    self.electrical,
+                    self.cycle,
+                    cancelled,
+                )
+                .map(|native| Prepared::Gate(Box::new(native)))
+            }
         }
         .map_err(step_error)
+    }
+
+    /// The gate lane's channels at the temperatures their switches' heat
+    /// ports received, and its drivers at the rails' voltages.
+    fn gates_at(
+        &self,
+        kelvin: &[f64],
+        rails: &[f64],
+    ) -> Result<Option<Gates>, CommutatedDriveError> {
+        let Storage::Gate(g) = &self.storage else {
+            return Ok(None);
+        };
+        let mut channels = Vec::with_capacity(4);
+        for (i, law) in g.channels.iter().enumerate() {
+            let port = HEAT_PORTS[1 + i];
+            let channel = law
+                .channel(kelvin[1 + i])
+                .map_err(|reason| CommutatedDriveError::Law { port, reason })?;
+            channels.push(channel);
+        }
+        let channels = channels
+            .try_into()
+            .map_err(|_| invalid("one channel per switch"))?;
+        let drivers = core::array::from_fn(|k| GateDriver {
+            on_voltage_v: rails[2 * k],
+            off_voltage_v: rails[2 * k + 1],
+            ..g.storage.gate_drivers[k]
+        });
+        Ok(Some((channels, drivers)))
     }
 
     /// The converter, battery, lead and motor of a step whose heat ports
@@ -880,35 +1171,50 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
         Ok((converter, battery, ohms[3], motor))
     }
 
-    /// The step's receipt, heat rates and mean shaft velocities, refused if
-    /// the owner's accounts, its native record and the port works disagree.
+    /// The step's receipt, its mean shaft velocities and the outputs after
+    /// them: in the gate lane each rail's mean current, then minus each heat
+    /// port's heat rate. `efforts` are the shafts' torques, then in the gate
+    /// lane the rails' voltages. Refused if the owner's accounts, its native
+    /// record and the port works disagree.
     fn account(
         &self,
         step: &Cycle,
         old: &[f64],
         next: &[f64],
-        torques: [f64; 2],
+        efforts: &[f64],
         kelvin: &[f64],
         dt_s: f64,
-    ) -> Result<(Receipt, [f64; 11], [f64; 2]), CommutatedDriveError> {
-        let heats = port_heats(step);
+    ) -> Result<(Receipt, [f64; 2], Vec<f64>), CommutatedDriveError> {
+        let (torques, rails) = ([efforts[0], efforts[1]], &efforts[2..]);
+        let gate = match (&step.gate, L::GATED) {
+            (Some(gate), true) => Some(gate),
+            (None, false) => None,
+            _ => return Err(invalid("the owner's gate accounts are the lane's")),
+        };
+        let mut heats = port_heats(step).to_vec();
+        if let Some(gate) = gate {
+            // The driver heat ports follow the ten.
+            heats.splice(10..10, gate.heat_j);
+        }
         if heats.iter().any(|heat| !(heat.is_finite() && *heat >= 0.0)) {
             return Err(invalid(
                 "a heat or the load's work is not finite and nonnegative",
             ));
         }
-        let rates = heats.map(|heat| heat / dt_s);
+        let rates: Vec<f64> = heats.iter().map(|heat| heat / dt_s).collect();
         if rates
             .iter()
-            .zip(heats)
-            .any(|(rate, heat)| !rate.is_finite() || (heat != 0.0 && *rate == 0.0))
+            .zip(&heats)
+            .any(|(rate, heat)| !rate.is_finite() || (*heat != 0.0 && *rate == 0.0))
         {
             return Err(invalid("a heat rate is not representable"));
         }
+        let (currents, gate_defects_j, gate_magnitude_j) = rail_accounts(gate, rails, dt_s);
         let speeds = step.mean_shaft_speed_rad_s;
         let port_work_j = [0, 1].map(|i| torques[i] * speeds[i] * dt_s);
         let shaft_j = step.shaft_work_j[0] + step.shaft_work_j[1];
-        let heat_j = step.heat_j.iter().sum::<f64>();
+        let gate_j = gate.map_or(0.0, |g| g.source_work_j.iter().sum());
+        let heat_j = step.heat_j.iter().sum::<f64>() + gate.map_or(0.0, |g| g.heat_j.iter().sum());
         let stored_change_j = step.stored_change_j;
         let numerical_loss_j = -step.balance_residual_j;
         let energy_old = self.energy(old)?;
@@ -921,7 +1227,8 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             + step.load_work_j
             + step.native.delta_h.abs()
             + step.native.supplied.abs()
-            + step.native.dissipated.abs();
+            + step.native.dissipated.abs()
+            + gate_magnitude_j;
         let rounding = arithmetic_rounding_floor(64 * step.integration_steps.max(1), magnitude);
         let allowance = rounding + self.energy_tolerance_j;
         // The owner's accounts against its native record and the port works.
@@ -929,11 +1236,12 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             numerical_loss_j,
             stored_change_j - step.native.delta_h,
             heat_j - step.native.dissipated,
-            shaft_j - step.load_work_j - step.native.supplied,
+            shaft_j + gate_j - step.load_work_j - step.native.supplied,
             port_work_j[0] - step.shaft_work_j[0],
             port_work_j[1] - step.shaft_work_j[1],
         ]
         .into_iter()
+        .chain(gate_defects_j)
         .map(f64::abs)
         .fold(0.0, f64::max);
         let entropy = heats
@@ -950,6 +1258,7 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             speeds[1],
         ]
         .iter()
+        .chain(&currents)
         .all(|value| value.is_finite())
         {
             return Err(invalid("the drive's energy account is not finite"));
@@ -972,7 +1281,11 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
             residual: step.native.solver_residual,
             tolerance: step.native.solver_residual,
         };
-        Ok((receipt, rates, speeds))
+        let outputs = currents
+            .into_iter()
+            .chain(rates.iter().map(|rate| -rate))
+            .collect();
+        Ok((receipt, speeds, outputs))
     }
 
     /// The identity words of the storage, the program and the controls.
@@ -992,6 +1305,31 @@ impl<L: DriveLane> CommutatedBatteryMotorDrive<L> {
                     for &(q, v) in curve.knots() {
                         words.extend([q.to_bits(), v.to_bits()]);
                     }
+                }
+            }
+            // Driven gates: the storage, the drivers, then each channel law.
+            Storage::Gate(g) => {
+                let s = &g.storage;
+                words.push(3);
+                words.push(s.maximum_cells_per_chord as u64);
+                for curve in &s.intrinsic_drain_charge_curves {
+                    words.push(curve.knots().len() as u64);
+                    for &(q, v) in curve.knots() {
+                        words.extend([q.to_bits(), v.to_bits()]);
+                    }
+                }
+                words.extend(s.gate_source_capacitance_f.map(f64::to_bits));
+                words.extend(s.gate_drain_capacitance_f.map(f64::to_bits));
+                for d in &s.gate_drivers {
+                    let values = [
+                        d.on_resistance_ohm,
+                        d.off_resistance_ohm,
+                        d.maximum_current_a,
+                    ];
+                    words.extend(values.map(f64::to_bits));
+                }
+                for law in &g.channels {
+                    counted(words, Some(|w: &mut Vec<u64>| law.identity_words(w)));
                 }
             }
         }
@@ -1043,22 +1381,37 @@ fn gate_program_words(program: &GateProgram, words: &mut Vec<u64>) {
     }
 }
 
-/// The drive's ports: the two shafts, the heat ports, the load's port if a
+/// The drive's ports: the two shafts, the gate lane's eight rails, the heat
+/// ports with the gate lane's four driver heat ports, the load's port if a
 /// program has a load, and the `program` signal if it chooses programs.
-fn port_specs(loaded: bool, signalled: bool) -> Result<Vec<PortSpec>, CommutatedDriveError> {
-    let mut ports = Vec::with_capacity(14);
-    for name in ["rotor", "stator"] {
+fn port_specs(
+    loaded: bool,
+    signalled: bool,
+    gated: bool,
+) -> Result<Vec<PortSpec>, CommutatedDriveError> {
+    let mut ports = Vec::with_capacity(26);
+    let shafts = ["rotor", "stator"].map(|name| (name, PortKind::RotationalTorqueAngularVelocity));
+    let rails = RAIL_PORTS
+        .into_iter()
+        .filter(|_| gated)
+        .map(|name| (name, PortKind::ElectricalVoltageCurrent));
+    for (name, kind) in shafts.into_iter().chain(rails) {
         ports.push(
             PortSpec::power(
                 StableId::new(name).map_err(CommutatedDriveError::Identifier)?,
-                PortKind::RotationalTorqueAngularVelocity,
+                kind,
                 PortRole::EffortIn,
                 NonZeroUsize::MIN,
             )
             .map_err(CommutatedDriveError::Port)?,
         );
     }
-    for name in HEAT_PORTS.into_iter().chain(loaded.then_some(LOAD_PORT)) {
+    let drivers = DRIVER_HEAT_PORTS.into_iter().filter(|_| gated);
+    for name in HEAT_PORTS
+        .into_iter()
+        .chain(drivers)
+        .chain(loaded.then_some(LOAD_PORT))
+    {
         let id = StableId::new(name).map_err(CommutatedDriveError::Identifier)?;
         ports.push(PortSpec::heat(id, PortRole::EffortIn).map_err(CommutatedDriveError::Port)?);
     }
@@ -1222,13 +1575,17 @@ impl<L: DriveLane> Component for CommutatedBatteryMotorDrive<L> {
         cx.checkpoint()
             .map_err(|_| CommutatedDriveError::Cancelled)?;
         let width = self.ports.len();
-        // The heat ports end where the `program` signal, if any, begins.
+        // The heat ports begin after the shafts and any rails, and end where
+        // the `program` signal, if any, begins.
+        let heat_start = 2 + if L::GATED { RAIL_PORTS.len() } else { 0 };
         let heat_end = width - usize::from(!self.scheduled.is_empty());
         if !(dt_s.is_finite() && dt_s > 0.0)
             || inputs.len() != width
             || outputs.len() != heat_end
             || inputs.iter().any(|value| !value.is_finite())
-            || inputs[2..heat_end].iter().any(|&kelvin| kelvin <= 0.0)
+            || inputs[heat_start..heat_end]
+                .iter()
+                .any(|&kelvin| kelvin <= 0.0)
         {
             return Err(invalid(
                 "positive duration, complete finite ports and positive temperatures required",
@@ -1253,11 +1610,13 @@ impl<L: DriveLane> Component for CommutatedBatteryMotorDrive<L> {
                 }
             },
         };
-        let (torques, kelvin) = ([inputs[0], inputs[1]], &inputs[2..heat_end]);
+        let (efforts, kelvin) = (&inputs[..heat_start], &inputs[heat_start..heat_end]);
+        let torques = [efforts[0], efforts[1]];
         let (converter, battery, lead, motor) = self.laws_at(kelvin)?;
+        let gates = self.gates_at(kelvin, &efforts[2..])?;
         let original = self.original(&converter, battery, lead, motor)?;
         let cancelled = || cx.is_cancel_requested();
-        let mut native = self.prepare(original, converter.devices, program, cancelled)?;
+        let mut native = self.prepare(original, &converter, program, gates, cancelled)?;
         let commands: Vec<_> = program
             .auxiliary_loads
             .iter()
@@ -1271,14 +1630,14 @@ impl<L: DriveLane> Component for CommutatedBatteryMotorDrive<L> {
             cx.is_cancel_requested()
         })?;
 
-        let (receipt, rates, speeds) =
-            self.account(&step, old.as_ref(), next.as_ref(), torques, kelvin, dt_s)?;
+        let (receipt, speeds, rest) =
+            self.account(&step, old.as_ref(), next.as_ref(), efforts, kelvin, dt_s)?;
         cx.checkpoint()
             .map_err(|_| CommutatedDriveError::Cancelled)?;
         outputs[0] = speeds[0];
         outputs[1] = speeds[1];
-        for (output, rate) in outputs[2..].iter_mut().zip(rates) {
-            *output = -rate;
+        for (output, value) in outputs[2..].iter_mut().zip(rest) {
+            *output = value;
         }
         *new = next;
         Ok(Proposal::Step(receipt))
