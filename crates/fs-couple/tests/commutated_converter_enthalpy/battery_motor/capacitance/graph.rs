@@ -2,7 +2,10 @@
 
 use fs_system::commutated_drive::DeviceStorage;
 
-use super::super::graph::{Case, Row, compare, kernel_refusal, kernel_run, leak};
+use super::super::graph::{
+    Case, Row, cells_start, closed_form_step, compare, heat_assembly, kernel_refusal, kernel_run,
+    leak,
+};
 use super::*;
 
 fn capacitive_case<'s>(
@@ -24,6 +27,7 @@ fn capacitive_case<'s>(
         substeps,
         load_cell,
         schedule: Vec::new(),
+        linked: false,
     }
 }
 
@@ -76,6 +80,58 @@ fn module_run(
         (thermal, drive, _) = next.into_parts();
     }
     Ok(rows)
+}
+
+/// The module's `steps` steps of the case through its heat assembly, which
+/// carries the case's link (`FixedCooling`).
+fn module_linked_run(f: &CapacitiveFixture, case: &Case<'_>, steps: usize) -> Vec<Row> {
+    let start = &cells_start(case);
+    heat_assembly(case, start, |cx, transport| {
+        let (resistors, devices) = (drive_resistors(&f.base), f.base.devices());
+        let drive = CommutatedBatteryMotorHeatNetwork {
+            assembly: transport,
+            resistors: &resistors,
+            devices: &devices,
+            bearing_cell: IDS[0],
+        };
+        let caps = f.bindings();
+        let network = CapacitiveBatteryMotorHeatNetwork {
+            drive,
+            capacitances: &caps,
+        };
+        let native = &case.steady.native;
+        let mut drive = network.bind(cx, start, native, COSS, case.start).unwrap();
+        let mut thermal = start.clone();
+        let mut rows = Vec::new();
+        for k in 0..steps {
+            let intervals = [CommutationInterval {
+                gates: case.gates(k),
+                duration_s: case.dt_s,
+            }];
+            let next = network
+                .step_candidate(
+                    cx,
+                    &thermal,
+                    thermal.time_s() + case.dt_s,
+                    &drive,
+                    &intervals,
+                    &[case.steady.command],
+                    case.substeps,
+                    case.load_cell,
+                    power_controls(),
+                    cycle_controls(),
+                    drive_controls(7),
+                    &[0.0; 7],
+                )
+                .unwrap();
+            rows.push(Row {
+                state: *next.drive().state(),
+                kelvin: IDS.map(|id| next.thermal().temperature_k(id).unwrap()),
+            });
+            (thermal, drive, _) = next.into_parts();
+        }
+        rows
+    })
 }
 
 #[test]
@@ -135,6 +191,46 @@ fn constant_capacitors_as_a_graph_follow_a_gate_program_that_changes() {
         kept[1].state.map(f64::to_bits),
         module[1].state.map(f64::to_bits)
     );
+}
+
+#[test]
+fn constant_capacitors_as_a_graph_carry_the_link_between_cells() {
+    // The module's heat-assembly fixture: steady motoring with a link of
+    // 0.25 W/K between the inductor's cell and the motor's. Then the hot
+    // dynamic fixture with the same link.
+    let steady = steady_drive(false);
+    let fixtures = [
+        (
+            capacitive_fixture(1.0, 0.0, 350.0, false, 1.0),
+            [0.0; 2],
+            1.0 / 64.0,
+            4,
+            [1e-14, 1e-11],
+        ),
+        (
+            capacitive_fixture(0.01, 0.02, 350.0, false, 1.0),
+            [-0.3, 0.4],
+            1.0 / 1024.0,
+            1,
+            [1e-13, 1e-9],
+        ),
+    ];
+    // On 72250ec7fc the steady fixture agrees bit for bit in the drive and
+    // within 1.7e-13 K in the cells, the hot one bit for bit. The bounds are
+    // those of the same fixtures without the link.
+    for (f, offset, dt, substeps, bounds) in fixtures {
+        let f = leak(f);
+        let start = initial(&steady, offset);
+        let case = Case {
+            linked: true,
+            ..capacitive_case(f, &steady, start, dt, substeps, None)
+        };
+        let module = module_linked_run(f, &case, 3);
+        compare(&module, &kernel_run(&case, 3), bounds);
+        // The steady fixture's first step also meets the module's own
+        // closed form on the graph: within 5.7e-14 K.
+        assert!(substeps != 4 || closed_form_step(&case) < 1e-12);
+    }
 }
 
 #[test]

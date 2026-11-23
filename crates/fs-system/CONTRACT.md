@@ -4208,7 +4208,11 @@ graph:
   temperature outside that claim is refused as the module refuses it;
 - two `Force` sources holding the command's shaft torques;
 - the seven cells as the backward-Euler timeline returning end-of-step
-  temperatures, and one heat route per heat port.
+  temperatures, and one heat route per heat port;
+- where the module links two cells, the same link in the timeline. A
+  test-local `ImplicitLinkLaw`, the stand-in for `FixedCooling` and not a
+  material law, gives the module's fixed conductance and the flux's
+  derivatives in both cells' enthalpies.
 
 Against the module, three steps of each fixture, for both storage files:
 - steady motoring and regeneration (1/64 s, four substeps, the load's work
@@ -4228,7 +4232,19 @@ Against the module, three steps of each fixture, for both storage files:
   - charge curves: within 5.5e-15 relative and 2.7e-11 K, held to 1e-13 and
     1e-9 K.
 
-  Keeping the first gates ends the second step elsewhere.
+  Keeping the first gates ends the second step elsewhere;
+- the module's heat-assembly fixture, a link of 0.25 W/K between the
+  inductor's cell and the motor's (`FixedCooling` on the module's heat
+  network), in steady motoring, then the hot fixture with the same link:
+  - steady: the drive bit for bit and the cells within 1.7e-13 K, held to
+    1e-14 relative and 1e-11 K;
+  - hot, constant capacitances: bit for bit; charge curves: within
+    7.8e-16 relative and 1.6e-11 K; held to 1e-13 and 1e-9 K.
+
+  The graph's first steady step also meets the module's closed form for
+  backward Euler through the link, X = hG(Q0 - Q6)/(1 + 2hG): within
+  5.7e-14 K, held to 1e-12 K. The drive's laws at the two linked cells do
+  not vary with temperature here, so the link reaches the cells only.
 
 Both sides refuse two steps:
 - a storage claim qualified only up to 300.000001 K (the graph with `Law`
@@ -4238,7 +4254,7 @@ Both sides refuse two steps:
 After each refusal the graph's drive and cells keep their states. The
 kernel's ledger closes within 1e-9 J.
 
-Seven defects planted in the graph, one at a time, each failed at least one of
+Nine defects planted in the graph, one at a time, each failed at least one of
 these tests:
 - the lead's heat in the polarization's cell;
 - the stator given the rotor's torque;
@@ -4246,10 +4262,12 @@ these tests:
 - the timeline returning mean temperatures;
 - the storage claims in reverse order;
 - the load's work left outside;
-- the schedule's third step on the second program.
+- the schedule's third step on the second program;
+- the link's conductance doubled;
+- the timeline without the link's law.
 
 Not claimed: torques that change within the program; gate charge and
 gate-driver heat (the owner's fifteen-coordinate lane); reverse recovery and
 avalanche; storage, OCV or bearing drag that change with temperature. The
-graphs do not cover the module's links between cells (its heat-assembly
-fixtures) or its refusals of a source that changed or was bound another way.
+graphs do not cover the module's refusals of a source that changed or was
+bound another way.

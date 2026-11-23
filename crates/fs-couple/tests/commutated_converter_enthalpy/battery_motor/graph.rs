@@ -12,7 +12,9 @@
 //! - two `elements::Force` sources holding the command's shaft torques;
 //! - the seven cells as one backward-Euler timeline whose cell ports return
 //!   end-of-step temperatures;
-//! - one heat route per heat port into the module's receiving cell.
+//! - one heat route per heat port into the module's receiving cell;
+//! - where the fixture links two cells, the same link in the timeline at the
+//!   module's fixed conductance ([`FixedCoolingStandIn`]).
 //!
 //! The two sides solve the same equations with different solvers, so they
 //! agree to within the solves' tolerances.
@@ -33,11 +35,12 @@ use fs_system::commutated_drive::{
 use fs_system::elements::{Force, SignalClock, SignalSource, SourceAccount, Waveform};
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
+use fs_thermal::enthalpy::conduction::implicit::link::{ImplicitLinkLaw, ImplicitLinkState};
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
     ImplicitConductionLinearControls, ImplicitConductionState,
 };
-use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductivityLaw};
+use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, ConductivityLaw};
 
 use super::*;
 
@@ -66,7 +69,13 @@ pub(super) struct Case<'s> {
     /// The gates of each step in turn; empty runs the steady gates in every
     /// step.
     pub(super) schedule: Vec<DeviceGateState>,
+    /// Whether the cells carry the module's heat-assembly link ([`LINK`]).
+    pub(super) linked: bool,
 }
+
+/// The link of the module's heat-assembly fixtures: its id, its two cells
+/// and the conductance `FixedCooling` gives it \[W/K\].
+pub(super) const LINK: (u64, [CellId; 2], f64) = (77, [IDS[0], IDS[6]], 0.25);
 
 impl Case<'_> {
     /// The gates of step `k`.
@@ -276,16 +285,133 @@ impl ImplicitConductionLaw for Caloric {
     }
 }
 
+/// The graph's stand-in for the module's `FixedCooling`, local to these
+/// tests and not a material law: the link at the fixed conductance the
+/// heat-assembly fixtures give it. The timeline takes `Q = G (T_a - T_b)`;
+/// the law gives its derivatives in both cells' enthalpies.
+struct FixedCoolingStandIn(&'static Caloric);
+
+impl ImplicitLinkLaw for FixedCoolingStandIn {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        [self.0.0.curve(); 2]
+    }
+
+    fn state_at_specific_enthalpies(
+        &self,
+        enthalpies_j_kg: [f64; 2],
+        _: ConductiveLink,
+        _: ContactPatch,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitLinkState, DepositionError> {
+        checkpoint()?;
+        let [a, b] = enthalpies_j_kg;
+        let a = ImplicitConductionLaw::state_at_specific_enthalpy(self.0, a)?;
+        let b = ImplicitConductionLaw::state_at_specific_enthalpy(self.0, b)?;
+        let g = LINK.2;
+        Ok(ImplicitLinkState {
+            conductance_w_k: g,
+            power_enthalpy_derivatives_w_kg_j: [
+                g * a.temperature_slope_kg_k_j,
+                -g * b.temperature_slope_kg_k_j,
+            ],
+        })
+    }
+}
+
+/// The cells at the start: with the link, born as the module's
+/// heat-assembly fixtures bear them, the seven cells and one contact.
+pub(super) fn cells_start(case: &Case<'_>) -> DepositionSimulation<'static> {
+    let f = case.fixture;
+    if !case.linked {
+        return f.thermal();
+    }
+    let birth = |cell: &DepositedCell| TimedEvent {
+        time_s: 0.0,
+        event: Event::Birth(cell.clone()),
+    };
+    let mut events: Vec<_> = f.thermal().cells().values().map(birth).collect();
+    let (id, [a, b], _) = LINK;
+    let link = ThermalLink {
+        id,
+        a,
+        b,
+        area_m2: 1.0,
+        conductance_w_k: 0.0,
+    };
+    events.push(TimedEvent {
+        time_s: 0.0,
+        event: Event::Contact(link),
+    });
+    let budget = DepositionBudget {
+        max_cells: 7,
+        max_links: 1,
+        max_events: 8,
+        max_substeps: 1000,
+    };
+    let config = StepConfig {
+        max_dt_s: 0.1,
+        energy_tolerance_j: 1e-9,
+    };
+    let laws = [(MaterialId(0), f.caloric.curve() as &dyn ThermalLaw)];
+    let cells = DepositionSimulation::new(events, &laws, budget).unwrap();
+    cells.advance_to(0.0, config, || Ok(())).unwrap().0
+}
+
+/// Runs `body` with a context and the module's heat assembly around the
+/// case's cells, the link at the conductance its heat-assembly fixtures
+/// give it (`FixedCooling`).
+pub(super) fn heat_assembly<R>(
+    case: &Case<'_>,
+    start: &DepositionSimulation<'_>,
+    body: impl FnOnce(&Cx<'_>, &FixedCooling<'_, '_, '_>) -> R,
+) -> R {
+    let cells = case.fixture.cells(case.context);
+    let bulk = MaterialNetwork {
+        cells: &cells,
+        links: &[],
+        resistors: &[],
+    };
+    let electrical = ElectricalContactNetwork {
+        bulk: &bulk,
+        contacts: &[],
+        electrical_bases: &[],
+    };
+    let heat = MaterialHeatNetwork {
+        electrical: &electrical,
+        thermal_contacts: &[],
+        radiation: None,
+    };
+    with_cx(|cx| {
+        let unset = BTreeMap::from([(LINK.0, 0.0)]);
+        let prepared = heat
+            .prepare_with_link_conductances(cx, start, &unset)
+            .unwrap();
+        let transport = FixedCooling {
+            prepared: &prepared,
+            conductance_w_k: LINK.2,
+        };
+        body(cx, &transport)
+    })
+}
+
 /// The module's seven cells as one backward-Euler timeline whose ports
 /// return end-of-step temperatures, and its start. Its longest interval is
 /// the cells' own (`Fixture::thermal_at`), so it does not cap the step.
-fn timeline(f: &'static Fixture) -> (ThermalTimeline<'static>, TimelineState<'static>) {
-    let start = f.thermal();
+fn timeline(case: &Case<'_>) -> (ThermalTimeline<'static>, TimelineState<'static>) {
+    let f = case.fixture;
+    let start = cells_start(case);
     let law: &'static Caloric = leak(Caloric(&f.caloric));
+    // The link's geometry is bound as the observer requires; the stand-in
+    // replaces the conduction it would give.
+    let geometry = [ConductiveLink {
+        link_id: LINK.0,
+        half_distances_m: [0.5; 2],
+        contact_resistance_m2_k_w: 0.0,
+    }];
     let observer = ConductionObserver::new(
         &start,
         &[(MaterialId(0), law as &dyn ConductivityLaw)],
-        &[],
+        &geometry[..usize::from(case.linked)],
         &[],
         || Ok(()),
     )
@@ -298,6 +424,15 @@ fn timeline(f: &'static Fixture) -> (ThermalTimeline<'static>, TimelineState<'st
         || Ok(()),
     )
     .unwrap();
+    let conduction = if case.linked {
+        let link: &'static FixedCoolingStandIn = leak(FixedCoolingStandIn(law));
+        let links = [(LINK.0, link as &dyn ImplicitLinkLaw)];
+        conduction
+            .with_link_laws(&start, &links, || Ok(()))
+            .unwrap()
+    } else {
+        conduction
+    };
     let controls = ImplicitConductionControls {
         maximum_dt_s: 1.0,
         cell_tolerance_j: 1e-10,
@@ -398,7 +533,6 @@ fn drive(case: &Case<'_>) -> CommutatedBatteryMotorDrive {
 
 /// The case as a graph. Returns the system, the drive and the cells.
 pub(super) fn declare(case: &Case<'_>) -> (System, NodeId, NodeId) {
-    let f = case.fixture;
     let mut builder = SystemBuilder::new();
     let node = builder.add("drive", drive(case), case.start).unwrap();
     let torques = case.steady.command.shaft_torque_nm;
@@ -430,7 +564,7 @@ pub(super) fn declare(case: &Case<'_>) -> (System, NodeId, NodeId) {
         );
         builder.signal(a, b).unwrap();
     }
-    let (timeline, start) = timeline(f);
+    let (timeline, start) = timeline(case);
     let cells = builder.add("cells", timeline, start).unwrap();
     let mut routes: Vec<_> = HEAT_PORTS.into_iter().zip(RECEIVERS.map(Some)).collect();
     routes.push((LOAD_PORT, case.load_cell));
@@ -486,6 +620,20 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             fs_exec::ExecMode::Deterministic,
         ))
     })
+}
+
+/// The module's own check of its heat-assembly fixture, on the graph's first
+/// step: backward Euler through the link between cells of 1 J/K from 300 K,
+/// `X = h G (Q0 - Q6) / (1 + 2 h G)` with the steady heats. The largest
+/// difference over the cells \[K\].
+pub(super) fn closed_form_step(case: &Case<'_>) -> f64 {
+    let (h, g) = (case.dt_s, LINK.2);
+    let q = per_body(case.steady.heat_w.map(|p| h * p), 0.0);
+    let x = h * g * (q[0] - q[6]) / (1.0 + 2.0 * h * g);
+    let exchange = [-x, 0.0, 0.0, 0.0, 0.0, 0.0, x];
+    let kelvin = kernel_run(case, 1)[0].kelvin;
+    let error = |i: usize| (kelvin[i] - (300.0 + q[i] + exchange[i])).abs();
+    (0..7).map(error).fold(0.0, f64::max)
 }
 
 /// `steps` steps of the case's graph. The kernel's ledger closes.
