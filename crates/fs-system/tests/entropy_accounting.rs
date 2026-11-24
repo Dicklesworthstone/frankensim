@@ -2,7 +2,7 @@
 //! declares it, at every step and before anything is published. The ledger
 //! keeps one entropy account per declaring component; a component that
 //! declares nothing has none. The accounts rewind with a checkpoint and
-//! come back from a snapshot.
+//! come back from a snapshot. The shipped `elements::Conductance` declares.
 
 #![allow(clippy::float_cmp)]
 
@@ -20,6 +20,7 @@ use fs_ports::StableId;
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, Proposal, Receipt,
 };
+use fs_system::elements::Conductance;
 use fs_system::ledger::{EntropyAccount, Ledger};
 use fs_system::{NodeId, Phase, System, SystemBuilder, SystemError, SystemImage};
 
@@ -264,12 +265,22 @@ struct Pair {
 }
 
 fn pair(tune: impl FnOnce(&mut Body, &mut Body, &mut Wall)) -> Pair {
-    let mut builder = SystemBuilder::new();
     let (mut hot_body, mut cold_body) = (Body::new(HOT.0), Body::new(COLD.0));
     let mut wall_member = Wall::new(3.0);
     tune(&mut hot_body, &mut cold_body, &mut wall_member);
-    let hot = builder.add("hot", hot_body, HOT.1).expect("hot");
-    let cold = builder.add("cold", cold_body, COLD.1).expect("cold");
+    joined((hot_body, HOT.1), (cold_body, COLD.1), wall_member)
+}
+
+/// Two bodies, each at its starting temperature, joined through `wall`, a
+/// stateless member with heat ports `a` and `b`.
+fn joined<W: Component<State = ()> + 'static>(
+    (hot_body, hot_k): (Body, f64),
+    (cold_body, cold_k): (Body, f64),
+    wall_member: W,
+) -> Pair {
+    let mut builder = SystemBuilder::new();
+    let hot = builder.add("hot", hot_body, hot_k).expect("hot");
+    let cold = builder.add("cold", cold_body, cold_k).expect("cold");
     let wall = builder.add("wall", wall_member, ()).expect("wall");
     let port = |builder: &SystemBuilder, node, name| builder.port(node, name).expect("port");
     let (a, b) = (port(&builder, wall, "a"), port(&builder, wall, "b"));
@@ -277,8 +288,8 @@ fn pair(tune: impl FnOnce(&mut Body, &mut Body, &mut Wall)) -> Pair {
     builder.common_effort(h, &[a]).expect("hot side");
     builder.common_effort(c, &[b]).expect("cold side");
     let mut system = builder.seal().expect("sealed");
-    assert!(system.guess(a, &[HOT.1]));
-    assert!(system.guess(b, &[COLD.1]));
+    assert!(system.guess(a, &[hot_k]));
+    assert!(system.guess(b, &[cold_k]));
     Pair {
         system,
         hot,
@@ -363,6 +374,46 @@ fn every_declared_entropy_is_audited_and_the_pair_closes_its_entropy() {
         (stored - generated).abs() <= 1.0e-9 * generated,
         "{stored} vs {generated}"
     );
+}
+
+#[test]
+fn the_shipped_conductance_is_audited_and_its_generation_cancels_its_port_entropy() {
+    let conductance = || Conductance::new(3.0).expect("conductance");
+    assert_eq!(
+        conductance().stored_entropy_j_per_k(&()).expect("measured"),
+        Some(0.0)
+    );
+    // At the pair's temperatures, and with the hot body ten times hotter
+    // than the cold one.
+    for hot_k in [HOT.1, 3000.0] {
+        let hot = (Body::new(HOT.0), hot_k);
+        let mut shipped = joined(hot, (Body::new(COLD.0), COLD.1), conductance());
+        let hot = (Body::new(HOT.0), hot_k);
+        let mut tested = joined(hot, (Body::new(COLD.0), COLD.1), Wall::new(3.0));
+        run(&mut shipped.system, 200);
+        run(&mut tested.system, 200);
+        // The test wall has the same law: the states and every entropy
+        // account agree to the bit.
+        let state = |pair: &Pair, node| pair.system.state::<f64>(node).expect("state").to_bits();
+        for (a, b) in [(shipped.hot, tested.hot), (shipped.cold, tested.cold)] {
+            assert_eq!(state(&shipped, a), state(&tested, b), "{hot_k} K");
+        }
+        let (ledger, reference) = (shipped.system.ledger(), tested.system.ledger());
+        for name in ["hot", "cold", "wall"] {
+            assert_eq!(entropy(ledger, name), entropy(reference, name), "{name}");
+        }
+        // It stores nothing, and it generates what its heat carries out.
+        let account = entropy(ledger, "wall").expect("declared");
+        assert_eq!(account.audited_steps, 200);
+        assert_eq!(account.stored_change_j_per_k.value(), 0.0);
+        let port = account.port_entropy_in_j_per_k.value();
+        let made = account.entropy_generated_j_per_k.value();
+        assert!(made > 0.0, "{hot_k} K");
+        assert!(
+            (port + made).abs() <= 1.0e-12 * made,
+            "{hot_k} K: {port:e} in, {made:e} generated"
+        );
+    }
 }
 
 #[test]

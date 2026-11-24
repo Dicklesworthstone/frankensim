@@ -341,9 +341,11 @@ physics owners below fs-couple can be composed without it.
   relative to the reported inventories, so an owner measures its entropy
   with rounding relative to the value it reports: `C ln(T / T_ref)` taken as
   `ln` of the quotient is refused near `T_ref` (`tests/entropy_accounting.rs`).
-  No element of this crate declares yet: `HeatCapacity` books no generation
-  and publishes its step-mean temperature, so its measured change would
-  differ from its port entropy at third order in the step.
+  `elements::Conductance` declares zero: it stores nothing, so each step's
+  generation must cancel the entropy its heat carries through its ports.
+  `HeatCapacity` does not declare: it books no generation and publishes its
+  step-mean temperature, so its measured change would differ from its port
+  entropy at third order in the step.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `scheduled_boundary(port, f, event_times_s)`: the same input with immutable,
   finite, strictly increasing absolute event times. The step negotiation
@@ -577,7 +579,7 @@ physics owners below fs-couple can be composed without it.
   temperature at the start of the step, which carries no power and leaves
   state and receipt unchanged, so a law that reads it is held over the step:
   first-order feedback), `Conductance` (heat ports `a`, `b`, entropy
-  `G (Ta - Tb)^2 / (Ta Tb) dt`), `HeatNode` (a thermal node of no capacity
+  `G (Ta - Tb)^2 / (Ta Tb) dt`, stored entropy declared zero), `HeatNode` (a thermal node of no capacity
   joined to `n` bodies by conductances, with a heat source at the node:
   port `source` receives the heat rate put into the node and returns its
   temperature `T_n = (P + sum G_k T_k) / sum G_k`; `body<k>` receives that
@@ -2428,7 +2430,12 @@ three declaring; every step is asserted taken whole, with no shortening:
   `Measure` phase, and nothing is published;
 - a checkpoint rewinds the entropy accounts and a replay restores them
   exactly; a snapshot resumed into a fresh pair carries them, and both
-  continue to the same ledger.
+  continue to the same ledger;
+- the shipped `Conductance` in the wall's place declares `Some(0.0)` and,
+  from 400 K and from 3000 K against 300 K, gives the test wall's states and
+  entropy accounts to the bit over 200 steps: 200 audited steps, no stored
+  change, positive generation, and port entropy that cancels it within
+  1e-12 of it.
 
 Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
 of them also into a second body and a named sink) deliver the sum of their

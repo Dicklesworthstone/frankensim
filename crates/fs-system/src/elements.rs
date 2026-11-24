@@ -1971,7 +1971,9 @@ impl PortTangent for HeatCapacity {
 
 /// A thermal conductance [W/K] between heat ports `a` and `b`. Heat
 /// `G (T_a - T_b)` enters at `a` and leaves at `b`; it stores nothing and
-/// generates `G (T_a - T_b)^2 / (T_a T_b)` of entropy per second.
+/// generates `G (T_a - T_b)^2 / (T_a T_b)` of entropy per second. It declares
+/// its stored entropy, zero, so the kernel audits each step's generation
+/// against the entropy its heat carries through the two ports.
 #[derive(Debug, Clone)]
 pub struct Conductance {
     conductance_w_k: f64,
@@ -2025,6 +2027,10 @@ impl Component for Conductance {
 
     fn stored_energy_j(&self, _state: &()) -> Result<f64, ElementError> {
         Ok(0.0)
+    }
+
+    fn stored_entropy_j_per_k(&self, _state: &()) -> Result<Option<f64>, ElementError> {
+        Ok(Some(0.0))
     }
 
     fn propose(
