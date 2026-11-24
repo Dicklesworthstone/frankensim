@@ -2971,12 +2971,15 @@ codec: a system holding it cannot be written to a durable snapshot.
 The owner is a type parameter. `PlanarWinding<'m, C, F>` steps a circuit `C`
 that implements the sealed `WindingOwner<'m>`, whose field's controls are `F`.
 Both default to the saturating owner (`NonlinearWindingCircuit`,
-`NonlinearEddyControls`), the only owner so far, so `PlanarWinding<'m>` and
-`PlanarWindingState<'m>` name the same types as before. The owner gives the
-Component:
+`NonlinearEddyControls`), so `PlanarWinding<'m>` and `PlanarWindingState<'m>`
+name the same types as before. The owner gives the Component:
 - its step and its graph-resistor rebinding;
 - each field cell's heat by triangle;
-- its stored energy and the coordinates that state equality reads.
+- the triangles its field heats beyond the conductors, and whether its fit
+  in each holds at a temperature;
+- its stored energy and the coordinates that state equality reads, its
+  field memory included;
+- its lane words.
 
 No field reaches `C` through an associated type, so the Component and its
 state stay covariant in `'m`.
@@ -3022,7 +3025,36 @@ The identity words bind:
 - the receiver map;
 - the controls, by their `Debug` text, which prints each `f64` so that it
   parses back to the same bits;
-- the energy tolerance.
+- the energy tolerance;
+- the owner's lane words: none for the saturating owner, whose words are as
+  they were.
+
+With the `magnetic-hysteresis` feature, the owner can also be the
+play-memory circuit `winding::hysteretic::HystereticWindingCircuit`
+(`PlanarWinding<'m, HystereticWindingCircuit<'m>, HystereticEddyControls>`):
+- Its field heat is each eddy cell's Joule heat and each magnetic cell's
+  pinning plus viscous heat (`PlanarHystereticCellStep::irreversible_heat_j`),
+  by triangle, the two channels `fs_couple::circuit_enthalpy` deposits.
+- Every triangle of its mesh can dissipate, conducting or not, so each maps
+  to exactly one receiver, and a receiver may name a triangle that carries no
+  conductor. A linear triangle maps too; its heat is zero.
+- Its magnetic fits are constant on their source-admitted temperature
+  support. Before each step, the fit in every triangle must hold over the
+  interval between the fit's own temperature and the temperature of the
+  triangle's port (`ResolvedVectorHysteresis::admit_temperature_interval`).
+  The fit's temperature is its one query coordinate that is a static
+  absolute temperature, typed so or the untyped `T`. A fit with none, or a
+  port outside the support, refuses the step (`Law`, element
+  `LawElement::Field`); at the fit's own temperature the fit holds. The
+  module admits each receiver's whole caloric chart once, at bind. The
+  Component sees only port temperatures, so it refuses when a port leaves
+  the support, not when the chart could.
+- State equality also compares, bit for bit, every cell's vector memory
+  (field, flux density, branch polarizations, stored energy density), the
+  field's flux density and its stored energy.
+- Its identity words end with one lane word, `b"vecplay1"` read
+  little-endian.
+- Parameter work stays refused; this owner books none.
 
 `tests/winding_component.rs` (11 tests). With fixed conductors:
 - the ports of a graph with a voltage source, and of one with a current source
@@ -3109,15 +3141,63 @@ Nineteen in the laws' paths each did too:
 18. the fixed topology check dropped;
 19. with no resistor laws, the topology check ignoring resistor values.
 
-No fixture reaches the `UnaccountedWork` refusal, or a `Balance` refusal
-without a planted defect: the fixture's balance defects stay below 2.4e-15 J.
-No fixture reaches the step's refusal of a heat record that no receiver maps,
-because construction maps every conductor triangle.
+With `magnetic-hysteresis`, `tests/winding_component/hysteretic.rs` (5
+tests) steps the play-memory owner on the paired squares of
+`tests/hysteretic_eddy/common.rs`, the fixture it shares with
+`hysteretic_eddy.rs`. The fits switch with pinning and viscosity in every
+triangle but triangle 6, which is linear. The core conducts in triangles 1
+and 7, the copper is stranded in 0, 3, 4 and 5, and triangles 2 and 6 are
+magnetic only. Every claim holds from 200 K to 500 K, and the fits are
+resolved at 300 K:
+- six steps through two minor loops (20, 0, 8, 0, -20 and 0 V), each the
+  owner's own `step_to_candidate`, bit for bit, in state (vector memory
+  included), source output, per-receiver heat rate and entropy. Each
+  receiver's heat is booked by hand from the stranded cells, the eddy cells
+  and every magnetic cell's pinning plus viscous heat, by triangle. Triangle
+  2, which conducts nothing, dissipates; triangle 6 never does. Each step
+  passes `audit_step` with balance defects of at most 1.3e-14 J and endpoint
+  defects of at most 4.4e-16 J;
+- `check_component` conformance from a switched state;
+- ports at 200 K and 500 K step. A port at 520 K or at 150 K refuses with
+  the first triangle it heats (`Law`, `LawElement::Field`), and so does a
+  fit with no temperature of its own. A cancelled step, and a step refused
+  after its solve, leave the state they were handed as it was. The second
+  is refused by an allowance of the rounding floor alone: the owner's own
+  closure defect reaches 2.0e-11 J against a floor of 1.2e-12 J, which the
+  1e-9 J tolerance of the other tests covers. A state whose field has
+  another mesh (one square, four triangles) is another topology;
+- construction refuses a magnetic-only triangle mapped to no receiver or to
+  two, and a triangle beyond the mesh. The identity words end with the
+  tolerance and the lane word, the saturating Component's with the
+  tolerance, and swapping the two magnetic-only triangles between receivers
+  changes them;
+- conductor laws that answer the owner's own conductors step as fixed
+  conductors do, bit for bit.
+
+Seven defects in the play-memory paths, planted one at a time, each failed
+at least one of these tests:
+1. every magnetic cell's heat booked to the other square's triangle;
+2. the viscous heat dropped (pinning only);
+3. the fits' temperature check skipped;
+4. every triangle's fit checked at the first heat port's temperature;
+5. the check that the state's field has the Component's triangles dropped;
+6. the lane word dropped;
+7. the candidate published before the balance check.
+
+No test builds two states that differ in vector memory alone: their field
+energies or potentials always differed too.
+
+No fixture reaches the `UnaccountedWork` refusal. The saturating fixtures
+reach no `Balance` refusal without a planted defect: their balance defects
+stay below 2.4e-15 J. No fixture reaches the step's refusal of a heat record
+that no receiver maps, because construction maps every conductor triangle
+and every play-memory field triangle.
 
 Not claimed:
 - convergence of the fixed point between a port's temperature and the heat
   it returns;
-- the hysteretic owner;
+- the play-memory owner with conductor laws that follow temperature, or with
+  resistor laws;
 - magnetic temperature refresh, motion, a tangent, a codec;
 - any comparison with `fs_couple`'s winding modules.
 

@@ -2,7 +2,7 @@
 use super::*;
 use fs_em::winding::{
     end::EndWindingMode,
-    hysteretic::{HystereticWindingCircuit, HystereticWindingControls, HystereticWindingError},
+    hysteretic::{HystereticWindingCircuit, HystereticWindingError},
     nonlinear::{
         NonlinearWindingConfig, NonlinearWindingInitial, NonlinearWindingPort, NonlinearWindings,
         resistors::GraphResistorMaterial,
@@ -10,29 +10,9 @@ use fs_em::winding::{
     ohmic::WindingConductor,
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
-use fs_solver::NewtonKrylovConfig;
 
 const END: f64 = 0.02 + 0.003 * 4.0;
 const GRAPH_R: f64 = 0.3;
-
-fn terminal_controls() -> HystereticWindingControls {
-    HystereticWindingControls {
-        field: controls(),
-        maximum_field_trials: 1000,
-        maximum_newton_iterations: 30,
-        difference_step_a: 1e-5,
-        terminal_voltage_tolerance_v: 1e-8,
-        power_tolerance_w: 1e-8,
-        energy_tolerance_j: 2e-8,
-        newton: NewtonKrylovConfig {
-            absolute_tolerance: 1e-10,
-            relative_tolerance: 1e-12,
-            forcing_minimum: 1e-4,
-            linear_restart: 8,
-            ..NewtonKrylovConfig::default()
-        },
-    }
-}
 
 fn circuit<'a>(
     owner: &'a PlanarHystereticMagnetostatics,

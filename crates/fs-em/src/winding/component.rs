@@ -26,6 +26,14 @@
 //! law with no answer refuses the step; the Component never clamps a
 //! temperature.
 //!
+//! With the `magnetic-hysteresis` feature, the owner can also be the
+//! play-memory circuit (`HystereticWindingCircuit`). Its field heats every
+//! magnetic triangle, conducting or not, by pinning and viscous switching, so
+//! every one of its triangles maps to a receiver. Its magnetic fits are
+//! constant on their source-admitted temperature support, and a step whose
+//! port gives a triangle a temperature outside the support between the fit's
+//! own temperature and the port's refuses ([`PlanarWindingError::Law`]).
+//!
 //! The Component borrows the owner's problem for `'m` and leaks nothing. A
 //! system of the kernel holds `'static` members, so a caller that adds one
 //! to a system gives it a problem that lives for `'static`. The state has no
@@ -34,6 +42,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
+use core::ops::Range;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -47,6 +56,8 @@ use fs_ports::component::{
 };
 use fs_ports::{CoupleError, PortKind, StableId};
 
+#[cfg(feature = "magnetic-hysteresis")]
+use super::hysteretic::HystereticWindingCircuit;
 use super::nonlinear::{
     NonlinearWindingCircuit, NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep,
     resistors::GraphResistorMaterial,
@@ -102,6 +113,8 @@ pub enum LawElement {
     Triangle(usize),
     /// A native graph resistor's branch.
     Resistor(usize),
+    /// A play-memory field triangle, whose magnetic fit does not hold there.
+    Field(usize),
 }
 
 /// Refusal of the winding owner or of its Component boundary.
@@ -136,7 +149,8 @@ pub enum PlanarWindingError {
         /// The allowance \[J\].
         tolerance_j: f64,
     },
-    /// A law had no answer at the temperature its port received.
+    /// A law had no answer at the temperature its port received, or a
+    /// play-memory triangle's magnetic fit does not hold there.
     Law {
         /// The heat receiver whose port gave the temperature.
         receiver: usize,
@@ -201,19 +215,34 @@ const fn invalid(what: &'static str) -> PlanarWindingError {
 }
 
 /// The winding owner whose accepted circuit a [`PlanarWinding`] steps:
-/// [`NonlinearWindingCircuit`], the saturating field. Sealed: the owners are
-/// fs-em's.
+/// [`NonlinearWindingCircuit`], the saturating field, or, with the
+/// `magnetic-hysteresis` feature, `HystereticWindingCircuit`, the play-memory
+/// field. Sealed: the owners are fs-em's.
 pub trait WindingOwner<'m>: owner::Sealed<'m> {}
 
 impl<'m> WindingOwner<'m> for NonlinearWindingCircuit<'m> {}
 
+#[cfg(feature = "magnetic-hysteresis")]
+impl<'m> WindingOwner<'m> for HystereticWindingCircuit<'m> {}
+
 mod owner {
+    #[cfg(feature = "magnetic-hysteresis")]
+    use super::HystereticWindingCircuit;
     use super::{
         CircuitGraph, EddyConductor, GraphResistorMaterial, NonlinearWindingCircuit,
-        NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep, WindingConductor,
-        fmt,
+        NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep, Range,
+        WindingConductor, fmt,
     };
+    #[cfg(feature = "magnetic-hysteresis")]
+    use crate::planar::eddy::hysteretic::{HystereticEddyControls, HystereticEddyStep};
     use crate::planar::eddy::nonlinear::{NonlinearEddyControls, NonlinearEddyStep};
+    #[cfg(feature = "magnetic-hysteresis")]
+    use fs_material::state_point::ResolvedMaterialStatePoint;
+    #[cfg(feature = "magnetic-hysteresis")]
+    use fs_qty::{
+        QuantitySpec, Temperature,
+        semantic::{QuantityKind, ValueForm},
+    };
 
     /// What the Component asks of its owner: one step from an accepted
     /// circuit, the rebinding of its graph resistors, and the accepted
@@ -223,6 +252,9 @@ mod owner {
         type FieldControls: Copy + fmt::Debug;
         /// The field's record inside [`NonlinearWindingStep`].
         type FieldStep;
+        /// Words that tell this owner's Component apart; none for the
+        /// saturating owner, whose words came first.
+        const LANE_WORDS: &'static [u64];
 
         /// The owner's `step_to_candidate` to `target_s`, in parts.
         fn step(
@@ -245,6 +277,17 @@ mod owner {
         /// The mesh triangle and heat \[J\] of each field cell of a step, in
         /// the owner's order.
         fn field_heat(step: &Self::FieldStep) -> Vec<(usize, f64)>;
+
+        /// The mesh triangles whose field cells may dissipate beyond the
+        /// conductors: none when only conductors heat.
+        fn field_triangles(&self) -> Range<usize>;
+
+        /// Why the field's law in `triangle` does not hold at `kelvin`.
+        fn admit_field_temperature(&self, triangle: usize, kelvin: f64) -> Result<(), String>;
+
+        /// Whether two states hold the same field memory beyond the
+        /// coordinates below.
+        fn same_memory(&self, other: &Self) -> bool;
 
         /// Circuit, field and end-mode storage, summed as the owner sums
         /// `stored_before_j`.
@@ -269,6 +312,7 @@ mod owner {
     impl<'m> Sealed<'m> for NonlinearWindingCircuit<'m> {
         type FieldControls = NonlinearEddyControls;
         type FieldStep = NonlinearEddyStep;
+        const LANE_WORDS: &'static [u64] = &[];
 
         fn step(
             &self,
@@ -297,6 +341,18 @@ mod owner {
                 .iter()
                 .map(|cell| (cell.source.triangle, cell.heat_j))
                 .collect()
+        }
+
+        fn field_triangles(&self) -> Range<usize> {
+            0..0
+        }
+
+        fn admit_field_temperature(&self, _: usize, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn same_memory(&self, _: &Self) -> bool {
+            true
         }
 
         fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError> {
@@ -355,6 +411,180 @@ mod owner {
             self.field().time_s()
         }
     }
+
+    /// The play-memory owner: its field heats each eddy cell and, by pinning
+    /// and viscous switching, every magnetic triangle, conducting or not.
+    #[cfg(feature = "magnetic-hysteresis")]
+    impl<'m> Sealed<'m> for HystereticWindingCircuit<'m> {
+        type FieldControls = HystereticEddyControls;
+        type FieldStep = HystereticEddyStep;
+        const LANE_WORDS: &'static [u64] = &[u64::from_le_bytes(*b"vecplay1")];
+
+        fn step(
+            &self,
+            target_s: f64,
+            core: Vec<EddyConductor>,
+            windings: Vec<WindingConductor>,
+            inputs: &[f64],
+            controls: NonlinearWindingControls<HystereticEddyControls>,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<(Self, NonlinearWindingStep<HystereticEddyStep>), NonlinearWindingError>
+        {
+            Ok(self
+                .step_to_candidate(target_s, core, windings, inputs, controls, cancelled)?
+                .into_parts())
+        }
+
+        fn rebind_graph_resistors(
+            &self,
+            sources: Vec<GraphResistorMaterial>,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<Self, NonlinearWindingError> {
+            self.with_graph_resistors(sources, cancelled)
+        }
+
+        /// Eddy cells, then each magnetic cell's pinning plus viscous heat
+        /// (`irreversible_heat_j`), as the thermal module deposits them.
+        fn field_heat(step: &HystereticEddyStep) -> Vec<(usize, f64)> {
+            step.cells
+                .iter()
+                .map(|cell| (cell.source.triangle, cell.heat_j))
+                .chain(
+                    step.magnetic
+                        .cells
+                        .iter()
+                        .map(|cell| (cell.triangle, cell.irreversible_heat_j)),
+                )
+                .collect()
+        }
+
+        fn field_triangles(&self) -> Range<usize> {
+            0..self.field().problem().mesh().faces().len()
+        }
+
+        /// The fit's coefficients are constant, so they must hold over the
+        /// whole interval between the temperature the fit was resolved at
+        /// and `kelvin`. At the fit's own temperature they are the fit's.
+        fn admit_field_temperature(&self, triangle: usize, kelvin: f64) -> Result<(), String> {
+            let law = self
+                .field()
+                .problem()
+                .materials()
+                .get(triangle)
+                .ok_or_else(|| "the field has no magnetic fit in this triangle".to_owned())?;
+            let (axis, fitted) = fitted_temperature(law.material()).ok_or_else(|| {
+                "the magnetic fit was resolved at no single absolute temperature".to_owned()
+            })?;
+            if kelvin.to_bits() == fitted.to_bits() {
+                return Ok(());
+            }
+            law.admit_temperature_interval(axis, [kelvin.min(fitted), kelvin.max(fitted)])
+                .map_err(|error| error.to_string())
+        }
+
+        /// Every cell's field, flux density, branch polarizations and
+        /// stored energy density, the curl of the accepted field and its
+        /// stored energy, bit for bit.
+        fn same_memory(&self, other: &Self) -> bool {
+            let (a, b) = (
+                self.field().magnetic_state(),
+                other.field().magnetic_state(),
+            );
+            a.stored_energy_j().to_bits() == b.stored_energy_j().to_bits()
+                && same_vectors(a.magnetic_flux_density_t(), b.magnetic_flux_density_t())
+                && a.cell_states().len() == b.cell_states().len()
+                && a.cell_states().iter().zip(b.cell_states()).all(|(x, y)| {
+                    x.stored_energy_j_m3().to_bits() == y.stored_energy_j_m3().to_bits()
+                        && same_vectors(
+                            &[x.field_a_m(), x.flux_density_t()],
+                            &[y.field_a_m(), y.flux_density_t()],
+                        )
+                        && same_vectors(x.polarizations_t(), y.polarizations_t())
+                })
+        }
+
+        fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError> {
+            let end = self
+                .end_inductance()
+                .stored_energy_j(self.currents_a())
+                .map_err(NonlinearWindingError::from)?;
+            Ok(self.dae().system.hamiltonian(self.state()) + self.field().energy_j() + end)
+        }
+
+        fn graph(&self) -> &CircuitGraph {
+            Self::graph(self)
+        }
+
+        fn time_s(&self) -> f64 {
+            Self::time_s(self)
+        }
+
+        fn state(&self) -> &[f64] {
+            Self::state(self)
+        }
+
+        fn currents_a(&self) -> &[f64] {
+            Self::currents_a(self)
+        }
+
+        fn flux_linkages_wb(&self) -> &[f64] {
+            Self::flux_linkages_wb(self)
+        }
+
+        fn resistance_ohm(&self) -> &[f64] {
+            Self::resistance_ohm(self)
+        }
+
+        fn conductors(&self) -> &[WindingConductor] {
+            Self::conductors(self)
+        }
+
+        fn core_conductors(&self) -> &[EddyConductor] {
+            self.field().conductors()
+        }
+
+        fn problem(&self) -> *const () {
+            core::ptr::from_ref(self.field().problem()).cast()
+        }
+
+        fn potential_wb_m(&self) -> &[f64] {
+            self.field().potential_wb_m()
+        }
+
+        fn field_energy_j(&self) -> f64 {
+            self.field().energy_j()
+        }
+
+        fn field_time_s(&self) -> f64 {
+            self.field().time_s()
+        }
+    }
+
+    /// The fit's one query coordinate that is a static absolute temperature:
+    /// typed so, or the untyped `T` (as fs-em's silica optics reads it).
+    #[cfg(feature = "magnetic-hysteresis")]
+    fn fitted_temperature(material: &ResolvedMaterialStatePoint) -> Option<(&str, f64)> {
+        let mut found = None;
+        for (axis, value) in material.query_point() {
+            let quantity = material.axis_quantities().get(axis).copied();
+            let absolute = quantity
+                .and_then(QuantitySpec::semantic_type)
+                .is_some_and(|ty| {
+                    ty.kind() == QuantityKind::AbsoluteTemperature && ty.form() == ValueForm::Static
+                })
+                || axis == "T"
+                    && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS));
+            if absolute && found.replace((axis.as_str(), *value)).is_some() {
+                return None;
+            }
+        }
+        found
+    }
+
+    #[cfg(feature = "magnetic-hysteresis")]
+    fn same_vectors<const N: usize>(a: &[[f64; N]], b: &[[f64; N]]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| super::same_bits(x, y))
+    }
 }
 
 /// The accepted state: the owner's circuit, which carries the field history.
@@ -388,8 +618,9 @@ fn same_bits(a: &[f64], b: &[f64]) -> bool {
 /// Equal states share the owner's problem (the same allocation) and graph,
 /// and hold the same bits in every accepted coordinate: clock, circuit
 /// state, currents, linkages, resistances, conductors and field potential,
-/// energy and clock. The graph is compared by value: a step with resistor
-/// laws builds a new one.
+/// energy and clock, and the owner's field memory (for the play-memory
+/// owner, every cell's vector history). The graph is compared by value: a
+/// step with resistor laws builds a new one.
 impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
@@ -405,6 +636,7 @@ impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
             && same_bits(a.potential_wb_m(), b.potential_wb_m())
             && a.field_energy_j().to_bits() == b.field_energy_j().to_bits()
             && a.field_time_s().to_bits() == b.field_time_s().to_bits()
+            && a.same_memory(b)
     }
 }
 
@@ -454,6 +686,8 @@ pub struct PlanarWinding<'m, C = NonlinearWindingCircuit<'m>, F = NonlinearEddyC
     receivers: Vec<HeatReceiver>,
     triangle_port: BTreeMap<usize, usize>,
     resistor_port: BTreeMap<usize, usize>,
+    /// The owner's field triangles that may dissipate beyond the conductors.
+    field: Range<usize>,
     controls: NonlinearWindingControls<F>,
     energy_tolerance_j: f64,
     ports: Vec<PortSpec>,
@@ -493,8 +727,9 @@ where
     /// # Errors
     /// The energy tolerance is not positive and finite; an external port
     /// drives no source or two; a receiver is empty; a stranded or core
-    /// triangle or a graph resistor is mapped to no receiver or to two; a
-    /// receiver names an element that does not dissipate.
+    /// triangle, a triangle of a field that heats beyond its conductors, or a
+    /// graph resistor is mapped to no receiver or to two; a receiver names an
+    /// element that does not dissipate.
     pub fn new(
         circuit: &C,
         core_conductors: Vec<EddyConductor>,
@@ -507,6 +742,7 @@ where
             .iter()
             .map(|c| c.triangle)
             .chain(winding_conductors.iter().map(|c| c.triangle))
+            .chain(circuit.field_triangles())
             .collect();
         let supply = Supply::Fixed {
             core: core_conductors,
@@ -551,7 +787,11 @@ where
             .map(|c| (c.triangle, Some(c.region)))
             .chain(circuit.conductors().iter().map(|c| (c.triangle, None)))
             .collect();
-        let triangles: Vec<usize> = cells.keys().copied().collect();
+        let triangles: Vec<usize> = cells
+            .keys()
+            .copied()
+            .chain(circuit.field_triangles())
+            .collect();
         let supply = Supply::Laws {
             cells,
             conductors: conductor_laws,
@@ -669,6 +909,7 @@ where
             receivers,
             triangle_port,
             resistor_port,
+            field: circuit.field_triangles(),
             controls,
             energy_tolerance_j,
             ports,
@@ -703,7 +944,7 @@ where
             }
             Supply::Fixed { .. } | Supply::Laws { .. } => old.0.graph() == &self.graph,
         };
-        if !same {
+        if !same || old.0.field_triangles() != self.field {
             return Err(invalid(
                 "the state's circuit is not this Component's topology",
             ));
@@ -889,8 +1130,10 @@ where
     /// The graph; the fixed conductors' triangles, regions, resistivity bits
     /// and card identities, or the laws' cells and words; the receiver map;
     /// the controls by their `Debug` text (which prints each `f64` so that it
-    /// parses back to the same bits) and the energy tolerance. Each list is
-    /// preceded by its length.
+    /// parses back to the same bits); the energy tolerance; then the
+    /// owner's lane words (none for the saturating owner, `b"vecplay1"` read
+    /// little-endian for the play-memory owner). Each list is preceded by its
+    /// length.
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.extend([
             self.graph.node_count as u64,
@@ -958,6 +1201,7 @@ where
             words.push(u64::from_le_bytes(bytes));
         }
         words.push(self.energy_tolerance_j.to_bits());
+        words.extend_from_slice(C::LANE_WORDS);
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -993,6 +1237,19 @@ where
         cx.checkpoint().map_err(|_| PlanarWindingError::Cancelled)?;
         let target_s = self.admit(old, dt_s, inputs, outputs.len())?;
         let (sources, heats) = (self.sources, self.receivers.len());
+        for triangle in self.field.clone() {
+            cx.checkpoint().map_err(|_| PlanarWindingError::Cancelled)?;
+            let receiver = self.triangle_port[&triangle];
+            let kelvin = inputs[sources + receiver];
+            old.0
+                .admit_field_temperature(triangle, kelvin)
+                .map_err(|message| PlanarWindingError::Law {
+                    receiver,
+                    element: LawElement::Field(triangle),
+                    kelvin,
+                    message,
+                })?;
+        }
         let (driven, core, windings) =
             self.supply_at(&old.0, &inputs[sources..], &mut || cx.checkpoint().is_err())?;
         let (circuit, step) = driven.as_ref().unwrap_or(&old.0).step(
