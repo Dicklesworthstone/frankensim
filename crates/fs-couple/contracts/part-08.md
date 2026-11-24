@@ -2561,7 +2561,12 @@ Held over four steps of 0.02 s, in this order:
   own conductors at each of its end temperatures, bit for bit: within
   2.171e-10 K, the others as against `reference()` to rounding.
 The bounds sit about fifty times above. The cell ends above 340 K, and the
-retained polarization ends reversed.
+retained polarization ends reversed. `reference()`'s own first interval is
+resolved, as the module test asserts: the core, copper and pinning heats
+and the numerical dissipation each above 0.01 J, the cell warming by more
+than 1 K, and the current at the start temperature above the coupled one
+by more than 1e-3 A. These failed with the interval at the second drive,
+0 V, planted in its place.
 
 Eight planted defects in the graph's law, drive, receiver and cell and in
 the shared kernel's heat route each failed this test before its module

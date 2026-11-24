@@ -219,25 +219,25 @@ pub(super) fn laws(
 pub(super) fn mu(t: f64, slope: f64) -> f64 {
     1.0 + slope * (t - 300.0)
 }
-fn field_u(t: f64, b: f64, slope: f64) -> f64 {
+pub(super) fn field_u(t: f64, b: f64, slope: f64) -> f64 {
     VOLUME * b * b / (2.0 * mu(t, slope)) * (1.0 + t * slope / mu(t, slope))
 }
 fn resistance(t: f64) -> f64 {
     72.0 * DEPTH / 18.0 * (1.0 + RHO_SLOPE * (t - 300.0)) + SERIES_OHM
 }
 
-struct Reference {
-    temperature: f64,
-    current: f64,
-    b: f64,
-    stored: f64,
-    heat: f64,
-    numerical: f64,
+pub(super) struct Reference {
+    pub(super) temperature: f64,
+    pub(super) current: f64,
+    pub(super) b: f64,
+    pub(super) stored: f64,
+    pub(super) heat: f64,
+    pub(super) numerical: f64,
     parameter: f64,
     reversible: f64,
 }
 
-fn reference(i0: f64, t0: f64, slope: f64) -> Reference {
+pub(super) fn reference(i0: f64, t0: f64, slope: f64) -> Reference {
     let b0 = mu(t0, slope) * i0;
     let current = |t| {
         (2.0 * DEPTH * b0 + END_H * i0 + DT * VOLTAGE)

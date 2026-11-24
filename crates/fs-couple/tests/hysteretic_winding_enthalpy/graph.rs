@@ -32,6 +32,14 @@ use super::*;
 
 const STEPS: usize = 4;
 const DRIVES: [f64; STEPS] = [20.0, 0.0, -30.0, 0.0];
+/// The cell at 300 K with no current, field or retained polarization.
+const START: History = History {
+    t: 300.0,
+    i: 0.0,
+    h: 0.0,
+    z: 0.0,
+    b: 0.0,
+};
 const TOLERANCE_J: f64 = 1e-9;
 
 type PlayState = PlanarWindingState<'static, HystereticWindingCircuit<'static>>;
@@ -260,6 +268,20 @@ const MODULE: [f64; 6] = [1.1e-8, 7e-10, 2.5e-11, 2.5e-10, 5e-11, 4e-10];
 /// one cell holds every triangle and the graph resistor; the drive reverses.
 #[test]
 fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
+    // `reference()`'s own first interval is resolved, as the module's test
+    // asserts: every heat and the numerical dissipation above 0.01 J, the
+    // cell warming by more than 1 K, and the current at the start
+    // temperature above the coupled one.
+    {
+        let (old, drive) = (START, DRIVES[0]);
+        let expected = reference(old, drive);
+        let e = expected.state;
+        assert!(expected.core > 0.01 && expected.copper > 0.01 && expected.pinning > 0.01);
+        assert!(expected.numerical > 0.01);
+        assert!(e.t > old.t + 1.0);
+        assert!(electrical(old, old.t, drive).i > e.i + 1e-3);
+    }
+
     let card: &'static Arc<MaterialCard> = Box::leak(Box::new(card(Some(500.0))));
     let curve: &'static ResolvedHeatCapacityCurve = Box::leak(Box::new(caloric(card)));
     let owner: &'static PlanarHystereticMagnetostatics =
@@ -296,13 +318,7 @@ fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
 
     // Each interval against `reference()` from the kernel's own start of
     // interval.
-    let mut from = History {
-        t: 300.0,
-        i: 0.0,
-        h: 0.0,
-        z: 0.0,
-        b: 0.0,
-    };
+    let mut from = START;
     let expected: Vec<Row> = kernel
         .iter()
         .zip(DRIVES)

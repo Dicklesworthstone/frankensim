@@ -25,8 +25,9 @@ use fs_em::winding::component::{
 use fs_em::winding::nonlinear::NonlinearWindingCircuit;
 
 use super::graph::{Row, STEPS, TOLERANCE_J, graph_run, hold, largest, module_row};
+use super::graph_solid::flux_density;
 use super::kernel::{CellConductors, conduction, graph, ledger_closes, timeline};
-use super::magnetic_thermal::{self as trial, END_H, HEAT_CAPACITY, VOLTAGE, linear, mu};
+use super::magnetic_thermal::{self as trial, END_H, HEAT_CAPACITY, VOLTAGE, field_u, linear, mu};
 use super::*;
 
 /// The trial's closed forms (`reference` in thermal.rs) over an interval
@@ -56,11 +57,77 @@ const CONTROL: [f64; 3] = [5e-10, 7.5e-9, 1.6e-8];
 /// and permeability.
 const FEEDBACK: [f64; 5] = [5e-2, 1e-3, 2.5e-4, 7.5e-9, 0.025];
 
+/// Bounds of [`at_slope_0`], in its order. On the export of 45a36e3bd3 the
+/// kernel agrees with `reference()` within 1.3e-10 K, 1.5e-11 A, 7.9e-11,
+/// 1.3e-10 and 1.4e-10 J, 1.4e-11 T and 5.6e-11 J; the bounds sit about
+/// fifty times above.
+const REFERENCE: [f64; 7] = [6.6e-9, 7.4e-10, 4e-9, 6.6e-9, 7.1e-9, 6.8e-10, 2.8e-9];
+
+/// At slope 0, each interval of `kernel` against thermal.rs's `reference()`
+/// from the kernel's own start of interval: temperature \[K\], current
+/// \[A\], and the stored change, Joule heat and numerical dissipation
+/// \[J\]; then the end `circuit`'s flux density in every triangle \[T\]
+/// and its field energy against the field's internal energy \[J\].
+fn at_slope_0(kernel: &[Row], circuit: &NonlinearWindingCircuit<'_>) {
+    let stored = |i: f64, t: f64| 0.5 * (VOLUME * mu(t, 0.0) + END_H) * i * i;
+    let (mut from, mut most, mut end) = ((0.0, 300.0), [0.0_f64; 7], [0.0; 2]);
+    for row in kernel {
+        let expected = trial::reference(from.0, from.1, 0.0);
+        let values = [
+            row.kelvin[0] - expected.temperature,
+            row.current_a - expected.current,
+            row.stored_j - (expected.stored - stored(from.0, from.1)),
+            row.joule_j - expected.heat,
+            row.numerical_j - expected.numerical,
+        ];
+        for (most, value) in most.iter_mut().zip(values) {
+            *most = most.max(value.abs());
+        }
+        end = [expected.b, field_u(expected.temperature, expected.b, 0.0)];
+        from = (row.current_a, row.kelvin[0]);
+    }
+    let field = circuit.field();
+    let mesh = field.problem().mesh();
+    for triangle in 0..mesh.faces().len() {
+        let [x, y] = flux_density(mesh, field.potential_wb_m(), triangle);
+        most[5] = most[5].max((x.hypot(y) - end[0]).abs());
+    }
+    most[6] = (field.energy_j() - end[1]).abs();
+    println!(
+        "graph_caloric (slope 0): kernel against the trial's reference: {:.3e} K, {:.3e} A, \
+         {:.3e} J stored, {:.3e} J heat, {:.3e} J numerical; at the end {:.3e} T, {:.3e} J",
+        most[0], most[1], most[2], most[3], most[4], most[5], most[6]
+    );
+    for (i, (value, bound)) in most.into_iter().zip(REFERENCE).enumerate() {
+        assert!(value <= bound, "slope 0, quantity {i}: {most:?}");
+    }
+}
+
 /// The largest difference of two field potentials \[Wb/m\].
 fn farthest(ours: &[f64], theirs: &[f64]) -> f64 {
     ours.iter()
         .zip(theirs)
         .fold(0.0, |most, (x, y)| most.max((x - y).abs()))
+}
+
+/// Each interval of `kernel` from its own start, at `slope`: the largest
+/// departures of its numerical loss, less the owner's dissipation, from the
+/// term, and of `module`'s cell energy, less the kernel's, from the terms
+/// summed \[J\]; also the terms summed and each term \[J\].
+fn booked(kernel: &[Row], module: &[Row], slope: f64) -> ([f64; 2], f64, Vec<f64>) {
+    let (mut from, mut summed, mut terms) = ((0.0, 300.0), 0.0, Vec::new());
+    let mut most = [0.0_f64; 2];
+    for (ours, theirs) in kernel.iter().zip(module) {
+        let to = (ours.current_a, ours.kelvin[0]);
+        let [numerical, term] = closed(from, to, slope);
+        most[0] = most[0].max((ours.numerical_j - numerical - term).abs());
+        summed += term;
+        let gap = HEAT_CAPACITY * (theirs.kelvin[0] - ours.kelvin[0]);
+        most[1] = most[1].max((gap - summed).abs());
+        terms.push(term);
+        from = to;
+    }
+    (most, summed, terms)
 }
 
 /// The module's run of the trial: `step_nonlinear_thermal_candidate` from
@@ -120,6 +187,7 @@ fn caloric_module(
 
 #[test]
 fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
+    let mut ends = Vec::new();
     for slope in [0.0, 0.004] {
         let card: &'static MaterialCard = Box::leak(Box::new(trial::card(slope)));
         let curve: &'static ResolvedHeatCapacityCurve = Box::leak(Box::new(trial::caloric(card)));
@@ -173,18 +241,7 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
         // Each interval from the kernel's own start: its numerical loss less
         // the owner's dissipation against the term, and the module's cell
         // energy less the kernel's against the terms summed.
-        let (mut from, mut summed, mut terms) = ((0.0, 300.0), 0.0, Vec::new());
-        let mut most = [0.0_f64; 2];
-        for (ours, theirs) in kernel.iter().zip(&module) {
-            let to = (ours.current_a, ours.kelvin[0]);
-            let [numerical, term] = closed(from, to, slope);
-            most[0] = most[0].max((ours.numerical_j - numerical - term).abs());
-            summed += term;
-            let gap = HEAT_CAPACITY * (theirs.kelvin[0] - ours.kelvin[0]);
-            most[1] = most[1].max((gap - summed).abs());
-            terms.push(term);
-            from = to;
-        }
+        let (most, summed, terms) = booked(&kernel, &module, slope);
         let differences = largest(&kernel, &module);
         let state = system
             .state::<PlanarWindingState<'static>>(electrical)
@@ -202,7 +259,10 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
             kernel[STEPS - 1].kelvin[0],
             module[STEPS - 1].kelvin[0]
         );
+        ends.push((kernel[STEPS - 1].current_a, kernel[STEPS - 1].kelvin[0]));
         if slope == 0.0 {
+            assert_eq!(summed.to_bits(), 0.0_f64.to_bits(), "{terms:?}");
+            at_slope_0(&kernel, state.circuit());
             hold(differences, "slope 0");
             for (value, bound) in [field, most[0], most[1]].into_iter().zip(CONTROL) {
                 assert!(value <= bound, "slope 0: {value:e} above {bound:e}");
@@ -224,4 +284,8 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
             assert!(module[STEPS - 1].kelvin[0] < kernel[STEPS - 1].kelvin[0]);
         }
     }
+    // The slope moves the current and the cell, as the trial's test asserts
+    // of the module.
+    assert!((ends[0].0 - ends[1].0).abs() > 1e-3, "current: {ends:?}");
+    assert!((ends[0].1 - ends[1].1).abs() > 0.1, "temperature: {ends:?}");
 }

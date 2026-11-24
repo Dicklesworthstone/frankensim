@@ -139,7 +139,7 @@ fn module_run(parts: &Parts, law: &CellConductors) -> Vec<State> {
 
 /// A triangle's flux density \[T\] from a P1 potential \[Wb/m\]: the
 /// potential's gradient turned a quarter.
-fn flux_density(mesh: &TriComplex2, potential: &[f64], triangle: usize) -> [f64; 2] {
+pub(super) fn flux_density(mesh: &TriComplex2, potential: &[f64], triangle: usize) -> [f64; 2] {
     let face = mesh.faces()[triangle].map(|v| v as usize);
     let [p, q, r] = face.map(|v| mesh.vertices()[v]);
     let [a, b, c] = face.map(|v| potential[v]);
@@ -353,6 +353,7 @@ const FEEDBACK: [f64; 5] = [1.6e-8, 7e-12, 1.3e-12, 2.1e-10, 1.5e-3];
 /// 17 at slope 0.004 per kelvin.
 #[test]
 fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
+    let mut ends = Vec::new();
     for (linked, slope) in [(false, 0.0), (true, 0.0), (true, 0.004)] {
         let parts = parts(slope, linked);
         let start = circuit(parts.problem);
@@ -420,6 +421,7 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
             assert!(value <= bound, "{value:e} above {bound:e}");
         }
 
+        ends.push(kernel[STEPS].0.currents_a()[0]);
         let module = heat_module_run(&parts, &law, &laws);
         let most = largest(&kernel, &module);
         let gap: f64 = (0..CELL_IDS.len())
@@ -454,4 +456,8 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
             }
         }
     }
+    // Link 17 and the slope each move the current, below `largest`'s
+    // bounds, as S2 asserts of the module.
+    assert!((ends[1] - ends[0]).abs() > 1e-9, "link: {ends:?}");
+    assert!((ends[2] - ends[1]).abs() > 1e-7, "slope: {ends:?}");
 }

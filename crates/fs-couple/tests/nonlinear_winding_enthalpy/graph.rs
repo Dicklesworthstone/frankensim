@@ -43,8 +43,8 @@ use fs_thermal::component::TimelineState;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 
 use super::graph_material::{
-    DESTINATIONS, LINKS, RESISTOR_CELL, RESISTOR_MATERIAL, bindings, graph_card, native, resistors,
-    solve_controls, two_bodies,
+    CHARGE, DESTINATIONS, LINKS, RESISTOR_CELL, RESISTOR_MATERIAL, bindings, graph_card, native,
+    oracle, resistors, solve_controls, two_bodies,
 };
 use super::kernel::{
     CellConductors, card_words, conduction, graph, ledger_closes, timeline, with_cx,
@@ -141,8 +141,8 @@ pub(super) struct Row {
     pub(super) kelvin: Vec<f64>,
     pub(super) current_a: f64,
     pub(super) state: Vec<f64>,
-    stored_j: f64,
-    joule_j: f64,
+    pub(super) stored_j: f64,
+    pub(super) joule_j: f64,
     pub(super) numerical_j: f64,
     supplied_j: f64,
     entropy_j_k: [f64; 2],
@@ -403,12 +403,105 @@ fn material_module(
     module
 }
 
+/// Graph 1's bounds of [`bisection`], in its order. On the export of
+/// 45a36e3bd3 the kernel agrees with the bisection within 3.1e-11 K,
+/// 1.6e-11 A, and 6.0e-11, 2.7e-11, 5.4e-11 and 3.2e-11 J; the bisection
+/// itself closes to rounding. The bounds sit about fifty times above.
+const BISECTION: [f64; 6] = [2e-9, 1e-9, 3e-9, 1.4e-9, 2.7e-9, 1.6e-9];
+
+/// Each interval of graphs 1 and 2's `kernel` against the bisection fixed
+/// point (the root's `reference()`) from the kernel's own start of
+/// interval: temperature \[K\], current \[A\], and the Joule heat, the
+/// stored change, the numerical dissipation and the supplied work `DT V I`
+/// \[J\].
+fn bisection(kernel: &[Row], saturating: bool) -> [f64; 6] {
+    let (mut from, mut most) = ((0.0, 300.0), [0.0_f64; 6]);
+    for row in kernel {
+        let expected = reference(from.0, from.1, saturating);
+        let before = VOLUME * density_energy(flux_density(from.0, saturating), saturating);
+        let values = [
+            row.kelvin[0] - expected.temperature,
+            row.current_a - expected.current,
+            row.joule_j - expected.heat,
+            row.stored_j - (expected.stored - before),
+            row.numerical_j - expected.numerical,
+            row.supplied_j - DT * DRIVE * expected.current,
+        ];
+        for (most, value) in most.iter_mut().zip(values) {
+            *most = most.max(value.abs());
+        }
+        from = (row.current_a, row.kelvin[0]);
+    }
+    most
+}
+
+/// Graph 3's bounds of [`capacitor`], in its order. On the export of
+/// 45a36e3bd3 the kernel agrees with the oracle within 2.8e-11 A,
+/// 7.1e-12 C, 4.0e-11 K, 9.4e-11 J and 7.3e-11 J; the bounds sit about
+/// fifty times above.
+const CAPACITOR: [f64; 5] = [1.4e-9, 3.6e-10, 2e-9, 4.7e-9, 3.7e-9];
+
+/// Each interval of graph 3's `kernel` against graph_material.rs's `oracle`
+/// from the kernel's own start of interval, with `charge` the capacitor's
+/// coordinate in the circuit state: the current \[A\], the charge
+/// `q0 - DT I` \[C\], the two cells' temperatures \[K\], the Joule heat
+/// with the resistor at `1 + alpha (T1 - 300)` ohm, and the resistor cell's
+/// own balance over link 17's 1 W/K \[J\].
+fn capacitor(kernel: &[Row], charge: usize, alpha: f64) -> [f64; 5] {
+    let (mut from, mut most) = ((CHARGE, 0.0, [300.0; 2]), [0.0_f64; 5]);
+    for row in kernel {
+        let (q0, i0, t0) = from;
+        let (current, t) = oracle(q0, i0, t0, alpha);
+        let ohms = |t1: f64| 1.0 + alpha * (t1 - 300.0);
+        let values = [
+            row.current_a - current,
+            row.state[charge] - (q0 - DT * current),
+            (row.kelvin[0] - t[0])
+                .abs()
+                .max((row.kelvin[1] - t[1]).abs()),
+            row.joule_j - DT * current * current * (winding_resistance(t[0]) + ohms(t[1])),
+            CAPACITY * (row.kelvin[1] - t0[1])
+                - DT * row.current_a * row.current_a * ohms(row.kelvin[1])
+                - DT * (row.kelvin[0] - row.kelvin[1]),
+        ];
+        for (most, value) in most.iter_mut().zip(values) {
+            *most = most.max(value.abs());
+        }
+        from = (
+            row.state[charge],
+            row.current_a,
+            [row.kelvin[0], row.kelvin[1]],
+        );
+    }
+    most
+}
+
+/// The resistor graph 3's accepted circuit carries at the end: `card`'s,
+/// on branch 2, at `1 + alpha (t1 - 300)` ohm for the resistor cell's end
+/// temperature `t1` \[K\].
+fn accepted_resistor(system: &System, winding: NodeId, card: &MaterialCard, alpha: f64, t1: f64) {
+    let state = system
+        .state::<PlanarWindingState<'static>>(winding)
+        .unwrap();
+    let source = &state.circuit().graph_resistor_materials()[0];
+    assert_eq!(source.branch, 2);
+    assert_eq!(
+        source.conductor.material().card_identity(),
+        card.content_hash()
+    );
+    near(
+        source.conductor.resistance_ohm(),
+        1.0 + alpha * (t1 - 300.0),
+    );
+}
+
 /// Graphs 1 and 2: the fixture of
 /// `data_only_saturation_changes_actual_voltage_current_and_finite_thermal_feedback`.
 /// One cell holds every triangle and the authored 1-ohm graph resistor; no
 /// links, no sources.
 #[test]
 fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fixed_point() {
+    let mut ends = Vec::new();
     for saturating in [false, true] {
         let card: &'static MaterialCard = Box::leak(Box::new(field::source(saturating, 18.0)));
         let curve: &'static ResolvedHeatCapacityCurve = Box::leak(Box::new(caloric(card)));
@@ -451,22 +544,14 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
 
         // Graph 1: each interval of the kernel against the bisection fixed
         // point from the kernel's own start of interval.
-        let (mut from, mut oracle) = ((0.0, 300.0), [0.0_f64; 3]);
-        for row in &kernel {
-            let expected = reference(from.0, from.1, saturating);
-            oracle[0] = oracle[0].max((row.kelvin[0] - expected.temperature).abs());
-            oracle[1] = oracle[1].max((row.current_a - expected.current).abs());
-            oracle[2] = oracle[2].max((row.joule_j - expected.heat).abs());
-            from = (row.current_a, row.kelvin[0]);
-        }
+        let oracle = bisection(&kernel, saturating);
         println!(
-            "graph 1 (saturating {saturating}): kernel against bisection: {:.1e} K, {:.1e} A, {:.1e} J",
-            oracle[0], oracle[1], oracle[2]
+            "graph 1 (saturating {saturating}): kernel against bisection: {:.1e} K, {:.1e} A, \
+             {:.1e} J heat, {:.1e} J stored, {:.1e} J numerical, {:.1e} J supplied",
+            oracle[0], oracle[1], oracle[2], oracle[3], oracle[4], oracle[5]
         );
-        // Within 3.1e-11 K, 1.6e-11 A and 6.0e-11 J on the export of
-        // d4e7a28481; the bisection itself closes to rounding.
-        for (value, bound) in oracle.iter().zip([2e-9, 1e-9, 3e-9]) {
-            assert!(*value <= bound, "graph 1: {oracle:?}");
+        for (i, (value, bound)) in oracle.iter().zip(BISECTION).enumerate() {
+            assert!(*value <= bound, "graph 1, quantity {i}: {oracle:?}");
         }
         let most = largest(&kernel, &module);
         println!(
@@ -481,7 +566,28 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
         // The feedback is real: the cell warms by more than 6 K, so the
         // winding's resistivity rises by more than 3 % of itself.
         assert!(kernel[STEPS - 1].kelvin[0] > 306.0, "{kernel:?}");
+        let state = system
+            .state::<PlanarWindingState<'static>>(electrical)
+            .unwrap();
+        let end = &kernel[STEPS - 1];
+        ends.push((
+            end.current_a,
+            end.kelvin[0],
+            state.circuit().field().energy_j(),
+        ));
     }
+    // Saturation is real: the linear and the saturating graph end apart in
+    // current, temperature and field energy.
+    let [linear, saturated] = [ends[0], ends[1]];
+    assert!((linear.0 - saturated.0).abs() > 0.2, "current: {ends:?}");
+    assert!(
+        (linear.1 - saturated.1).abs() > 0.1,
+        "temperature: {ends:?}"
+    );
+    assert!(
+        (linear.2 - saturated.2).abs() > 0.05,
+        "field energy: {ends:?}"
+    );
 }
 
 /// Graph 3: the fixture of
@@ -490,7 +596,7 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
 /// resistor; the two share link 17 of 1 W/K.
 #[test]
 fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell() {
-    let mut currents = Vec::new();
+    let mut ends = Vec::new();
     for alpha in [0.0, 0.08] {
         let cards: &'static [MaterialCard; 2] = Box::leak(Box::new([
             field::source(true, 18.0),
@@ -501,6 +607,7 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
         let problem: &'static PlanarNonlinearMagnetostatics =
             Box::leak(Box::new(field::problem(&cards[0], DEPTH)));
         let circuit = native(problem, &cards[0]);
+        let charge = circuit.dae().charge_index[0];
         let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
         let law = Arc::new(CellConductors::new(
             &cards[0],
@@ -556,6 +663,22 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL, RESISTOR_CELL]);
         ledger_closes(&system, electrical, cells, 0.0);
+
+        // Each interval against the oracle from the kernel's own start.
+        let against = capacitor(&kernel, charge, alpha);
+        println!(
+            "graph 3 (alpha {alpha}): kernel against the oracle: {:.1e} A, {:.1e} C, {:.1e} K, \
+             {:.1e} J heat, {:.1e} J resistor cell",
+            against[0], against[1], against[2], against[3], against[4]
+        );
+        for (i, (value, bound)) in against.iter().zip(CAPACITOR).enumerate() {
+            assert!(*value <= bound, "graph 3, quantity {i}: {against:?}");
+        }
+        let end = &kernel[STEPS - 1];
+        accepted_resistor(&system, electrical, &cards[1], alpha, end.kelvin[1]);
+
+        // The module, step for step, its conductors and graph resistor held
+        // to the laws first.
         let most = largest(&kernel, &module);
         println!(
             "graph 3 (alpha {alpha}): kernel against module: {:.1e} K, {:.1e} A, state {:.1e}, {:.1e} J, {:.1e} J/K; end {:.6} K, {:.6} K",
@@ -568,8 +691,13 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
             kernel[STEPS - 1].kelvin[1]
         );
         hold(most, "graph 3");
-        currents.push(kernel[STEPS - 1].current_a);
+        ends.push((end.current_a, end.kelvin[1]));
     }
-    // The resistor's R(T) reacts back on the circuit, as in the module's test.
-    assert!(currents[1] < currents[0] - 1e-3, "{currents:?}");
+    // Alpha moves the resistor cell, and the resistor's R(T) reacts back on
+    // the circuit, as in the module's test.
+    assert!(
+        (ends[1].1 - ends[0].1).abs() > 1e-3,
+        "resistor cell: {ends:?}"
+    );
+    assert!(ends[1].0 < ends[0].0 - 1e-3, "current: {ends:?}");
 }

@@ -5584,12 +5584,34 @@ resistor's R(T) off and at 8 % per kelvin:
   above;
 - each interval of the one-cell fixture against `reference()`, the
   independent bisection fixed point, from the kernel's own start of
-  interval: within 3.1e-11 K, 1.6e-11 A and 6.0e-11 J;
+  interval: within 3.1e-11 K, 1.6e-11 A and 6.0e-11 J of Joule heat, and
+  the stored change, numerical loss and supplied work `DT V I` within
+  2.7e-11, 5.4e-11 and 3.2e-11 J. The linear and saturating graphs end
+  more than 0.2 A, 0.1 K and 0.05 J of field energy apart;
+- each interval of the two-cell fixture against graph_material.rs's
+  `oracle` (a scalar current bisection with the two cells' exact linear
+  heat equations), from the kernel's own start of interval: within
+  2.8e-11 A, 7.1e-12 C of capacitor charge, 4.0e-11 K, 9.4e-11 J of Joule
+  heat with the resistor at `1 + alpha (T1 - 300)` ohm, and 7.3e-11 J in
+  the resistor cell's own balance over link 17's 1 W/K. The accepted
+  circuit carries the resistor card's source on branch 2 at that
+  resistance for the resistor cell's end temperature, and alpha moves that
+  cell by more than 1e-3 K;
 - the ledger: residual within 1e-8 J; the supplied work, less the circuit's
   stored change and numerical loss, equals the cells' stored change within
   1e-8 J; the routes' entropy stays within the interface tolerance.
 
-Nine planted defects in the graph and its laws each failed a test.
+Nine planted defects in the graph and its laws each failed a test. Seven
+more each failed a new check: the stored change and the numerical loss
+misread from the ledger (summed over the run; the dissipated energy) and
+the supplied work's closed form at the start current, at graph 1's
+comparison with `reference()`; both cases linear, at their contrast;
+fs-em's Component evaluating every resistor law at 300 K, at graph 3's
+comparison with `oracle` (alpha 0.08); the accepted resistance expected at
+299 K; and alpha 0 in both runs, at the resistor cell's contrast. A defect
+in fs-em's field account that moves 1e-6 J from numerical loss to stored
+change, keeping the owner's balance, is refused by the kernel's
+`EndpointEnergy` contract at the first step of every graph.
 
 ### Ordinary resistor material feedback in nonlinear field circuits
 
@@ -5686,6 +5708,14 @@ Held over four steps of 1/4 s, which keep the cell within the laws' 290-360 K:
   warmer. That departure is the cooler cell's feedback: its resistivity and
   permeability move the module's current by 7.9e-4 A and its end field
   potential by 1.9e-4 Wb/m;
+- slope 0, against the trial's `reference()` (thermal.rs) from the kernel's
+  own start of interval: within 1.3e-10 K, 1.5e-11 A, and 7.9e-11, 1.3e-10
+  and 1.4e-10 J of stored change, Joule heat and numerical loss. At the end,
+  every triangle's flux density is the reference's within 1.4e-11 T, and
+  the field energy its internal energy within 5.6e-11 J. The summed term is
+  bit-for-bit 0;
+- the slope moves the end current by more than 1e-3 A and the cell by more
+  than 0.1 K;
 - every kernel step passes the System's audits, the winding's entropy audit on
   every step, and the ledger closes as in graph.rs.
 
@@ -5693,7 +5723,11 @@ Six planted defects in the Component's magnetic lane each failed this test.
 Five break the receipt's balance and are refused at Propose. The sixth
 deposits the term through the port as the module does, with the balance and
 the entropy kept consistent: every step passes the audits, and the booked
-loss fails its bound.
+loss fails its bound. Five more each failed a new check: the trial's
+`reference()` with its series resistance 0.1 % high, and the misread stored
+change and numerical loss, at the comparison with `reference()`; `closed`
+with the entropy's slope shifted by 1e-9, at the bit-for-bit zero; and
+slope 0 in both runs, at the slopes' contrast.
 
 ## Source gas fields and source walls in the native DG operator
 

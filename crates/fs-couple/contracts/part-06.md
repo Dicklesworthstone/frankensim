@@ -5900,6 +5900,10 @@ Held over the same two steps, in this order:
   9.837e-13 Wb/m and 1.644e-10 1/m², the cooler cells' feedback through
   their resistivity and permeability.
 
+Link 17 moves the end current by more than 1e-9 A, and the slope by more
+than 1e-7 A; each contrast failed with its variant planted equal to its
+neighbour.
+
 Eight planted defects in the graph, its closed form, the shared magnetic
 laws and fs-em's magnetic lane each failed this test. Five failed at the
 closed form or the booked loss. The kernel refused two: the magnetic laws
@@ -5935,7 +5939,10 @@ Held over four steps of 0.25 s, in this order:
   module's cells end with that much less energy, within 1.26 % of it. The
   module departs by up to 1.04e-2 K, 2.3e-4 A and 5.3e-5 Wb/m, which is
   the cells' feedback through their resistivities, contact, radiation and
-  permeability.
+  permeability;
+- at both slopes, emissivity and contact each move both cells' end
+  temperatures and the end current by more than 1e-5; this failed with the
+  second variant planted equal to the first.
 
 Ten planted defects each failed this test before its module comparison:
 - link 17's contact, the radiation or the magnetic laws left off the graph;
@@ -5949,6 +5956,21 @@ The defects in shared pieces also failed the other tests that use them:
 graph 3 for `BodyResistor`, H1 for `balances` and `current`, the other two
 linked graphs for `conduction`, and graph_caloric.rs and graph_solid.rs for
 fs-em.
+
+A second test there declares H3's fixture
+(`missing_endpoint_emissivity_refuses_without_advancing_any_native_history`):
+H1's at 0.004 per kelvin, with the emissivity claim ending at 300.01 K,
+which the sink passes within one interval. The module refuses the
+interval. The kernel shortens it: the timeline's owner rejects an interval
+whose end leaves the claim, and fs-thermal's timeline answers with half the
+step (`Proposal::Shorten`). Of four requested intervals of 0.25 s it takes
+0.03125, 0.0039, 0.0020 and 0.00098 s, the sink ending at 300.0077,
+300.0089, 300.0095 and 300.0099 K. Each step ends with both cells inside
+the claim, and with the circuit, the field and the cells at the step's end
+time, bit for bit. Two planted defects failed it: the claim ending at 500 K
+(the step is taken whole, and the sink ends at 301.75 K), and fs-thermal's
+timeline answering a rejected interval with the same step rather than half
+(the kernel refuses the step as a contract violation of the cells).
 
 
 

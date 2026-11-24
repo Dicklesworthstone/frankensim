@@ -27,6 +27,7 @@ use fs_em::winding::component::{
     ResistorLaw,
 };
 use fs_system::{NodeId, System};
+use fs_thermal::component::TimelineState;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 use fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactLaw;
 
@@ -108,6 +109,27 @@ fn heat_module(
         }
     });
     (rows, circuit.field().potential_wb_m().to_vec())
+}
+
+/// The winding's conductors and its graph resistor for `parts`, from
+/// `start`'s conductors and the module's resistor.
+fn port_laws(
+    parts: &Parts,
+    start: &NonlinearWindingCircuit<'static>,
+) -> (Arc<CellConductors>, Arc<BodyResistor>) {
+    let law = CellConductors::new(
+        &parts.cards[0],
+        parts.context.clone(),
+        start.field().conductors(),
+        start.conductors(),
+    );
+    let resistor = BodyResistor::new(
+        &parts.cards[1],
+        parts.context.clone(),
+        parts.key,
+        &parts.assembly.electrical.bulk.resistors[0],
+    );
+    (Arc::new(law), Arc::new(resistor))
 }
 
 /// The graph of `parts` from `start`: the winding with `law` and
@@ -255,21 +277,11 @@ fn farthest(kernel: &[Row], module: &[Row], ours: &[f64], theirs: &[f64]) -> [f6
 #[test]
 fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
     for slope in [0.0, SLOPE] {
+        let mut ends = Vec::new();
         for (e, contact) in [(0.2, 0.2), (0.8, 0.2), (0.2, 2.0)] {
             let parts = parts(e, contact, 500.0, slope);
             let start = circuit(parts.field, 0.0);
-            let law = Arc::new(CellConductors::new(
-                &parts.cards[0],
-                parts.context.clone(),
-                start.field().conductors(),
-                start.conductors(),
-            ));
-            let resistor = Arc::new(BodyResistor::new(
-                &parts.cards[1],
-                parts.context.clone(),
-                parts.key,
-                &parts.assembly.electrical.bulk.resistors[0],
-            ));
+            let (law, resistor) = port_laws(&parts, &start);
             let (mut system, electrical, cells) = heat_graph(&parts, &start, &law, &resistor);
             let kernel = graph_run(&mut system, electrical, cells, &[CELL, SINK]);
             ledger_closes(&system, electrical, cells, 0.0);
@@ -279,6 +291,7 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
             let t0 = [CELL, SINK].map(|id| parts.thermal.temperature_k(id).unwrap());
             let (most, summed) = closed_forms(&kernel, t0, (e, contact, slope));
             let end = &kernel[STEPS - 1];
+            ends.push([end.kelvin[0], end.kelvin[1], end.current_a]);
             println!(
                 "graph H1 (slope {slope}, e {e}, contact {contact}): closed forms {:.3e} A, {:.3e} J, \
                  {:.3e} J, {:.3e} J; terms {summed:.4e} J; end {:.4} K, {:.4} K, {:.4} A",
@@ -331,5 +344,48 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
                 }
             }
         }
+        // Emissivity and contact each move both cells and the current, as
+        // H1 asserts of the module.
+        for changed in &ends[1..] {
+            for (x, y) in changed.iter().zip(&ends[0]) {
+                assert!((x - y).abs() > 1e-5, "slope {slope}: {ends:?}");
+            }
+        }
     }
+}
+
+/// H3's fixture (`missing_endpoint_emissivity_refuses_without_advancing_any_native_history`):
+/// H1's at 0.004 per kelvin, with the emissivity claim ending at 300.01 K,
+/// which the sink would pass within one interval. The module refuses the
+/// whole interval. The kernel shortens it instead: each step ends with both
+/// cells inside the claim, and the circuit, the field and the cells all at
+/// the step's end time.
+#[test]
+fn the_declared_graph_shortens_the_interval_at_the_end_of_the_emissivity_claim() {
+    let parts = parts(0.2, 0.2, 300.01, SLOPE);
+    let start = circuit(parts.field, 0.0);
+    let (law, resistor) = port_laws(&parts, &start);
+    let (mut system, electrical, cells) = heat_graph(&parts, &start, &law, &resistor);
+    with_cx(|cx| {
+        for _ in 0..4 {
+            let report = system.step(DT, cx).unwrap();
+            let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
+            let kelvin = [CELL, SINK].map(|id| timeline.simulation().temperature_k(id).unwrap());
+            println!("graph H3: {report:?}; cells {kelvin:?} K");
+            assert!(report.shortenings > 0 && report.dt_s < DT, "{report:?}");
+            assert!(kelvin.iter().all(|t| *t <= 300.01), "{kelvin:?}");
+            let circuit = system
+                .state::<PlanarWindingState<'static>>(electrical)
+                .unwrap()
+                .circuit();
+            let times = [
+                circuit.time_s(),
+                circuit.field().time_s(),
+                timeline.simulation().time_s(),
+            ];
+            for time in times {
+                assert_eq!(time.to_bits(), report.time_s.to_bits(), "{times:?}");
+            }
+        }
+    });
 }

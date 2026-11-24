@@ -20,7 +20,7 @@ use fs_qty::{QuantitySpec, Temperature};
 pub(super) const RESISTOR_CELL: CellId = CellId(8);
 pub(super) const RESISTOR_MATERIAL: MaterialId = MaterialId(10);
 const CAPACITANCE: f64 = 1.0;
-const CHARGE: f64 = 8.0;
+pub(super) const CHARGE: f64 = 8.0;
 pub(super) const LINKS: [ConductionLink; 1] = [ConductionLink {
     link: 17,
     distance_a_m: 0.5,
@@ -258,7 +258,7 @@ pub(super) fn solve_controls() -> CircuitEnthalpySolve {
 // piecewise H(B) inverse below. For a trial current the TWO material heat
 // equations are a linear 2x2 system, including the exact shared G=1 W/K.
 // Only a scalar bisection remains; no production constitutive/solver is called.
-fn oracle(q0: f64, i0: f64, t0: [f64; 2], alpha: f64) -> (f64, [f64; 2]) {
+pub(super) fn oracle(q0: f64, i0: f64, t0: [f64; 2], alpha: f64) -> (f64, [f64; 2]) {
     let temperature = |i: f64| {
         let heat = DT * i * i;
         let a = CAPACITY + DT - heat * 0.005;
