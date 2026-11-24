@@ -24,10 +24,12 @@ use crate::wiring::{
     RouteTemperature, blocks_in_dependency_order, tolerance_group,
 };
 
+mod events;
 mod line;
 mod scalar;
 mod snapshot;
 
+pub use events::{EventBracket, EventConfig, EventDirection, EventError, EventReport, EventStatus};
 pub use snapshot::SystemImage;
 
 use line::Line;

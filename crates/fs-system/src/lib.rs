@@ -21,6 +21,7 @@
 //! System::ledger                             window accounts
 //! System::checkpoint / restore               accepted-state rewind and replay
 //! System::step_adaptive                      state/account error-controlled steps
+//! System::step_to_event                      locate a state-triggered threshold
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
@@ -76,7 +77,8 @@ pub use adaptive::{AdaptiveConfig, AdaptiveError, AdaptiveReport, ErrorNorm, Err
 pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffered};
 pub use ledger::Ledger;
 pub use system::{
-    BoundaryFn, Checkpoint, CheckpointError, Phase, SolveConfig, StepReport, System, SystemBuilder,
-    SystemError, SystemImage, heat_sink,
+    BoundaryFn, Checkpoint, CheckpointError, EventBracket, EventConfig, EventDirection, EventError,
+    EventReport, EventStatus, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError,
+    SystemImage, heat_sink,
 };
 pub use wiring::{AdmissionError, HeatSink, NodeId, PortRef, RouteTemperature};

@@ -103,6 +103,39 @@ with independent analytic/bracketed references, with declared/differenced
 tangents, finite overshoot, initially zero nonlinear coordinates, budget
 exhaustion, rollback/replay, cancellation and shortening.
 
+## State-triggered thresholds
+
+`System::step_to_event(dt_max, config, guard, cx)` locates a directional zero
+of a caller-supplied continuous guard on accepted physical state or time.
+The initial ordinary step respects scheduled events and owner step limits;
+only its actual accepted interval is searched. Bisection replays that same
+kernel from the entry checkpoint. The driver retains one ordinary audited
+step at the crossing-side endpoint once its duration bracket is within
+`EventConfig::time_tolerance_s`, or at a sampled exact zero. Its report
+includes the bracket and guard values, retained `StepReport`, and trial count.
+Discarded trials contribute no accepted steps or ledger rows. The state,
+compensated clock, warm starts, port values, configuration and ledger are
+restored together; this driver also retains the last-step allowances omitted
+by the public checkpoint. Cancellation, nonfinite guards, owner refusals,
+spent bisections and unresolvable brackets restore the complete entry state.
+
+An exact zero on entry returns `AtStart` without advancing, independently of
+direction; the caller must handle or disarm it. No bracket returns `Advanced`
+with the original ordinary step. A shortened refinement is sampled at its
+actual duration and refuses if it cannot advance the lower bracket endpoint.
+The guard, boundaries and proposals must be externally pure, except for
+cancellation requests. A guard may not depend on last-step means, counters or
+solver diagnostics. This assumes at most one zero per trial interval; hidden
+multiple crossings, grazing roots and discontinuous guards are not detected
+reliably. It locates the numerical one-step trajectory, supplies no physical
+reset/impact law, and makes no trajectory-accuracy or allocation-free claim.
+The initial full ordinary trial must be admissible. An owner that refuses an
+invalid endpoint causes this call to refuse; the driver does not first recover
+and locate an event preceding that endpoint.
+`tests/events.rs` covers ballistic and heated-body time oracles, scheduled
+caps, direction, replay, retained accounting and diagnostic allowances, and
+atomic cancellation, refusal, trial-budget and clock-resolution boundaries.
+
 ## Scalar monotone feedback
 
 A `Class::Monotone1d` component without `PortTangent` can close a feedback loop
