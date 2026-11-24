@@ -2549,6 +2549,153 @@ fn gas_volumes_and_restrictions_conform_and_carry_what_the_upstream_side_holds()
 }
 
 #[test]
+fn gas_port_tangents_are_directional_derivatives_and_transposes_for_many_constituents() {
+    let dt = 0.02;
+    let epsilon = 1.0e-5;
+    let mut numbers = Numbers(20_261_124);
+    for count in [0, 3, 64] {
+        let fractions = vec![0.5 / count.max(1) as f64; count];
+        for wall in [false, true] {
+            let gas = if wall {
+                air(count).with_wall()
+            } else {
+                air(count)
+            };
+            let old = gas.contents(2.0e5, 420.0, 0.12, &fractions).unwrap();
+            let heat_at = 2 + count;
+            let width = heat_at + 1 + usize::from(wall);
+            for sign in [-1.0, 1.0] {
+                let mut inputs = vec![0.0; width];
+                inputs[0] = sign * 0.012;
+                inputs[1] = sign * 2500.0;
+                inputs[heat_at] = -70.0;
+                for (index, fraction) in fractions.iter().enumerate() {
+                    inputs[2 + index] = inputs[0] * fraction;
+                }
+                if wall {
+                    inputs[heat_at + 1] = sign * 0.01;
+                }
+                // Direction coordinates are scaled by the amount that changes
+                // their own inventory, keeping species and thermal rows visible.
+                let mut direction = vec![0.0; width];
+                direction[0] = 0.4 * old.mass_kg / dt;
+                direction[1] = -0.3 * old.energy_j / dt;
+                direction[heat_at] = 0.2 * old.energy_j / dt;
+                for (index, held) in old.carried_kg.iter().enumerate() {
+                    direction[2 + index] = numbers.next(-0.3, 0.3) * held / dt;
+                }
+                if wall {
+                    direction[heat_at + 1] = 0.1 * old.volume_m3 / dt;
+                }
+                with_cx(|cx| {
+                    let evaluate = |at: &[f64]| {
+                        let mut next = old.clone();
+                        let mut output = vec![f64::NAN; width];
+                        assert!(matches!(
+                            gas.propose(&old, dt, at, &mut next, &mut output, cx),
+                            Ok(Proposal::Step(_))
+                        ));
+                        output
+                    };
+                    let base = evaluate(&inputs);
+                    let plus: Vec<_> = inputs
+                        .iter()
+                        .zip(&direction)
+                        .map(|(input, d)| input + epsilon * d)
+                        .collect();
+                    let minus: Vec<_> = inputs
+                        .iter()
+                        .zip(&direction)
+                        .map(|(input, d)| input - epsilon * d)
+                        .collect();
+                    let plus = evaluate(&plus);
+                    let minus = evaluate(&minus);
+                    let mut pushed = vec![f64::NAN; width];
+                    gas.jvp(&old, dt, &inputs, &direction, &mut pushed, cx)
+                        .unwrap();
+                    for row in 0..width {
+                        let difference = (plus[row] - minus[row]) / (2.0 * epsilon);
+                        let size = difference.abs().max(pushed[row].abs());
+                        let rounding = 16.0 * f64::EPSILON * base[row].abs() / epsilon;
+                        assert!(
+                            (pushed[row] - difference).abs() <= 1.0e-7 * size + rounding,
+                            "{count} carried, wall {wall}, sign {sign}, row {row}: {} vs {difference}",
+                            pushed[row]
+                        );
+                    }
+                    let covector: Vec<_> = base
+                        .iter()
+                        .map(|value| numbers.next(-1.0, 1.0) / value.abs().max(1.0e-12))
+                        .collect();
+                    let mut pulled = vec![f64::NAN; width];
+                    gas.vjp(&old, dt, &inputs, &covector, &mut pulled, cx)
+                        .unwrap();
+                    assert!(pushed.iter().chain(&pulled).all(|value| value.is_finite()));
+                    let left: f64 = pushed.iter().zip(&covector).map(|(a, b)| a * b).sum();
+                    let right: f64 = direction.iter().zip(&pulled).map(|(a, b)| a * b).sum();
+                    let magnitude: f64 = pushed
+                        .iter()
+                        .zip(&covector)
+                        .chain(direction.iter().zip(&pulled))
+                        .map(|(a, b)| (a * b).abs())
+                        .sum();
+                    assert!((left - right).abs() <= 1.0e-12 * magnitude.max(1.0));
+                    if wall {
+                        assert_eq!(pushed[0], pushed[heat_at + 1]);
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn gas_port_tangents_preserve_outputs_on_invalid_inputs_or_prior_cancellation() {
+    let gas = air(1).with_wall();
+    let old = gas.contents(1.0e5, 300.0, 0.01, &[0.25]).unwrap();
+    let inputs = [0.0; 5];
+    with_cx(|cx| {
+        let mut output = [7.0; 5];
+        assert!(
+            gas.jvp(&old, 0.01, &inputs[..4], &[1.0; 5], &mut output, cx)
+                .is_err()
+        );
+        assert!(
+            gas.vjp(&old, 0.01, &inputs, &[1.0; 4], &mut output, cx)
+                .is_err()
+        );
+        assert!(
+            gas.jvp(&old, 0.01, &inputs, &[f64::NAN; 5], &mut output, cx)
+                .is_err()
+        );
+        assert!(
+            gas.vjp(&old, 0.01, &inputs, &[f64::INFINITY; 5], &mut output, cx)
+                .is_err()
+        );
+        assert!(
+            gas.jvp(&old, 0.0, &inputs, &[1.0; 5], &mut output, cx)
+                .is_err()
+        );
+        let emptied = [-2.0 * old.mass_kg, 0.0, 0.0, 0.0, 0.0];
+        assert!(
+            gas.vjp(&old, 1.0, &emptied, &[1.0; 5], &mut output, cx)
+                .is_err()
+        );
+        assert_eq!(output, [7.0; 5]);
+        cx.cancel_gate().request();
+        assert_eq!(
+            gas.jvp(&old, 0.01, &inputs, &[1.0; 5], &mut output, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            gas.vjp(&old, 0.01, &inputs, &[1.0; 5], &mut output, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(output, [7.0; 5]);
+    });
+}
+
+#[test]
 fn gas_volumes_and_restrictions_refuse_what_they_cannot_represent() {
     for (gas_constant, ratio) in [(0.0, 1.4), (-287.0, 1.4), (287.0, 1.0), (287.0, 0.9), (f64::NAN, 1.4), (287.0, f64::INFINITY)] {
         assert!(matches!(

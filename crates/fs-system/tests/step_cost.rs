@@ -15,7 +15,8 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal};
 use fs_system::elements::{
-    Damper, ElementError, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Waveform,
+    Damper, ElementError, Force, GasVolume, HeatCapacity, Mass, Motion, Restriction, SourceAccount,
+    Spring, Waveform,
 };
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, SystemError};
 
@@ -593,6 +594,78 @@ fn an_accepted_step_allocates_nothing() {
             assert_eq!(allocations, 0, "{n} masses, damped {damped}");
         });
     }
+}
+
+#[test]
+fn gas_port_tangent_actions_allocate_nothing() {
+    for count in [0, 16, 1024] {
+        for wall in [false, true] {
+            let gas = GasVolume::new(287.0, 1.4, count).unwrap();
+            let gas = if wall { gas.with_wall() } else { gas };
+            let fractions = vec![0.5 / count.max(1) as f64; count];
+            let old = gas.contents(2.0e5, 350.0, 0.1, &fractions).unwrap();
+            let width = 3 + count + usize::from(wall);
+            let inputs = vec![0.0; width];
+            let direction = vec![1.0; width];
+            let mut output = vec![0.0; width];
+            with_cx(|cx| {
+                let allocations = allocations_of(|| {
+                    for _ in 0..32 {
+                        gas.jvp(&old, DT_S, &inputs, &direction, &mut output, cx)
+                            .unwrap();
+                        gas.vjp(&old, DT_S, &inputs, &direction, &mut output, cx)
+                            .unwrap();
+                    }
+                });
+                assert_eq!(allocations, 0, "{count} carried quantities, wall {wall}");
+                assert!(output.iter().all(|value| value.is_finite()));
+            });
+        }
+    }
+}
+
+#[test]
+fn accepted_multiconstituent_gas_steps_allocate_nothing() {
+    let count = 16;
+    let gas = GasVolume::new(287.0, 1.4, count).unwrap();
+    let fractions = vec![0.5 / count as f64; count];
+    let mut builder = SystemBuilder::new();
+    let pipe = builder
+        .add_with_tangent("pipe", Restriction::new(2.0e-8, count).unwrap(), ())
+        .unwrap();
+    for (name, pressure, temperature) in [("a", 2.0e5, 300.0), ("b", 1.0e5, 450.0)] {
+        let contents = gas
+            .contents(pressure, temperature, 0.1, &fractions)
+            .unwrap();
+        let node = builder
+            .add_with_tangent(name, gas.clone(), contents)
+            .unwrap();
+        builder
+            .bond(
+                builder.port(node, "stream").unwrap(),
+                builder.port(pipe, name).unwrap(),
+            )
+            .unwrap();
+        builder
+            .boundary(
+                builder.port(node, "heat").unwrap(),
+                Box::new(|_, _, out| out[0] = 0.0),
+            )
+            .unwrap();
+    }
+    let mut system = builder.seal().unwrap();
+    with_cx(|cx| {
+        for _ in 0..5 {
+            system.step(DT_S, cx).unwrap();
+        }
+        let allocations = allocations_of(|| {
+            for _ in 0..20 {
+                system.step(DT_S, cx).unwrap();
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(system.ledger().energy_residual_j().abs() < 1.0e-8);
+    });
 }
 
 #[test]

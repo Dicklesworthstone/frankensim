@@ -97,6 +97,19 @@ struct Trial {
     scale_j: f64,
 }
 
+/// The nonzero coefficients shared by all rows of a gas port tangent.
+/// Enthalpy and heat rates have the same response; every carried quantity
+/// adds only its own rate and the dilution caused by the total mass rate.
+struct GasTangent {
+    mass_kg: f64,
+    pressure_rate: f64,
+    pressure_wall: f64,
+    temperature_mass: f64,
+    temperature_rate: f64,
+    temperature_wall: f64,
+    carried_rate: f64,
+}
+
 impl GasVolume {
     /// The same perfect-gas law with identified carried masses. Gas constants
     /// and the zero-at-absolute-zero energy datum are bound automatically;
@@ -353,14 +366,36 @@ impl GasVolume {
         })
     }
 
-    /// The derivative of every output with respect to every input, row-major.
-    fn jacobian(
+    /// Shared sparse coefficients, without assembling a dense port Jacobian.
+    fn tangent(
         &self,
         old: &GasContents,
         dt_s: f64,
         inputs: &[f64],
-    ) -> Result<Vec<f64>, ElementError> {
+        direction: &[f64],
+        output_len: usize,
+        cx: &Cx<'_>,
+    ) -> Result<GasTangent, ElementError> {
+        cx.checkpoint()?;
+        let width = self.ports.iter().map(PortSpec::width).sum::<usize>();
+        for (name, actual) in [
+            ("gas volume tangent input width", inputs.len()),
+            ("gas volume tangent direction width", direction.len()),
+            ("gas volume tangent output width", output_len),
+        ] {
+            if actual != width {
+                return Err(ElementError::Parameter {
+                    name,
+                    value: actual as f64,
+                });
+            }
+        }
+        positive("gas volume tangent timestep [s]", dt_s)?;
         inputs_finite(inputs)?;
+        for values in direction.chunks(1024) {
+            cx.checkpoint()?;
+            inputs_finite(values)?;
+        }
         self.admit(old)?;
         let Some(trial) = self.trial(old, dt_s, inputs) else {
             return Err(ElementError::Parameter {
@@ -368,50 +403,32 @@ impl GasVolume {
                 value: dt_s,
             });
         };
-        let k = self.carried;
-        let n = self.ports.iter().map(PortSpec::width).sum::<usize>();
-        let (heat_at, wall_at) = (STREAM_CARRIED + k, STREAM_CARRIED + k + 1);
         let capacity = self.heat_capacity_j_kg_k();
         let gamma_1 = self.ratio - 1.0;
-        // Derivative of the new energy with respect to each input.
-        let mut energy = vec![0.0; n];
-        energy[STREAM_ENTHALPY_RATE] = dt_s / trial.pivot;
-        energy[heat_at] = dt_s / trial.pivot;
-        // And of the new pressure.
-        let mut pressure = vec![0.0; n];
+        // U1 depends on the two energy rates and the compression alone.
+        let energy_rate = dt_s / trial.pivot;
+        let mut energy_wall = 0.0;
+        let mut pressure_wall = 0.0;
         if self.has_wall() {
             let half = 0.5 * gamma_1 * dt_s * self.compression(inputs);
             let d_half = 0.5 * gamma_1 * dt_s;
             let d_pivot =
                 -(d_half / trial.volume_m3 + half * dt_s / (trial.volume_m3 * trial.volume_m3));
-            energy[wall_at] =
+            energy_wall =
                 (old.energy_j * d_half / old.volume_m3 - trial.energy_j * d_pivot) / trial.pivot;
-            pressure[wall_at] =
-                gamma_1 * trial.energy_j * dt_s / (trial.volume_m3 * trial.volume_m3);
+            pressure_wall = gamma_1 * trial.energy_j * dt_s / (trial.volume_m3 * trial.volume_m3);
         }
-        for (slope, energy) in pressure.iter_mut().zip(&energy) {
-            *slope += gamma_1 * energy / trial.volume_m3;
-        }
-        let mut matrix = vec![0.0; n * n];
-        for column in 0..n {
-            let mut kelvin = 0.5 * energy[column] / (trial.mass_kg * capacity);
-            if column == STREAM_MASS_RATE {
-                kelvin -= 0.5 * trial.energy_j * dt_s / (trial.mass_kg * trial.mass_kg * capacity);
-            }
-            matrix[STREAM_PRESSURE * n + column] = 0.5 * pressure[column];
-            matrix[STREAM_SPECIFIC_ENTHALPY * n + column] = self.ratio * capacity * kelvin;
-            matrix[heat_at * n + column] = kelvin;
-            if self.has_wall() {
-                matrix[wall_at * n + column] = 0.5 * pressure[column];
-            }
-        }
-        for (index, held) in old.carried_kg.iter().enumerate() {
-            let row = (STREAM_CARRIED + index) * n;
-            let new = held + dt_s * inputs[STREAM_CARRIED + index];
-            matrix[row + STREAM_CARRIED + index] = 0.5 * dt_s / trial.mass_kg;
-            matrix[row + STREAM_MASS_RATE] = -0.5 * new * dt_s / (trial.mass_kg * trial.mass_kg);
-        }
-        Ok(matrix)
+        pressure_wall += gamma_1 * energy_wall / trial.volume_m3;
+        Ok(GasTangent {
+            mass_kg: trial.mass_kg,
+            pressure_rate: 0.5 * (gamma_1 * energy_rate / trial.volume_m3),
+            pressure_wall: 0.5 * pressure_wall,
+            temperature_mass: -0.5 * trial.energy_j * dt_s
+                / (trial.mass_kg * trial.mass_kg * capacity),
+            temperature_rate: 0.5 * energy_rate / (trial.mass_kg * capacity),
+            temperature_wall: 0.5 * energy_wall / (trial.mass_kg * capacity),
+            carried_rate: 0.5 * dt_s / trial.mass_kg,
+        })
     }
 }
 
@@ -557,14 +574,68 @@ impl PortTangent for GasVolume {
         inputs: &[f64],
         d_inputs: &[f64],
         d_outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
-        let matrix = self.jacobian(old, dt_s, inputs)?;
-        let n = d_inputs.len();
-        for (row, slot) in d_outputs.iter_mut().enumerate() {
-            *slot = (0..n)
-                .map(|column| matrix[row * n + column] * d_inputs[column])
-                .sum();
+        let tangent = self.tangent(old, dt_s, inputs, d_inputs, d_outputs.len(), cx)?;
+        let heat_at = STREAM_CARRIED + self.carried;
+        let action = |mass: f64, rate: f64, wall: f64| {
+            let value = mass * d_inputs[STREAM_MASS_RATE]
+                + rate * d_inputs[STREAM_ENTHALPY_RATE]
+                + rate * d_inputs[heat_at];
+            if self.has_wall() {
+                value + wall * d_inputs[heat_at + 1]
+            } else {
+                value
+            }
+        };
+        let pressure = finite(
+            "gas pressure direction",
+            action(0.0, tangent.pressure_rate, tangent.pressure_wall),
+        )?;
+        let kelvin = finite(
+            "gas temperature direction",
+            action(
+                tangent.temperature_mass,
+                tangent.temperature_rate,
+                tangent.temperature_wall,
+            ),
+        )?;
+        let cp = self.ratio * self.heat_capacity_j_kg_k();
+        let enthalpy = finite(
+            "gas specific enthalpy direction",
+            action(
+                cp * tangent.temperature_mass,
+                cp * tangent.temperature_rate,
+                cp * tangent.temperature_wall,
+            ),
+        )?;
+        let carried = |index: usize, held: f64| {
+            let at = STREAM_CARRIED + index;
+            let new = held + dt_s * inputs[at];
+            let mass = -0.5 * new * dt_s / (tangent.mass_kg * tangent.mass_kg);
+            mass * d_inputs[STREAM_MASS_RATE] + tangent.carried_rate * d_inputs[at]
+        };
+        // Validate before writing: an invalid direction leaves the output
+        // untouched. A second linear pass needs no temporary vector; if it
+        // is cancelled, the caller discards the partial tangent scratch.
+        for (index, &held) in old.carried_kg.iter().enumerate() {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            finite("gas carried fraction direction", carried(index, held))?;
+        }
+        cx.checkpoint()?;
+        d_outputs[STREAM_PRESSURE] = pressure;
+        d_outputs[STREAM_SPECIFIC_ENTHALPY] = enthalpy;
+        d_outputs[heat_at] = kelvin;
+        if self.has_wall() {
+            d_outputs[heat_at + 1] = pressure;
+        }
+        for (index, &held) in old.carried_kg.iter().enumerate() {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            d_outputs[STREAM_CARRIED + index] = carried(index, held);
         }
         Ok(())
     }
@@ -576,14 +647,59 @@ impl PortTangent for GasVolume {
         inputs: &[f64],
         bar_outputs: &[f64],
         bar_inputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
-        let matrix = self.jacobian(old, dt_s, inputs)?;
-        let n = bar_outputs.len();
-        for (column, slot) in bar_inputs.iter_mut().enumerate() {
-            *slot = (0..n)
-                .map(|row| matrix[row * n + column] * bar_outputs[row])
-                .sum();
+        let tangent = self.tangent(old, dt_s, inputs, bar_outputs, bar_inputs.len(), cx)?;
+        let heat_at = STREAM_CARRIED + self.carried;
+        let cp = self.ratio * self.heat_capacity_j_kg_k();
+        let pullback = |pressure: f64, kelvin: f64| {
+            let value = pressure * bar_outputs[STREAM_PRESSURE]
+                + (cp * kelvin) * bar_outputs[STREAM_SPECIFIC_ENTHALPY]
+                + kelvin * bar_outputs[heat_at];
+            if self.has_wall() {
+                value + pressure * bar_outputs[heat_at + 1]
+            } else {
+                value
+            }
+        };
+        let rate = finite(
+            "gas energy rate covector",
+            pullback(tangent.pressure_rate, tangent.temperature_rate),
+        )?;
+        let wall = finite(
+            "gas compression covector",
+            pullback(tangent.pressure_wall, tangent.temperature_wall),
+        )?;
+        let mut mass = (cp * tangent.temperature_mass) * bar_outputs[STREAM_SPECIFIC_ENTHALPY];
+        for (index, &held) in old.carried_kg.iter().enumerate() {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            let at = STREAM_CARRIED + index;
+            let new = held + dt_s * inputs[at];
+            mass += (-0.5 * new * dt_s / (tangent.mass_kg * tangent.mass_kg)) * bar_outputs[at];
+            finite(
+                "gas carried rate covector",
+                tangent.carried_rate * bar_outputs[at],
+            )?;
+        }
+        mass = finite(
+            "gas mass rate covector",
+            mass + tangent.temperature_mass * bar_outputs[heat_at],
+        )?;
+        cx.checkpoint()?;
+        bar_inputs[STREAM_MASS_RATE] = mass;
+        bar_inputs[STREAM_ENTHALPY_RATE] = rate;
+        bar_inputs[heat_at] = rate;
+        if self.has_wall() {
+            bar_inputs[heat_at + 1] = wall;
+        }
+        for index in 0..self.carried {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            let at = STREAM_CARRIED + index;
+            bar_inputs[at] = tangent.carried_rate * bar_outputs[at];
         }
         Ok(())
     }
