@@ -24,10 +24,8 @@ use fs_em::winding::component::{
 };
 use fs_em::winding::nonlinear::NonlinearWindingCircuit;
 
-use super::graph::{
-    CellConductors, Row, STEPS, TOLERANCE_J, graph, graph_run, hold, largest, ledger_closes,
-    module_row,
-};
+use super::graph::{CellConductors, Row, STEPS, TOLERANCE_J, graph_run, hold, largest, module_row};
+use super::kernel::{graph, ledger_closes};
 use super::magnetic_thermal::{self as trial, END_H, HEAT_CAPACITY, VOLTAGE, linear, mu};
 use super::*;
 
@@ -162,7 +160,7 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
             PlanarWindingState::at_temperatures(circuit, vec![300.0]),
             (&start, &[(MATERIAL, curve)], &[]),
             &[CELL],
-            Some(VOLTAGE),
+            Some(|_| VOLTAGE),
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL]);
         ledger_closes(&system, electrical, cells);
