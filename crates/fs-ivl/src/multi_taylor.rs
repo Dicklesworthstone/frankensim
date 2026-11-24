@@ -413,8 +413,9 @@ impl TaylorModel {
         let mut acc = Interval::point(1.0);
         for (i, &power) in mi.iter().enumerate() {
             if power > 0 {
-                let rad = self.variables[i].radius();
-                let centered = Interval::new(-rad, rad);
+                // The rounded midpoint need not be equidistant from the
+                // endpoints (for adjacent floats it is itself an endpoint).
+                let centered = self.variables[i].domain - Interval::point(self.centers[i]);
                 acc = acc * centered.powi(power as usize);
             }
         }
@@ -425,7 +426,7 @@ impl TaylorModel {
     pub fn mul(&self, other: &Self) -> Result<Self, TaylorModelError> {
         self.check_compatible(other)?;
 
-        let mut new_coeffs = vec![0.0; self.coefficients.len()];
+        let mut retained = vec![Interval::point(0.0); self.coefficients.len()];
         let mut tail_rem = Interval::point(0.0);
 
         for (i, &a) in self.coefficients.iter().enumerate() {
@@ -446,24 +447,39 @@ impl TaylorModel {
                 for k in 0..self.dim {
                     mi_prod[k] = mi_a[k] + mi_b[k];
                 }
-                let prod_ab = a * b;
+                let prod_ab = Interval::point(a) * Interval::point(b);
 
                 if deg_a + deg_b <= self.order {
                     if let Some(pos) = self.multi_indices.iter().position(|m| m == &mi_prod) {
-                        new_coeffs[pos] += prod_ab;
+                        retained[pos] = retained[pos] + prod_ab;
                     }
                 } else {
                     let mono = self.monomial_range(&mi_prod);
-                    tail_rem = tail_rem + Interval::point(prod_ab) * mono;
+                    tail_rem = tail_rem + prod_ab * mono;
                 }
             }
         }
 
-        // Bounded polynomial ranges for remainder cross-products
-        let dom_box = self.domain_box();
-        let p1_range = self.eval_box(&dom_box)?;
-        let p2_range = other.eval_box(&dom_box)?;
+        // Split each retained interval coefficient back into its polynomial
+        // part and the roundoff contribution over the whole centered domain.
+        let new_coeffs = retained
+            .into_iter()
+            .zip(&self.multi_indices)
+            .map(|(coefficient, mi)| {
+                if coefficient == Interval::point(0.0) {
+                    0.0
+                } else {
+                    crate::taylor::split_mid(coefficient, self.monomial_range(mi), &mut tail_rem)
+                }
+            })
+            .collect();
 
+        // (P + R)(Q + S) = PQ + P*S + Q*R + R*S. Using the full model
+        // ranges here would count R*S three times, which can exclude the
+        // true product when the remainders have a definite sign.
+        let dom_box = self.domain_box();
+        let p1_range = self.polynomial_on_box(&dom_box);
+        let p2_range = other.polynomial_on_box(&dom_box);
         let total_rem = tail_rem
             + p1_range * other.remainder
             + p2_range * self.remainder
@@ -587,6 +603,10 @@ impl TaylorModel {
         if box_.len() != self.dim {
             return Err(TaylorModelError::IncompatibleModels);
         }
+        Ok(self.polynomial_on_box(box_) + self.remainder)
+    }
+
+    fn polynomial_on_box(&self, box_: &[Interval]) -> Interval {
         // Center deviations (x_i - c_i)
         let mut deltas = Vec::with_capacity(self.dim);
         for (i, &iv) in box_.iter().enumerate() {
@@ -607,7 +627,7 @@ impl TaylorModel {
             sum = sum + term;
         }
 
-        Ok(sum + self.remainder)
+        sum
     }
 
     /// Recenter the Taylor model to a subdomain box `sub_box ⊆ D`.

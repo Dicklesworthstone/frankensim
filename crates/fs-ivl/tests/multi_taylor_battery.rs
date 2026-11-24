@@ -216,6 +216,57 @@ fn test_multivariate_multiplication_and_truncation() {
 }
 
 #[test]
+fn product_accounts_for_nonzero_remainders_once() {
+    let domain = Interval::new(-1.0, 1.0);
+    let model = |polynomial, remainder| {
+        let mut univariate = TaylorModel1::constant(polynomial, domain, 1).unwrap();
+        univariate.set_remainder(Interval::point(remainder));
+        TaylorModel::from_tm1(&univariate, "x", None).unwrap()
+    };
+    for (p, r, q, s) in [(0.0, 1.0, 0.0, 1.0), (3.0, -2.0, -1.0, 4.0)] {
+        let range = model(p, r).mul(&model(q, s)).unwrap().range().unwrap();
+        assert!(range.contains((p + r) * (q + s)), "{range:?}");
+        assert!(range.width() < 1e-12, "{range:?}");
+    }
+}
+
+#[test]
+fn product_retains_underflowed_coefficient_on_a_wide_domain() {
+    let extent = 2.0_f64.powi(490);
+    let vars = vec![VariableInfo::new("x", Interval::new(-extent, extent)).unwrap()];
+    let x = TaylorModel::variable(0, vars, 2).unwrap();
+    let small = x.scale(2.0_f64.powi(-538)).unwrap();
+    let square = small.mul(&small).unwrap();
+    // The coefficient 2^-1076 alone rounds to zero. At the endpoint its
+    // contribution is exactly 2^-96.
+    let value = square.eval_box(&[Interval::point(extent)]).unwrap();
+    assert!(value.contains(2.0_f64.powi(-96)), "{value:?}");
+    assert!(value.width().is_finite());
+}
+
+#[test]
+fn truncated_product_uses_actual_offsets_about_a_rounded_center() {
+    let a = 1.0;
+    let b = 1.0_f64.next_up();
+    let mut shifted = TaylorModel1::variable(Interval::new(a, b), 1).unwrap();
+    shifted.set_poly_coeff(0, 0.0);
+    let shifted = TaylorModel::from_tm1(&shifted, "x", None).unwrap();
+    let value = shifted.mul(&shifted).unwrap().eval_box(&[Interval::point(b)]).unwrap();
+    assert!(value.contains((b - a) * (b - a)), "{value:?}");
+    assert!(value.width() < 2.0 * (b - a) * (b - a));
+}
+
+#[test]
+fn product_overflow_keeps_a_finite_polynomial_with_an_unbounded_remainder() {
+    let vars = vec![VariableInfo::new("x", Interval::new(-1.0, 1.0)).unwrap()];
+    let huge = TaylorModel::constant(f64::MAX, vars, 1).unwrap();
+    let product = huge.mul(&huge).unwrap();
+    assert!(product.coefficients().iter().all(|c| c.is_finite()));
+    assert_eq!(product.remainder(), Interval::WHOLE);
+    assert_eq!(product.range().unwrap(), Interval::WHOLE);
+}
+
+#[test]
 fn test_multivariate_division_and_refusal() {
     let x_dom = Interval::new(-0.5, 0.5);
     let vars = vec![VariableInfo::new("x", x_dom).unwrap()];

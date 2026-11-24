@@ -56,6 +56,14 @@ mechanism and is likewise absent from the production dependency graph.
   against an interval enclosure of π; "possibly contains a critical point"
   counts as containment. Width ≥ 2π (or beyond `det::TRIG_DOMAIN`, or
   unbounded) → [−1, 1] (honest, always correct).
+- Multivariate `TaylorModel::mul` encloses retained convolution coefficients
+  with outward interval arithmetic and charges their rounding and discarded
+  terms to the remainder on the actual centered box. The product remainder
+  includes each of `P*S`, `Q*R` and `R*S` once for factors `P+R` and `Q+S`.
+  An unrepresentable retained coefficient produces a finite polynomial and
+  whole-line remainder. Focused tests exercise signed remainders, coefficient
+  overflow, a subnormal coefficient with a normal contribution, and adjacent
+  endpoints with an asymmetric centered box.
 - `TaylorModel1` — univariate Taylor models: f64 polynomial in (x−c)
   plus a RIGOROUS interval remainder; the containment law extended to
   FUNCTIONS (f(x) ∈ P(x−c) + rem for all x in the domain, tested).
@@ -340,9 +348,9 @@ rejections. Reimplementations must pass the golden-hash case bit-for-bit.
   deterministic finite family, not an exhaustive proof over every binary64
   input or every interior point of every interval. Basic-op enclosures are
   unconditionally rigorous.
-- `TaylorModel1` is univariate and fixed-order; multivariate Taylor models and
-  sparse polynomial bases are not implemented. Public construction and
-  arithmetic enforce the 169-order resource/numerics envelope and use fallible
+- `TaylorModel1` is univariate and fixed-order. The separate multivariate
+  `TaylorModel` uses a dense graded multi-index basis. Public univariate
+  construction and arithmetic enforce the 169-order envelope and use fallible
   Vec reservation. Arithmetic overflow can conservatively return a whole-line
   enclosure rather than a useful bound. The API makes no throughput claim near
   the cap and does not expose a user-selected memory budget below the fixed

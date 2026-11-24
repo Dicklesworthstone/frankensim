@@ -193,7 +193,7 @@ pub struct TaylorModel1 {
 
 /// Absorb an interval coefficient's deviation from its midpoint at the
 /// coefficient's centered-domain power and return the midpoint.
-fn split_mid(iv: Interval, h_power: Interval, rem: &mut Interval) -> f64 {
+pub(super) fn split_mid(iv: Interval, h_power: Interval, rem: &mut Interval) -> f64 {
     if !iv.lo().is_finite()
         || !iv.hi().is_finite()
         || !h_power.lo().is_finite()
