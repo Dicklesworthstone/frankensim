@@ -1004,6 +1004,20 @@ pub trait Component {
         Ok(None)
     }
 
+    /// Stored entropy [J/K], measured from the state when this owner exposes
+    /// it.
+    ///
+    /// `None` means unavailable, not zero, and is the default. Entropy has a
+    /// free reference: an owner that declares it states its reference, and
+    /// available values must be finite but may be negative. Declaring opts
+    /// into [`audit_entropy_step`]: the entropy the ports carry in plus the
+    /// receipt's `entropy_generated_j_per_k` must equal the measured change
+    /// to roundoff relative to the inventories reported here, so a reference
+    /// far from the states loosens that check in proportion.
+    fn stored_entropy_j_per_k(&self, _state: &Self::State) -> Result<Option<f64>, Self::Error> {
+        Ok(None)
+    }
+
     /// Independently measured inventory of one carried stream coordinate.
     ///
     /// `carried` is zero-based after mass and enthalpy, in the same order on
@@ -1469,6 +1483,32 @@ pub enum ContractViolation {
         /// Roundoff allowance [kg].
         tolerance_kg: f64,
     },
+    /// Stored entropy is available at only one endpoint of a step.
+    EntropyAvailability {
+        /// Whether the accepted endpoint exposes its inventory.
+        old_available: bool,
+        /// Whether the candidate endpoint exposes its inventory.
+        new_available: bool,
+    },
+    /// An available entropy inventory is not finite.
+    StoredEntropy {
+        /// The accepted or candidate endpoint.
+        endpoint: &'static str,
+        /// Rejected entropy [J/K].
+        value_j_per_k: f64,
+    },
+    /// Port entropy plus generated entropy does not equal the measured
+    /// inventory change.
+    EntropyBalance {
+        /// Net entropy into the component through its ports [J/K].
+        port_entropy_in_j_per_k: f64,
+        /// Entropy generated, from the receipt [J/K].
+        entropy_generated_j_per_k: f64,
+        /// Measured inventory change [J/K].
+        stored_change_j_per_k: f64,
+        /// Roundoff allowance [J/K].
+        tolerance_j_per_k: f64,
+    },
     /// Port energy does not equal stored change plus numerical loss.
     EnergyBalance {
         /// Net energy into the component through its ports [J].
@@ -1580,6 +1620,32 @@ impl fmt::Display for ContractViolation {
                 f,
                 "mass balance: port mass in {port_mass_in_kg} kg != stored change \
                  {stored_change_kg} kg within {tolerance_kg} kg"
+            ),
+            Self::EntropyAvailability {
+                old_available,
+                new_available,
+            } => write!(
+                f,
+                "stored entropy availability changed: accepted={old_available}, \
+                 candidate={new_available}"
+            ),
+            Self::StoredEntropy {
+                endpoint,
+                value_j_per_k,
+            } => write!(
+                f,
+                "{endpoint} stored entropy {value_j_per_k} J/K is not finite"
+            ),
+            Self::EntropyBalance {
+                port_entropy_in_j_per_k,
+                entropy_generated_j_per_k,
+                stored_change_j_per_k,
+                tolerance_j_per_k,
+            } => write!(
+                f,
+                "entropy balance: port entropy in {port_entropy_in_j_per_k} J/K + generated \
+                 {entropy_generated_j_per_k} J/K != stored change {stored_change_j_per_k} J/K \
+                 within {tolerance_j_per_k} J/K"
             ),
             Self::EnergyBalance {
                 port_energy_in_j,
@@ -1745,6 +1811,176 @@ fn mass_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolat
     crate::fixed_order_window_sum("mass account", values).map_err(|_| {
         ContractViolation::NonFinite {
             quantity: "mass account",
+        }
+    })
+}
+
+/// Measured entropy closure for an owner that exposes its stored entropy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntropyStepAudit {
+    /// Net entropy into the component through all its ports [J/K].
+    pub port_entropy_in_j_per_k: f64,
+    /// Entropy generated inside the component, from the receipt [J/K].
+    pub entropy_generated_j_per_k: f64,
+    /// Candidate inventory minus accepted inventory [J/K].
+    pub stored_change_j_per_k: f64,
+    /// Port input plus generation minus inventory change, using compensated
+    /// reduction [J/K].
+    pub balance_defect_j_per_k: f64,
+    /// Roundoff allowance applied to the balance [J/K].
+    pub tolerance_j_per_k: f64,
+}
+
+/// Audit port and generated entropy against independently measured endpoint
+/// inventories.
+///
+/// The entropy account of an owner that declares
+/// [`Component::stored_entropy_j_per_k`]: the entropy its ports carry in plus
+/// `entropy_generated_j_per_k` must equal the measured change. No allocation.
+/// `None` at both endpoints means unavailable, not a passing balance; even
+/// then the step, vectors, generation and individual port transfers must be
+/// valid. Available inventories may be negative, since entropy has a free
+/// reference. The terms are reduced in a fixed, compensated order, scaled
+/// before summation, with tolerance `128 * EPSILON` times the largest of the
+/// two inventories' sizes and the sum of the absolute port transfers and the
+/// generation. The tolerance is relative to the inventories the owner
+/// reports, so a reference far from the states loosens it in proportion.
+///
+/// # Errors
+/// Refuses invalid step/vector data, nonfinite port values or transfers,
+/// negative or nonfinite generation, nonfinite inventories, changing
+/// inventory availability, an unrepresentable account and an entropy balance
+/// defect.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn audit_entropy_step(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+    dt_s: f64,
+    inputs: &[f64],
+    outputs: &[f64],
+    entropy_generated_j_per_k: f64,
+    stored_old_j_per_k: Option<f64>,
+    stored_new_j_per_k: Option<f64>,
+) -> Result<Option<EntropyStepAudit>, ContractViolation> {
+    if !(dt_s.is_finite() && dt_s > 0.0) {
+        return Err(ContractViolation::Step { dt_s });
+    }
+    for (vector, expected, actual) in [
+        ("ports", layout.ports(), ports.len()),
+        ("inputs", layout.input_len(), inputs.len()),
+        ("outputs", layout.output_len(), outputs.len()),
+    ] {
+        if expected != actual {
+            return Err(ContractViolation::VectorLength {
+                vector,
+                expected,
+                actual,
+            });
+        }
+    }
+    if !inputs.iter().chain(outputs).all(|value| value.is_finite()) {
+        return Err(ContractViolation::NonFinite {
+            quantity: "entropy port values",
+        });
+    }
+    if !entropy_generated_j_per_k.is_finite() {
+        return Err(ContractViolation::NonFinite {
+            quantity: "entropy_generated_j_per_k",
+        });
+    }
+    if entropy_generated_j_per_k < 0.0 {
+        return Err(ContractViolation::NegativeProduction {
+            quantity: "entropy_generated_j_per_k",
+            value: entropy_generated_j_per_k,
+        });
+    }
+    let transfer = |(index, port): (usize, &PortSpec)| {
+        port.entropy_in_j_per_k(
+            dt_s,
+            &inputs[layout.input_range(index)],
+            &outputs[layout.output_range(index)],
+        )
+    };
+    let mut scale = entropy_generated_j_per_k;
+    for value in ports.iter().enumerate().map(transfer) {
+        if !value.is_finite() {
+            return Err(ContractViolation::NonFinite {
+                quantity: "port entropy transfer",
+            });
+        }
+        scale = scale.max(value.abs());
+    }
+    for (endpoint, inventory) in [
+        ("accepted", stored_old_j_per_k),
+        ("candidate", stored_new_j_per_k),
+    ] {
+        if let Some(value_j_per_k) = inventory {
+            if !value_j_per_k.is_finite() {
+                return Err(ContractViolation::StoredEntropy {
+                    endpoint,
+                    value_j_per_k,
+                });
+            }
+            scale = scale.max(value_j_per_k.abs());
+        }
+    }
+    let (old, new) = match (stored_old_j_per_k, stored_new_j_per_k) {
+        (Some(old), Some(new)) => (old, new),
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(ContractViolation::EntropyAvailability {
+                old_available: stored_old_j_per_k.is_some(),
+                new_available: stored_new_j_per_k.is_some(),
+            });
+        }
+    };
+    // All-zero accounts need no special arithmetic and have zero tolerance.
+    let scale = if scale == 0.0 { 1.0 } else { scale };
+    let transfers = ports
+        .iter()
+        .enumerate()
+        .map(transfer)
+        .map(|value| value / scale);
+    let generated = entropy_generated_j_per_k / scale;
+    let net = entropy_sum(transfers.clone())?;
+    let absolute = entropy_sum(transfers.clone().map(f64::abs).chain([generated]))?;
+    let defect = entropy_sum(transfers.chain([generated, old / scale, -new / scale]))?;
+    let tolerance = 128.0 * f64::EPSILON * absolute.max(old.abs() / scale).max(new.abs() / scale);
+    let audit = EntropyStepAudit {
+        port_entropy_in_j_per_k: net * scale,
+        entropy_generated_j_per_k,
+        stored_change_j_per_k: new - old,
+        balance_defect_j_per_k: defect * scale,
+        tolerance_j_per_k: tolerance * scale,
+    };
+    if ![
+        audit.port_entropy_in_j_per_k,
+        audit.stored_change_j_per_k,
+        audit.balance_defect_j_per_k,
+        audit.tolerance_j_per_k,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        return Err(ContractViolation::NonFinite {
+            quantity: "entropy account",
+        });
+    }
+    if !(defect.abs() <= tolerance) {
+        return Err(ContractViolation::EntropyBalance {
+            port_entropy_in_j_per_k: audit.port_entropy_in_j_per_k,
+            entropy_generated_j_per_k,
+            stored_change_j_per_k: audit.stored_change_j_per_k,
+            tolerance_j_per_k: audit.tolerance_j_per_k,
+        });
+    }
+    Ok(Some(audit))
+}
+
+fn entropy_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolation> {
+    crate::fixed_order_window_sum("entropy account", values).map_err(|_| {
+        ContractViolation::NonFinite {
+            quantity: "entropy account",
         }
     })
 }

@@ -31,7 +31,8 @@ behavior or whole-system passivity claims.
 - Iteration weight: `BoundedAitkenRelaxation`.
 - Executable contract: `component::{Component, PortTangent, LoadLine,
   StageResidual, PortSpec, DualityMetric, PortLayout, Class, Receipt, Proposal,
-  MassStepAudit, audit_step, audit_mass_step}` and `component::conformance`.
+  MassStepAudit, EntropyStepAudit, audit_step, audit_mass_step,
+  audit_entropy_step}` and `component::conformance`.
 
 The sections after the ten required ones give the semantics of each group.
 
@@ -82,6 +83,10 @@ None.
   work on an inertial surface.
 - `tests/mass_ports.rs` for optional inventory closure, stream signs, an
   energy-balanced mass leak, cancellation and unrepresentable input refusals.
+- `tests/entropy_ports.rs` for the optional entropy account: port entropy
+  and booked generation against measured inventories, the strict tolerance
+  and how an offset reference loosens it, refusals, and the conformance
+  kit's audit and unit rescaling of a declaring body.
 - `tests/heat_ports.rs` for the sign and size of a heat port's entropy and
   its refusal at a temperature that is not above zero; and for the field heat
   port: with one point it equals the scalar port, with three its energy and
@@ -245,6 +250,27 @@ The existing conformance check measures both endpoints and runs this audit;
 energy receipts do not supply its tolerance. This adds no species, element,
 momentum or charge audit to the Component contract.
 
+**Entropy.** `Component::stored_entropy_j_per_k` optionally measures entropy
+[J/K] from a state. Its default is `None` (unavailable), so an owner that
+does not declare it is not audited and changes nothing; zero storage must be
+declared as `Some(0.0)`. Entropy has a free reference: an owner that declares
+it states its reference, and available values must be finite but may be
+negative. `audit_entropy_step` checks that the entropy the ports carry in
+(`dt q / T` on a heat port) plus the receipt's `entropy_generated_j_per_k`
+equals the measured change. Step, vector, generation and individual transfer
+validation applies even when both inventories are unavailable. Availability
+at only one endpoint is refused, and so is an inventory change that is not
+representable. The tolerance is the mass account's, strict and with no claim
+from the owner: `128 * EPSILON * max(|old|, |new|, sum(abs(port transfers)) +
+generated)`, reduced in the same fixed, compensated order. It is relative to
+the inventories the owner reports, so a reference far from the states
+loosens it in proportion. A declaring owner books what its step generates,
+so its entropy closes to rounding; a time-discretization defect belongs in
+`numerical_loss_j`, not in this account. `EntropyStepAudit` reports net port
+input, generation, inventory change, balance defect and tolerance.
+`check_component` measures both endpoints and runs this audit after the mass
+audit; `check_unit_rescaling` compares the start's entropy in the new units.
+
 **First law.** `audit_step` is the one place a step's energy is tested:
 `sum(port energy in) = stored_change_j + numerical_loss_j` within the receipt's
 `energy_tolerance_j`; the receipt's stored change against re-measured endpoint
@@ -268,8 +294,8 @@ does not fit the layout is refused, not indexed.
 **Errors.** `Component::Error` is the owner's type and reaches the caller
 unchanged. Contract breaches are `ContractViolation`.
 
-**Determinism and cancellation.** The contract code is sequential. `audit_step`
-and `audit_mass_step` do not allocate; `PortLayout::new` allocates its two offset vectors.
+**Determinism and cancellation.** The contract code is sequential. `audit_step`,
+`audit_mass_step` and `audit_entropy_step` do not allocate; `PortLayout::new` allocates its two offset vectors.
 Components poll `Cx::checkpoint` and return their own cancellation error.
 
 **Conformance.** `component::conformance::check_component` and
@@ -352,7 +378,7 @@ tolerance:
   outputs, its end state and its receipt (stored change, dissipation,
   numerical loss, energy tolerance, entropy generated) are the base ones in
   the new units;
-- so are the start's stored energy and mass, `limit_dt_s` and
+- so are the start's stored energy, mass and entropy, `limit_dt_s` and
   `next_event_s`.
 
 G0 tests in `tests/component_reference.rs`:

@@ -9,7 +9,7 @@
 //! error: whether it is the owner's cancellation error is not checked, nor
 //! that `cx` is polled again later), the step audit (first law, endpoint
 //! energy, non-negative dissipation and entropy production, residual),
-//! available mass inventories, `admit`, and for
+//! available mass and entropy inventories, `admit`, and for
 //! [`PortTangent`] the JVP against
 //! central differences and the VJP against the JVP by the dot-product test,
 //! and for a component that declares [`Class::ExactLinear`]
@@ -35,7 +35,8 @@ use fs_qty::{DIMENSION_COUNT, Dims, Energy, Mass, Power, Temperature, Time};
 
 use super::{
     Carrier, Class, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec,
-    PortTangent, Proposal, Receipt, StepAudit, audit_carried_step, audit_mass_step, audit_step,
+    PortTangent, Proposal, Receipt, StepAudit, audit_carried_step, audit_entropy_step,
+    audit_mass_step, audit_step,
 };
 use crate::Entropy;
 
@@ -273,6 +274,23 @@ where
         &first_out,
         mass_old,
         mass_new,
+    )
+    .map_err(Failure::Contract)?;
+    let entropy_old = component
+        .stored_entropy_j_per_k(case.state)
+        .map_err(Failure::Owner)?;
+    let entropy_new = component
+        .stored_entropy_j_per_k(&first_state)
+        .map_err(Failure::Owner)?;
+    audit_entropy_step(
+        ports,
+        &layout,
+        case.dt_s,
+        case.inputs,
+        &first_out,
+        receipt.entropy_generated_j_per_k,
+        entropy_old,
+        entropy_new,
     )
     .map_err(Failure::Contract)?;
     for carried in 0..ports
@@ -1049,7 +1067,7 @@ pub fn unit_factor(dimensions: Dims, exponents: &UnitExponents) -> f64 {
 const RANGE_LAW: &str = "the rescaled numbers stay in the normal range of f64";
 const STEP_LAW: &str = "the rescaled step is taken or shortened as the base step is";
 const START_LAW: &str =
-    "the rescaled start's stored energy, mass and step limits are the base ones in the new units";
+    "the rescaled start's energy, mass, entropy and step limits are the base ones in the new units";
 
 /// Zero or a normal `f64`: a number a power of two scales exactly.
 fn scalable(value: f64) -> bool {
@@ -1338,6 +1356,12 @@ where
             rescaled.stored_mass_kg(&start).map_err(owner)?,
             base.stored_mass_kg(case.state).map_err(owner)?,
             factor(Mass::DIMS),
+        ),
+        (
+            "stored_entropy_j_per_k",
+            rescaled.stored_entropy_j_per_k(&start).map_err(owner)?,
+            base.stored_entropy_j_per_k(case.state).map_err(owner)?,
+            factor(Entropy::DIMS),
         ),
         (
             "next_event_s",
