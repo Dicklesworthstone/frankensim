@@ -232,9 +232,18 @@ interface Cook {
   /** Where the body would pass into what stands behind it, when the aisle is too narrow. */
   clash: THREE.Mesh;
   shellR: number;
-  out: HTMLElement | null;
+  /** The table cell's three parts (back load and peak, lean, reach), each kept on one line, or null without a cell. */
+  out: [HTMLElement, HTMLElement, HTMLElement] | null;
   fill: number;
   peakNm: number;
+}
+
+/** Split a readout cell into three spans joined by " · ", so a narrow screen wraps between the parts, never inside one. */
+function readoutParts(cell: HTMLElement | null): [HTMLElement, HTMLElement, HTMLElement] | null {
+  if (!cell) return null;
+  const parts: [HTMLElement, HTMLElement, HTMLElement] = [document.createElement("span"), document.createElement("span"), document.createElement("span")];
+  cell.replaceChildren(parts[0], " · ", parts[1], " · ", parts[2]);
+  return parts;
 }
 
 /** Points over the back of the trunk, from the gluteal fold to the shoulders, each tied to its spine bone. */
@@ -452,7 +461,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
       rearY: 0,
       clash: new THREE.Mesh(clashGeo, clashMat),
       shellR: shell.group.scale.x,
-      out: root.querySelector<HTMLElement>(spec.out),
+      out: readoutParts(root.querySelector<HTMLElement>(spec.out)),
       fill: -1,
       /** The largest back load seen since the pan weight was last set: the bottom of the lift. */
       peakNm: 0,
@@ -645,7 +654,11 @@ export function mountBrigadeStage(root: HTMLElement): void {
       const reach = off > 0 ? m.loadReachM : m.reachM;
       const tau = estimateLumbarTorqueNm(c.st.massKg, loadKg * off, reach, m.torsoFlexDeg);
       c.peakNm = Math.max(c.peakNm, tau);
-      if (c.out) c.out.textContent = `${tau.toFixed(0)} N·m (peak ${c.peakNm.toFixed(0)}) · ${Math.max(0, m.torsoFlexDeg).toFixed(0)}° · reach ${reach.toFixed(2)} m`;
+      if (c.out) {
+        c.out[0].textContent = `${tau.toFixed(0)} N·m (peak ${c.peakNm.toFixed(0)})`;
+        c.out[1].textContent = `${Math.max(0, m.torsoFlexDeg).toFixed(0)}°`;
+        c.out[2].textContent = `reach ${reach.toFixed(2)} m`;
+      }
     }
   }
 
@@ -724,26 +737,35 @@ export function mountBrigadeStage(root: HTMLElement): void {
       pose();
     });
 
+  // The stage draws only while it is on screen. On a phone the crew table sits below the stage, so the lift keeps
+  // going (posed, not drawn) while the table is read, and its numbers stay live.
   let inView = false;
+  let tableInView = false;
   observeInView(stageEl, (v) => {
     inView = v;
   });
+  const tableEl = root.querySelector("table.cohorts");
+  if (tableEl)
+    observeInView(tableEl, (v) => {
+      tableInView = v;
+    });
   let last = performance.now();
   let sinceReadout = 0;
   function animate(now: number): void {
     requestAnimationFrame(animate);
     const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
     last = now;
-    if (!inView || document.hidden) return;
+    if (!(inView || tableInView) || document.hidden) return;
     if (frozen === null) t += dt;
     else t = frozen;
     pose();
-    for (const r of ranges) r.hooks.tick?.(now / 1000, dt, 1);
     sinceReadout += dt;
     if (sinceReadout > 0.12) {
       sinceReadout = 0;
       readouts();
     }
+    if (!inView) return;
+    for (const r of ranges) r.hooks.tick?.(now / 1000, dt, 1);
     controls.update();
     renderer.render(scene, camera);
   }

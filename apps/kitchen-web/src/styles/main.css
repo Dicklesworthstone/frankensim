@@ -2003,11 +2003,15 @@ table.data {
 .cohorts td b {
   font-size: 0.82rem;
 }
-/* On phones the height drops under the name, so each cook's numbers stay on one line. */
+.cohorts td b span {
+  white-space: nowrap;
+}
+/* On phones the height drops under the name, and a cook's numbers wrap only between their parts. */
 @media (max-width: 599px) {
   .cohorts th[scope="row"] {
     flex-wrap: wrap;
     row-gap: 0.1rem;
+    min-width: 6.4rem;
   }
   .cohorts th[scope="row"] small {
     flex-basis: 100%;
@@ -2015,7 +2019,6 @@ table.data {
   }
   .cohorts td b {
     font-size: 0.76rem;
-    white-space: nowrap;
   }
 }
 .fact {
