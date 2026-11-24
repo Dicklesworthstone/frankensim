@@ -1,0 +1,53 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 2,
+  "step_s": 0.0625,
+  "sample_every_s": 0.25,
+  "elements": {
+    "mass": {
+      "kind": "mass",
+      "mass_kg": 2,
+      "velocity_m_s": 4
+    },
+    "drag": {
+      "kind": "damper",
+      "damping_n_s_m": 2,
+      "dissipation_law": {
+        "quadratic_flow_scale": 2,
+        "shift": {
+          "arrhenius": {
+            "activation_energy_j_mol": 49886.77570891944,
+            "reference_k": 300,
+            "valid_k": [
+              290,
+              340
+            ]
+          }
+        }
+      }
+    },
+    "body": {
+      "kind": "heat_capacity",
+      "capacity_j_k": 2,
+      "temperature_k": 300
+    }
+  },
+  "connections": [
+    {
+      "join": [
+        "mass.p",
+        "drag.a"
+      ]
+    },
+    {
+      "prescribe": "drag.b",
+      "velocity_m_s": 0
+    },
+    {
+      "join": [
+        "body.heat",
+        "drag.heat"
+      ]
+    }
+  ]
+}

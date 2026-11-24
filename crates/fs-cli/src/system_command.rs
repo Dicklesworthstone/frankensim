@@ -11,6 +11,7 @@ mod adaptive_metric;
 mod conduction;
 mod contact;
 mod dirac;
+mod dissipation;
 mod friction;
 mod gas;
 mod hydraulic;
@@ -214,6 +215,19 @@ Elements (ports in brackets; physical fields use SI units):
                  angle/angular velocity or charge/current in their SI units.
   spring         stiffness_n_m, cubic_n_m3 = 0, extension_m = 0       [a, b]
   damper         damping_n_s_m                                        [a, b, heat]
+                 damper, rotary_damper and scalar resistor may add
+                 dissipation_law = {quadratic_flow_scale, shift}, with
+                 either member optional but at least one required.
+                 Effort = reference_coefficient * a_T(T) *
+                   (1 + abs(u)/quadratic_flow_scale) * u, u = flow_a-flow_b.
+                 Without a scale the flow factor is 1; the positive scale
+                 uses m/s, rad/s or A for the respective element.
+                 shift uses the Arrhenius/WLF declaration below; without
+                 it a_T = 1. T is the LIVE heat-port temperature, solved
+                 together with any attached body; off-band trials refuse.
+                 All absorbed work leaves heat. Authored calibration only;
+                 no source material-card provenance or added heat storage.
+                 This option does not apply to material-backed resistors.
   resistance_matrix domain, matrix (square, 1 to 64 rows)              [u, heat]
                  domain is translation, rotation, electrical or hydraulic;
                  matrix is symmetric positive definite, in SI effort/flow units
@@ -1653,6 +1667,8 @@ struct Element {
     /// A controlled source driven by a signal or prescribed through `value`
     /// uses a held sample; SI-named prescriptions retain interval-mean semantics.
     point_sampled_command: bool,
+    /// A scalar dissipator evaluates an authored flow/temperature law live.
+    nonlinear_dissipation: bool,
     /// Initial temperature of a heat capacity, used as the starting value of
     /// the temperature inputs joined to it.
     temperature_k: Option<f64>,
@@ -3464,10 +3480,14 @@ fn element(
         }
         Kind::Resistance(domain) => {
             let names = domain.names();
-            fields(definition, &["kind", names.resistance], &what)?;
+            fields(definition, &["kind", names.resistance, "dissipation_law"], &what)?;
             let resistance = number(definition, names.resistance, &what)?;
             let damper = Damper::in_domain(domain.port_kind(), resistance)
                 .map_err(|_| format!("{what}: {} must be positive", names.resistance))?;
+            let damper = match dissipation::law(definition, &what)? {
+                Some(law) => damper.following(law),
+                None => damper,
+            };
             add(builder, name, damper, ())?
         }
         Kind::ResistanceMatrix => resistance_matrix(builder, name, definition, &what)?,
@@ -3753,6 +3773,7 @@ fn element(
         node,
         ports,
         point_sampled_command: false,
+        nonlinear_dissipation: definition.get("dissipation_law").is_some(),
         temperature_k,
         port_temperatures_k,
         node_capacity,
@@ -5475,6 +5496,19 @@ impl Device {
                  one temperature, no entrance length, wall slip, pressure-dependent viscosity, \
                  heat storage or heat carried by the flow, and the viscosity's uncertainty not \
                  propagated"
+            ));
+        }
+        if self.elements.iter().any(|element| element.nonlinear_dissipation) {
+            let base = description.replacen(
+                "constant parameters",
+                "constant parameters or authored passive dissipation",
+                1,
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; scalar dissipation uses its live heat-port temperature and relative \
+                 flow, with optional linear-plus-quadratic resistance and the fs-material \
+                 Arrhenius/WLF shift; authored calibrations refuse outside their temperature \
+                 band and confer no material-card provenance or extra heat storage"
             ));
         }
         description

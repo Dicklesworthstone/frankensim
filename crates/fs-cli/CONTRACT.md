@@ -1,5 +1,38 @@
 # CONTRACT: fs-cli
 
+## Live scalar dissipation on system graphs
+
+The scalar `damper`, `rotary_damper` and non-material `resistor` may declare
+`dissipation_law`, containing `quadratic_flow_scale`, `shift`, or both.
+The coefficient remains the element's reference resistance. For relative
+flow u and the LIVE temperature T received at its heat port, the effort is
+R_ref * a_T(T) * (1 + abs(u)/flow_scale) * u. An omitted flow scale gives
+a flow factor of one; an omitted shift gives a temperature factor of one.
+The positive flow scale has the relative flow's SI unit: m/s, rad/s or A.
+
+The shift uses the same authored Arrhenius/WLF declaration as network
+elements: `shift = {"arrhenius": {activation_energy_j_mol, reference_k,
+valid_k}}` or `{"wlf": {c1, c2_k, reference_k, valid_k}}`.
+The original fs-material TemperatureShift owner evaluates every trial;
+temperatures outside its admitted band refuse instead of extrapolating.
+Its exact logarithmic derivative and the flow derivative enter the shared
+Damper JVP/VJP, so a connected body's temperature participates in the
+same implicit solve. This does not use a lagged temperature signal.
+
+Every absorbed watt is emitted through `heat`. The law introduces no
+storage or adaptive state coordinate. Reports retain their existing
+effort and `heat_w` probes and identify the authored-law scope.
+The complete flow and temperature declarations bind checkpoint identity.
+Scenes without a law retain their original constant-coefficient path.
+
+`examples/system/thermally_softening_drag.json` connects a nonlinear damper,
+moving mass and finite heat capacity. `tests/system_command/dissipation.rs`
+checks all three scalar domains, both shift models, reversal and zero flow,
+an independent coupled midpoint energy balance, native checkpoint replay,
+binary/native report agreement and admission/runtime refusals.
+These are authored calibrations, not material-card provenance or validation
+of a particular fluid, resistor or drag geometry.
+
 ## Radiative exchange on system graphs
 
 A `gray_radiation` element declares `area_m2`, `emissivity_a` and

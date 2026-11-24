@@ -34,6 +34,8 @@ mod electrical_switching;
 mod dirac;
 #[path = "system_command/radiation.rs"]
 mod radiation;
+#[path = "system_command/dissipation.rs"]
+mod dissipation;
 
 fn example(name: &str) -> String {
     format!(
