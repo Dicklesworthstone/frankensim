@@ -5,12 +5,12 @@
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
  *   - ALL 6 WebGL canvases render non-blank frames (pixel variance > 0)
- *   - Switching ALL 5 hero commercial kitchen `.glb`s loads cleanly with <= 180 draw calls
+ *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
- *   - Switching Walk-In <-> Carrier and clicking "Trigger OOD Refusal" shows the refusal banner
+ *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
  *   - 0 px horizontal overflow across 1440x900 (desktop), 768x1024 (tablet), 390x844 (mobile)
- *   - Captures crisp screenshots to `/tmp/kitchen_web_verify/` AND writes
- *     `dist-cf/kitchen-lab/og-card.png` (1200x630 OpenGraph/Twitter share preview card)!
+ *   - The 1200x630 share card `dist-cf/kitchen-lab/og-card.png` exists (rendered by scripts/render-posters.mjs)
+ *   - Captures screenshots to `/tmp/kitchen_web_verify/`
  */
 
 import fs from "node:fs";
@@ -28,6 +28,10 @@ const require = createRequire(import.meta.url);
 const puppeteer = require(path.resolve(APP_ROOT, "../kitchen-studio/node_modules/puppeteer-core"));
 
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+/** Draw calls in one hero frame, shadow pass included. Measured 194–528 across the five kitchens on 2026-11-24 (the
+ * commissary is the most); the ceiling leaves room for the camera's view and catches a change that multiplies them. */
+const DRAW_CEILING = 700;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -87,7 +91,7 @@ async function main() {
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--use-gl=angle",
-      "--use-angle=swiftshader",
+      "--use-angle=metal", // the GPU: software GL cannot keep up with the full hero kitchen
       "--enable-webgl",
       "--ignore-gpu-blocklist",
       "--window-size=1440,900",
@@ -107,31 +111,31 @@ async function main() {
     });
     page.on("pageerror", (err) => pageErrors.push(String(err)));
     page.on("response", (resp) => {
-      if (resp.status() >= 400 && !resp.url().endsWith("/og-card.png")) {
+      if (resp.status() >= 400) {
         failedRequests.push(`${resp.status()} ${resp.url()}`);
       }
     });
 
     await page.goto(url, { waitUntil: "networkidle0", timeout: 45000 });
+    // The hero kitchen is built in the page after load; wait until it reports its draw calls (it is finished).
+    await page.waitForFunction(() => (document.querySelector("[data-hero-status]")?.textContent || "").includes("draw calls"), {
+      timeout: 60000,
+    });
     await sleep(1600);
 
     // 1. Capture crisp 1440x900 desktop Hero screenshot (Mall QSR 400 loaded)
     await page.screenshot({ path: path.join(VERIFY_DIR, "hero-desktop.png"), fullPage: false });
     console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/hero-desktop.png");
 
-    // 2. Capture 1200x630 OpenGraph share preview card into dist-cf/kitchen-lab/og-card.png
-    await page.setViewport({ width: 1200, height: 630, deviceScaleFactor: 1 });
-    await sleep(650);
+    // 2. The share card is rendered by scripts/render-posters.mjs into public/ and copied into the build by Vite.
     const ogPath = path.join(DIST_CF, "kitchen-lab", "og-card.png");
-    await page.screenshot({ path: ogPath, fullPage: false });
-    fs.copyFileSync(ogPath, path.join(VERIFY_DIR, "og-card.png"));
-    console.log("[verify-chrome] Saved dist-cf/kitchen-lab/og-card.png (1200x630)");
+    if (!fs.existsSync(ogPath)) throw new Error("dist-cf/kitchen-lab/og-card.png missing: run node scripts/render-posters.mjs, then build again.");
 
-    // Restore 1440x900 desktop viewport (deviceScaleFactor: 1 during SwiftShader multi-scene soak to keep CPU WebGL snappy)
+    // Restore the 1440x900 desktop viewport at 1x for the multi-scene pass
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
     await sleep(400);
 
-    // 3. Switch ALL 5 canonical kitchen `.glb`s in Hero & verify clean load + <= 180 draw calls
+    // 3. Build each of the 5 hero kitchens and check its frame stays within the draw-call ceiling
     const archetypes = [
       "freestanding_qsr_1450",
       "fast_casual_1100",
@@ -155,7 +159,7 @@ async function main() {
       );
       const drawCalls = await page.evaluate(() => window.__KITCHEN_LAB__.hero.getDrawCalls());
       console.log(`[verify-chrome] Hero archetype ${id}: loaded cleanly (${drawCalls} draw calls)`);
-      if (drawCalls <= 0 || drawCalls > 180) {
+      if (drawCalls <= 0 || drawCalls > DRAW_CEILING) {
         throw new Error(`Hero draw call budget violated for ${id}: ${drawCalls}`);
       }
     }
@@ -220,7 +224,18 @@ async function main() {
           vapor: parseFloat(document.querySelector("[data-st-vapor]")?.textContent || "0"),
         }));
         await page.click("[data-stove-deglaze]");
-        await sleep(850);
+        // The bottle lifts, tilts and pours; the wine counts only as it lands, so wait for the boil-off to show.
+        await page
+          .waitForFunction(
+            (b) => {
+              const pan = parseFloat(document.querySelector("[data-st-pan]")?.textContent || "0");
+              const vapor = parseFloat(document.querySelector("[data-st-vapor]")?.textContent || "0");
+              return vapor > b.vapor && pan < b.pan;
+            },
+            { timeout: 20000, polling: 200 },
+            before,
+          )
+          .catch(() => {});
         const after = await page.evaluate(() => ({
           pan: parseFloat(document.querySelector("[data-st-pan]")?.textContent || "0"),
           vapor: parseFloat(document.querySelector("[data-st-vapor]")?.textContent || "0"),
@@ -246,18 +261,29 @@ async function main() {
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch4-cold.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch4-cold.png");
 
-        // Switch to Insulated Carrier & trigger Certified Surrogate Out-of-Domain Refusal!
+        // Switch to the delivery box: the fast estimate must answer in range (quoting its measured error) and refuse
+        // out of range.
         await page.click('button[data-cold-mode="carrier"]');
         await sleep(500);
+        await page.click("[data-car-surrogate]");
+        await sleep(500);
+        const inState = await page.evaluate(() => {
+          const el = document.querySelector("[data-cold-alert]");
+          return { state: el?.getAttribute("data-state"), text: el?.textContent || "" };
+        });
+        console.log(`[verify-chrome] Fast estimate in range: ${inState.state} | ${inState.text.slice(0, 90)}...`);
+        if (!inState.text.includes("Times from the fast estimate")) {
+          throw new Error(`Fast estimate did not answer in range: ${JSON.stringify(inState)}`);
+        }
         await page.click("[data-car-ood-preset]");
         await sleep(500);
         const oodState = await page.evaluate(() => {
           const el = document.querySelector("[data-cold-alert]");
           return { state: el?.getAttribute("data-state"), text: el?.textContent || "" };
         });
-        console.log(`[verify-chrome] Carrier Surrogate OOD refusal: ${oodState.state} | ${oodState.text.slice(0, 72)}...`);
-        if (oodState.state !== "danger" || !oodState.text.includes("OUT OF CALIBRATION DOMAIN")) {
-          throw new Error(`Carrier OOD refusal failed: ${JSON.stringify(oodState)}`);
+        console.log(`[verify-chrome] Fast estimate out of range: ${oodState.state} | ${oodState.text.slice(0, 90)}...`);
+        if (oodState.state !== "warn" || !oodState.text.includes("Out of range for the fast estimate")) {
+          throw new Error(`Carrier out-of-range refusal failed: ${JSON.stringify(oodState)}`);
         }
       }
 

@@ -26,7 +26,7 @@
  *
  * Invariants (crowd.test.ts checks them; `Crowd.audit` measures them on the live tracks):
  *   I1 (walls and fixtures) Every committed sample keeps every footprint circle's centre at least its radius plus
- *      STATIC_MARGIN from every static obstacle and the walls. Between samples the root and heading are
+ *      STATIC_MARGIN from every static obstacle and the walls (a `high` circle, from the walls and the tall ones). Between samples the root and heading are
  *      interpolated and checked at points no more than STATIC_MARGIN of circle travel apart, each with room of
  *      at least STATIC_MARGIN / 2; clearance is 1-Lipschitz, so no circle ever enters an obstacle.
  *   I2 (people) For any two people and any time up to the later of their committed ends, the distance between any
@@ -40,6 +40,14 @@
  *      anything else is.
  *   I5 (goals) A committed leg ends where the caller's motion ends: `planLeg` never alters the motion it is given,
  *      only when it starts.
+ *   I6 (gates) A gate (a walk-in's doorway and the room behind it) is an obstacle to everyone at all times except to
+ *      the holder of a window on it, and only during that window; windows on one gate never overlap, so whoever is
+ *      inside has it to themselves.
+ *   A leg may take over a parked thing (`release`: the rack a person starts to push stops being a parked obstacle
+ *   when their hands take it, and moves on as part of their footprint) and may leave things behind it (`timed`: the
+ *   door it opens, for as long as it stands open; the rack it parks, from then on, for everyone including itself).
+ *   Taking over only ever frees space, and what is left behind is checked against everyone's committed future (I3)
+ *   before the leg is committed, so I2-I4 keep holding.
  */
 
 export type XZ = readonly [number, number];
@@ -52,11 +60,16 @@ export interface Rect {
   maxZ: number;
 }
 
-/** A circle of a footprint, in the body frame: x to the person's left, z forward, metres. */
+/**
+ * A circle of a footprint, in the body frame: x to the person's left, z forward, metres. A `high` circle is held up
+ * at the waist (a hotel pan carried in both hands): it passes over counters, so of the room only the walls and the
+ * fixtures that stand taller than that (`Crowd.tall`) stop it; people stop it like any other circle.
+ */
 export interface Circle {
   x: number;
   z: number;
   r: number;
+  high?: boolean;
 }
 export type Footprint = readonly Circle[];
 
@@ -268,8 +281,30 @@ export class NavGrid {
     return fracs.map((f) => path && this.keepRight(path, r, f, dyn));
   }
 
+  /**
+   * As `findPaths`, a slice at a time: the search yields after every `chunk` cells it expands (and before keeping to
+   * the right), so that a long search across a big kitchen spreads over frames. The result is the same.
+   */
+  *findPathsSteps(from: XZ, to: XZ, r: number, fracs: readonly number[], dyn?: DynamicClearance, chunk = 1500): Generator<void, (XZ[] | null)[]> {
+    const path = yield* this.routeSteps(from, to, r, dyn, chunk);
+    const out: (XZ[] | null)[] = [];
+    for (const f of fracs) {
+      yield;
+      out.push(path && this.keepRight(path, r, f, dyn));
+    }
+    return out;
+  }
+
   /** The string-pulled shortest comfortable path, before any keeping to the right. */
   private route(from: XZ, to: XZ, r: number, dyn?: DynamicClearance): XZ[] | null {
+    const it = this.routeSteps(from, to, r, dyn, 0);
+    let x = it.next();
+    while (!x.done) x = it.next();
+    return x.value;
+  }
+
+  /** The search behind `route`, yielding after every `chunk` cells expanded (never, for 0). */
+  private *routeSteps(from: XZ, to: XZ, r: number, dyn: DynamicClearance | undefined, chunk: number): Generator<void, XZ[] | null> {
     const okAt = (x: number, z: number) => this.clearance(x, z) >= r && (!dyn || dyn(x, z) >= r);
     if (!okAt(from[0], from[1]) || !okAt(to[0], to[1])) return null;
     if (this.segmentClear(from[0], from[1], to[0], to[1], r, dyn)) return [from, to];
@@ -331,6 +366,7 @@ export class NavGrid {
         break;
       }
       if (++pops > 400000) break;
+      if (chunk > 0 && pops % chunk === 0) yield;
       const i = c % nx;
       const j = (c / nx) | 0;
       for (const [di, dj, w] of dirs) {
@@ -361,16 +397,28 @@ export class NavGrid {
     if (!this.segmentClear(to[0], to[1], cells[cells.length - 1]![0], cells[cells.length - 1]![1], r, dyn)) return null;
     void gx;
     void gz;
-    return this.pull(pts, r, dyn);
+    return chunk > 0 ? yield* this.pullSteps(pts, r, dyn, Math.max(8, chunk >> 6)) : this.pull(pts, r, dyn);
   }
 
   /** String pulling: from each kept point, jump to the farthest later point in clear sight. */
   pull(pts: readonly XZ[], r: number, dyn?: DynamicClearance): XZ[] {
+    const it = this.pullSteps(pts, r, dyn, 0);
+    let x = it.next();
+    while (!x.done) x = it.next();
+    return x.value;
+  }
+
+  /** `pull`, yielding after every `chunk` sight lines it tests (never, for 0). */
+  private *pullSteps(pts: readonly XZ[], r: number, dyn: DynamicClearance | undefined, chunk: number): Generator<void, XZ[]> {
     const out: XZ[] = [pts[0]!];
     let i = 0;
+    let tests = 0;
     while (i < pts.length - 1) {
       let j = pts.length - 1;
-      while (j > i + 1 && !this.segmentClear(pts[i]![0], pts[i]![1], pts[j]![0], pts[j]![1], r, dyn)) j--;
+      while (j > i + 1 && !this.segmentClear(pts[i]![0], pts[i]![1], pts[j]![0], pts[j]![1], r, dyn)) {
+        j--;
+        if (chunk > 0 && ++tests % chunk === 0) yield;
+      }
       out.push(pts[j]!);
       i = j;
     }
@@ -506,7 +554,24 @@ export interface Motion {
   z: Float32Array;
   yaw: Float32Array;
   shape: Uint8Array;
-  timed?: { rect: Rect; k0: number; k1: number }[];
+  timed?: TimedSpec[];
+  /** Timed rectangles (by key) this leg takes over at step k from its start: they stop being obstacles there. */
+  release?: { key: string; k: number }[];
+  /** Windows (steps from the leg's start) in which this leg passes through a gate (by key). */
+  gates?: { key: string; k0: number; k1: number }[];
+}
+
+/**
+ * A rectangle a leg holds over steps k0..k1 from its start (k1 may be Infinity: parked for good). Its owner is the
+ * person moving (an obstacle to everyone else), unless `owner` says otherwise (-1: an obstacle to everyone, the
+ * mover too, as a rack it leaves parked). A `key` lets a later leg take it over (`Motion.release`).
+ */
+export interface TimedSpec {
+  rect: Rect;
+  k0: number;
+  k1: number;
+  owner?: number;
+  key?: string;
 }
 
 /** One person's committed track: samples from step `k0` on; before it unknown (past), after its end, standing. */
@@ -547,6 +612,17 @@ interface TimedRect {
   k0: number;
   k1: number;
   owner: number;
+  key?: string;
+}
+
+interface Gate {
+  rect: Rect;
+  windows: { k0: number; k1: number; owner: number }[];
+}
+
+/** Whether two rectangles come within `m` of each other. */
+function rectsNear(a: Rect, b: Rect, m: number): boolean {
+  return a.minX - m < b.maxX && b.minX - m < a.maxX && a.minZ - m < b.maxZ && b.minZ - m < a.maxZ;
 }
 
 export interface AgentInfo {
@@ -575,11 +651,16 @@ export class Crowd {
   readonly agents: AgentInfo[] = [];
   readonly tracks: Track[] = [];
   private timed: TimedRect[] = [];
+  private gates = new Map<string, Gate>();
 
-  /** `dt` is the sampling step in seconds. */
+  /**
+   * `dt` is the sampling step in seconds. `tall` is the room with only its walls and the fixtures that stand above
+   * waist height (reach-ins, racks, shelving, ovens), for the `high` circles; by default the whole room.
+   */
   constructor(
     readonly grid: NavGrid,
     readonly dt = 0.05,
+    readonly tall: NavGrid = grid,
   ) {}
 
   /** Add a person standing at (x, z) facing yaw, showing footprint `shape`, from step k. Returns its id. */
@@ -608,11 +689,31 @@ export class Crowd {
   prune(k: number): void {
     for (const t of this.tracks) t.prune(k - 40);
     this.timed = this.timed.filter((r) => r.k1 >= k - 40);
+    for (const g of this.gates.values()) g.windows = g.windows.filter((w) => w.k1 >= k - 40);
   }
 
-  /** A rectangle that is an obstacle to everyone but `owner` over steps k0..k1 (a parked rack, an open door). */
-  addTimedRect(rect: Rect, k0: number, k1: number, owner: number): void {
-    this.timed.push({ rect, k0, k1, owner });
+  /**
+   * A rectangle that is an obstacle to everyone but `owner` over steps k0..k1 (a parked rack, an open door; owner
+   * -1 for everyone; k1 Infinity for good). A `key` lets a leg take it over later (`Motion.release`).
+   */
+  addTimedRect(rect: Rect, k0: number, k1: number, owner: number, key?: string): void {
+    this.timed.push({ rect, k0, k1, owner, key });
+  }
+
+  /** The timed rectangle with this key that is held latest (a rack's current parking place), if any. */
+  timedRect(key: string): { rect: Rect; k0: number; k1: number; owner: number } | null {
+    let best: TimedRect | null = null;
+    for (const r of this.timed) if (r.key === key && (!best || r.k1 > best.k1)) best = r;
+    return best;
+  }
+
+  /** A gate (I6): a rectangle closed to everyone except the holder of a window on it, during the window. */
+  addGate(key: string, rect: Rect): void {
+    this.gates.set(key, { rect, windows: [] });
+  }
+  /** A gate's windows from step k on, for display and checks. */
+  gateWindows(key: string, k = -Infinity): readonly { k0: number; k1: number; owner: number }[] {
+    return (this.gates.get(key)?.windows ?? []).filter((w) => w.k1 >= k);
   }
 
   /** Footprint clearance from the static floor for a person `id` at a pose: min over circles of clearance - r. */
@@ -620,8 +721,9 @@ export class Crowd {
     let worst = Infinity;
     for (const c of this.agents[id]!.shapes[shape] ?? []) {
       circleWorld(c, x, z, yaw, _a);
-      const q = this.grid.clearanceLB(_a.x, _a.z);
-      const room = (q >= c.r + STATIC_MARGIN ? q : this.grid.clearance(_a.x, _a.z)) - c.r;
+      const g = c.high ? this.tall : this.grid;
+      const q = g.clearanceLB(_a.x, _a.z);
+      const room = (q >= c.r + STATIC_MARGIN ? q : g.clearance(_a.x, _a.z)) - c.r;
       if (room < worst) worst = room;
     }
     return worst;
@@ -632,7 +734,7 @@ export class Crowd {
    * their committed tracks, and the timed rectangles held for longer than `longHold` seconds after k (a rack parked
    * for the shift; a door that shuts again in a moment is left to the timing, `planLeg`). Returns the clearance.
    */
-  standingObstacles(id: number, k: number, longHold = 10): DynamicClearance {
+  standingObstacles(id: number, k: number, longHold = 10, ignore: readonly string[] = []): DynamicClearance {
     const circles: { x: number; z: number; r: number }[] = [];
     for (let j = 0; j < this.tracks.length; j++) {
       if (j === id) continue;
@@ -642,7 +744,9 @@ export class Crowd {
         circles.push({ x: _a.x, z: _a.z, r: c.r + PAIR_MARGIN });
       }
     }
-    const rects = this.timed.filter((r) => r.owner !== id && r.k1 >= k + longHold / this.dt).map((r) => r.rect);
+    // Gates are closed to a search unless it means to pass one (and then the timing is left to `planLeg`).
+    const rects = this.timed.filter((r) => r.owner !== id && r.k1 >= k + longHold / this.dt && !(r.key && ignore.includes(r.key))).map((r) => r.rect);
+    for (const [key, g] of this.gates) if (!ignore.includes(key)) rects.push(g.rect);
     return (x, z) => {
       let d = Infinity;
       for (const c of circles) {
@@ -732,32 +836,64 @@ export class Crowd {
         if (!pairClear(myShapes, A0, A1, theirShapes, B0, B1)) return false;
       }
     }
-    // Timed rectangles held by others, against my circles.
-    for (const tr of this.timed) {
-      if (tr.owner === id || tr.k1 < k0) continue;
-      const ka = Math.max(k0, tr.k0);
-      const kb = tr.k1;
-      for (let k = ka; k <= kb; k++) {
+    // What this leg takes over stops being an obstacle the step its hands take it.
+    const released = new Map<string, number>();
+    for (const r of m.release ?? []) released.set(r.key, kStart + r.k);
+    const myRectClear = (rect: Rect, ka: number, kb: number) => {
+      // Past my last sample I stand still: one more step covers the rest of any hold, however long.
+      const kc = Math.min(kb, Math.max(ka, kMine + 1));
+      for (let k = ka; k <= kc; k++) {
         mine(k, A0);
         for (const c of myShapes[A0.shape] ?? []) {
           circleWorld(c, A0.x, A0.z, A0.yaw, _a);
-          if (rectDistance(tr.rect, _a.x, _a.z) < c.r + PAIR_MARGIN) return false;
+          if (rectDistance(rect, _a.x, _a.z) < c.r + PAIR_MARGIN) return false;
         }
       }
+      return true;
+    };
+    // Timed rectangles held by others (or by nobody), against my circles.
+    for (const tr of this.timed) {
+      if (tr.owner === id) continue;
+      const rel = tr.key !== undefined ? released.get(tr.key) : undefined;
+      const k1 = rel !== undefined ? Math.min(tr.k1, rel - 1) : tr.k1;
+      if (k1 < k0) continue;
+      if (!myRectClear(tr.rect, Math.max(k0, tr.k0), k1)) return false;
     }
-    // My timed rectangles, against everyone else.
+    // My timed rectangles, against everyone else (they stand still past their tracks' ends), against the other
+    // rectangles held at the same time, and against me when I leave them to everyone.
     for (const tr of m.timed ?? []) {
       const ka = kStart + tr.k0;
       const kb = kStart + tr.k1;
       for (let j = 0; j < this.tracks.length; j++) {
         if (j === id) continue;
         const other = this.tracks[j]!;
-        for (let k = ka; k <= kb; k++) {
+        const kc = Math.min(kb, Math.max(ka, other.end + 1));
+        for (let k = ka; k <= kc; k++) {
           const i = other.index(k);
           for (const c of this.agents[j]!.shapes[other.shape[i]!] ?? []) {
             circleWorld(c, other.x[i]!, other.z[i]!, other.yaw[i]!, _a);
             if (rectDistance(tr.rect, _a.x, _a.z) < c.r + PAIR_MARGIN) return false;
           }
+        }
+      }
+      for (const o of this.timed) {
+        const rel = o.key !== undefined ? released.get(o.key) : undefined;
+        const k1 = rel !== undefined ? Math.min(o.k1, rel - 1) : o.k1;
+        if (o.k0 <= kb && ka <= k1 && rectsNear(o.rect, tr.rect, PAIR_MARGIN)) return false;
+      }
+      if (tr.owner !== undefined && tr.owner !== id && !myRectClear(tr.rect, ka, kb)) return false;
+    }
+    // Gates (I6): my windows clash with nobody's, and outside them I keep out.
+    for (const [key, g] of this.gates) {
+      const wins = (m.gates ?? []).filter((w) => w.key === key).map((w) => [kStart + w.k0, kStart + w.k1] as const);
+      for (const [a, b] of wins) for (const w of g.windows) if (w.owner !== id && w.k0 <= b && a <= w.k1) return false;
+      for (let k = k0; k <= kMine + 1; k++) {
+        if (wins.some(([a, b]) => a <= k && k <= b)) continue;
+        if (g.windows.some((w) => w.owner === id && w.k0 <= k && k <= w.k1)) continue;
+        mine(k, A0);
+        for (const c of myShapes[A0.shape] ?? []) {
+          circleWorld(c, A0.x, A0.z, A0.yaw, _a);
+          if (rectDistance(g.rect, _a.x, _a.z) < c.r + PAIR_MARGIN) return false;
         }
       }
     }
@@ -796,7 +932,11 @@ export class Crowd {
       t.yaw.push(m.yaw[i]!);
       t.shape.push(m.shape[i]!);
     }
-    for (const tr of m.timed ?? []) this.timed.push({ rect: tr.rect, k0: k0 + delay + tr.k0, k1: k0 + delay + tr.k1, owner: id });
+    const kStart = k0 + delay;
+    for (const r of m.release ?? [])
+      for (const tr of this.timed) if (tr.key === r.key) tr.k1 = Math.min(tr.k1, kStart + r.k - 1);
+    for (const tr of m.timed ?? []) this.timed.push({ rect: tr.rect, k0: kStart + tr.k0, k1: kStart + tr.k1, owner: tr.owner ?? id, key: tr.key });
+    for (const w of m.gates ?? []) this.gates.get(w.key)?.windows.push({ k0: kStart + w.k0, k1: kStart + w.k1, owner: id });
   }
 
   /**
@@ -854,14 +994,28 @@ export class Crowd {
    * Measure the invariants over steps k0..k1 on the committed tracks: the least gap between any two people's
    * circles (beyond their radii), and the least static room of any circle (beyond its radius).
    */
-  audit(k0: number, k1: number): { minPairGap: number; minStaticRoom: number; pair: [number, number] | null } {
+  audit(k0: number, k1: number): { minPairGap: number; minStaticRoom: number; pair: [number, number] | null; minRectGap: number; gateIntrusions: number } {
     let minPairGap = Infinity;
     let minStaticRoom = Infinity;
+    let minRectGap = Infinity;
+    let gateIntrusions = 0;
     let pair: [number, number] | null = null;
     for (let k = k0; k <= k1; k++) {
       for (let i = 0; i < this.tracks.length; i++) {
         const a = this.poseAt(i, k);
         minStaticRoom = Math.min(minStaticRoom, this.staticRoom(i, a.x, a.z, a.yaw, a.shape));
+        // Timed rectangles not this person's own (I4), and gates outside this person's windows (I6).
+        for (const c of this.agents[i]!.shapes[a.shape] ?? []) {
+          circleWorld(c, a.x, a.z, a.yaw, _a);
+          for (const tr of this.timed) {
+            if (tr.owner === i || k < tr.k0 || k > tr.k1) continue;
+            minRectGap = Math.min(minRectGap, rectDistance(tr.rect, _a.x, _a.z) - c.r);
+          }
+          for (const g of this.gates.values()) {
+            if (g.windows.some((w) => w.owner === i && w.k0 <= k && k <= w.k1)) continue;
+            if (rectDistance(g.rect, _a.x, _a.z) < c.r) gateIntrusions++;
+          }
+        }
         for (let j = i + 1; j < this.tracks.length; j++) {
           const b = this.poseAt(j, k);
           for (const ca of this.agents[i]!.shapes[a.shape] ?? []) {
@@ -878,7 +1032,7 @@ export class Crowd {
         }
       }
     }
-    return { minPairGap, minStaticRoom, pair };
+    return { minPairGap, minStaticRoom, pair, minRectGap, gateIntrusions };
   }
 }
 
@@ -891,6 +1045,8 @@ export function wrapPi(a: number): number {
 /**
  * Whether two bodies keep PAIR_MARGIN between every pair of their circles over one step, each moving in a straight
  * line from its pose at the step's start to its pose at its end: the closest approach of each pair on that interval.
+ * A body that changes footprint over the step (stops walking, picks up a pan) is taken to show both footprints the
+ * whole step, each circle moving with the body.
  */
 function pairClear(
   sa: readonly Footprint[],
@@ -902,16 +1058,18 @@ function pairClear(
 ): boolean {
   const fa = sa[a0.shape] ?? [];
   const fb = sb[b0.shape] ?? [];
-  const fa1 = sa[a1.shape] ?? fa;
-  const fb1 = sb[b1.shape] ?? fb;
-  for (let i = 0; i < fa.length; i++) {
-    const ca = fa[i]!;
+  const fa1 = a1.shape !== a0.shape ? (sa[a1.shape] ?? []) : null;
+  const fb1 = b1.shape !== b0.shape ? (sb[b1.shape] ?? []) : null;
+  const na = fa.length + (fa1?.length ?? 0);
+  const nb = fb.length + (fb1?.length ?? 0);
+  for (let i = 0; i < na; i++) {
+    const ca = i < fa.length ? fa[i]! : fa1![i - fa.length]!;
     circleWorld(ca, a0.x, a0.z, a0.yaw, _a);
-    circleWorld(fa1[i] ?? ca, a1.x, a1.z, a1.yaw, _c);
-    for (let j = 0; j < fb.length; j++) {
-      const cb = fb[j]!;
+    circleWorld(ca, a1.x, a1.z, a1.yaw, _c);
+    for (let j = 0; j < nb; j++) {
+      const cb = j < fb.length ? fb[j]! : fb1![j - fb.length]!;
       circleWorld(cb, b0.x, b0.z, b0.yaw, _b);
-      circleWorld(fb1[j] ?? cb, b1.x, b1.z, b1.yaw, _d);
+      circleWorld(cb, b1.x, b1.z, b1.yaw, _d);
       // Relative motion p(u) = p0 + (p1 - p0) u, u in [0, 1].
       const px = _a.x - _b.x;
       const pz = _a.z - _b.z;
@@ -921,7 +1079,7 @@ function pairClear(
       const u = vv > 1e-12 ? Math.max(0, Math.min(1, -(px * vx + pz * vz) / vv)) : 0;
       const dx = px + vx * u;
       const dz = pz + vz * u;
-      const need = Math.max(ca.r, (fa1[i] ?? ca).r) + Math.max(cb.r, (fb1[j] ?? cb).r) + PAIR_MARGIN;
+      const need = ca.r + cb.r + PAIR_MARGIN;
       if (dx * dx + dz * dz < need * need) return false;
     }
   }

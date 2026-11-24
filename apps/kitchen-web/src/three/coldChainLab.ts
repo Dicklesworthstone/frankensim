@@ -18,7 +18,8 @@
  *                      density follows the box-kitchen temperature contrast. Cold box air slumps out under the
  *                      neutral plane and fogs where it meets the kitchen; kitchen air comes in over it and fogs inside.
  *   food tint       <- state.pan_core_c, a faint warm cast on the food while it is hot
- * Carrier (`stepCarrierKernel`, `evaluateCarrierSurrogate`): NSF-CARRIER-INSULATED on a work table, its right wall cut
+ * Carrier (`stepCarrierKernel`; hold times from `fullModelHoldTimes`, or from the measured fast-estimate table in
+ * sim/carrierFastEstimate.ts when that is on): NSF-CARRIER-INSULATED on a work table, its right wall cut
  * away to show the load and the foamed double wall.
  *   vent cap        <- cfg.ventFraction, set("vent")
  *   pans            <- cfg.foodMassKg, one lidded GN 1/1 pan per 2 kg, set("pans")
@@ -28,12 +29,12 @@
  */
 
 import * as THREE from "three";
+import { HOLD_HORIZON_MIN, buildFastEstimate, fullModelHoldTimes } from "../sim/carrierFastEstimate";
 import {
   HACCP_COLD_LIMIT_C,
   HOT_HOLD_FLOOR_C,
   createInitialCarrierState,
   createInitialWalkinState,
-  evaluateCarrierSurrogate,
   stepCarrierKernel,
   stepWalkinKernel,
   type CarrierConfig,
@@ -619,6 +620,13 @@ export function mountColdChainLab(root: HTMLElement): void {
 
   let surrogateEnabled = false;
   let chartAccum = 0;
+  // The fast estimate's table: built from the full model in idle time after the chapter mounts (about 70 ms on a
+  // laptop), or at once if the fast estimate is switched on before that.
+  let fast: ReturnType<typeof buildFastEstimate> | null = null;
+  const fastTable = () => (fast ??= buildFastEstimate());
+  const idle = (window as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+  if (idle) idle(() => void fastTable());
+  else setTimeout(() => void fastTable(), 2500);
 
   // DOM controls
   const modeBtns = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-cold-mode]"));
@@ -684,19 +692,19 @@ export function mountColdChainLab(root: HTMLElement): void {
 
       const boxF = (wiState.box_air_c * 9) / 5 + 32;
       outGrid.innerHTML = `
-        <div class="stat-cell"><span>Box Air</span><b class="num">${wiState.box_air_c.toFixed(1)} °C (${boxF.toFixed(1)} °F)</b></div>
-        <div class="stat-cell"><span>Pan Core</span><b class="num">${wiState.pan_core_c.toFixed(1)} °C</b></div>
-        <div class="stat-cell"><span>Pan BTU Wall</span><b class="num">${(wiState.pan_load_w / 1000).toFixed(2)} kW</b></div>
-        <div class="stat-cell"><span>Door Infiltration</span><b class="num">${(wiState.infiltration_w / 1000).toFixed(2)} kW</b></div>
-        <div class="stat-cell"><span>Evap Cooling</span><b class="num">${(wiState.evap_cooling_w / 1000).toFixed(2)} kW</b></div>
-        <div class="stat-cell"><span>Coil Frost</span><b class="num">${wiState.frost_mass_kg.toFixed(2)} kg (${Math.round(wiState.frost_ua_factor * 100)}% UA)</b></div>
+        <div class="stat-cell"><span>Air in the box</span><b class="num">${wiState.box_air_c.toFixed(1)} °C (${boxF.toFixed(1)} °F)</b></div>
+        <div class="stat-cell"><span>Centre of the pans</span><b class="num">${wiState.pan_core_c.toFixed(1)} °C</b></div>
+        <div class="stat-cell"><span>Heat from the pans</span><b class="num">${(wiState.pan_load_w / 1000).toFixed(2)} kW</b></div>
+        <div class="stat-cell"><span>Warm air at the door</span><b class="num">${(wiState.infiltration_w / 1000).toFixed(2)} kW</b></div>
+        <div class="stat-cell"><span>Coil cooling</span><b class="num">${(wiState.evap_cooling_w / 1000).toFixed(2)} kW</b></div>
+        <div class="stat-cell"><span>Frost on the coil</span><b class="num">${wiState.frost_mass_kg.toFixed(2)} kg (coil at ${Math.round(wiState.frost_ua_factor * 100)}%)</b></div>
       `;
       if (wiState.box_excursion_41f) {
         alertBanner.dataset.state = "danger";
-        alertBanner.textContent = `HACCP 41 °F (5.0 °C) EXCURSION: peak box reached ${wiState.peak_box_air_c.toFixed(1)} °C because hot hotel-pan heat load and doorway infiltration exceeded evaporator capacity.`;
+        alertBanner.textContent = `Above 41 °F (5 °C): the air in the box reached ${wiState.peak_box_air_c.toFixed(1)} °C. The hot pans and the open door brought in more heat than the coil could take out.`;
       } else {
         alertBanner.dataset.state = "ok";
-        alertBanner.textContent = `Cold chain holding <= 41 °F (5.0 °C) · Gosney-Olama doorway exchange and coil frost UA active`;
+        alertBanner.textContent = `Holding at or below 41 °F (5 °C), with the warm air through the doorway and the frost on the coil both counted.`;
       }
       if (chartCanvas) {
         drawStripChart(
@@ -709,7 +717,7 @@ export function mountColdChainLab(root: HTMLElement): void {
             minY: 0,
             maxY: 90,
             unit: "°C",
-            threshold: { value: HACCP_COLD_LIMIT_C, color: "#fb7185", label: "HACCP 5°C (41°F)" },
+            threshold: { value: HACCP_COLD_LIMIT_C, color: "#fb7185", label: "41 °F (5 °C) limit" },
           },
         );
       }
@@ -718,48 +726,61 @@ export function mountColdChainLab(root: HTMLElement): void {
       if (carMassVal) carMassVal.textContent = `${(carCfg.foodMassKg ?? 4.5).toFixed(1)} kg`;
       if (carAmbVal) carAmbVal.textContent = `${Math.round(carCfg.ambientC ?? 22)} °C`;
 
-      const surr = evaluateCarrierSurrogate(carCfg);
+      // The two hold times: from the fast estimate when it is on and will answer, otherwise from the full model.
+      const est = surrogateEnabled ? fastTable().estimate(carCfg) : null;
+      const times = est?.inRange ? est.times : fullModelHoldTimes(carCfg);
       const crispPct = Math.round(carState.crispness_index * 100);
       const foodF = (carState.food_temp_c * 9) / 5 + 32;
+      const hold = (min: number) => (min >= HOLD_HORIZON_MIN ? `over ${HOLD_HORIZON_MIN / 60} h` : `${min.toFixed(0)} min`);
 
       outGrid.innerHTML = `
-        <div class="stat-cell"><span>Food Temp</span><b class="num">${carState.food_temp_c.toFixed(1)} °C (${foodF.toFixed(0)} °F)</b></div>
-        <div class="stat-cell"><span>Crust Tg (Gordon-Taylor)</span><b class="num">${carState.crust_tg_c.toFixed(1)} °C</b></div>
-        <div class="stat-cell"><span>Crispness Index</span><b class="num">${crispPct}%</b></div>
-        <div class="stat-cell"><span>Headspace RH</span><b class="num">${Math.round(carState.headspace_rh * 100)}%</b></div>
-        <div class="stat-cell"><span>Time to Soggy</span><b class="num">${surr.minutes_until_soggy.toFixed(0)} min</b></div>
-        <div class="stat-cell"><span>Time to &lt;135 °F</span><b class="num">${surr.minutes_until_below_135f.toFixed(0)} min</b></div>
+        <div class="stat-cell"><span>Food</span><b class="num">${carState.food_temp_c.toFixed(1)} °C (${foodF.toFixed(0)} °F)</b></div>
+        <div class="stat-cell"><span>Crust softening point</span><b class="num">${carState.crust_tg_c.toFixed(1)} °C</b></div>
+        <div class="stat-cell"><span>Crispness</span><b class="num">${crispPct}%</b></div>
+        <div class="stat-cell"><span>Humidity in the box</span><b class="num">${Math.round(carState.headspace_rh * 100)}%</b></div>
+        <div class="stat-cell"><span>Soggy after packing</span><b class="num">${hold(times.soggyMin)}</b></div>
+        <div class="stat-cell"><span>Below 135 °F after packing</span><b class="num">${hold(times.below135Min)}</b></div>
       `;
 
-      if (surrogateEnabled && surr.out_of_domain) {
-        alertBanner.dataset.state = "danger";
-        alertBanner.textContent = `SURROGATE REFUSAL: OUT OF CALIBRATION DOMAIN (valid box: 15-32 °C, 2-8 kg, 75-92 °C). Bound widens to ±${surr.max_bound_min.toFixed(1)} min; falling back to exact conservation kernel.`;
-      } else if (surrogateEnabled) {
-        alertBanner.dataset.state = "ok";
-        alertBanner.textContent = `Certified Surrogate IN-DOMAIN · Verified max bound ±${surr.max_bound_min.toFixed(2)} min vs conservation kernel`;
-      } else if (carState.food_temp_c < HOT_HOLD_FLOOR_C) {
-        alertBanner.dataset.state = "warn";
-        alertBanner.textContent = `HOT-HOLD WARNING: food dropped below the 135 °F (57.2 °C) safety floor.`;
+      // First the state of the food now (a safety warning is never hidden), then where the hold times came from.
+      let state: "ok" | "warn" = "ok";
+      let now: string;
+      if (carState.food_temp_c < HOT_HOLD_FLOOR_C) {
+        state = "warn";
+        now = `Below 135 °F (57 °C): the food is no longer safely hot-held.`;
       } else if (carState.crispness_index <= 0.35) {
-        alertBanner.dataset.state = "warn";
-        alertBanner.textContent = `CRUST SOG-OUT: trapped headspace steam pushed crust Tg below food temperature. Open the vent to trade heat for crispness.`;
+        state = "warn";
+        now = `Soggy: steam trapped in the box has softened the crust. Open the vent to trade heat for crispness.`;
+      } else if (times.soggyMin < HOLD_HORIZON_MIN) {
+        now = `Crisp and above 135 °F, ${(carState.time_s / 60).toFixed(0)} min after packing. The steam in the box is softening the crust: soggy ${hold(times.soggyMin)} after packing.`;
       } else {
-        alertBanner.dataset.state = "ok";
-        alertBanner.textContent = `Crisp and safe hot-hold · Gordon-Taylor Tg (${carState.crust_tg_c.toFixed(1)} °C) tracking wet-basis crust moisture`;
+        now = `Crisp and above 135 °F, ${(carState.time_s / 60).toFixed(0)} min after packing, and at this vent setting the crust stays crisp for over ${HOLD_HORIZON_MIN / 60} h.`;
       }
+      let source = "";
+      if (est && !est.inRange) {
+        state = "warn";
+        source =
+          est.reason === "range"
+            ? ` Out of range for the fast estimate, which covers 15–32 °C outside, 2–8 kg of food and food packed at 75–92 °C, so the full model gives the times.`
+            : ` Too close to the vent setting where the box stops going soggy for the fast estimate to answer, so the full model gives the times.`;
+      } else if (est?.inRange) {
+        source = ` Times from the fast estimate: checked against the full model at ${est.checkedPoints.toLocaleString("en-US")} points across its range, its worst error was ${est.boundMin.soggyMin.toFixed(1)} min for soggy and ${est.boundMin.below135Min.toFixed(1)} min for 135 °F.`;
+      }
+      alertBanner.dataset.state = state;
+      alertBanner.textContent = now + source;
 
       if (chartCanvas) {
         drawStripChart(
           chartCanvas,
           [
             { label: "Food °C", color: "#f59e0b", values: carHistFood },
-            { label: "Crust Tg °C", color: "#38bdf8", values: carHistTg },
+            { label: "Crust softening °C", color: "#38bdf8", values: carHistTg },
           ],
           {
             minY: 15,
             maxY: 105,
             unit: "°C",
-            threshold: { value: HOT_HOLD_FLOOR_C, color: "#fb7185", label: "135°F (57.2°C)" },
+            threshold: { value: HOT_HOLD_FLOOR_C, color: "#fb7185", label: "135 °F (57 °C)" },
           },
         );
       }

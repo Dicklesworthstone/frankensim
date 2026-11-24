@@ -47,9 +47,9 @@ interface CohortSpec {
 }
 
 const COHORTS: readonly CohortSpec[] = [
-  { key: "p05", name: "P05", accent: 0x38bdf8, apron: "#26344d", seed: 4, food: 0, density: 1050, out: "[data-br-p05]" },
-  { key: "p50", name: "P50", accent: 0x34d399, apron: "#4a5a6e", seed: 2, food: 3, density: 1020, out: "[data-br-p50]" },
-  { key: "p95", name: "P95", accent: 0xc084fc, apron: "#3b3d43", seed: 7, food: 0, density: 1050, out: "[data-br-p95]" },
+  { key: "p05", name: "short", accent: 0x38bdf8, apron: "#26344d", seed: 4, food: 0, density: 1050, out: "[data-br-p05]" },
+  { key: "p50", name: "average", accent: 0x34d399, apron: "#4a5a6e", seed: 2, food: 3, density: 1020, out: "[data-br-p50]" },
+  { key: "p95", name: "tall", accent: 0xc084fc, apron: "#3b3d43", seed: 7, food: 0, density: 1050, out: "[data-br-p95]" },
 ];
 
 /* Layout: x along the line, y up, z across the aisle. The prep tables' front edge is z = 0 and they face +z; the
@@ -234,6 +234,7 @@ interface Cook {
   shellR: number;
   out: HTMLElement | null;
   fill: number;
+  peakNm: number;
 }
 
 /** Points over the back of the trunk, from the gluteal fold to the shoulders, each tied to its spine bone. */
@@ -453,6 +454,8 @@ export function mountBrigadeStage(root: HTMLElement): void {
       shellR: shell.group.scale.x,
       out: root.querySelector<HTMLElement>(spec.out),
       fill: -1,
+      /** The largest back load seen since the pan weight was last set: the bottom of the lift. */
+      peakNm: 0,
     };
     measureRear(c);
     c.clash.visible = false;
@@ -571,11 +574,14 @@ export function mountBrigadeStage(root: HTMLElement): void {
     let msg: string;
     if (gap < 0) {
       state = "danger";
-      msg = `CONTACT · ${head}: at the bottom of the lift the ${worst.spec.name} cook's back meets ${behind.name} (${(-gap * 100).toFixed(0)} cm over)`;
+      const overMm = -gap * 1000;
+      const by = overMm < 0.5 ? "just touching" : overMm < 10 ? `${overMm.toFixed(0)} mm too close` : `${(overMm / 10).toFixed(0)} cm too close`;
+      msg = `Contact at ${head}: at the bottom of the lift the ${worst.spec.name} cook's back meets ${behind.name}, ${by}.`;
     } else if (gap < passNeed) {
       state = "warn";
-      msg = `NO PASSING · ${head}: ${(gap * 100).toFixed(0)} cm free behind the stooping ${worst.spec.name}; a P95 passing sideways needs ${(passNeed * 100).toFixed(0)} cm`;
-    } else msg = `CLEAR PASS · ${head}: ${(gap * 100).toFixed(0)} cm free behind the cooks at full stoop`;
+      const free = gap < 0.01 ? `${(gap * 1000).toFixed(0)} mm` : `${(gap * 100).toFixed(0)} cm`;
+      msg = `No passing at ${head}: ${free} free behind the stooping ${worst.spec.name} cook, and a tall cook passing sideways needs ${(passNeed * 100).toFixed(0)} cm.`;
+    } else msg = `Clear to pass at ${head}: ${(gap * 100).toFixed(0)} cm free behind the cooks at full stoop.`;
     const col = STATE_COLOR[state];
     stripMat.color.setHex(col);
     freeMat.color.setHex(col);
@@ -590,6 +596,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
   function syncLoad(): void {
     if (loadVal) loadVal.textContent = `${loadKg.toFixed(1)} kg`;
     for (const c of cooks) {
+      c.peakNm = 0;
       const f = panFill(loadKg, c.spec.density).fill;
       if (Math.abs(f - c.fill) > 1e-4) {
         c.fill = f;
@@ -637,7 +644,8 @@ export function mountBrigadeStage(root: HTMLElement): void {
       const off = cur.itemOn ? THREE.MathUtils.smoothstep(cur.itemPos.y, PAN_Y + 0.001, PAN_Y + 0.012) : 0;
       const reach = off > 0 ? m.loadReachM : m.reachM;
       const tau = estimateLumbarTorqueNm(c.st.massKg, loadKg * off, reach, m.torsoFlexDeg);
-      if (c.out) c.out.textContent = `${tau.toFixed(0)} N·m · ${Math.max(0, m.torsoFlexDeg).toFixed(0)}° · reach ${reach.toFixed(2)} m`;
+      c.peakNm = Math.max(c.peakNm, tau);
+      if (c.out) c.out.textContent = `${tau.toFixed(0)} N·m (peak ${c.peakNm.toFixed(0)}) · ${Math.max(0, m.torsoFlexDeg).toFixed(0)}° · reach ${reach.toFixed(2)} m`;
     }
   }
 

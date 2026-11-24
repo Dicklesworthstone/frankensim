@@ -1003,7 +1003,8 @@ export function mountStoveLab(root: HTMLElement): void {
     if (smokeBadge) {
       const fat = FAT_PROPS[cfg.fat];
       if (state.smoking) {
-        smokeBadge.textContent = `SMOKING · > ${fat.smokeC.toFixed(0)} °C (${fat.label.split(" ")[0]})`;
+        const fatName: Record<string, string> = { butter: "butter", canola: "canola oil", lard: "lard" };
+        smokeBadge.textContent = `Smoking: the ${fatName[cfg.fat] ?? fat.label.split(" ")[0]!.toLowerCase()} is past its ${fat.smokeC.toFixed(0)} °C smoke point`;
         smokeBadge.dataset.state = "warn";
       } else {
         smokeBadge.textContent = `Clean sear · smoke point ${fat.smokeC.toFixed(0)} °C`;

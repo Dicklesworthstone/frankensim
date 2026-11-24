@@ -3,19 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#080605" />
-    <title>Kitchen Lab · FrankenSim Commercial Kitchen Digital Twin</title>
+    <meta name="theme-color" content="#0b0907" />
+    <title>FrankenSim Kitchen Lab · Run the dinner rush before you build the kitchen</title>
     <meta
       name="description"
-      content="Interactive 3D commercial kitchen digital twin built on FrankenSim conservation physics: 5 Blender-authored kitchens, 67 parametric NSF assets, 29-bone anthropometric staff rigs, and 4 live Rust-verified thermal kernels."
+      content="A commercial kitchen you can run in your browser. Five kitchens in 3D, with the heat, the hot air and the cold storage computed live by FrankenSim's physics models, and cooks who find their own way round each other."
     />
     <link rel="canonical" href="https://frankensim.org/kitchen-lab/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="FrankenSim" />
-    <meta property="og:title" content="FrankenSim Kitchen Lab · 3D Commercial Kitchen Digital Twin" />
+    <meta property="og:title" content="FrankenSim Kitchen Lab · Run the dinner rush before you build the kitchen" />
     <meta
       property="og:description"
-      content="Inspect 5 commercial kitchens built in Blender, 67 parametric fixtures, 29-bone chef rigs, and 4 live cooking and refrigeration conservation kernels in WebGL."
+      content="Five commercial kitchens in 3D. Turn up the orders, switch the line to induction, load the walk-in and test the aisles, with the physics computed live."
     />
     <meta property="og:url" content="https://frankensim.org/kitchen-lab/" />
     <meta property="og:image" content="https://frankensim.org/kitchen-lab/og-card.png" />
@@ -24,836 +24,959 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="FrankenSim Kitchen Lab interactive 3D commercial kitchen with thermal overlays, exhaust plumes, and articulated staff."
+      content="A commercial kitchen in 3D with its cooks at work and the hot air rising into the hood."
     />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="FrankenSim Kitchen Lab · 3D Commercial Kitchen Digital Twin" />
+    <meta name="twitter:title" content="FrankenSim Kitchen Lab · Run the dinner rush before you build the kitchen" />
     <meta
       name="twitter:description"
-      content="5 commercial kitchens in 3D, 67 parametric Blender assets, 29-bone staff rigs, and live conservation physics running in the browser."
+      content="Five commercial kitchens in 3D, with the heat, the hot air, the cold storage and the cooks computed live in your browser."
     />
     <meta name="twitter:image" content="https://frankensim.org/kitchen-lab/og-card.png" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <script>
+      document.documentElement.classList.add("js");
+      // If the page's module never starts (a failed download, an old browser), show the text it would have revealed.
+      setTimeout(function () {
+        if (!document.documentElement.classList.contains("booted")) document.documentElement.classList.remove("js");
+      }, 6000);
+    </script>
   </head>
   <body>
-    <a class="skip-link" href="#main">Skip to content</a>
+    <a class="skip" href="#main">Skip to content</a>
 
-    <header class="topbar" data-topbar>
-      <div class="topbar-inner">
+    <header class="top">
+      <div class="bar">
         <a class="brand" href="#hero">
-          <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
-            <circle cx="20" cy="21" r="14" fill="none" stroke="#22d3ee" stroke-opacity="0.55" stroke-width="1.8" stroke-dasharray="4 3" />
+          <svg class="mark" viewBox="0 0 40 40" aria-hidden="true">
+            <circle cx="20" cy="21" r="15" fill="none" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.6" stroke-dasharray="4 3" />
             <path
               d="M20 7c3.1 4.9 8.2 8 8.2 14.8a8.2 8.2 0 1 1-16.4 0c0-3.9 1.9-6.9 4-9.5.4 2.5 1.5 4.2 3.2 4.7-.9-3.4-.5-6.8 1-10Z"
-              fill="url(#navFlame)"
+              fill="url(#markFlame)"
             />
             <path d="M20 18.2c1.6 2.4 3.7 4 3.7 7a3.7 3.7 0 1 1-7.4 0c0-2 1.1-3.8 3.7-7Z" fill="#fef3c7" />
             <defs>
-              <linearGradient id="navFlame" x1="20" y1="7" x2="20" y2="30" gradientUnits="userSpaceOnUse">
+              <linearGradient id="markFlame" x1="20" y1="7" x2="20" y2="30" gradientUnits="userSpaceOnUse">
                 <stop stop-color="#fde047" />
                 <stop offset="0.5" stop-color="#f59e0b" />
                 <stop offset="1" stop-color="#ea580c" />
               </linearGradient>
             </defs>
           </svg>
-          <span>FrankenSim <em class="brand-sub">Kitchen Lab</em></span>
+          <span>FrankenSim <em>Kitchen Lab</em></span>
         </a>
 
-        <nav class="chapter-nav" aria-label="Chapters">
-          <a href="#hero" data-spy="hero" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>Line</a>
-          <a href="#why" data-spy="why" style="--chapter: #fb923c"><span class="joint" aria-hidden="true"></span>Why</a>
-          <a href="#equipment" data-spy="equipment" style="--chapter: #d97706"><span class="joint" aria-hidden="true"></span>Hardware</a>
-          <a href="#stove" data-spy="stove" style="--chapter: #f97316"><span class="joint" aria-hidden="true"></span>Flame &amp; Pan</a>
-          <a href="#oven" data-spy="oven" style="--chapter: #eab308"><span class="joint" aria-hidden="true"></span>Combi Oven</a>
-          <a href="#cold" data-spy="cold" style="--chapter: #38bdf8"><span class="joint" aria-hidden="true"></span>Cold Chain</a>
-          <a href="#brigade" data-spy="brigade" style="--chapter: #34d399"><span class="joint" aria-hidden="true"></span>Brigade</a>
-          <a href="#architecture" data-spy="architecture" style="--chapter: #c084fc"><span class="joint" aria-hidden="true"></span>Engine</a>
+        <nav class="chapters" aria-label="Chapters">
+          <a href="#equipment" data-spy="equipment" style="--chapter: #b4c0cb"><span class="joint" aria-hidden="true"></span>Equipment</a>
+          <a href="#stove" data-spy="stove" style="--chapter: #f97316"><span class="joint" aria-hidden="true"></span>Stove</a>
+          <a href="#oven" data-spy="oven" style="--chapter: #f2b134"><span class="joint" aria-hidden="true"></span>Oven</a>
+          <a href="#cold" data-spy="cold" style="--chapter: #5ec8f2"><span class="joint" aria-hidden="true"></span>Cold chain</a>
+          <a href="#brigade" data-spy="brigade" style="--chapter: #e0905f"><span class="joint" aria-hidden="true"></span>Crew</a>
+          <a href="#fleet" data-spy="fleet" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>Kitchens</a>
+          <a href="#architecture" data-spy="architecture" style="--chapter: #9fb3c8"><span class="joint" aria-hidden="true"></span>Engine</a>
         </nav>
 
-        <div class="topbar-tools">
-          <a class="nav-ext" href="https://frankensim.org/">frankensim.org</a>
-          <a class="nav-ext" href="https://frankensim.org/instrument-tests/">Instrument Tests</a>
-          <a class="btn btn-copper btn-sm" href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub ↗</a>
-          <details class="mobile-menu">
-            <summary aria-label="Open navigation menu">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round" />
-              </svg>
+        <div class="tools">
+          <a class="ext" href="https://frankensim.org/">FrankenSim<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h10v10M18 6 6 18" /></svg></a>
+          <a class="btn go sm" href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h10v10M18 6 6 18" /></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 8h16M4 16h16" /></svg>
             </summary>
-            <nav aria-label="Mobile chapters">
-              <a href="#hero" style="--chapter: #f59e0b"><span class="joint on"></span>Line Overview</a>
-              <a href="#why" style="--chapter: #fb923c"><span class="joint on"></span>Why Physics-First</a>
-              <a href="#equipment" style="--chapter: #d97706"><span class="joint on"></span>Ch 1 · Hardware</a>
-              <a href="#stove" style="--chapter: #f97316"><span class="joint on"></span>Ch 2 · Flame &amp; Pan</a>
-              <a href="#oven" style="--chapter: #eab308"><span class="joint on"></span>Ch 3 · Combi Oven</a>
-              <a href="#cold" style="--chapter: #38bdf8"><span class="joint on"></span>Ch 4 · Cold Chain</a>
-              <a href="#brigade" style="--chapter: #34d399"><span class="joint on"></span>Ch 5 · Brigade &amp; Fleet</a>
-              <a href="#architecture" style="--chapter: #c084fc"><span class="joint on"></span>Under the Hood</a>
-              <div class="mobile-ext-row">
-                <a href="https://frankensim.org/">frankensim.org</a>
-                <a href="https://frankensim.org/instrument-tests/">Instrument Tests</a>
-                <a href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub ↗</a>
-              </div>
+            <nav aria-label="Menu">
+              <a href="#why" style="--chapter: #f59e0b"><span class="joint on" aria-hidden="true"></span>Why a kitchen lab</a>
+              <a href="#equipment" style="--chapter: #b4c0cb"><span class="joint on" aria-hidden="true"></span>Equipment</a>
+              <a href="#stove" style="--chapter: #f97316"><span class="joint on" aria-hidden="true"></span>Stove</a>
+              <a href="#oven" style="--chapter: #f2b134"><span class="joint on" aria-hidden="true"></span>Oven</a>
+              <a href="#cold" style="--chapter: #5ec8f2"><span class="joint on" aria-hidden="true"></span>Cold chain</a>
+              <a href="#brigade" style="--chapter: #e0905f"><span class="joint on" aria-hidden="true"></span>Crew</a>
+              <a href="#fleet" style="--chapter: #f59e0b"><span class="joint on" aria-hidden="true"></span>All five kitchens</a>
+              <a href="#architecture" style="--chapter: #9fb3c8"><span class="joint on" aria-hidden="true"></span>Engine</a>
+              <a href="https://frankensim.org/" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>FrankenSim home</a>
+              <a class="btn go" href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h10v10M18 6 6 18" /></svg></a>
             </nav>
           </details>
         </div>
       </div>
-      <span class="read-progress" aria-hidden="true"><i data-progress-bar></i></span>
+      <span class="progress" aria-hidden="true"><i data-progress-bar></i></span>
     </header>
 
     <main id="main">
-      <!-- =================================================================
-           HERO STAGE (#hero) - FULL-BLEED 3D COMMERCIAL KITCHEN VIEWPORT
-           ================================================================= -->
+      <!-- ============================ HERO ============================ -->
       <section class="hero" id="hero" aria-labelledby="hero-title" style="--chapter: #f59e0b">
         <div class="hero-stage" data-hero-stage>
           <picture class="hero-poster" aria-hidden="true">
-            <source media="(max-width: 999px)" srcset="./kitchen-assets/web_posters/hero-mobile.png" width="1080" height="1180" />
-            <img src="./kitchen-assets/web_posters/hero-desktop.png" width="1920" height="1100" alt="" fetchpriority="high" />
+            <source media="(max-width: 999px)" srcset="./kitchen-assets/web_posters/hero-mobile.webp" type="image/webp" />
+            <img src="./kitchen-assets/web_posters/hero-desktop.webp" alt="" fetchpriority="high" />
           </picture>
           <canvas
-            class="webgl-canvas"
             data-hero-canvas
             tabindex="0"
-            aria-label="Interactive 3D commercial kitchen digital twin with animated staff, exhaust plumes, thermal overlays, and aisle clearances."
+            aria-label="A commercial kitchen in 3D. Cooks work the line, hot air rises from the burners into the hood. Drag to look around."
           ></canvas>
           <div class="hero-scrim" aria-hidden="true"></div>
-          <div class="hero-hud-top">
-            <span class="fig-tag">Interactive 3D · Built Live in WebGL</span>
-            <span class="hud-status num" data-hero-status>Building Mall QSR 400…</span>
-          </div>
         </div>
 
         <div class="wrap hero-copy">
-          <p class="eyebrow-pill">
-            <span class="joint on" style="--chapter: #f59e0b" aria-hidden="true"></span>
-            Commercial Kitchen Digital Twin
-            <i></i>
-            Conservation Physics in WebGL
-          </p>
-          <h1 class="d1" id="hero-title">
-            <span>Every burner,</span>
-            <span>plume, and <em class="ember">aisle</em></span>
-            <span>from first principles.</span>
-          </h1>
-          <p class="lede">
-            Five commercial kitchens built live from their floorplans, 67 millimeter-checked NSF fixtures, crews of anthropometric cooks who route around each other without ever touching, and four Rust-verified heat and mass-transfer kernels running live in your browser.
-          </p>
-
-          <div class="hero-toolbar">
-            <div class="pill-row" role="group" aria-label="3D Overlay Modes">
-              <button type="button" class="chip-btn" data-overlay="pbr" aria-pressed="true">PBR Stainless</button>
-              <button type="button" class="chip-btn" data-overlay="thermal" aria-pressed="false">Thermal IR</button>
-              <button type="button" class="chip-btn" data-overlay="plumes" aria-pressed="true">Exhaust Plumes</button>
-              <button type="button" class="chip-btn" data-overlay="aisles" aria-pressed="false">Aisle Clearances</button>
+          <div class="hero-text">
+            <p class="pill"><span class="joint on" aria-hidden="true"></span>Commercial kitchens<i></i>Live physics</p>
+            <h1 class="d1" id="hero-title">
+              <span>Run the <em class="g">dinner rush</em></span>
+              <span>before you build</span>
+              <span>the kitchen.</span>
+            </h1>
+            <p class="lede">
+              Kitchen Lab is a commercial kitchen you can run in your browser. Pick a layout, turn up the orders and move the line from gas to induction. The power draw, the hot air and the cooks' paths change as you drag.
+            </p>
+            <div class="cta">
+              <a class="btn go" href="#why">Take the tour<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
+              <a class="btn" href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" /></svg>Star on GitHub</a>
             </div>
-            <div class="pill-row" role="group" aria-label="Camera Presets">
-              <button type="button" class="chip-btn chip-subtle" data-cam="isometric" aria-pressed="true">Isometric</button>
-              <button type="button" class="chip-btn chip-subtle" data-cam="cookline" aria-pressed="false">Cookline</button>
-              <button type="button" class="chip-btn chip-subtle" data-cam="pass" aria-pressed="false">Pass / Expedite</button>
-              <button type="button" class="chip-btn chip-subtle" data-cam="hood" aria-pressed="false">Hood Plume</button>
-              <button type="button" class="chip-btn chip-subtle" data-cam="walkin" aria-pressed="false">Walk-In</button>
+          </div>
+
+          <div class="hero-view">
+            <span class="hud" data-hero-status>Loading the kitchen…</span>
+            <p class="micro">Camera</p>
+            <div class="seg sm" role="group" aria-label="Camera">
+              <button type="button" data-cam="isometric" aria-pressed="true">Overview</button>
+              <button type="button" data-cam="cookline" aria-pressed="false">Cook line</button>
+              <button type="button" data-cam="pass" aria-pressed="false">Pass</button>
+              <button type="button" data-cam="hood" aria-pressed="false">Hood</button>
+              <button type="button" data-cam="walkin" aria-pressed="false">Walk-in</button>
+            </div>
+            <p class="micro">Show</p>
+            <div class="layers">
+              <div class="seg sm" role="group" aria-label="Surfaces">
+                <button type="button" data-overlay="pbr" aria-pressed="true">Steel</button>
+                <button type="button" data-overlay="thermal" aria-pressed="false">Heat camera</button>
+              </div>
+              <button type="button" class="toggle sm" data-overlay="plumes" aria-pressed="true"><i aria-hidden="true"></i>Hot air</button>
+              <button type="button" class="toggle sm" data-overlay="aisles" aria-pressed="false"><i aria-hidden="true"></i>Walkways</button>
             </div>
           </div>
         </div>
 
-        <!-- Floating Bottom Frosted-Glass Control Console -->
         <div class="wrap console-wrap">
-          <div class="glass-console">
-            <div class="console-archetypes">
-              <p class="micro">Canonical Kitchen Archetype (keys 1-5)</p>
-              <div class="seg-group seg-5" role="group" aria-label="Select canonical kitchen">
-                <button type="button" data-archetype="mall_qsr_400" aria-pressed="true">Mall QSR 400</button>
-                <button type="button" data-archetype="freestanding_qsr_1450" aria-pressed="false">Drive-Thru 1450</button>
-                <button type="button" data-archetype="fast_casual_1100" aria-pressed="false">Fast-Casual 1100</button>
-                <button type="button" data-archetype="fine_dining_950" aria-pressed="false">Brigade 950</button>
-                <button type="button" data-archetype="commissary_catering_3200" aria-pressed="false">Commissary 3200</button>
+          <div class="console">
+            <div class="console-pick">
+              <p class="micro">Pick a kitchen</p>
+              <div class="seg" role="group" aria-label="Kitchen">
+                <button type="button" data-archetype="mall_qsr_400" aria-pressed="true">Mall counter</button>
+                <button type="button" data-archetype="freestanding_qsr_1450" aria-pressed="false">Drive-thru</button>
+                <button type="button" data-archetype="fast_casual_1100" aria-pressed="false">Fast casual</button>
+                <button type="button" data-archetype="fine_dining_950" aria-pressed="false">Fine dining</button>
+                <button type="button" data-archetype="commissary_catering_3200" aria-pressed="false">Commissary</button>
               </div>
             </div>
 
             <div class="console-dials">
-              <label class="dial">
-                <span class="dial-head"><span>Rush Load</span><output class="num" data-hero-rush-val>75 ord/hr</output></span>
-                <input type="range" min="25" max="140" step="5" value="75" data-hero-rush />
-              </label>
-              <label class="dial">
-                <span class="dial-head"><span>Electrification</span><output class="num" data-hero-elec-val>35%</output></span>
-                <input type="range" min="0" max="100" step="5" value="35" data-hero-elec />
-              </label>
-              <label class="dial">
-                <span class="dial-head"><span>Ambient</span><output class="num" data-hero-amb-val>26 °C</output></span>
-                <input type="range" min="18" max="40" step="1" value="26" data-hero-amb />
-              </label>
+              <label class="range"><span><b>Orders<span class="wide-only"> per hour</span></b><output data-hero-rush-val>75 ord/hr</output></span><input type="range" min="25" max="140" step="5" value="75" data-hero-rush aria-label="Orders per hour" /></label>
+              <label class="range"><span><b>On induction</b><output data-hero-elec-val>35%</output></span><input type="range" min="0" max="100" step="5" value="35" data-hero-elec aria-label="Share of the line on induction" /></label>
+              <label class="range"><span><b>Outside air</b><output data-hero-amb-val>26 °C</output></span><input type="range" min="18" max="40" step="1" value="26" data-hero-amb aria-label="Outside air temperature" /></label>
             </div>
 
-            <div class="console-tally">
-              <div class="tally-top">
-                <div>
-                  <span class="micro">Peak Line Load</span>
-                  <strong class="tally-big num" data-out-kw>62.4 kW</strong>
-                </div>
-                <div>
-                  <span class="micro">Hood Capture</span>
-                  <strong class="tally-mid num" data-out-capture>94.2%</strong>
-                </div>
-                <div>
-                  <span class="micro">Min Aisle</span>
-                  <strong class="tally-mid num" data-out-aisle>38" (0.97 m)</strong>
-                </div>
+            <div class="console-out">
+              <p class="tally"><strong data-out-kw>…</strong><span>cooking load</span></p>
+              <div class="tallybar" aria-hidden="true">
+                <i data-bar="gas" style="flex-grow: 45"></i>
+                <i data-bar="elec" style="flex-grow: 35"></i>
+                <i data-bar="hvac" style="flex-grow: 20"></i>
               </div>
-              <div class="tally-bar" aria-hidden="true">
-                <i class="bar-gas" data-bar="gas" style="flex-grow: 45"></i>
-                <i class="bar-elec" data-bar="elec" style="flex-grow: 35"></i>
-                <i class="bar-hvac" data-bar="hvac" style="flex-grow: 20"></i>
-              </div>
-              <div class="tally-keys">
-                <span class="key-gas">Gas <b class="num" data-key="gas">0 kW</b></span>
-                <span class="key-elec">Electric <b class="num" data-key="elec">0 kW</b></span>
-                <span class="key-hvac">HVAC <b class="num" data-key="hvac">0 kW</b></span>
-              </div>
-              <p class="tally-meta num" data-out-meta>14 fixtures · 3 staff · loading</p>
+              <p class="tallykeys">
+                <span class="gas">Gas <b data-key="gas">…</b></span>
+                <span class="elec">Electric <b data-key="elec">…</b></span>
+                <span class="hvac">Cooling <b data-key="hvac">…</b></span>
+              </p>
+              <dl class="tally-more">
+                <div><dt>Hood catches</dt><dd><strong data-out-capture>…</strong></dd></div>
+                <div><dt>Tightest aisle</dt><dd><strong data-out-aisle>…</strong></dd></div>
+              </dl>
+              <p class="tally-meta" data-out-meta>14 fixtures · 3 staff</p>
             </div>
 
-            <button type="button" class="pause-btn" data-hero-pause aria-label="Pause or resume 3D simulation" aria-pressed="false">
-              <span class="icon-pause" aria-hidden="true">❚❚</span>
-              <span class="icon-play" aria-hidden="true">▶</span>
+            <button type="button" class="console-pause" data-hero-pause aria-label="Pause the kitchen" aria-pressed="false">
+              <span class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9 5v14M15 5v14" /></svg></span>
+              <span class="off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg></span>
             </button>
           </div>
-          <p class="console-prompt">
-            Drag to orbit any of the 5 kitchens (click a canvas to unlock wheel zoom, or press Space to pause). Slide Electrification toward 100% Induction to watch the gas burners go out and the hood plumes thin as sensible room heat falls, or turn on Aisle Clearances to see every cook's planned path.
+          <p class="console-note">
+            Drag the kitchen to look around. Click it once to zoom with the scroll wheel; Space pauses. Slide induction to 100% and the gas flames go out. The cooks plan their own routes and step round each other; their walking is a kinematic illustration, posed for reach and stride rather than solved from forces.
           </p>
         </div>
       </section>
 
-      <!-- 5-CARD SPEC STAT RIBBON -->
-      <section class="wrap stat-ribbon-wrap" aria-label="Measured build counts">
-        <ul class="stat-ribbon">
-          <li>
-            <a href="#hero">
-              <b class="num">5</b>
-              <strong>Canonical 3D Kitchens</strong>
-              <span>400 sq ft Mall QSR through 3,200 sq ft Catering Commissary, batched into under 180 WebGL draw calls.</span>
-            </a>
-          </li>
-          <li>
-            <a href="#equipment">
-              <b class="num">67</b>
-              <strong>Parametric .glb Assets</strong>
-              <span>Watertight meshes checked within 0.44 mm of SI envelopes, paired with matdb surface cards, hinges, and grasp sockets.</span>
-            </a>
-          </li>
-          <li>
-            <a href="#brigade">
-              <b class="num">29</b>
-              <strong>Bone Anthropometric Rigs</strong>
-              <span>ISO 7250 P05, P50, and P95 SkinnedMesh rigs measuring door conflicts, reach arcs, and L5/S1 lift torque.</span>
-            </a>
-          </li>
-          <li>
-            <a href="#stove">
-              <b class="num">4</b>
-              <strong>Live Conservation Kernels</strong>
-              <span>Stove, Combi Oven, Walk-In Cooler, and Insulated Carrier solvers matched to Rust WASM within 1e-6.</span>
-            </a>
-          </li>
-          <li>
-            <a href="#architecture">
-              <b class="num">0</b>
-              <strong>OEM Brands · Law V-L16</strong>
-              <span>Generic commercial NSF archetypes with zero vendor branding and explicit fitted-parameter disclosure.</span>
-            </a>
-          </li>
+      <div class="wrap">
+        <ul class="stats">
+          <li><a href="#hero"><b>5</b><strong>kitchens</strong><span>From a 400 ft² mall counter to a 3,200 ft² commissary.</span></a></li>
+          <li><a href="#equipment"><b>79</b><strong>pieces of equipment</strong><span>Each one built to its catalogue size.</span></a></li>
+          <li><a href="#stove"><b>4</b><strong>live physics models</strong><span>The stove, the oven, the walk-in and the delivery box.</span></a></li>
+          <li><a href="#brigade"><b>3</b><strong>body sizes</strong><span>Short, average and tall cooks test every aisle.</span></a></li>
+          <li><a href="#architecture"><b>0</b><strong>brand names</strong><span>Generic equipment, and every fitted number marked.</span></a></li>
         </ul>
-      </section>
+      </div>
 
-      <!-- =================================================================
-           EDITORIAL BAND (#why) - WHY CONSERVATION-LAW KITCHEN SIMULATION
-           ================================================================= -->
-      <section class="chapter why-band" id="why" style="--chapter: #fb923c" aria-labelledby="why-title">
+      <!-- ============================ WHY ============================ -->
+      <section class="sec open" id="why" aria-labelledby="why-title" style="--chapter: #f59e0b">
         <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Why Simulate a Kitchen from First Principles</p>
-            <h2 class="d2" id="why-title">A floorplan is a coupled thermal and human machine.</h2>
-            <p class="chapter-lede">
-              Commercial kitchens draw 30 to 430 kW inside tight, stainless rooms where gas burners, exhaust hoods, walk-in evaporators, hot pans, and moving cooks all fight the same air and corridor space. Static CAD drawings check footprints, and spreadsheets sum nameplate ratings, yet the expensive buildout mistakes happen where those domains collide.
-            </p>
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span>Why a kitchen lab</p>
+              <h2 class="d2" id="why-title">A kitchen is heat, air and people <em class="g">in one small room</em>.</h2>
+              <p class="kicker">
+                At a normal rush the five kitchens here run 71 to 414 kW of cooking heat in rooms of 400 to 3,200 ft². The burners, the hood, the walk-in and the cooks share that air and the same few aisles. Drawings and spreadsheets check each part on its own; Kitchen Lab runs them together.
+              </p>
+            </div>
           </div>
 
-          <div class="decision-grid">
-            <article class="decision-card" style="--card-accent: #f59e0b">
-              <span class="decision-num num">01 · HVAC &amp; ELECTRIFICATION</span>
-              <h3>Does switching to induction pay back in hood and cooling tonnage?</h3>
-              <p>
-                Open commercial gas ranges transfer roughly 42% of burner energy into a skillet and dump the other 58% into the room and exhaust canopy. Ferromagnetic induction couples at ~86%, cutting convective plume buoyancy and letting mechanical engineers shrink makeup-air and HVAC tonnage before ordering rooftop units.
-              </p>
-              <a class="decision-link" href="#fleet">Compare all 5 kitchens in the Fleet Matrix ↓</a>
-            </article>
+          <ul class="bento">
+            <li class="heat reveal">
+              <div class="bento-art" aria-hidden="true">
+                <svg viewBox="0 0 480 300" preserveAspectRatio="xMidYMid slice">
+                  <defs>
+                    <linearGradient id="artHeatGlow" x1="0" y1="1" x2="0" y2="0">
+                      <stop offset="0" stop-color="#f97316" stop-opacity="0.4" />
+                      <stop offset="1" stop-color="#f97316" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <path d="M0 270h480" stroke="#e9dccf" stroke-opacity="0.12" />
+                  <path d="M212 0v34h56V0" fill="#17110d" stroke="#e9dccf" stroke-opacity="0.28" />
+                  <path d="M118 34h244l36 54H82z" fill="#1b140f" stroke="#e9dccf" stroke-opacity="0.36" />
+                  <path d="M120 80l10-14M150 80l10-14M180 80l10-14M210 80l10-14M240 80l10-14M270 80l10-14M300 80l10-14M330 80l10-14" stroke="#e9dccf" stroke-opacity="0.16" />
+                  <path d="M190 186 240 92 290 186z" fill="url(#artHeatGlow)" />
+                  <g fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round">
+                    <path d="M206 184c-9-24 13-38 2-60s9-30 3-38" stroke-opacity="0.8" />
+                    <path d="M240 184c-7-24 10-36 0-60s7-28 0-38" stroke-opacity="0.9" />
+                    <path d="M274 184c-7-24 12-38 3-60s9-28 2-38" stroke-opacity="0.8" />
+                    <path d="M298 184c18-20 40-20 58-40s38-26 66-28" stroke-opacity="0.55" stroke-dasharray="3 7" />
+                    <path d="M182 184c-18-18-40-20-58-38s-36-24-64-26" stroke-opacity="0.55" stroke-dasharray="3 7" />
+                  </g>
+                  <path d="M415 113l10 3-8 6" fill="none" stroke="#f97316" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round" />
+                  <path d="M65 117l-10 3 8 6" fill="none" stroke="#f97316" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round" />
+                  <rect x="128" y="214" width="224" height="90" rx="6" fill="#15100c" stroke="#e9dccf" stroke-opacity="0.32" />
+                  <path d="M128 232h224" stroke="#e9dccf" stroke-opacity="0.16" />
+                  <g fill="none" stroke="#e9dccf" stroke-opacity="0.38">
+                    <circle cx="168" cy="252" r="7" />
+                    <circle cx="208" cy="252" r="7" />
+                    <circle cx="272" cy="252" r="7" />
+                    <circle cx="312" cy="252" r="7" />
+                  </g>
+                  <path d="M170 214v-5h140v5" fill="none" stroke="#e9dccf" stroke-opacity="0.4" />
+                  <g>
+                    <path d="M192 208c-5-5-4-11 0-16 4 5 5 11 0 16z" fill="#f97316" />
+                    <path d="M206 208c-5-6-4-13 0-18 4 5 5 12 0 18z" fill="#fb923c" />
+                    <path d="M220 208c-5-5-4-11 0-16 4 5 5 11 0 16z" fill="#f97316" />
+                    <path d="M234 208c-5-6-4-13 0-18 4 5 5 12 0 18z" fill="#fb923c" />
+                    <path d="M248 208c-5-5-4-11 0-16 4 5 5 11 0 16z" fill="#f97316" />
+                    <path d="M262 208c-5-6-4-13 0-18 4 5 5 12 0 18z" fill="#fb923c" />
+                    <path d="M276 208c-5-5-4-11 0-16 4 5 5 11 0 16z" fill="#f97316" />
+                    <path d="M290 208c-5-6-4-13 0-18 4 5 5 12 0 18z" fill="#fb923c" />
+                  </g>
+                  <path d="M178 184h126l-7 12H185z" fill="#2c221b" stroke="#e9dccf" stroke-opacity="0.55" />
+                  <path d="M304 188l54-7" stroke="#e9dccf" stroke-opacity="0.5" stroke-width="5" stroke-linecap="round" />
+                  <g font-family="JetBrains Mono Variable, JetBrains Mono, monospace" font-size="13" font-weight="500">
+                    <text x="64" y="204" text-anchor="middle" fill="#fdba74">42% to the pan</text>
+                    <path d="M112 200h58" stroke="#fdba74" stroke-opacity="0.5" stroke-dasharray="2 4" />
+                    <text x="416" y="94" text-anchor="middle" fill="#fdba74">58% to the air</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="bento-copy">
+                <p class="micro">Gas or induction</p>
+                <h3>Where does the burner's heat go?</h3>
+                <p>An open gas burner puts about 42% of its heat into the pan. The rest heats the kitchen and the hood. Induction puts about 86% into the pan, so the hood and the air conditioning can be smaller.</p>
+                <a class="more" href="#fleet">Compare all five kitchens<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
+              </div>
+            </li>
 
-            <article class="decision-card" style="--card-accent: #38bdf8">
-              <span class="decision-num num">02 · COLD CHAIN FAILURE</span>
-              <h3>When do hot hotel pans push a walk-in past 41 °F?</h3>
-              <p>
-                Rolling 20 hot 4-inch or 6-inch pans straight off the line while staff open the cooler door creates a double load: slow conductive core cooling inside deep pans plus warm humid air rushing across the top lintel (Gosney-Olama exchange). Coil frost then cuts evaporator heat transfer right when the box needs peak capacity.
-              </p>
-              <a class="decision-link" href="#cold">Stress-test the Walk-In BTU wall ↓</a>
-            </article>
+            <li class="cold reveal">
+              <div class="bento-art" aria-hidden="true">
+                <svg viewBox="0 0 480 300" preserveAspectRatio="xMidYMid slice">
+                  <defs>
+                    <radialGradient id="artColdPool" cx="0.5" cy="0.5" r="0.5">
+                      <stop offset="0" stop-color="#5ec8f2" stop-opacity="0.32" />
+                      <stop offset="1" stop-color="#5ec8f2" stop-opacity="0" />
+                    </radialGradient>
+                  </defs>
+                  <ellipse cx="112" cy="272" rx="120" ry="16" fill="url(#artColdPool)" />
+                  <path d="M0 272h480" stroke="#e9dccf" stroke-opacity="0.16" />
+                  <rect x="188" y="46" width="254" height="226" fill="#5ec8f2" fill-opacity="0.04" />
+                  <path d="M178 108V36h274v236" fill="none" stroke="#e9dccf" stroke-opacity="0.4" stroke-width="2" />
+                  <path d="M188 108V46h254v226" fill="none" stroke="#e9dccf" stroke-opacity="0.13" />
+                  <path d="M178 108l-50 16v146l50 2" fill="#17110d" stroke="#e9dccf" stroke-opacity="0.32" />
+                  <path d="M138 190v22" stroke="#e9dccf" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round" />
+                  <rect x="352" y="54" width="78" height="24" rx="4" fill="#12202a" stroke="#5ec8f2" stroke-opacity="0.65" />
+                  <path d="M362 58v16M372 58v16M382 58v16M392 58v16M402 58v16M412 58v16M422 58v16" stroke="#5ec8f2" stroke-opacity="0.35" />
+                  <path d="M356 84l5 5 5-5 5 5 5-5 5 5 5-5 5 5 5-5 5 5 5-5 5 5 5-5 5 5 5-5" fill="none" stroke="#e8f6fc" stroke-opacity="0.75" />
+                  <g stroke="#e9dccf" stroke-opacity="0.34">
+                    <path d="M290 118v152M340 118v152" />
+                    <path d="M286 136h58M286 168h58M286 200h58M286 232h58M286 264h58" />
+                  </g>
+                  <rect x="295" y="127" width="40" height="8" rx="2" fill="#f97316" fill-opacity="0.95" />
+                  <rect x="295" y="159" width="40" height="8" rx="2" fill="#f97316" fill-opacity="0.8" />
+                  <rect x="295" y="191" width="40" height="8" rx="2" fill="#f97316" fill-opacity="0.65" />
+                  <rect x="295" y="223" width="40" height="8" rx="2" fill="#fb923c" fill-opacity="0.5" />
+                  <rect x="295" y="255" width="40" height="8" rx="2" fill="#fb923c" fill-opacity="0.38" />
+                  <g fill="none" stroke="#e9dccf" stroke-opacity="0.32" stroke-linecap="round">
+                    <path d="M306 122c-4-5 4-8 0-13M322 122c-4-5 4-8 0-13" />
+                    <path d="M314 154c-4-5 4-8 0-13" />
+                  </g>
+                  <g fill="none" stroke-width="2.2" stroke-linecap="round">
+                    <path d="M24 124c48-8 96-6 150-2s56 6 80 10" stroke="#f97316" stroke-opacity="0.85" />
+                    <path d="M246 126l11 7-12 4" stroke="#f97316" stroke-opacity="0.85" />
+                    <path d="M270 248c-46 6-92 12-148 14s-72 0-100-2" stroke="#5ec8f2" stroke-opacity="0.9" />
+                    <path d="M32 254l-11 5 11 6" stroke="#5ec8f2" stroke-opacity="0.9" />
+                    <path d="M260 230c-50 8-100 16-160 20" stroke="#5ec8f2" stroke-opacity="0.4" stroke-dasharray="3 7" />
+                  </g>
+                  <g font-family="JetBrains Mono Variable, JetBrains Mono, monospace" font-size="13" font-weight="500">
+                    <text x="24" y="110" fill="#fdba74">warm air in</text>
+                    <text x="24" y="240" fill="#8fd9f7">cold air out</text>
+                    <rect x="198" y="56" width="66" height="26" rx="7" fill="#0b0907" stroke="#5ec8f2" stroke-opacity="0.5" />
+                    <text x="231" y="74" text-anchor="middle" fill="#8fd9f7">41 °F</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="bento-copy">
+                <p class="micro">Walk-in cooler</p>
+                <h3>Will it stay under 41 °F?</h3>
+                <p>A rack of hot pans rolls in and the door keeps opening. Warm air pours in at the top of the doorway while cold air spills out at the floor, and frost on the coil cuts its cooling.</p>
+                <a class="more" href="#cold">Load the walk-in<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
+              </div>
+            </li>
 
-            <article class="decision-card" style="--card-accent: #eab308">
-              <span class="decision-num num">03 · QUALITY VS. SAFETY</span>
-              <h3>How much vent opening keeps fried food crisp above 135 °F?</h3>
-              <p>
-                Seal an insulated delivery carrier tightly and food stays warm, but trapped steam drives crust moisture up until its Gordon-Taylor glass-transition temperature falls below food temperature and the crust turns soft. Open the vent too wide and core temperature crosses the 135 °F hot-hold floor early.
-              </p>
-              <a class="decision-link" href="#cold">Explore the Carrier vent trade-off ↓</a>
-            </article>
+            <li class="crisp reveal">
+              <div class="bento-art" aria-hidden="true">
+                <svg viewBox="0 0 480 300" preserveAspectRatio="xMidYMid slice">
+                  <path d="M0 272h480" stroke="#e9dccf" stroke-opacity="0.12" />
+                  <path d="M142 86V68a8 8 0 0 1 8-8h74a8 8 0 0 1 8 8v18" fill="none" stroke="#e9dccf" stroke-opacity="0.4" stroke-width="5" stroke-linecap="round" />
+                  <rect x="56" y="86" width="262" height="178" rx="20" fill="#19130e" stroke="#e9dccf" stroke-opacity="0.4" stroke-width="2" />
+                  <rect x="70" y="100" width="234" height="150" rx="12" fill="#0e0b08" stroke="#e9dccf" stroke-opacity="0.14" />
+                  <rect x="246" y="80" width="48" height="11" rx="3" fill="#0b0907" stroke="#f2b134" stroke-opacity="0.85" />
+                  <rect x="257" y="76" width="15" height="19" rx="3" fill="#f2b134" />
+                  <g fill="none" stroke="#e9dccf" stroke-opacity="0.38" stroke-linecap="round">
+                    <path d="M278 72c-6-9 6-15 0-24s6-13 2-20" />
+                    <path d="M290 72c-5-8 5-13 0-21" stroke-opacity="0.25" />
+                  </g>
+                  <g fill="#5ec8f2" fill-opacity="0.6">
+                    <circle cx="92" cy="108" r="2.6" /><circle cx="112" cy="110" r="2.2" /><circle cx="134" cy="108" r="2.6" /><circle cx="156" cy="110" r="2.2" />
+                    <circle cx="178" cy="108" r="2.6" /><circle cx="200" cy="110" r="2.2" /><circle cx="222" cy="108" r="2.6" />
+                  </g>
+                  <g fill="none" stroke="#e9dccf" stroke-opacity="0.3" stroke-linecap="round">
+                    <path d="M140 176c-5-8 5-12 0-20s5-12 0-20" />
+                    <path d="M186 172c-5-8 5-12 0-20s5-12 0-20" />
+                    <path d="M232 176c-5-8 5-12 0-20s5-12 0-20" />
+                  </g>
+                  <g fill="#f2b134">
+                    <rect x="120" y="186" width="7" height="46" rx="2" transform="rotate(-14 123 209)" />
+                    <rect x="134" y="182" width="7" height="50" rx="2" transform="rotate(-6 137 207)" />
+                    <rect x="148" y="184" width="7" height="48" rx="2" transform="rotate(4 151 208)" fill-opacity="0.85" />
+                    <rect x="162" y="180" width="7" height="52" rx="2" transform="rotate(-10 165 206)" />
+                    <rect x="176" y="186" width="7" height="46" rx="2" transform="rotate(9 179 209)" fill-opacity="0.85" />
+                    <rect x="190" y="182" width="7" height="50" rx="2" transform="rotate(-3 193 207)" />
+                    <rect x="204" y="184" width="7" height="48" rx="2" transform="rotate(12 207 208)" fill-opacity="0.85" />
+                    <rect x="218" y="186" width="7" height="46" rx="2" transform="rotate(-8 221 209)" />
+                    <rect x="232" y="182" width="7" height="50" rx="2" transform="rotate(6 235 207)" fill-opacity="0.85" />
+                  </g>
+                  <path d="M104 214h170l-14 26H118z" fill="#3a2a1a" stroke="#e9dccf" stroke-opacity="0.3" />
+                  <g fill="none" stroke-linecap="round">
+                    <path d="M370 132a32 32 0 0 1 64 0" stroke="#e9dccf" stroke-opacity="0.2" stroke-width="6" />
+                    <path d="M370 132a32 32 0 0 1 22-30" stroke="#f2b134" stroke-width="6" />
+                    <path d="M402 132l-17-19" stroke="#f4eee8" stroke-width="2.5" />
+                    <path d="M370 222a32 32 0 0 1 64 0" stroke="#e9dccf" stroke-opacity="0.2" stroke-width="6" />
+                    <path d="M370 222a32 32 0 0 1 55-22" stroke="#f97316" stroke-width="6" />
+                    <path d="M402 222l20-15" stroke="#f4eee8" stroke-width="2.5" />
+                  </g>
+                  <circle cx="402" cy="132" r="4" fill="#f4eee8" />
+                  <circle cx="402" cy="222" r="4" fill="#f4eee8" />
+                  <g font-family="JetBrains Mono Variable, JetBrains Mono, monospace" font-size="13" font-weight="500" text-anchor="middle">
+                    <text x="402" y="154" fill="#f7cf7a">crisp</text>
+                    <text x="402" y="244" fill="#fdba74">135 °F</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="bento-copy">
+                <p class="micro">Delivery</p>
+                <h3>Crisp, or hot enough?</h3>
+                <p>Seal a delivery box and the fries steam and go soft. Open the vent too far and the food drops below 135 °F, the hot-holding limit. Drag the vent and watch both numbers.</p>
+                <a class="more" href="#cold">Pack a delivery<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
+              </div>
+            </li>
 
-            <article class="decision-card" style="--card-accent: #34d399">
-              <span class="decision-num num">04 · ERGONOMIC CLEARANCE</span>
-              <h3>Will a 38-inch line pinch taller cooks when oven doors open?</h3>
-              <p>
-                An aisle that passes code on paper can still force a 95th-percentile cook to twist past an open combi door or bend 26 degrees forward lifting a 10 kg stockpot. Checking P05, P50, and P95 swept capsules and lumbar torque directly on the real 3D geometry catches door conflicts before steel is fabricated.
-              </p>
-              <a class="decision-link" href="#brigade">Test aisle widths with P05-P95 rigs ↓</a>
-            </article>
-          </div>
+            <li class="aisle reveal">
+              <div class="bento-art" aria-hidden="true">
+                <svg viewBox="0 0 480 300" preserveAspectRatio="xMidYMid slice">
+                  <rect x="20" y="24" width="440" height="76" rx="6" fill="#18120d" stroke="#e9dccf" stroke-opacity="0.34" />
+                  <g fill="none" stroke="#e9dccf" stroke-opacity="0.3">
+                    <circle cx="66" cy="62" r="18" /><circle cx="66" cy="62" r="8" />
+                    <circle cx="116" cy="62" r="18" /><circle cx="116" cy="62" r="8" />
+                    <rect x="152" y="40" width="56" height="44" rx="4" />
+                    <path d="M160 48h40M160 56h40M160 64h40M160 72h40" stroke-opacity="0.16" />
+                    <rect x="222" y="40" width="98" height="44" rx="4" />
+                    <circle cx="372" cy="62" r="18" /><circle cx="372" cy="62" r="8" />
+                    <circle cx="422" cy="62" r="18" /><circle cx="422" cy="62" r="8" />
+                  </g>
+                  <rect x="20" y="204" width="440" height="76" rx="6" fill="#18120d" stroke="#e9dccf" stroke-opacity="0.34" />
+                  <rect x="316" y="212" width="80" height="60" rx="4" fill="#211912" stroke="#e9dccf" stroke-opacity="0.42" />
+                  <path d="M326 222h60v40h-60z" fill="none" stroke="#e9dccf" stroke-opacity="0.18" />
+                  <path d="M396 204V136" stroke="#e0905f" stroke-width="5" stroke-linecap="round" />
+                  <path d="M316 204a80 80 0 0 1 80-68" fill="none" stroke="#e0905f" stroke-opacity="0.55" stroke-dasharray="4 5" />
+                  <path d="M40 104v96M33 104h14M33 200h14" stroke="#e9dccf" stroke-opacity="0.45" />
+                  <g fill="none" stroke="#e0905f" stroke-opacity="0.4" stroke-dasharray="3 5">
+                    <circle cx="154" cy="152" r="40" />
+                    <circle cx="322" cy="150" r="50" />
+                  </g>
+                  <g>
+                    <ellipse cx="154" cy="156" rx="20" ry="10" fill="#2c2119" stroke="#e0905f" stroke-opacity="0.7" />
+                    <path d="M138 150l-4-14M170 150l4-14" stroke="#e9dccf" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round" />
+                    <circle cx="154" cy="156" r="8" fill="#f4eee8" />
+                    <ellipse cx="322" cy="158" rx="26" ry="12" fill="#2c2119" stroke="#e0905f" stroke-opacity="0.7" />
+                    <path d="M302 150l-4-20M342 150l4-20" stroke="#e9dccf" stroke-opacity="0.55" stroke-width="6" stroke-linecap="round" />
+                    <rect x="292" y="116" width="60" height="18" rx="3" fill="#b8c2cc" fill-opacity="0.85" />
+                    <circle cx="322" cy="158" r="10" fill="#f4eee8" />
+                  </g>
+                  <circle cx="372" cy="150" r="9" fill="#fb7185" fill-opacity="0.22" stroke="#fb7185" stroke-opacity="0.8" />
+                  <g font-family="JetBrains Mono Variable, JetBrains Mono, monospace" font-size="13" font-weight="500">
+                    <text x="54" y="157" fill="#f2bd98">38 in</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="bento-copy">
+                <p class="micro">Aisles</p>
+                <h3>Is 38 inches wide enough?</h3>
+                <p>The mall counter's tightest aisle is 38 inches. Once a tall cook bends to a low shelf, nobody else can get past. Test three body sizes in aisles from 32 to 60 inches.</p>
+                <a class="more" href="#brigade">Test an aisle<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
+              </div>
+            </li>
+          </ul>
         </div>
       </section>
 
-      <!-- =================================================================
-           CHAPTER 1 (#equipment) - THE HARDWARE
-           ================================================================= -->
-      <section class="chapter" id="equipment" style="--chapter: #d97706" aria-labelledby="ch1-title">
+      <!-- ============================ 01 EQUIPMENT ============================ -->
+      <section class="sec" id="equipment" aria-labelledby="equipment-title" style="--chapter: #b4c0cb">
         <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Chapter 01 · Parametric Asset Library</p>
-            <h2 class="d2" id="ch1-title">The Hardware.</h2>
-            <p class="chapter-lede">
-              Every range, combi oven, canopy hood, skillet, bottle, and food item is a watertight binary <code>.glb</code> generated programmatically in Blender 5.3. Each asset carries verified SI millimeter bounds, articulated hinges and baskets, grasp sockets for staff rigs, and a material card linking geometry to surface emissivity and thermal mass.
-            </p>
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>01</b><i></i>Equipment</p>
+              <h2 class="d3" id="equipment-title">Every piece of equipment, <em class="g">to the millimetre</em>.</h2>
+              <p class="kicker">
+                Ranges, combi ovens, hoods, skillets and even the steaks are built in code, part by part. Each one has its true size, doors and baskets that move, grip points for a cook's hands, and a material card that sets how it heats.
+              </p>
+            </div>
+            <a class="more" href="#equipment-how">How it's made<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
           </div>
 
-          <div class="figure-card">
-            <div class="figure-bar">
-              <p class="figure-prompt">Pick a category, search all 67 assets, or toggle Animate Joints, Thermal Preview, Wireframe X-Ray, and the SI Dimension Cage.</p>
-              <span class="fig-tag">Interactive 3D · 67 Real .glb Assets</span>
-            </div>
-
-            <div class="eq-layout">
-              <div class="eq-stage-col">
-                <div class="stage-box stage-turntable" data-eq-stage>
-                  <canvas
-                    class="webgl-canvas"
-                    data-eq-canvas
-                    tabindex="0"
-                    aria-label="Interactive 3D turntable inspecting parametric commercial kitchen equipment and cookware."
-                  ></canvas>
-                  <div class="stage-overlay-pills">
-                    <button type="button" class="chip-btn chip-subtle" data-eq-joints aria-pressed="true">Animate Joints</button>
-                    <button type="button" class="chip-btn chip-subtle" data-eq-thermal aria-pressed="false">Thermal Preview</button>
-                    <button type="button" class="chip-btn chip-subtle" data-eq-wire aria-pressed="false">Wireframe X-Ray</button>
-                    <button type="button" class="chip-btn chip-subtle" data-eq-cage aria-pressed="true">SI Cage &amp; Sockets</button>
-                    <button type="button" class="chip-btn chip-subtle" data-eq-spin aria-pressed="true">Auto-Spin</button>
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Pick a piece, then drag to turn it</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="eq">
+                <div class="eq-pick">
+                  <div class="seg" role="group" aria-label="Equipment category">
+                    <button type="button" data-eq-tab="hot_line" aria-pressed="true">Hot line</button>
+                    <button type="button" data-eq-tab="ovens_fryers" aria-pressed="false">Ovens &amp; fryers</button>
+                    <button type="button" data-eq-tab="cold_chain" aria-pressed="false">Cold storage</button>
+                    <button type="button" data-eq-tab="ventilation" aria-pressed="false">Hoods</button>
+                    <button type="button" data-eq-tab="cookware_food" aria-pressed="false">Pans &amp; food</button>
                   </div>
-                </div>
-              </div>
-
-              <div class="eq-panel">
-                <div class="seg-group seg-wrap" role="group" aria-label="Equipment categories">
-                  <button type="button" data-eq-tab="hot_line" aria-pressed="true">Hot Line</button>
-                  <button type="button" data-eq-tab="ovens_fryers" aria-pressed="false">Ovens &amp; Fryers</button>
-                  <button type="button" data-eq-tab="cold_chain" aria-pressed="false">Cold Chain</button>
-                  <button type="button" data-eq-tab="ventilation" aria-pressed="false">Ventilation</button>
-                  <button type="button" data-eq-tab="cookware_food" aria-pressed="false">Cookware &amp; Food</button>
+                  <div class="eq-find">
+                    <input type="search" class="text-input" data-eq-search placeholder="Search all 79: fryer, hood, steak…" aria-label="Search all 79 pieces of equipment" />
+                    <select class="select-input" data-eq-select aria-label="All 79 pieces of equipment"></select>
+                  </div>
+                  <div class="chip-grid" data-eq-pills></div>
                 </div>
 
-                <div class="eq-search-row">
-                  <input type="search" class="text-input" data-eq-search placeholder="Search all 67 assets (fryer, combi, skillet, steak, hood)..." aria-label="Search 67 catalog assets" />
-                  <select class="select-input" data-eq-select aria-label="Select any of 67 catalog assets"></select>
+                <div class="eq-view">
+                  <div class="stage" data-eq-stage>
+                    <canvas data-eq-canvas tabindex="0" aria-label="The selected piece of equipment in 3D, turning slowly. Drag to turn it."></canvas>
+                  </div>
+                  <div class="toggles">
+                    <button type="button" class="toggle sm" data-eq-joints aria-pressed="true"><i aria-hidden="true"></i>Moving parts</button>
+                    <button type="button" class="toggle sm" data-eq-thermal aria-pressed="false"><i aria-hidden="true"></i>Heat</button>
+                    <button type="button" class="toggle sm" data-eq-wire aria-pressed="false"><i aria-hidden="true"></i>Wireframe</button>
+                    <button type="button" class="toggle sm" data-eq-cage aria-pressed="true"><i aria-hidden="true"></i>Size box</button>
+                    <button type="button" class="toggle sm" data-eq-spin aria-pressed="true"><i aria-hidden="true"></i>Spin</button>
+                  </div>
                 </div>
 
-                <div class="chip-grid" data-eq-pills></div>
-
-                <div class="spec-sheet">
-                  <div class="spec-header">
-                    <strong data-eq-name>6-Burner Gas Range</strong>
-                    <code class="num" data-eq-id>NSF-RANGE-GAS-6B</code>
+                <div class="eq-spec" aria-live="polite">
+                  <p class="micro">Selected</p>
+                  <div>
+                    <h3><strong data-eq-name>6-Burner Gas Range</strong></h3>
+                    <code class="eq-id" data-eq-id>NSF-RANGE-GAS-6B</code>
                   </div>
-                  <p class="spec-note" data-eq-note>Open flame grates · 42% pan coupling</p>
-                  <div class="stat-grid-2">
-                    <div class="stat-cell"><span>SI Bounding Box</span><b class="num" data-eq-dims>914 × 864 × 1473 mm</b></div>
-                    <div class="stat-cell"><span>Geometry Budget</span><b class="num" data-eq-tris>1,404 tris</b></div>
-                    <div class="stat-cell"><span>MatDB Surface Card</span><b class="num" data-eq-card>surfaces/cookware-cast-iron-seasoned</b></div>
-                    <div class="stat-cell"><span>Kinematics &amp; Grasp</span><b class="num" data-eq-sockets>5 sockets · 2 joints</b></div>
-                  </div>
+                  <p class="note" data-eq-note>Open flame grates · 42% pan coupling</p>
+                  <table class="data">
+                    <tbody>
+                      <tr><th scope="row">Size</th><td><b data-eq-dims>914 × 864 × 1473 mm</b></td></tr>
+                      <tr><th scope="row">Detail</th><td><b data-eq-tris>…</b></td></tr>
+                      <tr><th scope="row">Material card</th><td><b data-eq-card>…</b></td></tr>
+                      <tr><th scope="row">Moving parts</th><td><b data-eq-sockets>…</b></td></tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
-          </div>
+            <figcaption class="fig-foot how" id="equipment-how">
+              <div>
+                <p class="how-title">How it's made</p>
+                <p>Each piece is built in code with three.js, part by part, to the catalogue's width, depth and height. The size box shows those measurements in millimetres. Its material card gives the surface's emissivity and heat capacity, which the stove and oven models use.</p>
+              </div>
+              <div>
+                <p class="how-title">In the files</p>
+                <p>Moving parts are named joints, such as an oven door's hinge or a fryer basket's lift. Grip points are named sockets that the cooks' hands attach to. The catalogue lists all 79 pieces with their sizes, triangle counts and joints.</p>
+              </div>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
-      <!-- =================================================================
-           CHAPTER 2 (#stove) - THE FLAME & THE PAN
-           ================================================================= -->
-      <section class="chapter" id="stove" style="--chapter: #f97316" aria-labelledby="ch2-title">
+      <!-- ============================ 02 STOVE ============================ -->
+      <section class="sec" id="stove" aria-labelledby="stove-title" style="--chapter: #f97316">
         <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Chapter 02 · Conduction, Eddy Coupling &amp; Phase Flash</p>
-            <h2 class="d2" id="ch2-title">The Flame &amp; the Pan.</h2>
-            <p class="chapter-lede">
-              An 8-slice finite-difference ribeye sits inside a two-node skillet of the chosen alloy over a coupled heat source. Switch to Induction on an Aluminum skillet to watch eddy-current power collapse, push Butter past its 177 °C smoke point, or pour 120 mL of wine to watch latent heat of vaporization quench the pan surface and dissolve browned fond in real time.
-            </p>
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>02</b><i></i>The stove</p>
+              <h2 class="d3" id="stove-title">Sear a steak, then <em class="g">pour in the wine</em>.</h2>
+              <p class="kicker">
+                A ribeye sears in a skillet over gas, induction or an electric coil. Change the pan or the fat and the sear changes. Pour in 120 mL of wine and it boils on contact, cools the pan and lifts the browned bits off the bottom.
+              </p>
+            </div>
+            <a class="more" href="#stove-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
           </div>
 
-          <div class="figure-card">
-            <div class="figure-bar">
-              <p class="figure-prompt">Compare heat sources and skillet alloys, then trigger Deglaze 120 mL Wine to inspect flash boiling, steak shrinkage, and thermal recovery.</p>
-              <span class="fig-tag tag-live">Live Conservation Physics · &lt;1e-6 Rust Parity</span>
-            </div>
-
-            <div class="lab-grid">
-              <div class="lab-stage-col">
-                <div class="stage-box stage-lab" data-stove-stage>
-                  <canvas
-                    class="webgl-canvas"
-                    data-stove-canvas
-                    tabindex="0"
-                    aria-label="Live 3D stovetop sear and 120 mL wine deglaze conservation physics visualization."
-                  ></canvas>
-                </div>
-                <div class="chart-card">
-                  <canvas class="strip-chart" data-stove-chart aria-label="Live pan and steak core temperature strip chart"></canvas>
-                </div>
-              </div>
-
-              <div class="lab-panel">
-                <div class="eq-bar">
-                  <span class="micro">Governing Energy Balance</span>
-                  <code class="eq-formula">C_pan · dT_pan/dt = η_src(alloy) · P_in − q_steak − ṁ_vap · h_fg(T) − q_loss</code>
-                </div>
-
-                <div class="control-block">
-                  <p class="micro">Heat Source</p>
-                  <div class="seg-group" role="group" aria-label="Stovetop heat source">
-                    <button type="button" data-stove-source="induction" aria-pressed="true">Induction</button>
-                    <button type="button" data-stove-source="gas" aria-pressed="false">Gas Flame</button>
-                    <button type="button" data-stove-source="electric" aria-pressed="false">Electric Coil</button>
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Choose a burner and a pan, then pour in the wine</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="lab">
+                <div class="lab-view">
+                  <div class="stage" data-stove-stage>
+                    <canvas data-stove-canvas tabindex="0" aria-label="A ribeye searing in a skillet on the chosen burner, in 3D. Drag to look around."></canvas>
+                  </div>
+                  <div class="chart">
+                    <canvas data-stove-chart aria-label="Pan and steak temperatures over time"></canvas>
                   </div>
                 </div>
 
-                <div class="control-block">
-                  <p class="micro">Skillet Alloy</p>
-                  <div class="seg-group" role="group" aria-label="Skillet alloy">
-                    <button type="button" data-stove-pan="cast_iron" aria-pressed="true">Cast Iron</button>
-                    <button type="button" data-stove-pan="tri_ply" aria-pressed="false">Tri-Ply SS</button>
-                    <button type="button" data-stove-pan="aluminum" aria-pressed="false">Aluminum</button>
-                  </div>
-                </div>
-
-                <div class="control-block">
-                  <p class="micro">Cooking Fat</p>
-                  <div class="seg-group" role="group" aria-label="Cooking fat">
-                    <button type="button" data-stove-fat="canola" aria-pressed="true">Canola</button>
-                    <button type="button" data-stove-fat="butter" aria-pressed="false">Butter</button>
-                    <button type="button" data-stove-fat="lard" aria-pressed="false">Lard</button>
-                  </div>
-                </div>
-
-                <label class="dial">
-                  <span class="dial-head"><span>Burner Throttle</span><output class="num" data-stove-power-val>72%</output></span>
-                  <input type="range" min="15" max="100" step="1" value="72" data-stove-power />
-                </label>
-
-                <div class="action-row">
-                  <button type="button" class="btn btn-copper" data-stove-deglaze>Deglaze 120 mL Wine</button>
-                  <button type="button" class="btn btn-ghost" data-stove-reset>Reset Sear</button>
-                </div>
-
-                <div class="status-pill" data-st-smoke data-state="ok">Clean sear · smoke point 204 °C</div>
-
-                <div class="stat-grid-3">
-                  <div class="stat-cell"><span>Pan Surface</span><b class="num" data-st-pan>192.0 °C</b></div>
-                  <div class="stat-cell"><span>Steak Core</span><b class="num" data-st-core>14.0 °C</b></div>
-                  <div class="stat-cell"><span>Coupled Power</span><b class="num" data-st-power>2268 W</b></div>
-                  <div class="stat-cell"><span>Maillard Crust</span><b class="num" data-st-maillard>0.0%</b></div>
-                  <div class="stat-cell"><span>Fond Dissolved</span><b class="num" data-st-fond>0.0%</b></div>
-                  <div class="stat-cell"><span>Vapor Released</span><b class="num" data-st-vapor>0.0 g</b></div>
-                </div>
-
-                <p class="origin-note">
-                  Solver: <code>stepStoveKernel</code> (&lt;1e-6 parity with Rust <code>engine-stove</code>). Fitted card parameters: <code>fat_smoke_point_c</code> and <code>fat_contact_h_mult</code>. The ribeye is drawn from the kernel every frame: cook yield shrinks and thickens it, Maillard progress browns its crust, and core temperature sets its doneness.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- =================================================================
-           CHAPTER 3 (#oven) - THE CAVITY & THE CRUST
-           ================================================================= -->
-      <section class="chapter" id="oven" style="--chapter: #eab308" aria-labelledby="ch3-title">
-        <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Chapter 03 · Steam Condensation &amp; Yeast Oven-Spring</p>
-            <h2 class="d2" id="ch3-title">The Cavity &amp; the Crust.</h2>
-            <p class="chapter-lede">
-              When steam enters a hot combi cavity while dough surface temperature sits below the dew point, water condenses onto the loaf and releases 2.26 MJ/kg of latent heat. That condensation spikes effective heat transfer into the crumb while keeping the outer skin pliable so yeast gas expands the scored boule before starch gelatinization and Maillard browning lock the crust.
-            </p>
-          </div>
-
-          <div class="figure-card">
-            <div class="figure-bar">
-              <p class="figure-prompt">Sweep Steam Injection from 0% to 100% RH and vary Convection Fan Speed to compare dry crust-lock against steam-assisted oven-spring.</p>
-              <span class="fig-tag tag-live">Live Conservation Physics · Combi Cavity</span>
-            </div>
-
-            <div class="lab-grid">
-              <div class="lab-stage-col">
-                <div class="stage-box stage-lab" data-oven-stage>
-                  <canvas
-                    class="webgl-canvas"
-                    data-oven-canvas
-                    tabindex="0"
-                    aria-label="Live 3D combi-steamer with its door open and a window cut in the air baffle, showing the convection fan wheel and its ring element, the steam haze, and a scored sourdough boule rising and browning on a perforated tray."
-                  ></canvas>
-                </div>
-                <div class="chart-card">
-                  <canvas class="strip-chart" data-oven-chart aria-label="Live oven crust and crumb core temperature chart"></canvas>
-                </div>
-              </div>
-
-              <div class="lab-panel">
-                <div class="eq-bar">
-                  <span class="micro">Cavity Heat Transfer</span>
-                  <code class="eq-formula">h_eff = h_conv(v_fan) + h_rad(T_cav, T_crust) + h_cond(RH, T_dew − T_crust)</code>
-                </div>
-
-                <label class="dial">
-                  <span class="dial-head"><span>Cavity Temperature</span><output class="num" data-oven-temp-val>235 °C</output></span>
-                  <input type="range" min="150" max="260" step="5" value="235" data-oven-temp />
-                </label>
-                <label class="dial">
-                  <span class="dial-head"><span>Steam Injection</span><output class="num" data-oven-steam-val>65% RH</output></span>
-                  <input type="range" min="0" max="100" step="5" value="65" data-oven-steam />
-                </label>
-                <label class="dial">
-                  <span class="dial-head"><span>Convection Fan</span><output class="num" data-oven-fan-val>55%</output></span>
-                  <input type="range" min="0" max="100" step="5" value="55" data-oven-fan />
-                </label>
-                <label class="dial">
-                  <span class="dial-head"><span>Dough Hydration</span><output class="num" data-oven-hyd-val>76%</output></span>
-                  <input type="range" min="55" max="85" step="1" value="76" data-oven-hyd />
-                </label>
-
-                <div class="action-row">
-                  <button type="button" class="btn btn-ghost" data-oven-reset>Restart Bake</button>
-                </div>
-
-                <div class="stat-grid-3">
-                  <div class="stat-cell"><span>Oven Spring</span><b class="num" data-ov-spring>1.00×</b></div>
-                  <div class="stat-cell"><span>Crust Temp</span><b class="num" data-ov-crust>24.0 °C</b></div>
-                  <div class="stat-cell"><span>Core Temp</span><b class="num" data-ov-core>22.0 °C</b></div>
-                  <div class="stat-cell"><span>Effective h</span><b class="num" data-ov-h>36.0 W/m²K</b></div>
-                  <div class="stat-cell"><span>Maillard Crust</span><b class="num" data-ov-maillard>0.0%</b></div>
-                  <div class="stat-cell"><span>Cook Yield</span><b class="num" data-ov-yield>100.0%</b></div>
-                </div>
-
-                <p class="origin-note">
-                  Solver: <code>stepOvenKernel</code> (&lt;1e-6 parity with Rust <code>engine-oven</code>). Combines forced convection, radiation, dew-point condensation and Arrhenius browning; the loaf's rise and crust colour are drawn from its computed oven spring and Maillard progress every frame.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- =================================================================
-           CHAPTER 4 (#cold) - THE COLD CHAIN & THE CARRIER
-           ================================================================= -->
-      <section class="chapter" id="cold" style="--chapter: #38bdf8" aria-labelledby="ch4-title">
-        <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Chapter 04 · HACCP BTU-Wall &amp; Glass-Transition Transport</p>
-            <h2 class="d2" id="ch4-title">The Cold Chain &amp; the Carrier.</h2>
-            <p class="chapter-lede">
-              Load up to 25 hot hotel pans onto mobile speed racks inside a walk-in cooler and watch Gosney-Olama doorway exchange plus coil frost push box air across the 41 °F (5 °C) HACCP limit. Switch to the Insulated Catering Carrier to balance door venting against Gordon-Taylor crust glass transition, and test how the certified surrogate refuses inputs outside its calibration box.
-            </p>
-          </div>
-
-          <div class="figure-card">
-            <div class="figure-bar">
-              <p class="figure-prompt">Toggle Walk-In Cooler vs. Insulated Catering Carrier. Try 25 deep 6" pans in the cooler, or test Surrogate OOD refusal in the carrier.</p>
-              <div class="seg-group" role="group" aria-label="Cold chain mode">
-                <button type="button" data-cold-mode="walkin" aria-pressed="true">Walk-In BTU Wall</button>
-                <button type="button" data-cold-mode="carrier" aria-pressed="false">Insulated Carrier</button>
-              </div>
-            </div>
-
-            <div class="lab-grid">
-              <div class="lab-stage-col">
-                <div class="stage-box stage-lab" data-cold-stage>
-                  <canvas
-                    class="webgl-canvas"
-                    data-cold-canvas
-                    tabindex="0"
-                    aria-label="Live 3D Walk-In Cooler BTU-Wall and Insulated Catering Carrier conservation physics scene."
-                  ></canvas>
-                </div>
-                <div class="chart-card">
-                  <canvas class="strip-chart" data-cold-chart aria-label="Live cold chain and carrier telemetry chart"></canvas>
-                </div>
-              </div>
-
-              <div class="lab-panel">
-                <div class="eq-bar">
-                  <span class="micro">Doorway &amp; Crispness Laws</span>
-                  <code class="eq-formula">Q_door ∝ A·√(g·H·Δρ/ρ) · f_open &nbsp;|&nbsp; T_g = (w_s·T_gs + k·w_w·T_gw)/(w_s + k·w_w)</code>
-                </div>
-
-                <div data-walkin-controls>
-                  <label class="dial">
-                    <span class="dial-head"><span>Hot Hotel Pans Loaded</span><output class="num" data-wi-pans-val>16 pans</output></span>
-                    <input type="range" min="1" max="25" step="1" value="16" data-wi-pans />
-                  </label>
-                  <div class="control-block">
-                    <p class="micro">Hotel Pan Depth (Biot Number)</p>
-                    <div class="seg-group" role="group" aria-label="Hotel pan depth">
-                      <button type="button" data-wi-depth="2" aria-pressed="false">2" Shallow</button>
-                      <button type="button" data-wi-depth="4" aria-pressed="true">4" Standard</button>
-                      <button type="button" data-wi-depth="6" aria-pressed="false">6" Deep</button>
+                <div class="lab-side">
+                  <div class="field">
+                    <p class="micro">Heat</p>
+                    <div class="seg fill" role="group" aria-label="Heat source">
+                      <button type="button" data-stove-source="induction" aria-pressed="true">Induction</button>
+                      <button type="button" data-stove-source="gas" aria-pressed="false">Gas</button>
+                      <button type="button" data-stove-source="electric" aria-pressed="false">Electric coil</button>
                     </div>
                   </div>
-                  <label class="dial">
-                    <span class="dial-head"><span>Door Open Fraction (Gosney-Olama)</span><output class="num" data-wi-door-val>30% open</output></span>
-                    <input type="range" min="0" max="100" step="5" value="30" data-wi-door />
-                  </label>
-                  <label class="dial">
-                    <span class="dial-head"><span>Kitchen Ambient</span><output class="num" data-wi-amb-val>32 °C</output></span>
-                    <input type="range" min="18" max="42" step="1" value="32" data-wi-amb />
-                  </label>
-                  <div class="action-row">
-                    <button type="button" class="btn btn-ghost" data-wi-reset>Reset Cooler</button>
+                  <div class="field">
+                    <p class="micro">Pan</p>
+                    <div class="seg fill" role="group" aria-label="Pan">
+                      <button type="button" data-stove-pan="cast_iron" aria-pressed="true">Cast iron</button>
+                      <button type="button" data-stove-pan="tri_ply" aria-pressed="false">Tri-ply steel</button>
+                      <button type="button" data-stove-pan="aluminum" aria-pressed="false">Aluminum</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">Fat</p>
+                    <div class="seg fill" role="group" aria-label="Cooking fat">
+                      <button type="button" data-stove-fat="canola" aria-pressed="true">Canola</button>
+                      <button type="button" data-stove-fat="butter" aria-pressed="false">Butter</button>
+                      <button type="button" data-stove-fat="lard" aria-pressed="false">Lard</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Burner</b><output data-stove-power-val>72%</output></span><input type="range" min="15" max="100" step="1" value="72" data-stove-power aria-label="Burner power" /></label>
+                  <div class="btnrow">
+                    <button type="button" class="btn go sm" data-stove-deglaze>Pour in the wine</button>
+                    <button type="button" class="btn sm" data-stove-reset>Start over</button>
+                  </div>
+                  <p class="hint">Try induction with the aluminum pan, or butter at full power.</p>
+                  <div class="status" data-st-smoke data-state="ok">Clean sear · smoke point 204 °C</div>
+                  <div class="readout">
+                    <div class="stat-cell"><span>Pan surface</span><b data-st-pan>…</b></div>
+                    <div class="stat-cell"><span>Inside the steak</span><b data-st-core>…</b></div>
+                    <div class="stat-cell"><span>Power into the pan</span><b data-st-power>…</b></div>
+                    <div class="stat-cell"><span>Crust browning</span><b data-st-maillard>…</b></div>
+                    <div class="stat-cell"><span>Browned bits lifted</span><b data-st-fond>…</b></div>
+                    <div class="stat-cell"><span>Steam released</span><b data-st-vapor>…</b></div>
                   </div>
                 </div>
-
-                <div data-carrier-controls hidden>
-                  <label class="dial">
-                    <span class="dial-head"><span>Door Vent Opening</span><output class="num" data-car-vent-val>15% (Sealed)</output></span>
-                    <input type="range" min="0" max="100" step="5" value="15" data-car-vent />
-                  </label>
-                  <label class="dial">
-                    <span class="dial-head"><span>Food Batch Mass</span><output class="num" data-car-mass-val>4.5 kg</output></span>
-                    <input type="range" min="1.0" max="12.0" step="0.5" value="4.5" data-car-mass />
-                  </label>
-                  <label class="dial">
-                    <span class="dial-head"><span>Delivery Ambient</span><output class="num" data-car-amb-val>22 °C</output></span>
-                    <input type="range" min="5" max="44" step="1" value="22" data-car-amb />
-                  </label>
-                  <div class="action-row">
-                    <button type="button" class="chip-btn" data-car-surrogate aria-pressed="false">Certified Surrogate</button>
-                    <button type="button" class="btn btn-danger btn-sm" data-car-ood-preset>Trigger OOD Refusal</button>
-                    <button type="button" class="btn btn-ghost btn-sm" data-car-reset>Reset</button>
-                  </div>
-                </div>
-
-                <div class="status-pill" data-cold-alert data-state="ok">Cold chain holding &lt;= 41 °F (5.0 °C)</div>
-
-                <div class="stat-grid-3" data-cold-readouts></div>
-
-                <p class="origin-note">
-                  Solvers: <code>stepWalkinKernel</code>, <code>stepCarrierKernel</code>, and <code>evaluateCarrierSurrogate</code> (&lt;1e-6 Rust parity). Fitted parameter: <code>gordon_taylor_k_gt = 4.6</code>. Pre-operational engineering screen only, not regulatory HACCP certification.
-                </p>
               </div>
             </div>
-          </div>
+            <figcaption class="fig-foot how" id="stove-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>The steak is eight layers that pass heat to one another. The pan is two thermal masses, and how much burner power reaches it depends on its metal: induction barely heats aluminum. When the wine goes in, the heat it takes to boil comes out of the pan.</p>
+                <p>The steak on screen is drawn from the model every frame. It shrinks as it cooks, browns with the crust and changes colour inside with its core temperature.</p>
+              </div>
+              <div>
+                <code class="formula">C_pan · dT_pan/dt = η(source, pan) · P_in − q_steak − ṁ_vap · h_fg − q_loss</code>
+                <p class="model">Model: <code>stepStoveKernel</code>, matching FrankenSim's <code>engine-stove</code> reference to one part in a million. Fitted values: each fat's smoke point and contact factor.</p>
+              </div>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
-      <!-- =================================================================
-           CHAPTER 5 (#brigade) - THE BRIGADE & THE FLOOR
-           ================================================================= -->
-      <section class="chapter" id="brigade" style="--chapter: #34d399" aria-labelledby="ch5-title">
+      <!-- ============================ 03 OVEN ============================ -->
+      <section class="sec" id="oven" aria-labelledby="oven-title" style="--chapter: #f2b134">
         <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Chapter 05 · Anthropometrics &amp; Fleet Matrix</p>
-            <h2 class="d2" id="ch5-title">The Brigade &amp; the Floor.</h2>
-            <p class="chapter-lede">
-              A line that looks neat on a 2D plan can still trap elbows and load workers' lower backs during dinner rush. Three cooks built to the anthropometric cohorts (P05 female at 1.51 m, P50 adult at 1.72 m, and P95 male at 1.88 m) stand side by side, each lifting a full 4-inch hotel pan off a low shelf, to check aisle clearance, forward reach, and L5/S1 lumbar torque live in 3D.
-            </p>
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>03</b><i></i>The oven</p>
+              <h2 class="d3" id="oven-title">Steam makes the loaf <em class="g">rise higher</em>.</h2>
+              <p class="kicker">
+                Steam in a hot oven condenses on the cool dough and gives up its heat. The skin stays soft for longer, so the loaf keeps rising before the crust sets. Turn the steam off and the crust locks early.
+              </p>
+            </div>
+            <a class="more" href="#oven-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
           </div>
 
-          <div class="figure-card">
-            <div class="figure-bar">
-              <p class="figure-prompt">Drag Cookline Aisle Width (32" to 60") or jump to canonical exemplar clearances to inspect 3D reach envelopes and lumbar moment.</p>
-              <span class="fig-tag">Interactive 3D · 3 × 61-Bone Skinned Cooks</span>
-            </div>
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Set the oven, then watch the loaf rise</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="lab">
+                <div class="lab-view">
+                  <div class="stage" data-oven-stage>
+                    <canvas
+                      data-oven-canvas
+                      tabindex="0"
+                      aria-label="A combi oven with its door open and a window cut in the back wall, showing the fan, the steam and a sourdough loaf rising and browning on a tray."
+                    ></canvas>
+                  </div>
+                  <div class="chart">
+                    <canvas data-oven-chart aria-label="Crust and centre temperatures of the loaf over time"></canvas>
+                  </div>
+                </div>
 
-            <div class="lab-grid">
-              <div class="lab-stage-col">
-                <div class="stage-box stage-brigade" data-brigade-stage>
-                  <canvas
-                    class="webgl-canvas"
-                    data-brigade-canvas
-                    tabindex="0"
-                    aria-label="Interactive 3D anthropometric chef rigs P05, P50, and P95 lifting stainless hotel pans inside an adjustable aisle corridor."
-                  ></canvas>
+                <div class="lab-side">
+                  <label class="range"><span><b>Oven temperature</b><output data-oven-temp-val>235 °C</output></span><input type="range" min="150" max="260" step="5" value="235" data-oven-temp aria-label="Oven temperature" /></label>
+                  <label class="range"><span><b>Steam</b><output data-oven-steam-val>65% RH</output></span><input type="range" min="0" max="100" step="5" value="65" data-oven-steam aria-label="Steam" /></label>
+                  <label class="range"><span><b>Fan</b><output data-oven-fan-val>55%</output></span><input type="range" min="0" max="100" step="5" value="55" data-oven-fan aria-label="Fan speed" /></label>
+                  <label class="range"><span><b>Water in the dough</b><output data-oven-hyd-val>76%</output></span><input type="range" min="55" max="85" step="1" value="76" data-oven-hyd aria-label="Water in the dough" /></label>
+                  <div class="btnrow">
+                    <button type="button" class="btn sm" data-oven-reset>Bake again</button>
+                  </div>
+                  <p class="hint">Bake once with no steam and once with full steam at the same temperature, then compare the rise.</p>
+                  <div class="readout">
+                    <div class="stat-cell"><span>Rise</span><b data-ov-spring>…</b></div>
+                    <div class="stat-cell"><span>Crust</span><b data-ov-crust>…</b></div>
+                    <div class="stat-cell"><span>Centre</span><b data-ov-core>…</b></div>
+                    <div class="stat-cell"><span>Heat transfer</span><b data-ov-h>…</b></div>
+                    <div class="stat-cell"><span>Browning</span><b data-ov-maillard>…</b></div>
+                    <div class="stat-cell"><span>Weight kept</span><b data-ov-yield>…</b></div>
+                  </div>
                 </div>
               </div>
-
-              <div class="lab-panel">
-                <div class="eq-bar">
-                  <span class="micro">L5/S1 Lumbar Moment</span>
-                  <code class="eq-formula">τ_L5/S1 = m_upper·g·L_torso·sin(θ_flex) + m_pan·g·d_reach</code>
-                </div>
-
-                <label class="dial">
-                  <span class="dial-head"><span>Cookline Aisle Width</span><output class="num" data-br-aisle-val>44" (1.12 m)</output></span>
-                  <input type="range" min="32" max="60" step="1" value="44" data-br-aisle />
-                </label>
-
-                <div class="control-block">
-                  <p class="micro">Canonical Exemplar Clearances</p>
-                  <div class="pill-row">
-                    <button type="button" class="chip-btn chip-subtle" data-br-preset="38">38" Mall QSR Tight Pass</button>
-                    <button type="button" class="chip-btn chip-subtle" data-br-preset="48">48" Drive-Thru Corridor</button>
-                    <button type="button" class="chip-btn chip-subtle" data-br-preset="60">60" Commissary Spine</button>
-                  </div>
-                </div>
-
-                <label class="dial">
-                  <span class="dial-head"><span>Loaded Hotel Pan Mass</span><output class="num" data-br-load-val>6.5 kg</output></span>
-                  <input type="range" min="1.5" max="14.0" step="0.5" value="6.5" data-br-load />
-                </label>
-
-                <div class="action-row">
-                  <button type="button" class="chip-btn" data-br-reach aria-pressed="true">3D Reach Envelopes</button>
-                </div>
-
-                <div class="status-pill" data-br-status data-state="ok">CLEAR PASS (44.0" / 1.12 m)</div>
-
-                <div class="cohort-cards">
-                  <div class="cohort-card" style="--cohort: #38bdf8">
-                    <span class="micro">P05 Female · 1.511 m</span>
-                    <b class="num" data-br-p05>45 N·m · reach 0.68 m</b>
-                  </div>
-                  <div class="cohort-card" style="--cohort: #34d399">
-                    <span class="micro">P50 Adult · 1.715 m</span>
-                    <b class="num" data-br-p50>64 N·m · reach 0.77 m</b>
-                  </div>
-                  <div class="cohort-card" style="--cohort: #c084fc">
-                    <span class="micro">P95 Male · 1.878 m</span>
-                    <b class="num" data-br-p95>84 N·m · reach 0.86 m</b>
-                  </div>
-                </div>
-
-                <div class="callout-strip">
-                  <strong>Commissary Door Margin Audit:</strong> The 20-pan mobile speed rack clears the 36" roll-in combi doorway by <code class="num">69.5 mm</code> per side (verified in <code>commissary_catering_3200.scene3d.v1.json</code>).
-                </div>
-
-                <p class="origin-note">
-                  Synthetic people, modelled on no real person, with no biometric data. The motion is a kinematic illustration: poses are solved for reach and joint range, not from forces; the lumbar torque is computed from the pose shown. Pre-operational ergonomics screen only, not clinical or OSHA certification.
-                </p>
-              </div>
             </div>
-          </div>
-
-          <!-- ALL-5-KITCHEN FLEET COMPARISON & ELECTRIFICATION WHAT-IF MATRIX -->
-          <div class="fleet-card" id="fleet">
-            <div class="fleet-head">
+            <figcaption class="fig-foot how" id="oven-how">
               <div>
-                <p class="kick"><span class="joint on" style="--chapter: #34d399" aria-hidden="true"></span>All-5-Kitchen Fleet What-If Matrix</p>
-                <h3 class="d3">Electrification &amp; Summer Stress Comparison.</h3>
+                <p class="how-title">How it's computed</p>
+                <p>Heat reaches the loaf three ways: the fan's moving air, radiation from the hot walls, and steam condensing on the surface while the dough is below the dew point. Condensing steam gives up 2.26 MJ for every kilogram of water. Browning follows an Arrhenius rate.</p>
+                <p>The loaf's height and colour on screen come from the computed rise and browning.</p>
               </div>
-              <div class="seg-group" role="group" aria-label="Fleet scenario">
-                <button type="button" data-fleet-scenario="gas" aria-pressed="true">Gas Baseline</button>
-                <button type="button" data-fleet-scenario="electric" aria-pressed="false">All-Electric Induction</button>
-                <button type="button" data-fleet-scenario="summer" aria-pressed="false">Peak Summer 38 °C</button>
+              <div>
+                <code class="formula">h_eff = h_conv(fan) + h_rad(T_cavity, T_crust) + h_cond(RH, T_dew − T_crust)</code>
+                <p class="model">Model: <code>stepOvenKernel</code>, matching FrankenSim's <code>engine-oven</code> reference to one part in a million.</p>
+              </div>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ============================ 04 COLD CHAIN ============================ -->
+      <section class="sec" id="cold" aria-labelledby="cold-title" style="--chapter: #5ec8f2">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>04</b><i></i>Cold chain</p>
+              <h2 class="d3" id="cold-title">From the walk-in <em class="g">to the doorstep</em>.</h2>
+              <p class="kicker">
+                In the walk-in, hot pans and an open door work against the cooling coil. In the delivery box, the vent trades heat for crispness. Both are live models, and both tell you when the food crosses a safety line.
+              </p>
+            </div>
+            <a class="more" href="#cold-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
+          </div>
+
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Load the walk-in, or pack a delivery</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="lab">
+                <div class="lab-view">
+                  <div class="stage" data-cold-stage>
+                    <canvas data-cold-canvas tabindex="0" aria-label="A walk-in cooler loaded with hot pans, or an insulated delivery box, in 3D. Drag to look around."></canvas>
+                  </div>
+                  <div class="chart">
+                    <canvas data-cold-chart aria-label="Temperatures over time in the walk-in or the delivery box"></canvas>
+                  </div>
+                </div>
+
+                <div class="lab-side">
+                  <div class="seg fill" role="group" aria-label="Scene">
+                    <button type="button" data-cold-mode="walkin" aria-pressed="true">Walk-in cooler</button>
+                    <button type="button" data-cold-mode="carrier" aria-pressed="false">Delivery box</button>
+                  </div>
+
+                  <div class="lab-side" data-walkin-controls>
+                    <label class="range"><span><b>Hot pans</b><output data-wi-pans-val>16 pans</output></span><input type="range" min="1" max="25" step="1" value="16" data-wi-pans aria-label="Hot pans loaded" /></label>
+                    <div class="field">
+                      <p class="micro">Pan depth</p>
+                      <div class="seg fill" role="group" aria-label="Pan depth">
+                        <button type="button" data-wi-depth="2" aria-pressed="false">2 in</button>
+                        <button type="button" data-wi-depth="4" aria-pressed="true">4 in</button>
+                        <button type="button" data-wi-depth="6" aria-pressed="false">6 in</button>
+                      </div>
+                    </div>
+                    <label class="range"><span><b>Door open</b><output data-wi-door-val>30% open</output></span><input type="range" min="0" max="100" step="5" value="30" data-wi-door aria-label="How long the door stays open" /></label>
+                    <label class="range"><span><b>Kitchen temperature</b><output data-wi-amb-val>32 °C</output></span><input type="range" min="18" max="42" step="1" value="32" data-wi-amb aria-label="Kitchen temperature" /></label>
+                    <div class="btnrow">
+                      <button type="button" class="btn sm" data-wi-reset>Reset the cooler</button>
+                    </div>
+                  </div>
+
+                  <div class="lab-side" data-carrier-controls hidden>
+                    <label class="range"><span><b>Vent</b><output data-car-vent-val>15% (Sealed)</output></span><input type="range" min="0" max="100" step="5" value="15" data-car-vent aria-label="Vent opening" /></label>
+                    <label class="range"><span><b>Food</b><output data-car-mass-val>4.5 kg</output></span><input type="range" min="1.0" max="12.0" step="0.5" value="4.5" data-car-mass aria-label="Food in the box" /></label>
+                    <label class="range"><span><b>Outside</b><output data-car-amb-val>22 °C</output></span><input type="range" min="5" max="44" step="1" value="22" data-car-amb aria-label="Outside temperature" /></label>
+                    <div class="btnrow">
+                      <button type="button" class="toggle sm" data-car-surrogate aria-pressed="false"><i aria-hidden="true"></i>Fast estimate</button>
+                      <button type="button" class="btn sm" data-car-ood-preset>Try it out of range</button>
+                      <button type="button" class="btn sm" data-car-reset>Reset</button>
+                    </div>
+                    <p class="hint">The fast estimate is a table built from the full model, and it answers only inside the range the table covers. Outside it, it says so and the full model takes over.</p>
+                  </div>
+
+                  <div class="status" data-cold-alert data-state="ok">Running the walk-in against the 41 °F (5 °C) limit…</div>
+                  <div class="readout" data-cold-readouts></div>
+                </div>
               </div>
             </div>
+            <figcaption class="fig-foot how" id="cold-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>In an open doorway, warm air flows in at the top while cold air drains out at the bottom, faster for a taller door and a bigger temperature difference. Frost on the coil lowers how much heat it can take out. In the delivery box, the crust goes soft when steam lowers its glass transition below the food's temperature.</p>
+                <p>A design check, not a HACCP certification.</p>
+              </div>
+              <div>
+                <code class="formula">Q_door ∝ A · √(g · H · Δρ / ρ) · f_open<br />T_g = (w_s · T_gs + k · w_w · T_gw) / (w_s + k · w_w)</code>
+                <p class="model">Models: <code>stepWalkinKernel</code> and <code>stepCarrierKernel</code>; the fast estimate is a table of <code>stepCarrierKernel</code> runs with its error measured against more of them. Doorway exchange after Gosney and Olama; crust glass transition by Gordon-Taylor with a fitted k = 4.6.</p>
+              </div>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
 
-            <div class="table-scroll">
-              <table class="fleet-table">
+      <!-- ============================ 05 CREW ============================ -->
+      <section class="sec" id="brigade" aria-labelledby="brigade-title" style="--chapter: #e0905f">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>05</b><i></i>The crew</p>
+              <h2 class="d3" id="brigade-title">Three cooks, one aisle, <em class="g">a full pan</em>.</h2>
+              <p class="kicker">
+                A short, an average and a tall cook each lift a full hotel pan off a low shelf. Narrow the aisle or add weight to see who runs out of room and how hard each back works.
+              </p>
+            </div>
+            <a class="more" href="#brigade-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
+          </div>
+
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Set the aisle width, then load the pan</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="lab">
+                <div class="lab-view">
+                  <div class="stage" data-brigade-stage>
+                    <canvas data-brigade-canvas tabindex="0" aria-label="Three cooks of different heights lifting hotel pans in an aisle whose width you set. Drag to look around."></canvas>
+                  </div>
+                </div>
+
+                <div class="lab-side">
+                  <label class="range"><span><b>Aisle width</b><output data-br-aisle-val>44" (1.12 m)</output></span><input type="range" min="32" max="60" step="1" value="44" data-br-aisle aria-label="Aisle width in inches" /></label>
+                  <div class="field">
+                    <p class="micro">Typical aisles</p>
+                    <div class="btnrow">
+                      <button type="button" class="tag" data-br-preset="38">38 in · mall counter</button>
+                      <button type="button" class="tag" data-br-preset="48">48 in · drive-thru</button>
+                      <button type="button" class="tag" data-br-preset="60">60 in · commissary</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Pan weight</b><output data-br-load-val>6.5 kg</output></span><input type="range" min="1.5" max="14.0" step="0.5" value="6.5" data-br-load aria-label="Pan weight" /></label>
+                  <div class="toggles">
+                    <button type="button" class="toggle sm" data-br-reach aria-pressed="true"><i aria-hidden="true"></i>Reach zones</button>
+                  </div>
+                  <div class="status" data-br-status data-state="ok">Measuring the aisle at 44" (1.12 m)…</div>
+                  <table class="data cohorts">
+                    <thead><tr><th>Cook</th><th>Back load now (peak) · lean · reach</th></tr></thead>
+                    <tbody>
+                      <tr><th scope="row"><i style="--c: #38bdf8" aria-hidden="true"></i>Short <small>1.51 m</small></th><td><b data-br-p05>…</b></td></tr>
+                      <tr><th scope="row"><i style="--c: #34d399" aria-hidden="true"></i>Average <small>1.72 m</small></th><td><b data-br-p50>…</b></td></tr>
+                      <tr><th scope="row"><i style="--c: #c084fc" aria-hidden="true"></i>Tall <small>1.88 m</small></th><td><b data-br-p95>…</b></td></tr>
+                    </tbody>
+                  </table>
+                  <p class="fact">In the commissary, a 20-pan rack clears the 36-inch oven door by <b>69.5 mm</b> on each side.</p>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="brigade-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>The motion is a kinematic illustration: each pose is solved for reach and joint range, not from forces. The load on the lower back is then computed from the pose you see. The cooks are synthetic and modelled on no real person, sized to the 5th, 50th and 95th percentiles of ISO 7250.</p>
+                <p>An ergonomics screening tool, not a certification.</p>
+              </div>
+              <div>
+                <code class="formula">τ_L5/S1 = m_upper · g · L_torso · sin θ_lean + m_pan · g · d_reach</code>
+                <p class="model">Aisle presets and the rack clearance come from the kitchens' build manifests.</p>
+              </div>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ============================ 06 ALL FIVE KITCHENS ============================ -->
+      <section class="sec" id="fleet" aria-labelledby="fleet-title" style="--chapter: #f59e0b">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>All five kitchens</p>
+              <h2 class="d3" id="fleet-title">Five kitchens, <em class="g">side by side</em>.</h2>
+              <p class="kicker">
+                Run every kitchen through the same model. Switch them all to induction, or to a 38 °C summer day, and compare the power, the exhaust, the cooling and the heat at the line.
+              </p>
+            </div>
+          </div>
+
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Pick a scenario, then open any kitchen in 3D</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="fleet-top">
+                <div class="seg" role="group" aria-label="Scenario">
+                  <button type="button" data-fleet-scenario="gas" aria-pressed="true">Gas today</button>
+                  <button type="button" data-fleet-scenario="electric" aria-pressed="false">All induction</button>
+                  <button type="button" data-fleet-scenario="summer" aria-pressed="false">Summer peak</button>
+                </div>
+                <p class="hint">Each row is recomputed when you switch.</p>
+              </div>
+              <table class="data fleet">
                 <thead>
                   <tr>
-                    <th>Archetype</th>
-                    <th>Area</th>
-                    <th>Fixtures / Service</th>
-                    <th>Peak Line Load</th>
-                    <th>Exhaust CFM</th>
-                    <th>HVAC Cooling</th>
-                    <th>Line Comfort</th>
-                    <th>Min Aisle</th>
-                    <th>Action</th>
+                    <th scope="col">Kitchen</th>
+                    <th scope="col">Equipment</th>
+                    <th scope="col">Cooking load</th>
+                    <th scope="col">Exhaust</th>
+                    <th scope="col">Cooling</th>
+                    <th scope="col">At the line</th>
+                    <th scope="col">Tightest aisle</th>
+                    <th scope="col"><span class="sr">Open</span></th>
                   </tr>
                 </thead>
                 <tbody data-fleet-body></tbody>
               </table>
             </div>
-            <p class="origin-note fleet-note">
-              Provenance: footprints, fixture counts, electrical service ratings, and clearances read from verified <code>.scene3d.v1.json</code> and <code>.site_metadata.json</code> manifests. Energy and HVAC deltas come directly from pan coupling efficiency (42% open gas vs. 86% induction).
-            </p>
-          </div>
+            <figcaption class="fig-foot">
+              <p>Sizes, equipment counts, electrical service and aisle widths come from each kitchen's build manifest. Cooking load, exhaust and cooling follow from how much burner heat reaches the pan: about 42% for open gas and 86% for induction.</p>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
-      <!-- =================================================================
-           UNDER THE HOOD (#architecture) - VERIFICATION & ENGINEERING DEPTH
-           ================================================================= -->
-      <section class="chapter arch-band" id="architecture" style="--chapter: #c084fc" aria-labelledby="arch-title">
+      <!-- ============================ ENGINE ============================ -->
+      <section class="sec open" id="architecture" aria-labelledby="arch-title" style="--chapter: #9fb3c8">
         <div class="wrap">
-          <div class="chapter-head">
-            <p class="kick"><span class="joint on" aria-hidden="true"></span>Under the Hood · Pure Rust + Deterministic Blender Pipeline</p>
-            <h2 class="d2" id="arch-title">One geometry graph, one conservation engine.</h2>
-            <p class="chapter-lede">
-              Every visual on this page comes from the same versioned manifests and solvers that run in FrankenSim headless Rust simulations. Nothing is hand-faked for the web, and every empirical boundary is stated up front.
-            </p>
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span>Under the hood</p>
+              <h2 class="d2" id="arch-title">One model of each kitchen, <em class="g">from drawing to physics</em>.</h2>
+              <p class="kicker">The pictures and the numbers on this page come from the same build files and solvers that FrankenSim runs in Rust.</p>
+            </div>
           </div>
 
-          <div class="arch-grid">
-            <div class="arch-card">
-              <span class="micro">01 · Single Source of Truth</span>
-              <h3>Blender 5.3 + Scene3D + .fsim Parity</h3>
-              <p>
-                Each kitchen build script outputs a binary <code>.glb</code>, a <code>.scene3d.v1.json</code> geometry audit, and an executable <code>.fsim.json</code> physics assembly in one pass. Fixture IDs, SI millimeter bounds, swept door volumes, and BLAKE3 hashes stay locked together across two independent clean builds.
-              </p>
-              <code class="arch-code">0 static OBB overlaps · &lt;= 0.44 mm max bbox drift · BLAKE3 verified</code>
-            </div>
+          <ol class="flow reveal">
+            <li>
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z" /><path d="M4 7.5 12 12l8-4.5M12 12v9" /></svg></span>
+              <h3><span>1</span>A build script</h3>
+              <p>A Blender 5.3 script writes each kitchen's plan: every fixture's place and size, its moving parts and grip points, and a physics description.</p>
+            </li>
+            <li>
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4" /><path d="m8 12.3 2.8 2.8L16.2 9" /></svg></span>
+              <h3><span>2</span>Checked twice</h3>
+              <p>Two clean builds must agree: the same sizes, no equipment overlapping, the same file hashes.</p>
+            </li>
+            <li>
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg></span>
+              <h3><span>3</span>The Rust engine</h3>
+              <p>Heat, air, moisture and motion modules connect through shared ports and step together.</p>
+            </li>
+            <li>
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="M3 9h18M6.5 6.8h.01M9 6.8h.01" /></svg></span>
+              <h3><span>4</span>Your browser</h3>
+              <p>TypeScript copies of four solvers run on this page, tested against the engine's reference kernels.</p>
+            </li>
+          </ol>
 
-            <div class="arch-card">
-              <span class="micro">02 · Pure-Rust Physics Stack</span>
-              <h3>Composable Ports, Zero Foreign FFI</h3>
-              <p>
-                Thermal, fluid, moisture, and rigid-body modules connect through shared typed ports in <code>fs-ports</code> and step inside <code>fs-system</code> without C, Fortran, or external CAD kernels. The browser TypeScript kernels run deterministic parity tests against Rust reference traces on every build.
-              </p>
-              <code class="arch-code">fs-thermal · fs-gas · fs-solid · fs-mbd · fs-couple · &lt;1e-6 parity</code>
-            </div>
+          <ul class="cards3">
+            <li class="reveal">
+              <h3>Built from code</h3>
+              <p>Every kitchen plan comes from a script, and the browser builds each room and every piece of equipment from that plan, so a change to the script rebuilds the kitchen exactly. Two clean builds of the plans must produce the same BLAKE3 hashes.</p>
+              <p class="tags"><span>0 overlaps</span><span>Same hashes twice</span><span>BLAKE3</span></p>
+            </li>
+            <li class="reveal">
+              <h3>Pure Rust underneath</h3>
+              <p>Thermal, gas, solid and motion modules plug together through typed ports and run without C or Fortran libraries or a CAD kernel.</p>
+              <p class="tags"><span>fs-thermal</span><span>fs-gas</span><span>fs-solid</span><span>fs-mbd</span><span>fs-couple</span></p>
+            </li>
+            <li class="reveal">
+              <h3>Clear about its limits</h3>
+              <p>The fast delivery-box estimate refuses questions outside the range its table covers, such as a 42 °C loading dock, and hands them to the full model. It quotes its worst error, measured against the full model, not a guess. Fitted numbers, like k = 4.6 for crust crispness, are named as fitted.</p>
+              <p class="tags"><span>Refuses out of range</span><span>Fitted values named</span><span>No brand names</span></p>
+            </li>
+          </ul>
+        </div>
+      </section>
 
-            <div class="arch-card">
-              <span class="micro">03 · Honest Boundaries</span>
-              <h3>Refusal Over Silent Extrapolation</h3>
-              <p>
-                When a fast surrogate is asked for an operating point outside its calibrated training box (such as 42 °C summer docks or an 11.5 kg batch in Chapter 4), it flags an Out-of-Domain refusal and drops back to the full conservation ODE. Every fitted constant (such as Gordon-Taylor <code>k_gt = 4.6</code>) is disclosed on its card.
-              </p>
-              <code class="arch-code">Law V-L16 zero-OEM check · OOD surrogate refusal · Zero-PII rigs</code>
-            </div>
+      <!-- ============================ CLOSING ============================ -->
+      <section class="closer" aria-labelledby="close-title" style="--chapter: #f59e0b">
+        <div class="lattice" aria-hidden="true"></div>
+        <div class="wrap reveal">
+          <p class="kick"><span class="joint on" aria-hidden="true"></span>Open source</p>
+          <h2 class="d2" id="close-title">The whole lab is <em class="g">on GitHub</em>.</h2>
+          <p class="lede">The kitchens, the equipment scripts, the solvers and this page are all in the FrankenSim repository. Star it to follow the work, or try the other labs.</p>
+          <div class="cta">
+            <a class="btn go" href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" /></svg>Star on GitHub</a>
+            <a class="btn" href="https://frankensim.org/">FrankenSim home<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
+            <a class="btn" href="https://frankensim.org/instrument-tests/">Instrument tests<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg></a>
           </div>
         </div>
       </section>
     </main>
 
-    <footer class="site-footer">
-      <div class="wrap footer-inner">
-        <div class="footer-brand">
-          <strong>FrankenSim Kitchen Lab</strong>
-          <span>Pure Rust conservation physics · Blender-authored 3D digital twins · Law V-L16 zero-OEM hygiene.</span>
-        </div>
-        <div class="footer-links">
-          <a href="https://frankensim.org/">frankensim.org</a>
-          <a href="https://frankensim.org/instrument-tests/">Instrument Tests</a>
-          <a href="https://frankensim.org/music/">Music Lab</a>
-          <a href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub</a>
-        </div>
+    <footer class="end">
+      <div class="wrap">
+        <a class="brand" href="#hero">
+          <svg class="mark" viewBox="0 0 40 40" aria-hidden="true">
+            <circle cx="20" cy="21" r="15" fill="none" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.6" stroke-dasharray="4 3" />
+            <path d="M20 7c3.1 4.9 8.2 8 8.2 14.8a8.2 8.2 0 1 1-16.4 0c0-3.9 1.9-6.9 4-9.5.4 2.5 1.5 4.2 3.2 4.7-.9-3.4-.5-6.8 1-10Z" fill="#f59e0b" />
+            <path d="M20 18.2c1.6 2.4 3.7 4 3.7 7a3.7 3.7 0 1 1-7.4 0c0-2 1.1-3.8 3.7-7Z" fill="#fef3c7" />
+          </svg>
+          <span>FrankenSim <em>Kitchen Lab</em></span>
+        </a>
+        <span>Part of FrankenSim.</span>
+        <a href="https://frankensim.org/">frankensim.org</a>
+        <a href="https://frankensim.org/instrument-tests/">Instrument tests</a>
+        <a href="https://frankensim.org/music/">Music lab</a>
+        <a href="https://github.com/Dicklesworthstone/frankensim" target="_blank" rel="noreferrer">GitHub</a>
       </div>
     </footer>
 

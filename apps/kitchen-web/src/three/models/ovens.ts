@@ -43,6 +43,7 @@ import {
   roundLeg,
   roundRect,
   screw,
+  boxUVs,
   slideJoint,
   torus,
   turnJoint,
@@ -88,7 +89,9 @@ function rrect(x: CanvasRenderingContext2D, x0: number, y0: number, w: number, h
 
 /** A combi's touch screen mid-programme: the cavity set point on a ring gauge, the three modes, the time line. */
 function combiUi(): HTMLCanvasElement {
-  const [c, x] = canvas2d(256, 320);
+  // Drawn at twice the layout's size, so the type stays sharp from a hand's breadth away.
+  const [c, x] = canvas2d(512, 640);
+  x.scale(2, 2);
   const g = x.createLinearGradient(0, 0, 0, 320);
   g.addColorStop(0, "#0d1822");
   g.addColorStop(1, "#05090d");
@@ -277,22 +280,221 @@ function dialFace(max: number, major: number, red: number, unit: string): HTMLCa
   return c;
 }
 
-/** A soft puff for steam and vapour. */
-function puff(): HTMLCanvasElement {
-  const S = 128;
-  const [c, x] = canvas2d(S, S);
-  const r = rng(77);
-  for (let i = 0; i < 9; i++) {
-    const px = S / 2 + (r() - 0.5) * 34;
-    const py = S / 2 + (r() - 0.5) * 34;
-    const rad = 28 + r() * 22;
-    const g = x.createRadialGradient(px, py, 0, px, py, rad);
-    g.addColorStop(0, "rgba(255,255,255,0.32)");
-    g.addColorStop(1, "rgba(255,255,255,0)");
-    x.fillStyle = g;
-    x.fillRect(0, 0, S, S);
+/** Smooth value noise on a seeded 64 × 64 lattice (wrapping), about 0..1. */
+function noiseField(seed: number): (u: number, v: number) => number {
+  const r = rng(seed);
+  const lat = new Float32Array(64 * 64);
+  for (let i = 0; i < lat.length; i++) lat[i] = r();
+  return (u, v) => {
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const fu = u - i;
+    const fv = v - j;
+    const su = fu * fu * (3 - 2 * fu);
+    const sv = fv * fv * (3 - 2 * fv);
+    const at = (a: number, b: number) => lat[(a & 63) + (b & 63) * 64]!;
+    const [a, b, c, d] = [at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)];
+    return a + (b - a) * su + (c - a) * sv + (a - b - c + d) * su * sv;
+  };
+}
+/** Fractal sum of `oct` octaves of a noise field, normalised to about 0..1. */
+function fbm(n: (u: number, v: number) => number, u: number, v: number, oct = 5): number {
+  let a = 0;
+  let amp = 0.5;
+  let f = 1;
+  let norm = 0;
+  for (let k = 0; k < oct; k++) {
+    a += amp * n(u * f + k * 17.3, v * f + k * 9.1);
+    norm += amp;
+    f *= 2.03;
+    amp *= 0.5;
   }
+  return a / norm;
+}
+function sstep(a: number, b: number, t: number): number {
+  const k = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return k * k * (3 - 2 * k);
+}
+
+/**
+ * A wisp of steam, twice as tall as it is wide: a plume that leaves its source narrow and spreads as it rises, torn
+ * into strands by domain-warped noise, fading out at its foot and its crown. White; the alpha carries it all.
+ */
+function wisp(seed: number): HTMLCanvasElement {
+  const W = 96;
+  const H = 192;
+  const [c, x] = canvas2d(W, H);
+  const img = x.createImageData(W, H);
+  const n = noiseField(seed);
+  for (let py = 0; py < H; py++) {
+    const v = py / (H - 1);
+    const up = 1 - v;
+    const cx = 0.5 + 0.34 * (fbm(n, 1.3, v * 1.8, 3) - 0.5) * up;
+    const half = 0.09 + 0.24 * up;
+    for (let px = 0; px < W; px++) {
+      const u = px / (W - 1);
+      const dx = (u - cx) / half;
+      const env = Math.exp(-dx * dx * 1.8) * sstep(0, 0.3, v) * sstep(0, 0.22, up);
+      const warp = fbm(n, u * 2.6 + 4.1, v * 1.4 + 2.7, 3);
+      const f = fbm(n, u * 3.8 + warp * 2.4, v * 2.1 - warp * 1.3, 5);
+      const strands = sstep(0.42, 0.8, f);
+      const fine = 0.55 + 0.45 * sstep(0.35, 0.85, fbm(n, u * 9 + 31, v * 5 + 7, 3));
+      const a = Math.min(1, env * strands * fine * 1.25);
+      const o = (py * W + px) * 4;
+      img.data[o] = 255;
+      img.data[o + 1] = 255;
+      img.data[o + 2] = 255;
+      img.data[o + 3] = Math.round(255 * a);
+    }
+  }
+  x.putImageData(img, 0, 0);
   return c;
+}
+let wispTexs: THREE.CanvasTexture[] | null = null;
+/** Four different wisps, made once. */
+function wisps(): THREE.CanvasTexture[] {
+  if (!wispTexs) wispTexs = [301, 302, 303, 304].map((sd) => ctex(wisp(sd)));
+  return wispTexs;
+}
+
+/**
+ * The black ceramic frit fired onto the back of a door's outer pane, for a pane W × H centred on (cx, cy): solid out
+ * to the pane's edges, with a clear window `win` (absolute, in the pane's plane) whose corners are rounded by `r`.
+ * Built as geometry, so the window's edge stays exact however close one looks.
+ */
+function fritGeom(s: Shop, W: number, H: number, cx: number, cy: number, win: { x0: number; x1: number; y0: number; y1: number }, r: number): THREE.BufferGeometry {
+  const sh = roundRect(W, H, 0.003, cx, cy);
+  rectPath(sh, win.x1 - win.x0, win.y1 - win.y0, r, (win.x0 + win.x1) / 2, (win.y0 + win.y1) / 2, true);
+  return new THREE.ShapeGeometry(sh, s.seg(10, 3));
+}
+
+/**
+ * A sheet of glass w × h × t centred on `at`, facing ±z: its two faces in `face` and its four edges in `edge` (glass
+ * seen edge on is green and nearly opaque, which is how a pane's thickness reads).
+ */
+function pane(s: Shop, face: Mat, edge: Mat, w: number, h: number, t: number, at: V3): void {
+  s.add(face, new THREE.PlaneGeometry(w, h), [at[0], at[1], at[2] + t / 2]);
+  s.add(face, new THREE.PlaneGeometry(w, h).rotateY(Math.PI), [at[0], at[1], at[2] - t / 2]);
+  if (!s.fine(1)) return;
+  for (const sg of [-1, 1]) {
+    s.add(edge, new THREE.PlaneGeometry(t, h).rotateY((sg * Math.PI) / 2), [at[0] + (sg * w) / 2, at[1], at[2]]);
+    s.add(edge, new THREE.PlaneGeometry(w, t).rotateX((-sg * Math.PI) / 2), [at[0], at[1] + (sg * h) / 2, at[2]]);
+  }
+}
+
+/**
+ * Draw a door's glass from the inside out (inner panes, their edges, then the tinted outer pane), so that seen from the
+ * front each layer is blended over the one behind it. Every transparent part a shop makes shares one render order.
+ */
+function layerGlass(root: THREE.Object3D): void {
+  const fm = mats();
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    if (m.material === fm.paneClear) m.renderOrder = 3;
+    else if (m.material === fm.paneEdge) m.renderOrder = 4;
+    else if (m.material === fm.paneSmoke) m.renderOrder = 5;
+  });
+}
+
+/** A section point: x, y and the unit normal (nx, ny) of the face that is to be seen. */
+type SecPt = readonly [number, number, number, number];
+/** An arc of a concave cove about (cx, cy), radius r, from angle a0 to a1, its normals toward the centre. */
+function covePts(cx: number, cy: number, r: number, a0: number, a1: number, n: number): SecPt[] {
+  const out: SecPt[] = [];
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + ((a1 - a0) * i) / n;
+    out.push([cx + r * Math.cos(a), cy + r * Math.sin(a), -Math.cos(a), -Math.sin(a)]);
+  }
+  return out;
+}
+/**
+ * A sheet `t` thick swept along z from z0 to z1 through the open section `pts`: its face along the given normals,
+ * its back `t` behind, and its two long edges closed (so a cutaway shows the sheet's thickness). Smooth across the
+ * section, as a deep-drawn liner's coves are.
+ */
+function sweepZ(pts: readonly SecPt[], z0: number, z1: number, t: number): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const idx: number[] = [];
+  const quad = (a: number, b: number, c: number, d: number, nx: number, ny: number, nz: number) => {
+    // a, b, c, d round the quad; keep the winding whose face normal agrees with (nx, ny, nz).
+    const P = (i: number) => new THREE.Vector3(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+    const fn = new THREE.Vector3().subVectors(P(b), P(a)).cross(new THREE.Vector3().subVectors(P(c), P(a)));
+    if (fn.x * nx + fn.y * ny + fn.z * nz >= 0) idx.push(a, b, c, a, c, d);
+    else idx.push(a, c, b, a, d, c);
+  };
+  for (const [off, flip] of [
+    [0, 1],
+    [t, -1],
+  ] as const) {
+    const o = pos.length / 3;
+    for (const [x, y, nx, ny] of pts)
+      for (const z of [z0, z1]) {
+        pos.push(x - nx * off, y - ny * off, z);
+        nrm.push(nx * flip, ny * flip, 0);
+      }
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = o + i * 2;
+      const [nx, ny] = [pts[i]![2] + pts[i + 1]![2], pts[i]![3] + pts[i + 1]![3]];
+      quad(a, a + 2, a + 3, a + 1, nx * flip, ny * flip, 0);
+    }
+  }
+  for (const [i, j] of [
+    [0, 1],
+    [pts.length - 1, pts.length - 2],
+  ] as const) {
+    const [x, y, nx, ny] = pts[i]!;
+    const tx = x - pts[j]![0];
+    const ty = y - pts[j]![1];
+    const tl = Math.hypot(tx, ty) || 1;
+    const o = pos.length / 3;
+    for (const [px, py] of [
+      [x, y],
+      [x - nx * t, y - ny * t],
+    ] as const)
+      for (const z of [z0, z1]) {
+        pos.push(px, py, z);
+        nrm.push(tx / tl, ty / tl, 0);
+      }
+    quad(o, o + 2, o + 3, o + 1, tx, ty, 0);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+/**
+ * UVs projected along z onto `bounds` (the geometry's own xy bounds if none), 0..1: a slice or a steak painted as one
+ * picture, its sides taking the colour at the picture's edge.
+ */
+function planarUV(g: THREE.BufferGeometry, bounds?: THREE.Box2): THREE.BufferGeometry {
+  g.computeBoundingBox();
+  const b = bounds ?? new THREE.Box2(new THREE.Vector2(g.boundingBox!.min.x, g.boundingBox!.min.y), new THREE.Vector2(g.boundingBox!.max.x, g.boundingBox!.max.y));
+  const p = g.attributes.position as THREE.BufferAttribute;
+  const uv = new Float32Array(p.count * 2);
+  const [sx, sy] = [b.max.x - b.min.x || 1, b.max.y - b.min.y || 1];
+  for (let i = 0; i < p.count; i++) {
+    uv[i * 2] = (p.getX(i) - b.min.x) / sx;
+    uv[i * 2 + 1] = (p.getY(i) - b.min.y) / sy;
+  }
+  g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  return g;
+}
+
+/** A path's outline, sampled, in the canvas frame that maps the bounds [bx0, bx1] × [by0, by1] onto S × S. */
+function tracePath(x: CanvasRenderingContext2D, pts: THREE.Vector2[], b: THREE.Box2, S: number): void {
+  const sx = S / (b.max.x - b.min.x);
+  const sy = S / (b.max.y - b.min.y);
+  x.beginPath();
+  for (const [i, q] of pts.entries()) {
+    const [cx, cy] = [(q.x - b.min.x) * sx, S - (q.y - b.min.y) * sy];
+    if (i) x.lineTo(cx, cy);
+    else x.moveTo(cx, cy);
+  }
+  x.closePath();
 }
 
 interface FamilyMats {
@@ -312,6 +514,8 @@ interface FamilyMats {
   poly: THREE.MeshPhysicalMaterial;
   /** Vacuum-bag film. */
   bag: THREE.MeshPhysicalMaterial;
+  /** A sous-vide bath's water: clean tap water, nearly clear, faintly blue-green in depth. */
+  bath: THREE.MeshPhysicalMaterial;
   /** Red gauge needles, valve handles. */
   red: THREE.MeshStandardMaterial;
   /** Grey electrical enclosure paint. */
@@ -322,26 +526,1031 @@ interface FamilyMats {
   wool: THREE.MeshStandardMaterial;
   /** A halogen lamp seen through frosted glass. */
   lamp: THREE.MeshBasicMaterial;
-  /** Food: what the pans hold. */
+  /** Food: what the pans hold. Baked mac and cheese, its elbows in the sauce and browned where the top caught. */
   mac: THREE.MeshStandardMaterial;
+  /** Loose elbows standing out of the mac: cheese-coated, and browned. */
+  elbow: THREE.MeshStandardMaterial;
+  elbowBrown: THREE.MeshStandardMaterial;
+  /** Chili con carne: a glossy red-brown sauce full of mince, onion and tomato. */
   chili: THREE.MeshStandardMaterial;
+  /** Kidney beans in the chili. */
   bean: THREE.MeshStandardMaterial;
+  /** Whole cooked green beans: the heap seen from above, and loose pods in two greens. */
+  greensHeap: THREE.MeshStandardMaterial;
   greens: THREE.MeshStandardMaterial;
+  greensDark: THREE.MeshStandardMaterial;
+  /** Steamed long-grain rice, grain by grain. */
   rice: THREE.MeshStandardMaterial;
   mash: THREE.MeshStandardMaterial;
+  /** Corn kernels. */
   corn: THREE.MeshStandardMaterial;
+  /** A cutting board's HDPE: off-white, satin, crossed by fine knife scores. UVs in metres (a tile is 0.3 m). */
+  board: THREE.MeshStandardMaterial;
+  /** A basket's heap of fries seen from above (the fill under the loose ones). */
   fries: THREE.MeshStandardMaterial;
+  /** Single fries, pale to well browned; each is painted darker at its tips. */
+  fry: THREE.MeshStandardMaterial[];
   dough: THREE.MeshStandardMaterial;
+  /** A ribeye's cut face, marbled, its fat cap and the seam round the spinalis; sides take the edge's colour. */
   beef: THREE.MeshStandardMaterial;
-  fat: THREE.MeshStandardMaterial;
+  /** A salmon portion: coral flesh with its white myosepta in chevrons. */
   salmon: THREE.MeshStandardMaterial;
   gravy: THREE.MeshStandardMaterial;
-  toast: THREE.MeshStandardMaterial;
-  crust: THREE.MeshStandardMaterial;
-  crumb: THREE.MeshStandardMaterial;
-  crustRaw: THREE.MeshStandardMaterial;
-  steamTex: THREE.CanvasTexture;
+  /** A slice of sandwich bread, its face and crust as one picture: raw, and toasted golden-brown. */
+  breadRaw: THREE.MeshStandardMaterial;
+  breadToast: THREE.MeshStandardMaterial;
+  /** Door glass: the outer pane's grey-bronze tint, clear inner panes, and edges seen edge on. */
+  paneSmoke: THREE.MeshPhysicalMaterial;
+  paneClear: THREE.MeshPhysicalMaterial;
+  paneEdge: THREE.MeshStandardMaterial;
+  /** The black glass fascia of a combi's control column. */
+  blackGlass: THREE.MeshPhysicalMaterial;
+  /** Black ceramic frit, seen through the glass it is fired onto. */
+  frit: THREE.MeshStandardMaterial;
+  /** A microwave cavity's punched lamp grille and air inlet: steel with 2.5 mm holes at 4 mm. */
+  grille: THREE.MeshStandardMaterial;
 }
+
+/** The outline of a slice of sandwich bread (the pan loaf's crown flaring over its sides), centred, in metres. */
+function breadShape(): THREE.Shape {
+  const s = new THREE.Shape();
+  s.moveTo(-0.036, -0.052);
+  s.lineTo(0.036, -0.052);
+  s.quadraticCurveTo(0.047, -0.052, 0.047, -0.041);
+  s.lineTo(0.049, 0.014);
+  s.bezierCurveTo(0.05, 0.021, 0.056, 0.023, 0.0555, 0.032);
+  s.bezierCurveTo(0.054, 0.051, 0.031, 0.06, 0, 0.06);
+  s.bezierCurveTo(-0.031, 0.06, -0.054, 0.051, -0.0555, 0.032);
+  s.bezierCurveTo(-0.056, 0.023, -0.05, 0.021, -0.049, 0.014);
+  s.lineTo(-0.047, -0.041);
+  s.quadraticCurveTo(-0.047, -0.052, -0.036, -0.052);
+  return s;
+}
+
+/**
+ * A slice's face as one picture over the outline's bounds: the open crumb (its pores drawn into a bump map as well),
+ * the crust round the edge, and when toasted the browning, deepest toward the edges and blotched where the quartz
+ * found it. The area outside the outline is crust, so that a slice's sides, projected from it, are crust too.
+ */
+function breadArt(toasted: boolean): { map: THREE.CanvasTexture; bump: THREE.CanvasTexture } {
+  const S = 512;
+  const shape = breadShape();
+  const pts = shape.getPoints(30);
+  const b = new THREE.Box2().setFromPoints(pts);
+  const [c, x] = canvas2d(S, S);
+  const [cb, xb] = canvas2d(S, S);
+  const crust = toasted ? "#6a3816" : "#b87a3e";
+  x.fillStyle = crust;
+  x.fillRect(0, 0, S, S);
+  xb.fillStyle = "#6e6e6e";
+  xb.fillRect(0, 0, S, S);
+  for (const ctx of [x, xb]) {
+    ctx.save();
+    tracePath(ctx, pts, b, S);
+    ctx.clip();
+  }
+  x.fillStyle = toasted ? "#d9a35c" : "#efe3c9";
+  x.fillRect(0, 0, S, S);
+  xb.fillStyle = "#9a9a9a";
+  xb.fillRect(0, 0, S, S);
+  const r = rng(toasted ? 61 : 62);
+  // The crumb's cells: small, elongated in the direction the loaf rose, a few big holes.
+  for (let i = 0; i < 3200; i++) {
+    const px = r() * S;
+    const py = r() * S;
+    const big = r() < 0.04;
+    const rx = big ? 3 + r() * 5 : 0.8 + r() * 2.2;
+    const ry = rx * (1.1 + r() * 0.9);
+    const rot = (r() - 0.5) * 0.8;
+    const shade = r();
+    x.fillStyle = toasted ? `rgba(${110 + shade * 40 | 0},${58 + shade * 30 | 0},${22 + shade * 14 | 0},${0.35 + r() * 0.35})` : `rgba(${176 + shade * 30 | 0},${150 + shade * 26 | 0},${112 + shade * 20 | 0},${0.3 + r() * 0.35})`;
+    x.beginPath();
+    x.ellipse(px, py, rx, ry, rot, 0, Math.PI * 2);
+    x.fill();
+    xb.fillStyle = `rgba(30,30,30,${0.5 + r() * 0.4})`;
+    xb.beginPath();
+    xb.ellipse(px, py, rx, ry, rot, 0, Math.PI * 2);
+    xb.fill();
+    // The lit lip of the cell.
+    x.fillStyle = toasted ? "rgba(238,190,120,0.35)" : "rgba(255,250,236,0.45)";
+    x.beginPath();
+    x.ellipse(px - rx * 0.35, py - ry * 0.5, rx * 0.7, ry * 0.35, rot, 0, Math.PI * 2);
+    x.fill();
+  }
+  if (toasted) {
+    // Browning: blotches where the elements and the belt's wires were hottest, and the edges darkest.
+    for (let i = 0; i < 90; i++) {
+      const px = r() * S;
+      const py = r() * S;
+      const rad = 18 + r() * 60;
+      const g = x.createRadialGradient(px, py, 0, px, py, rad);
+      g.addColorStop(0, `rgba(122,62,20,${0.18 + r() * 0.22})`);
+      g.addColorStop(1, "rgba(122,62,20,0)");
+      x.fillStyle = g;
+      x.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+    }
+    x.globalCompositeOperation = "multiply";
+    const g = x.createRadialGradient(S / 2, S * 0.52, S * 0.12, S / 2, S * 0.52, S * 0.62);
+    g.addColorStop(0, "rgb(255,246,226)");
+    g.addColorStop(1, "rgb(150,96,56)");
+    x.fillStyle = g;
+    x.fillRect(0, 0, S, S);
+    x.globalCompositeOperation = "source-over";
+  }
+  // The crust band, soft on its inner side.
+  x.strokeStyle = toasted ? "rgba(92,48,18,0.35)" : "rgba(196,144,84,0.4)";
+  x.lineWidth = 34;
+  tracePath(x, pts, b, S);
+  x.stroke();
+  x.strokeStyle = crust;
+  x.lineWidth = 18;
+  tracePath(x, pts, b, S);
+  x.stroke();
+  xb.strokeStyle = "#5a5a5a";
+  xb.lineWidth = 18;
+  tracePath(xb, pts, b, S);
+  xb.stroke();
+  x.restore();
+  xb.restore();
+  return { map: ctex(c), bump: ctex(cb, false) };
+}
+
+/** One fry along u (its length) and round v: golden, its tips and edges browned, flecked where it blistered. */
+function fryArt(): HTMLCanvasElement {
+  const [c, x] = canvas2d(128, 32);
+  x.fillStyle = "#e8b45e";
+  x.fillRect(0, 0, 128, 32);
+  const g = x.createLinearGradient(0, 0, 128, 0);
+  g.addColorStop(0, "rgba(160,96,40,0.6)");
+  g.addColorStop(0.1, "rgba(196,126,52,0.3)");
+  g.addColorStop(0.3, "rgba(196,126,52,0)");
+  g.addColorStop(0.72, "rgba(196,126,52,0)");
+  g.addColorStop(0.9, "rgba(196,126,52,0.3)");
+  g.addColorStop(1, "rgba(160,96,40,0.6)");
+  x.fillStyle = g;
+  x.fillRect(0, 0, 128, 32);
+  // The four long edges (the section's rounded corners, a band of v each) brown first.
+  for (const v of [6, 14, 22, 30]) {
+    const g2 = x.createLinearGradient(0, v - 3, 0, v + 3);
+    g2.addColorStop(0, "rgba(184,110,40,0)");
+    g2.addColorStop(0.5, "rgba(184,110,40,0.32)");
+    g2.addColorStop(1, "rgba(184,110,40,0)");
+    x.fillStyle = g2;
+    x.fillRect(0, v - 3, 128, 6);
+  }
+  const r = rng(93);
+  for (let i = 0; i < 160; i++) {
+    x.fillStyle = r() < 0.7 ? `rgba(170,96,34,${0.15 + r() * 0.3})` : `rgba(255,236,180,${0.2 + r() * 0.3})`;
+    x.beginPath();
+    x.ellipse(r() * 128, r() * 32, 1 + r() * 3, 0.6 + r() * 1.2, 0, 0, Math.PI * 2);
+    x.fill();
+  }
+  return c;
+}
+
+/**
+ * One fry along x, `L` long and `a` across: a square section with rounded edges, narrowing toward its ends, which are
+ * cut square with soft corners; bowed by `bow` across its length and rolled by `roll`. u runs along it, v round it.
+ */
+function fryGeom(L: number, a: number, bow: number, roll: number): THREE.BufferGeometry {
+  const nL = 5;
+  const sec: [number, number, number, number][] = [];
+  const c = a * 0.13;
+  for (let k = 0; k < 4; k++) {
+    const f = (k * Math.PI) / 2 + roll;
+    const [ny, nz] = [Math.cos(f), Math.sin(f)];
+    const [ty, tz] = [-nz, ny];
+    for (const sg of [-1, 1]) {
+      const m = Math.hypot(1, 0.22);
+      sec.push([(ny * a) / 2 + sg * ty * (a / 2 - c), (nz * a) / 2 + sg * tz * (a / 2 - c), (ny + sg * 0.22 * ty) / m, (nz + sg * 0.22 * tz) / m]);
+    }
+  }
+  sec.push(sec[0]!);
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const ring = sec.length;
+  for (let i = 0; i <= nL; i++) {
+    const u = i / nL;
+    const e = 2 * u - 1;
+    const sc = 1 - 0.16 * e ** 4;
+    const x = e * (L / 2);
+    const y = bow * (1 - e * e);
+    for (const [j, [py, pz, qy, qz]] of sec.entries()) {
+      pos.push(x, y + py * sc, pz * sc);
+      nrm.push(0, qy, qz);
+      uv.push(0.04 + u * 0.92, j / (ring - 1));
+    }
+  }
+  for (let i = 0; i < nL; i++)
+    for (let j = 0; j < ring - 1; j++) {
+      const a0 = i * ring + j;
+      const b0 = a0 + ring;
+      // The section runs anticlockwise from +y toward +z, so (along the section) × (along the fry) faces out.
+      idx.push(a0, a0 + 1, b0, a0 + 1, b0 + 1, b0);
+    }
+  // The cut ends: a fan from a centre pushed a little out.
+  for (const sg of [-1, 1]) {
+    const sc = 1 - 0.16;
+    const base = pos.length / 3;
+    pos.push(sg * (L / 2) + sg * a * 0.12, 0, 0);
+    nrm.push(sg, 0, 0);
+    uv.push(sg < 0 ? 0.16 : 0.84, 0.45);
+    for (const [py, pz] of sec) {
+      pos.push(sg * (L / 2), py * sc, pz * sc);
+      nrm.push(sg * 0.8, py / a, pz / a);
+      uv.push(sg < 0 ? 0.1 : 0.9, 0.45);
+    }
+    for (let j = 0; j < ring - 1; j++) sg > 0 ? idx.push(base, base + 1 + j, base + 2 + j) : idx.push(base, base + 2 + j, base + 1 + j);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+/** A basket of fries from above: a jumble of sticks, the ones beneath in shadow. */
+function friesHeapArt(): HTMLCanvasElement {
+  const S = 256;
+  const [c, x] = canvas2d(S, S);
+  x.fillStyle = "#8a5a26";
+  x.fillRect(0, 0, S, S);
+  const r = rng(94);
+  for (let layer = 0; layer < 3; layer++)
+    for (let i = 0; i < 150; i++) {
+      const len = 26 + r() * 26;
+      const wid = 5 + r() * 2;
+      x.save();
+      x.translate(r() * S, r() * S);
+      x.rotate(r() * Math.PI);
+      x.shadowColor = "rgba(40,20,5,0.55)";
+      x.shadowBlur = 3;
+      const k = 0.55 + layer * 0.2 + r() * 0.12;
+      const g = x.createLinearGradient(-len / 2, 0, len / 2, 0);
+      const base = [246 * k, 205 * k, 128 * k].map((v) => Math.min(255, v | 0)).join(",");
+      const tip = [190 * k, 112 * k, 44 * k].map((v) => Math.min(255, v | 0)).join(",");
+      g.addColorStop(0, `rgb(${tip})`);
+      g.addColorStop(0.2, `rgb(${base})`);
+      g.addColorStop(0.8, `rgb(${base})`);
+      g.addColorStop(1, `rgb(${tip})`);
+      x.fillStyle = g;
+      rrect(x, -len / 2, -wid / 2, len, wid, 2);
+      x.fill();
+      x.restore();
+    }
+  return c;
+}
+
+/**
+ * A flat food cut from `shape` (a slice, a steak, a fillet), `t` thick and centred on y = 0, lying in xz with the
+ * shape's +y toward -z; its edges rounded by `bev`, and its whole surface painted from one picture over the shape's
+ * bounds.
+ */
+function flatFood(s: Shop, shape: THREE.Shape, t: number, bev: number): THREE.BufferGeometry {
+  const b = new THREE.Box2().setFromPoints(shape.getPoints(30));
+  const fine = s.fine(1);
+  const bv = fine ? Math.min(bev, t * 0.45) : 0;
+  const g = new THREE.ExtrudeGeometry(shape, {
+    depth: Math.max(1e-4, t - 2 * bv),
+    bevelEnabled: bv > 0,
+    bevelThickness: bv,
+    bevelSize: bv * 0.85,
+    bevelSegments: s.fine(2) ? 3 : 1,
+    curveSegments: s.fine(2) ? 8 : fine ? 3 : 2,
+  });
+  planarUV(g, b);
+  g.translate(0, 0, -(t - 2 * bv) / 2);
+  g.rotateX(-Math.PI / 2);
+  return g;
+}
+
+/** `pts` (a closed outline) pushed out by `o` along its vertex normals. */
+function offsetOutline(pts: THREE.Vector2[], o: number): THREE.Vector2[] {
+  const q = pts.length > 2 && pts[0]!.distanceTo(pts[pts.length - 1]!) < 1e-7 ? pts.slice(0, -1) : pts;
+  const sg = THREE.ShapeUtils.isClockWise(q) ? -1 : 1;
+  const n = q.length;
+  return q.map((p, i) => {
+    const a = q[(i + n - 1) % n]!;
+    const b = q[(i + 1) % n]!;
+    const e0 = new THREE.Vector2(p.x - a.x, p.y - a.y).normalize();
+    const e1 = new THREE.Vector2(b.x - p.x, b.y - p.y).normalize();
+    const nn = new THREE.Vector2(e0.y + e1.y, -(e0.x + e1.x)).normalize().multiplyScalar(sg);
+    return new THREE.Vector2(p.x + nn.x * o, p.y + nn.y * o);
+  });
+}
+
+/** Signed distance from (x, y) to a closed polygon: negative inside. */
+function polyDistance(q: THREE.Vector2[], x: number, y: number): number {
+  let d2 = Infinity;
+  let inside = false;
+  for (let i = 0, j = q.length - 1; i < q.length; j = i++) {
+    const [a, b] = [q[j]!, q[i]!];
+    const [ex, ey] = [b.x - a.x, b.y - a.y];
+    const k = Math.max(0, Math.min(1, ((x - a.x) * ex + (y - a.y) * ey) / (ex * ex + ey * ey || 1)));
+    const [dx, dy] = [x - a.x - ex * k, y - a.y - ey * k];
+    d2 = Math.min(d2, dx * dx + dy * dy);
+    if (a.y > y !== b.y > y && x < a.x + ((y - a.y) * ex) / ey) inside = !inside;
+  }
+  return inside ? -Math.sqrt(d2) : Math.sqrt(d2);
+}
+
+interface BagSpec {
+  /** The bag's rectangle in the food's frame (the food lies in xz, centred on y = 0). */
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  /** The heat seal: a band across the bag, at x in [a, b] or at z in [a, b]. */
+  seal: { axis: "x" | "z"; a: number; b: number };
+  /** A sideways set (in y) of the bag by z, for a bag hung over a wall. */
+  bend?: (z: number) => number;
+  /** Lying on a floor: the film underneath is pressed flat and needs no shape. */
+  flat?: boolean;
+}
+
+/**
+ * A vacuum bag round a food that flatFood cut from `shape` (`t` thick, edges rounded by `bev`). Close to, the bag's two
+ * films are height fields over its rectangle: drawn tight over the food and down round its edge to meet a few
+ * millimetres outside it, then running out together to the bag's cut edges, creased where the vacuum drew them in
+ * (the creases radiating from the food and dying away from it) and cockled everywhere else; flat and doubled across
+ * the heat seal. Further off, a shell round the food and a sheet.
+ */
+function vacBag(s: Shop, mat: THREE.Material, shape: THREE.Shape, t: number, bev: number, spec: BagSpec, seed: number): void {
+  const { x0, x1, z0, z1, seal, bend } = spec;
+  const bendAt = (z: number) => (bend ? bend(z) : 0);
+  const inSeal = (x: number, z: number) => {
+    const u = seal.axis === "x" ? x : z;
+    return sstep(seal.a - 0.004, seal.a, u) * (1 - sstep(seal.b, seal.b + 0.004, u));
+  };
+  const sealBox = () => {
+    const [w, l] = seal.axis === "x" ? [seal.b - seal.a, z1 - z0] : [x1 - x0, seal.b - seal.a];
+    const [ax, az] = seal.axis === "x" ? [(seal.a + seal.b) / 2, (z0 + z1) / 2] : [(x0 + x1) / 2, (seal.a + seal.b) / 2];
+    s.add(mat, new THREE.PlaneGeometry(w, l).rotateX(-Math.PI / 2), [ax, bendAt(az) + 0.0006, az]);
+  };
+  if (!s.fine(2)) {
+    const pts = shape.getPoints(3);
+    const bvF = Math.min(bev, t * 0.45) * 0.85;
+    s.add(mat, flatFood(s, new THREE.Shape(offsetOutline(pts, bvF + 0.0012)), t + 0.0018, Math.min(0.006, t * 0.4)));
+    const nz = bend ? 8 : 1;
+    const g = new THREE.PlaneGeometry(x1 - x0, z1 - z0, 1, nz).rotateX(-Math.PI / 2);
+    const pa = g.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < pa.count; i++) pa.setY(i, bendAt(pa.getZ(i) + (z0 + z1) / 2));
+    s.add(mat, g, [(x0 + x1) / 2, 0, (z0 + z1) / 2]);
+    sealBox();
+    return;
+  }
+  const q = shape.getPoints(30);
+  const qb = new THREE.Box2().setFromPoints(q);
+  const [ocx, ocy] = [(qb.min.x + qb.max.x) / 2, (qb.min.y + qb.max.y) / 2];
+  const nf = noiseField(seed);
+  const H = t / 2 + 0.0009;
+  const bvF = Math.min(bev, t * 0.45) * 0.85;
+  const r = bvF + Math.max(0.0045, 0.5 * H);
+  const sep = 0.0002;
+  const cell = 0.004;
+  const nx = Math.max(2, Math.round((x1 - x0) / cell));
+  const nz = Math.max(2, Math.round((z1 - z0) / cell));
+  const top: number[] = [];
+  const bot: number[] = [];
+  const uv: number[] = [];
+  for (let j = 0; j <= nz; j++)
+    for (let i = 0; i <= nx; i++) {
+      const x = x0 + ((x1 - x0) * i) / nx;
+      const z = z0 + ((z1 - z0) * j) / nz;
+      // The food's frame puts the shape's +y toward -z.
+      const d = polyDistance(q, x, -z);
+      let h = 0;
+      if (d <= 0) h = H + 0.0003 * fbm(nf, x * 90, z * 90, 2);
+      else if (d < r) h = H * Math.pow(1 - Math.pow(d / r, 2.4), 1 / 2.4);
+      // The films together: the creases radiate from the food, the cockle is everywhere off it.
+      let wv = 0;
+      if (d > 0) {
+        const a = Math.atan2(-z - ocy, x - ocx);
+        const ridge = 1 - Math.abs(2 * fbm(nf, Math.cos(a) * 7 + d * 9, Math.sin(a) * 7 + d * 6, 3) - 1);
+        const near = sstep(r * 0.5, r + 0.004, d) * Math.exp(-Math.max(0, d - r) / 0.03);
+        wv = 0.0017 * ridge ** 4 * near + 0.0006 * (fbm(nf, x * 26 + 3, z * 26 + 7, 3) - 0.5) * sstep(r, r + 0.012, d);
+        wv *= 1 - inSeal(x, z);
+      }
+      const b = bendAt(z);
+      top.push(x, b + wv + h + sep, z);
+      bot.push(x, b + wv - h - sep, z);
+      uv.push(x / 0.04, z / 0.04);
+    }
+  const idx: number[] = [];
+  const idxR: number[] = [];
+  for (let j = 0; j < nz; j++)
+    for (let i = 0; i < nx; i++) {
+      const a = j * (nx + 1) + i;
+      const [b, c, e] = [a + 1, a + nx + 1, a + nx + 2];
+      idx.push(a, c, b, b, c, e);
+      idxR.push(a, b, c, b, e, c);
+    }
+  const film = (pos: number[], ix: number[]) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex(ix);
+    g.computeVertexNormals();
+    return g;
+  };
+  s.add(mat, film(top, idx));
+  if (spec.flat) s.add(mat, new THREE.PlaneGeometry(x1 - x0, z1 - z0).rotateX(Math.PI / 2), [(x0 + x1) / 2, -H - sep, (z0 + z1) / 2]);
+  else s.add(mat, film(bot, idxR));
+  sealBox();
+}
+
+/** The outline of a ribeye steak lying flat: the eye, its cap round the top, the fat tail at the left; centred, metres. */
+function steakShape(): THREE.Shape {
+  const s = new THREE.Shape();
+  s.moveTo(-0.072, -0.03);
+  s.bezierCurveTo(-0.05, -0.058, 0.02, -0.06, 0.058, -0.04);
+  s.bezierCurveTo(0.084, -0.024, 0.088, 0.012, 0.072, 0.034);
+  s.bezierCurveTo(0.054, 0.058, 0.012, 0.062, -0.022, 0.054);
+  s.bezierCurveTo(-0.05, 0.048, -0.074, 0.034, -0.084, 0.012);
+  s.bezierCurveTo(-0.09, -0.004, -0.084, -0.02, -0.072, -0.03);
+  return s;
+}
+
+/**
+ * A ribeye's face over its outline's bounds, as it looks part way through its bath: the eye a rosy brown-pink, finely
+ * marbled; the spinalis cap round its upper edge, parted from it by a seam of fat; the fat cap along the top and the
+ * tail's fat at the left, both continued past the outline so that the sides there read as fat.
+ */
+function steakArt(): HTMLCanvasElement {
+  const S = 512;
+  const pts = steakShape().getPoints(30);
+  const b = new THREE.Box2().setFromPoints(pts);
+  const [c, x] = canvas2d(S, S);
+  const r = rng(71);
+  x.fillStyle = "#a2544c";
+  x.fillRect(0, 0, S, S);
+  // The fat cap along the top and round to the tail, drawn wide so that it runs past the outline.
+  x.strokeStyle = "#eadcc6";
+  x.lineCap = "round";
+  x.lineWidth = 40;
+  x.beginPath();
+  x.moveTo(S * 0.88, S * 0.18);
+  x.bezierCurveTo(S * 0.62, -S * 0.02, S * 0.22, S * 0.0, S * 0.03, S * 0.36);
+  x.stroke();
+  x.save();
+  tracePath(x, pts, b, S);
+  x.clip();
+  // Flesh: mottled so it is not a flat colour.
+  for (let i = 0; i < 260; i++) {
+    const px = r() * S;
+    const py = r() * S;
+    const rad = 10 + r() * 40;
+    const g = x.createRadialGradient(px, py, 0, px, py, rad);
+    const k = r();
+    g.addColorStop(0, k < 0.5 ? "rgba(178,92,84,0.35)" : "rgba(128,52,50,0.3)");
+    g.addColorStop(1, "rgba(150,70,64,0)");
+    x.fillStyle = g;
+    x.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+  }
+  // The seam round the spinalis, and the cap's fat.
+  x.strokeStyle = "rgba(238,224,204,0.7)";
+  x.shadowColor = "rgba(238,224,204,0.8)";
+  x.shadowBlur = 6;
+  x.lineWidth = 9;
+  x.beginPath();
+  x.moveTo(S * 0.06, S * 0.52);
+  x.bezierCurveTo(S * 0.2, S * 0.3, S * 0.6, S * 0.22, S * 0.95, S * 0.42);
+  x.stroke();
+  x.strokeStyle = "#eadcc6";
+  x.lineWidth = 30;
+  x.beginPath();
+  x.moveTo(S * 0.98, S * 0.12);
+  x.bezierCurveTo(S * 0.62, -S * 0.05, S * 0.2, -S * 0.03, -S * 0.02, S * 0.36);
+  x.stroke();
+  // Marbling: intramuscular fat as a fine, soft web of flecks and short streaks over the whole eye, a little denser
+  // toward its lower half, sparse in the cap.
+  x.shadowColor = "rgba(238,224,204,0.7)";
+  x.shadowBlur = 4;
+  for (let i = 0; i < 1700; i++) {
+    const px = S * (0.08 + r() * 0.88);
+    const py = S * (0.3 + Math.sqrt(r()) * 0.68);
+    x.fillStyle = `rgba(240,227,208,${0.14 + r() * 0.32})`;
+    x.beginPath();
+    x.ellipse(px, py, 0.8 + r() * 2.4, 0.5 + r() * 1.1, r() * Math.PI, 0, Math.PI * 2);
+    x.fill();
+  }
+  for (let i = 0; i < 170; i++) {
+    let px = S * (0.1 + r() * 0.84);
+    let py = S * (0.32 + Math.sqrt(r()) * 0.64);
+    let a = r() * Math.PI * 2;
+    const n = 2 + Math.floor(r() * 5);
+    x.strokeStyle = `rgba(240,226,206,${0.18 + r() * 0.3})`;
+    x.lineWidth = 0.9 + r() * 1.8;
+    x.beginPath();
+    x.moveTo(px, py);
+    for (let k = 0; k < n; k++) {
+      a += (r() - 0.5) * 1.1;
+      px += Math.cos(a) * (3 + r() * 7);
+      py += Math.sin(a) * (3 + r() * 7);
+      x.lineTo(px, py);
+    }
+    x.stroke();
+  }
+  x.shadowBlur = 0;
+  // Fat tail at the left.
+  const g = x.createRadialGradient(S * 0.02, S * 0.55, 0, S * 0.02, S * 0.55, S * 0.16);
+  g.addColorStop(0, "rgba(236,224,204,1)");
+  g.addColorStop(0.75, "rgba(236,224,204,0.85)");
+  g.addColorStop(1, "rgba(236,224,204,0)");
+  x.fillStyle = g;
+  x.fillRect(0, 0, S, S);
+  x.restore();
+  return c;
+}
+
+/** The outline of a salmon portion cut across a side: rounded at the thick back, tapering to the belly. Centred, metres. */
+function salmonShape(): THREE.Shape {
+  const s = new THREE.Shape();
+  s.moveTo(-0.08, -0.03);
+  s.bezierCurveTo(-0.03, -0.04, 0.05, -0.036, 0.078, -0.022);
+  s.bezierCurveTo(0.09, -0.012, 0.09, 0.016, 0.076, 0.026);
+  s.bezierCurveTo(0.04, 0.042, -0.04, 0.04, -0.078, 0.03);
+  s.bezierCurveTo(-0.088, 0.018, -0.088, -0.022, -0.08, -0.03);
+  return s;
+}
+
+/** A salmon portion's face: coral, paler toward the belly, its myosepta in white chevrons, the brown lateral line. */
+function salmonArt(): HTMLCanvasElement {
+  const W = 512;
+  const H = 256;
+  const [c, x] = canvas2d(W, H);
+  const g = x.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#e2734c");
+  g.addColorStop(0.55, "#ec8a60");
+  g.addColorStop(1, "#f2a27e");
+  x.fillStyle = g;
+  x.fillRect(0, 0, W, H);
+  x.strokeStyle = "rgba(168,84,58,0.6)";
+  x.lineWidth = 7;
+  x.beginPath();
+  x.moveTo(0, H * 0.42);
+  x.bezierCurveTo(W * 0.3, H * 0.46, W * 0.7, H * 0.4, W, H * 0.44);
+  x.stroke();
+  const r = rng(72);
+  for (let i = 0; i < 15; i++) {
+    const x0 = -W * 0.04 + i * W * 0.075 + (r() - 0.5) * 6;
+    x.strokeStyle = `rgba(250,232,218,${0.7 + r() * 0.25})`;
+    x.lineWidth = 2.5 + r() * 2.5;
+    x.beginPath();
+    x.moveTo(x0 + 22, -4);
+    x.quadraticCurveTo(x0 - 6, H * 0.2, x0 + 14, H * 0.42);
+    x.quadraticCurveTo(x0 + 34, H * 0.66, x0 + 6, H + 4);
+    x.stroke();
+  }
+  return c;
+}
+
+/** Vacuum-bag film's embossed channels: a diamond lattice, as a bump map. */
+function bagEmboss(): THREE.CanvasTexture {
+  const [c, x] = canvas2d(64, 64);
+  x.fillStyle = "#808080";
+  x.fillRect(0, 0, 64, 64);
+  x.strokeStyle = "#b8b8b8";
+  x.lineWidth = 3;
+  for (const k of [-64, 0, 64]) {
+    x.beginPath();
+    x.moveTo(k, 0);
+    x.lineTo(k + 64, 64);
+    x.moveTo(k + 64, 0);
+    x.lineTo(k, 64);
+    x.stroke();
+  }
+  const t = ctex(c, false);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(14, 14);
+  return t;
+}
+/* ------------------------------------------------------------------------------------------------------------ */
+/* Hot-table food and its board, each painted on one tile that repeats seamlessly, laid on in metres              */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+/** Run `f` at (x, y) and at each wrapped copy that reaches into an S-pixel tile within `reach`, so the tile repeats. */
+function wrapped(S: number, x: number, y: number, reach: number, f: (x: number, y: number) => void): void {
+  for (const ox of [-S, 0, S])
+    for (const oy of [-S, 0, S]) {
+      const [px, py] = [x + ox, y + oy];
+      if (px > -reach && px < S + reach && py > -reach && py < S + reach) f(px, py);
+    }
+}
+const grey = (v: number) => {
+  const k = Math.max(0, Math.min(255, Math.round(v)));
+  return `rgb(${k},${k},${k})`;
+};
+const tint = (rgb: readonly number[], k: number) => `rgb(${rgb.map((v) => Math.max(0, Math.min(255, Math.round(v * k)))).join(",")})`;
+const mixRgb = (a: readonly number[], b: readonly number[], t: number) => a.map((v, i) => v + (b[i]! - v) * t);
+
+/** Steamed long-grain rice, a tile 80 mm across (0.156 mm a pixel): three layers of grains, those beneath in shadow. */
+function riceArt(): [HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [b, y] = canvas2d(S, S);
+  x.fillStyle = "#958b77";
+  x.fillRect(0, 0, S, S);
+  y.fillStyle = "#000";
+  y.fillRect(0, 0, S, S);
+  y.globalCompositeOperation = "lighten";
+  const r = rng(73);
+  for (let layer = 0; layer < 3; layer++)
+    for (let i = 0; i < 560; i++) {
+      const [gx, gy, a] = [r() * S, r() * S, r() * Math.PI];
+      // A cooked grain is 7 to 9 mm long and about 2.3 mm across.
+      const len = 45 + r() * 13;
+      const wid = 14 + r() * 3;
+      const k = 0.84 + layer * 0.07 + r() * 0.04;
+      const hgt = 80 + layer * 60 + r() * 30;
+      wrapped(S, gx, gy, len, (px, py) => {
+        for (const ctx of [x, y]) {
+          ctx.save();
+          ctx.translate(px, py);
+          ctx.rotate(a);
+          ctx.scale(1, wid / len);
+          const g = ctx.createRadialGradient(-len * 0.06, -len * 0.1, 0, 0, 0, len / 2);
+          if (ctx === y) {
+            g.addColorStop(0, grey(hgt));
+            g.addColorStop(1, grey(hgt * 0.45));
+          } else {
+            g.addColorStop(0, tint([255, 254, 249], k));
+            g.addColorStop(0.6, tint([243, 239, 228], k));
+            g.addColorStop(1, tint([200, 192, 172], k));
+          }
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(0, 0, len / 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      });
+    }
+  return [c, b];
+}
+
+/** An irregular crumb of `n` corners round (px, py), its radii `rs` times `rad`, turned by `a0`. */
+function crumb(ctx: CanvasRenderingContext2D, px: number, py: number, rad: number, rs: readonly number[], a0: number): void {
+  ctx.beginPath();
+  for (const [k, q] of rs.entries()) {
+    const a = a0 + (k / rs.length) * Math.PI * 2;
+    if (k) ctx.lineTo(px + Math.cos(a) * rad * q, py + Math.sin(a) * rad * q);
+    else ctx.moveTo(px + Math.cos(a) * rad * q, py + Math.sin(a) * rad * q);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** Chili con carne, a tile 120 mm across (0.234 mm a pixel): mince in a red-brown sauce, onion and tomato through it. */
+function chiliArt(): [HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [b, y] = canvas2d(S, S);
+  x.fillStyle = "#47190b";
+  x.fillRect(0, 0, S, S);
+  y.fillStyle = grey(40);
+  y.fillRect(0, 0, S, S);
+  const r = rng(37);
+  const pool = (n: number, alpha: number) => {
+    for (let i = 0; i < n; i++) {
+      const [px0, py0, rad] = [r() * S, r() * S, 30 + r() * 70];
+      const col = r() < 0.5 ? "116,40,14" : "50,17,7";
+      wrapped(S, px0, py0, rad, (px, py) => {
+        const g = x.createRadialGradient(px, py, 0, px, py, rad);
+        g.addColorStop(0, `rgba(${col},${alpha})`);
+        g.addColorStop(1, `rgba(${col},0)`);
+        x.fillStyle = g;
+        x.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+      });
+    }
+  };
+  pool(40, 0.45);
+  y.globalCompositeOperation = "lighten";
+  // Mince: browned crumbs 2 to 5 mm, lit from above, sauce dark in the cracks between them.
+  const cols = [
+    [86, 36, 16],
+    [104, 46, 22],
+    [70, 27, 12],
+    [120, 56, 28],
+  ];
+  for (let i = 0; i < 1700; i++) {
+    const [px0, py0, a0] = [r() * S, r() * S, r() * 6.28];
+    const rad = 5 + r() * 8;
+    const rs = Array.from({ length: 7 }, () => 0.6 + r() * 0.5);
+    const col = cols[Math.floor(r() * cols.length)]!;
+    const hgt = 110 + r() * 110;
+    wrapped(S, px0, py0, rad * 1.2, (px, py) => {
+      const g = x.createRadialGradient(px - rad * 0.3, py - rad * 0.3, 0, px, py, rad * 1.1);
+      g.addColorStop(0, tint(col, 1.2));
+      g.addColorStop(0.7, tint(col, 0.9));
+      g.addColorStop(1, tint(col, 0.5));
+      x.fillStyle = g;
+      crumb(x, px, py, rad, rs, a0);
+      const gh = y.createRadialGradient(px, py, 0, px, py, rad * 1.1);
+      gh.addColorStop(0, grey(hgt));
+      gh.addColorStop(1, grey(hgt * 0.5));
+      y.fillStyle = gh;
+      crumb(y, px, py, rad, rs, a0);
+    });
+  }
+  // The sauce runs back over some of it.
+  pool(45, 0.4);
+  // Onion gone soft and translucent, tomato, flecks of chili.
+  for (const [n, col, r0, r1] of [
+    [70, "rgba(200,150,100,0.3)", 4, 8],
+    [140, "rgba(150,30,12,0.55)", 3, 7],
+    [260, "rgba(40,10,4,0.7)", 1, 2.2],
+  ] as const)
+    for (let i = 0; i < n; i++) {
+      const [px0, py0, a0] = [r() * S, r() * S, r() * 6.28];
+      const rad = r0 + r() * (r1 - r0);
+      const rs = Array.from({ length: 5 }, () => 0.7 + r() * 0.35);
+      wrapped(S, px0, py0, rad * 1.2, (px, py) => {
+        x.fillStyle = col;
+        crumb(x, px, py, rad, rs, a0);
+      });
+    }
+  return [c, b];
+}
+
+/**
+ * Baked macaroni and cheese, a tile 100 mm across (0.195 mm a pixel): elbows in a golden cheese sauce, three deep,
+ * browned in patches where the top caught under the heat, each elbow's open end a dark hollow.
+ */
+function macArt(): [HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [b, y] = canvas2d(S, S);
+  x.fillStyle = "#a8641a";
+  x.fillRect(0, 0, S, S);
+  y.fillStyle = grey(30);
+  y.fillRect(0, 0, S, S);
+  const r = rng(53);
+  const patches = Array.from({ length: 24 }, () => [r() * S, r() * S, 30 + r() * 70] as const);
+  const brown = (px: number, py: number) => {
+    let v = 0;
+    for (const [bx, by, br] of patches) {
+      let dx = Math.abs(px - bx) % S;
+      let dy = Math.abs(py - by) % S;
+      dx = Math.min(dx, S - dx);
+      dy = Math.min(dy, S - dy);
+      v = Math.max(v, 1 - Math.hypot(dx, dy) / br);
+    }
+    return sstep(0, 0.8, v);
+  };
+  const sauce = (n: number, alpha: number) => {
+    for (let i = 0; i < n; i++) {
+      const [px0, py0, rad] = [r() * S, r() * S, 14 + r() * 30];
+      const col = tint(mixRgb([222, 146, 40], [160, 86, 28], brown(px0, py0)), 1);
+      wrapped(S, px0, py0, rad, (px, py) => {
+        const g = x.createRadialGradient(px, py, 0, px, py, rad);
+        g.addColorStop(0, col.replace("rgb", "rgba").replace(")", `,${alpha})`));
+        g.addColorStop(1, col.replace("rgb", "rgba").replace(")", ",0)"));
+        x.fillStyle = g;
+        x.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+      });
+    }
+  };
+  x.lineCap = "round";
+  y.lineCap = "round";
+  for (let layer = 0; layer < 3; layer++) {
+    for (let i = 0; i < 170; i++) {
+      const [ex, ey, a0] = [r() * S, r() * S, r() * 6.28];
+      // An elbow's centreline bends at 5 to 6.5 mm; the tube is about 4.3 mm across.
+      const R = 26 + r() * 8;
+      const lw = 20 + r() * 4;
+      const sweep = 1.7 + r() * 0.9;
+      const k = 0.78 + layer * 0.11 + r() * 0.05;
+      const col = mixRgb([238, 180, 72], [176, 100, 36], brown(ex, ey) * (0.5 + layer * 0.25));
+      const hgt = 90 + layer * 55;
+      const hole = r() < 0.2;
+      wrapped(S, ex, ey, R + lw, (px, py) => {
+        const arc = (ctx: CanvasRenderingContext2D, rr: number, w: number, style: string) => {
+          ctx.strokeStyle = style;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.arc(px, py, rr, a0, a0 + sweep);
+          ctx.stroke();
+        };
+        arc(x, R, lw + 5, "rgba(104,56,18,0.55)");
+        arc(x, R, lw, tint(col, k));
+        arc(x, R - lw * 0.18, lw * 0.26, "rgba(255,226,150,0.3)");
+        // An open end turned up, seen into.
+        if (hole) {
+          x.fillStyle = "rgba(122,66,20,0.45)";
+          x.beginPath();
+          x.ellipse(px + Math.cos(a0) * R, py + Math.sin(a0) * R, lw * 0.22, lw * 0.13, a0, 0, Math.PI * 2);
+          x.fill();
+        }
+        arc(y, R, lw, grey(hgt));
+        arc(y, R, lw * 0.45, grey(hgt + 60));
+      });
+    }
+    sauce(layer < 2 ? 70 : 30, layer < 2 ? 0.5 : 0.3);
+  }
+  // Where it caught: the crust darker still at the patches' hearts.
+  for (const [bx, by, br] of patches)
+    wrapped(S, bx, by, br, (px, py) => {
+      const g = x.createRadialGradient(px, py, 0, px, py, br * 0.6);
+      g.addColorStop(0, "rgba(110,52,14,0.45)");
+      g.addColorStop(1, "rgba(110,52,14,0)");
+      x.fillStyle = g;
+      x.fillRect(px - br, py - br, br * 2, br * 2);
+    });
+  return [c, b];
+}
+
+/** Whole cooked green beans heaped, a tile 200 mm across (0.39 mm a pixel): three layers, those beneath in shadow. */
+function greenBeanArt(): [HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [b, y] = canvas2d(S, S);
+  x.fillStyle = "#18230a";
+  x.fillRect(0, 0, S, S);
+  y.fillStyle = "#000";
+  y.fillRect(0, 0, S, S);
+  x.lineCap = "round";
+  y.lineCap = "round";
+  const r = rng(61);
+  for (let layer = 0; layer < 3; layer++)
+    for (let i = 0; i < 64; i++) {
+      // A bean is 60 to 100 mm long and 7 to 8 mm across.
+      const [px0, py0, a] = [r() * S, r() * S, r() * Math.PI];
+      const L = 150 + r() * 110;
+      const wd = 17 + r() * 4;
+      const bow = (r() - 0.5) * 34;
+      const k = 0.5 + layer * 0.24 + r() * 0.08;
+      const [ca, sa] = [Math.cos(a), Math.sin(a)];
+      wrapped(S, px0, py0, L / 2 + wd, (px, py) => {
+        const path = (ctx: CanvasRenderingContext2D, off: number) => {
+          ctx.beginPath();
+          ctx.moveTo(px - (ca * L) / 2 - sa * off, py - (sa * L) / 2 + ca * off);
+          ctx.quadraticCurveTo(px - sa * (bow + off), py + ca * (bow + off), px + (ca * L) / 2 - sa * off, py + (sa * L) / 2 + ca * off);
+        };
+        for (const [ctx, w, style] of [
+          [x, wd + 4, "rgba(14,26,6,0.75)"],
+          [x, wd, tint([86, 132, 46], k)],
+          [y, wd, grey(70 + layer * 60)],
+          [y, wd * 0.5, grey(110 + layer * 60)],
+        ] as const) {
+          ctx.strokeStyle = style;
+          ctx.lineWidth = w;
+          path(ctx, 0);
+          ctx.stroke();
+        }
+        x.strokeStyle = "rgba(176,210,120,0.32)";
+        x.lineWidth = 4;
+        path(x, -wd * 0.22);
+        x.stroke();
+        // The stem end, trimmed.
+        x.fillStyle = "rgba(120,112,52,0.8)";
+        x.beginPath();
+        x.arc(px - (ca * L) / 2, py - (sa * L) / 2, wd * 0.28, 0, Math.PI * 2);
+        x.fill();
+      });
+    }
+  return [c, b];
+}
+
+/** Corn kernels, a tile 80 mm across (0.156 mm a pixel): plump and glossy, pale where they were cut from the cob. */
+function cornArt(): [HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [b, y] = canvas2d(S, S);
+  x.fillStyle = "#6a3f04";
+  x.fillRect(0, 0, S, S);
+  y.fillStyle = "#000";
+  y.fillRect(0, 0, S, S);
+  y.globalCompositeOperation = "lighten";
+  const r = rng(29);
+  for (let layer = 0; layer < 3; layer++)
+    for (let i = 0; i < 150; i++) {
+      // A kernel is about 7 mm across and 8 long.
+      const [px0, py0, a] = [r() * S, r() * S, r() * 6.28];
+      const [kw, kh] = [40 + r() * 8, 46 + r() * 8];
+      const k = 0.8 + layer * 0.1 + r() * 0.05;
+      wrapped(S, px0, py0, kh, (px, py) => {
+        for (const ctx of [x, y]) {
+          ctx.save();
+          ctx.translate(px, py);
+          ctx.rotate(a);
+          const g = ctx.createRadialGradient(-kw * 0.12, -kh * 0.12, 0, 0, 0, kh * 0.62);
+          if (ctx === y) {
+            g.addColorStop(0, grey(110 + layer * 55));
+            g.addColorStop(1, grey(30 + layer * 40));
+          } else {
+            g.addColorStop(0, tint([255, 212, 62], k));
+            g.addColorStop(0.55, tint([240, 178, 22], k));
+            g.addColorStop(1, tint([192, 124, 8], k));
+          }
+          ctx.fillStyle = g;
+          rrect(ctx, -kw / 2, -kh / 2, kw, kh, kw * 0.38);
+          ctx.fill();
+          if (ctx === x) {
+            x.strokeStyle = "rgba(120,72,4,0.5)";
+            x.lineWidth = 2;
+            x.stroke();
+            // The cut tip, pale; a glint.
+            x.fillStyle = "rgba(250,230,160,0.35)";
+            x.fillRect(-kw * 0.3, kh / 2 - 7, kw * 0.6, 5);
+            x.fillStyle = "rgba(255,250,220,0.4)";
+            x.beginPath();
+            x.ellipse(-kw * 0.14, -kh * 0.18, 4, 2.5, 0.5, 0, Math.PI * 2);
+            x.fill();
+          }
+          ctx.restore();
+        }
+      });
+    }
+  return [c, b];
+}
+
+/**
+ * A cutting board's HDPE, a tile 300 mm across: a warm off-white, a faint stain or two, crossed by knife scores that
+ * catch a little grey, roughen it where they run and are cut into it.
+ */
+function boardArt(): [HTMLCanvasElement, HTMLCanvasElement, HTMLCanvasElement] {
+  const S = 512;
+  const [c, x] = canvas2d(S, S);
+  const [rc, rx] = canvas2d(S, S);
+  const [bc, bx] = canvas2d(S, S);
+  const r = rng(97);
+  x.fillStyle = "#ddd7c8";
+  x.fillRect(0, 0, S, S);
+  for (let i = 0; i < 6; i++) {
+    const [px0, py0, rad] = [r() * S, r() * S, 60 + r() * 120];
+    wrapped(S, px0, py0, rad, (px, py) => {
+      const g = x.createRadialGradient(px, py, 0, px, py, rad);
+      g.addColorStop(0, "rgba(196,186,166,0.12)");
+      g.addColorStop(1, "rgba(196,186,166,0)");
+      x.fillStyle = g;
+      x.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+    });
+  }
+  rx.fillStyle = grey(160);
+  rx.fillRect(0, 0, S, S);
+  bx.fillStyle = grey(128);
+  bx.fillRect(0, 0, S, S);
+  for (let i = 0; i < 900; i++) {
+    // Most cuts run along the board, a few across it.
+    const a = (r() < 0.6 ? 0 : Math.PI / 2) + (r() - 0.5) * 0.7;
+    const len = 10 + r() * 70;
+    const [px0, py0] = [r() * S, r() * S];
+    const alpha = 0.08 + r() * 0.16;
+    wrapped(S, px0, py0, len, (px, py) => {
+      for (const [ctx, col, lw] of [
+        [x, `rgba(112,104,90,${alpha})`, 0.8],
+        [rx, "rgba(240,240,240,0.5)", 1.2],
+        [bx, "rgba(40,40,40,0.45)", 0.9],
+      ] as const) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len);
+        ctx.stroke();
+      }
+    });
+  }
+  return [c, rc, bc];
+}
+
+type StdFn = (p: THREE.MeshStandardMaterialParameters, uv?: "box" | "own", uvScale?: number) => THREE.MeshStandardMaterial;
+
+/** The hot table's food and its board. Food tops carry their own UVs in metres; each map repeats every `tile` m. */
+function foodMats(std: StdFn, speck: (base: string, dots: string[], n: number, seed: number) => THREE.CanvasTexture) {
+  const tiled = (cv: HTMLCanvasElement, srgb: boolean, tile: number) => {
+    const t = ctex(cv, srgb);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(1 / tile, 1 / tile);
+    return t;
+  };
+  const art = ([c, b]: [HTMLCanvasElement, HTMLCanvasElement], tile: number) => ({ map: tiled(c, true, tile), bumpMap: tiled(b, false, tile) });
+  const mashMap = speck("#e4d5ad", ["#efe3c2", "#d8c79c", "#ece0bc"], 1800, 21);
+  mashMap.repeat.set(1 / 0.06, 1 / 0.06);
+  const mashBump = tiled(mashMap.image as HTMLCanvasElement, false, 0.06);
+  const chili = std({ ...art(chiliArt(), 0.12), bumpScale: 4, roughness: 0.32, metalness: 0 }, "own");
+  const [bm, br, bb] = boardArt();
+  return {
+    mac: std({ ...art(macArt(), 0.1), bumpScale: 1.6, roughness: 0.5, metalness: 0 }, "own"),
+    // Open tubes: both faces drawn, so an end that stands clear of the sauce shows the pasta's inside.
+    elbow: std({ color: 0xe9b04c, roughness: 0.42, metalness: 0, side: THREE.DoubleSide }),
+    elbowBrown: std({ color: 0xc27f36, roughness: 0.5, metalness: 0, side: THREE.DoubleSide }),
+    chili,
+    bean: std({ color: 0x4c1610, roughness: 0.3, metalness: 0 }),
+    greensHeap: std({ ...art(greenBeanArt(), 0.2), bumpScale: 2, roughness: 0.48, metalness: 0 }, "own"),
+    greens: std({ color: 0x5a8a2e, roughness: 0.42, metalness: 0 }),
+    greensDark: std({ color: 0x41661f, roughness: 0.46, metalness: 0 }),
+    rice: std({ ...art(riceArt(), 0.08), bumpScale: 2.4, roughness: 0.55, metalness: 0 }, "own"),
+    mash: std({ map: mashMap, bumpMap: mashBump, bumpScale: 0.8, roughness: 0.62, metalness: 0 }, "own"),
+    corn: std({ ...art(cornArt(), 0.08), bumpScale: 2.2, roughness: 0.34, metalness: 0 }, "own"),
+    board: std({ map: tiled(bm, true, 0.3), roughnessMap: tiled(br, false, 0.3), bumpMap: tiled(bb, false, 0.3), bumpScale: 0.5, roughness: 0.85, metalness: 0 }, "own"),
+  };
+}
+
 let fam: FamilyMats | null = null;
 
 function mats(): FamilyMats {
@@ -375,11 +1584,37 @@ function mats(): FamilyMats {
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     return t;
   };
-  const poly = new THREE.MeshPhysicalMaterial({ color: 0xe6eef2, metalness: 0, roughness: 0.12, transparent: true, opacity: 0.2, clearcoat: 1, depthWrite: false, side: THREE.DoubleSide });
+  // Clear polycarbonate. Everything made of it is a closed solid, so its front faces alone draw both of its surfaces.
+  const poly = new THREE.MeshPhysicalMaterial({ color: 0xe6eef2, metalness: 0, roughness: 0.08, transparent: true, opacity: 0.13, clearcoat: 1, envMapIntensity: 1.4, depthWrite: false });
   poly.userData.uv = "own";
-  const bag = new THREE.MeshPhysicalMaterial({ color: 0xf2f4f5, metalness: 0, roughness: 0.18, transparent: true, opacity: 0.16, clearcoat: 1, clearcoatRoughness: 0.2, depthWrite: false });
+  // Vacuum-bag film: thin, glossy and slightly milky; its embossed channels catch the light.
+  const bag = new THREE.MeshPhysicalMaterial({
+    color: 0xf4f7f8,
+    metalness: 0,
+    roughness: 0.16,
+    transparent: true,
+    opacity: 0.11,
+    clearcoat: 1,
+    clearcoatRoughness: 0.06,
+    envMapIntensity: 1.8,
+    bumpMap: bagEmboss(),
+    bumpScale: 0.6,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
   bag.userData.uv = "own";
   const ui = basic(combiUi());
+  const own = <T extends THREE.Material>(m: T): T => {
+    m.userData.uv = "own";
+    return m;
+  };
+  const bread = (toasted: boolean) => {
+    const a = breadArt(toasted);
+    return own(new THREE.MeshStandardMaterial({ map: a.map, bumpMap: a.bump, bumpScale: 2.2, roughness: 0.92, metalness: 0 }));
+  };
+  const fryTex = ctex(fryArt());
+  const grilleTex = perforation(15, 0.62);
+  grilleTex.repeat.set(1, 2 / 3);
   fam = {
     perf: std({ color: 0xb9bdc2, metalness: 0.85, roughness: 0.42, alphaMap: perfTex, alphaTest: 0.5, side: THREE.DoubleSide }, "box", 125 / 16),
     screenMesh: std({ color: 0x101113, metalness: 0.5, roughness: 0.5, alphaMap: meshTex, alphaTest: 0.5, side: THREE.DoubleSide }, "box", 400 / 32),
@@ -393,6 +1628,7 @@ function mats(): FamilyMats {
     dialPress: std({ map: ctex(dialFace(10, 2, 8.6, "bar")), roughness: 0.5 }, "own"),
     poly,
     bag,
+    bath: new THREE.MeshPhysicalMaterial({ color: 0xa8ccd4, metalness: 0, roughness: 0.03, transparent: true, opacity: 0.15, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.3, depthWrite: false }),
     red: std({ color: 0xc8302a, metalness: 0.1, roughness: 0.45 }),
     greyBox: std({ color: 0x8b9096, metalness: 0.2, roughness: 0.55 }),
     mica: std({ color: 0xcdb98e, metalness: 0, roughness: 0.5, side: THREE.DoubleSide }, "box"),
@@ -402,24 +1638,21 @@ function mats(): FamilyMats {
       m.userData.uv = "own";
       return m;
     })(),
-    mac: std({ color: 0xe8b443, roughness: 0.5, map: speck("#e8b443", ["#f6cf6a", "#c98a25", "#f2c25a"], 900, 11) }, "box", 6),
-    chili: std({ color: 0xffffff, roughness: 0.42, map: speck("#6a2414", ["#4a160c", "#8a3a1c", "#3a120a", "#a54a22"], 1400, 12) }, "box", 5),
-    bean: std({ color: 0x4a140e, roughness: 0.35 }),
-    greens: std({ color: 0x4f8030, roughness: 0.45 }),
-    rice: std({ color: 0xffffff, roughness: 0.8, map: speck("#eeeadf", ["#ffffff", "#d9d3c4", "#f8f6ef"], 2600, 13) }, "box", 6),
-    mash: std({ color: 0xe9dcb8, roughness: 0.72 }),
-    corn: std({ color: 0xffffff, roughness: 0.4, map: speck("#f0c02c", ["#ffd84a", "#d9a218", "#fbe07a"], 2000, 14) }, "box", 8),
-    fries: std({ color: 0xe3ac4a, roughness: 0.6 }),
+    ...foodMats(std, speck),
+    fries: own(new THREE.MeshStandardMaterial({ map: ctex(friesHeapArt()), roughness: 0.62 })),
+    fry: [0xfff8ec, 0xf8dcae, 0xe8b07a].map((col) => own(new THREE.MeshStandardMaterial({ map: fryTex, color: col, roughness: 0.62 }))),
     dough: std({ color: 0xead8b4, roughness: 0.88 }),
-    beef: std({ color: 0x8a2a2c, roughness: 0.48 }),
-    fat: std({ color: 0xe8d8c8, roughness: 0.6 }),
-    salmon: std({ color: 0xe07a52, roughness: 0.45 }),
+    beef: own(new THREE.MeshStandardMaterial({ map: ctex(steakArt()), roughness: 0.42 })),
+    salmon: own(new THREE.MeshStandardMaterial({ map: ctex(salmonArt()), roughness: 0.4 })),
     gravy: std({ color: 0x6a4224, roughness: 0.22 }),
-    toast: std({ color: 0xffffff, roughness: 0.85, map: speck("#b77a3c", ["#8e5426", "#c98d4a", "#6e3e1c"], 1800, 16) }, "box", 6),
-    crust: std({ color: 0x6e3e1e, roughness: 0.7 }),
-    crumb: std({ color: 0xffffff, roughness: 0.9, map: speck("#efe2c4", ["#e0cfa8", "#f7eedb", "#d8c49a"], 2200, 17) }, "box", 6),
-    crustRaw: std({ color: 0xc8a572, roughness: 0.75 }),
-    steamTex: ctex(puff()),
+    breadRaw: bread(false),
+    breadToast: bread(true),
+    paneSmoke: own(new THREE.MeshPhysicalMaterial({ color: 0x2a2b2a, metalness: 0, roughness: 0.02, transparent: true, opacity: 0.4, envMapIntensity: 1.7, clearcoat: 1, clearcoatRoughness: 0.02, depthWrite: false })),
+    paneClear: own(new THREE.MeshPhysicalMaterial({ color: 0xd8e6e2, metalness: 0, roughness: 0.02, transparent: true, opacity: 0.1, envMapIntensity: 1.5, depthWrite: false })),
+    paneEdge: own(new THREE.MeshStandardMaterial({ color: 0x4f7c6c, metalness: 0, roughness: 0.08, transparent: true, opacity: 0.72, depthWrite: false })),
+    blackGlass: own(new THREE.MeshPhysicalMaterial({ color: 0x060708, metalness: 0, roughness: 0.08, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.2 })),
+    frit: new THREE.MeshStandardMaterial({ color: 0x0b0c0d, roughness: 0.35, metalness: 0 }),
+    grille: own(new THREE.MeshStandardMaterial({ color: 0xa9adb2, metalness: 0.85, roughness: 0.45, alphaMap: grilleTex, alphaTest: 0.5, side: THREE.DoubleSide })),
   };
   return fam;
 }
@@ -678,10 +1911,14 @@ function adjFoot(s: Shop, x: number, z: number, y1: number, r = 0.019): void {
   if (s.fine(2)) s.add(p.ssBright, cyl(s, r * 0.75, 0.005, "y", 6), [x, y1 - sl - 0.004, z]);
 }
 
-/** The steam a pan or a cavity gives off: soft sprites drifting in a box, their strength live. */
+/**
+ * The steam a pan or a cavity gives off: torn, noise-textured wisps (view-aligned sprites, so they read from every
+ * side) drifting in a box, their strength live. Each is a plume taller than it is wide; off a surface they rise, swell
+ * and thin out as they go, swaying; in a cavity the fan churns them round, turning slowly as they are carried.
+ */
 class Haze {
   readonly group = new THREE.Group();
-  private items: { s: THREE.Sprite; m: THREE.SpriteMaterial; x: number; y: number; z: number; ph: number; sp: number; sc: number }[] = [];
+  private items: { s: THREE.Sprite; m: THREE.SpriteMaterial; x: number; y: number; z: number; ph: number; sp: number; w: number; h: number; rot: number; spin: number }[] = [];
   private level = 0;
   constructor(
     private bx: { x0: number; x1: number; y0: number; y1: number; z0: number; z1: number },
@@ -693,15 +1930,18 @@ class Haze {
     private peak = 0.5,
   ) {
     const r = rng(seed);
+    const tex = wisps();
     for (let i = 0; i < n; i++) {
-      const m = new THREE.SpriteMaterial({ map: mats().steamTex, color: tint, transparent: true, depthWrite: false, opacity: 0, rotation: r() * 6.28 });
+      const rot = rise > 0 ? (r() - 0.5) * 0.5 : r() * Math.PI * 2;
+      const m = new THREE.SpriteMaterial({ map: tex[i % tex.length], color: tint, transparent: true, depthWrite: false, opacity: 0, rotation: rot });
       m.userData.uv = "own";
       const sp = new THREE.Sprite(m);
       sp.renderOrder = 1;
-      const sc = size * (0.7 + r() * 0.6);
-      sp.scale.set(sc, sc, sc);
+      const w = size * (0.45 + r() * 0.4);
+      const h = w * (1.7 + r() * 0.7);
+      sp.scale.set(w, h, 1);
       this.group.add(sp);
-      this.items.push({ s: sp, m, x: r(), y: r(), z: r(), ph: r() * 6.28, sp: 0.6 + r() * 0.8, sc });
+      this.items.push({ s: sp, m, x: r(), y: r(), z: r(), ph: r() * 6.28, sp: 0.6 + r() * 0.8, w, h, rot, spin: (r() - 0.5) * 0.5 });
     }
     this.group.visible = false;
   }
@@ -717,21 +1957,24 @@ class Haze {
     if (!this.group.visible) return;
     const b = this.bx;
     for (const it of this.items) {
-      let u: number;
-      let y: number;
       if (this.rise > 0) {
-        // Wisps rising off a surface, growing and fading as they go.
-        u = (it.y + t * this.rise * it.sp) % 1;
-        y = b.y0 + u * (b.y1 - b.y0);
-        const k = Math.sin(Math.PI * u);
-        it.s.scale.setScalar(it.sc * (0.5 + u));
-        it.m.opacity = this.peak * this.level * k;
-        it.s.position.set(b.x0 + (b.x1 - b.x0) * (it.x + 0.06 * Math.sin(t * 0.9 + it.ph) * u), y, b.z0 + (b.z1 - b.z0) * it.z);
+        // Rising off a surface: born small and dense, swelling and thinning as it climbs, leaning as it sways.
+        const u = (it.y + t * this.rise * it.sp) % 1;
+        const y = b.y0 + u * (b.y1 - b.y0);
+        const k = Math.sin(Math.PI * Math.min(1, u * 1.25)) * (1 - u * 0.35);
+        const g = 0.55 + 0.9 * u;
+        it.s.scale.set(it.w * g, it.h * g, 1);
+        it.m.opacity = this.peak * this.level * Math.max(0, k);
+        it.m.rotation = it.rot + 0.25 * Math.sin(t * 0.7 + it.ph) * u;
+        it.s.position.set(b.x0 + (b.x1 - b.x0) * (it.x + 0.06 * Math.sin(t * 0.9 + it.ph) * u), y + (it.h * g) * 0.3, b.z0 + (b.z1 - b.z0) * it.z);
       } else {
-        // Churned round by the fan: a slow loop in the cavity.
+        // Churned round by the fan: a slow loop in the cavity, each wisp turning as it is carried.
         const a = t * 0.35 * it.sp + it.ph;
         const fx = 0.5 + (it.x - 0.5) * 0.7 + 0.14 * Math.cos(a);
         const fy = 0.5 + (it.y - 0.5) * 0.7 + 0.14 * Math.sin(a);
+        it.m.rotation = it.rot + t * it.spin;
+        const br = 0.75 + 0.25 * Math.sin(t * 0.6 * it.sp + it.ph * 2);
+        it.m.opacity = this.peak * this.level * br;
         it.s.position.set(b.x0 + (b.x1 - b.x0) * fx, b.y0 + (b.y1 - b.y0) * fy, b.z0 + (b.z1 - b.z0) * (0.2 + 0.6 * it.z));
       }
     }
@@ -833,6 +2076,8 @@ function combiLayout(pans: 6 | 10 | 20, e: Ext): CombiLayout {
 /** Half the spacing of the GN runner rods a pan's rim rests on, and of the frame rods that carry them. */
 const RUNNER = 0.155;
 const FRAME = 0.205;
+/** How far in from the door's left edge its hinge pins stand (in the plane of its outer face). */
+const HINGE_IN = 0.004;
 
 export interface CombiCavity {
   /** The working cavity's clear box (fixture frame): wall to wall in x, floor to ceiling in y, baffle face (z0) to the opening (z1). */
@@ -844,6 +2089,12 @@ export interface CombiCavity {
   runners: [number, number];
   /** The z of a pan's centre when pushed home on its runners. */
   zc: number;
+  /**
+   * The door (fixture frame): its hinge pins' line at x, z (in the plane of its outer face, hinged left); the leaf's
+   * length from the pins to its free edge; how far its inner face lies behind the pins' line; the pull's grip along
+   * the leaf from the pins and out from its face, and where along the leaf the pull begins to stand out.
+   */
+  door: { x: number; z: number; len: number; back: number; hAlong: number; hOut: number; pullFrom: number };
 }
 
 /** Where pans go in a combi oven: its cavity box and rail heights in the fixture frame, or null for another archetype. */
@@ -852,7 +2103,11 @@ export function combiCavity(id: string, e: Ext): CombiCavity | null {
   if (!pans) return null;
   const L = combiLayout(pans, e);
   const { x0, x1, y0, y1, z0, z1 } = L.cav;
-  return { box: { x0, x1, y0, y1, z0, z1 }, rails: [...L.rails], cx: L.cx, runners: [L.cx - RUNNER, L.cx + RUNNER], zc: z0 + (pans === 20 ? 0.042 : 0.024) + 0.265 };
+  // The pull (see the door in combi()): a grip on two standoffs 30 mm in from the free edge, its axis 26 mm out.
+  const len = L.door.x1 - L.door.x0 - HINGE_IN;
+  const hAlong = len - 0.03;
+  const door = { x: L.door.x0 + HINGE_IN, z: L.zDoorFront, len, back: L.zDoorFront - L.zDoorBack, hAlong, hOut: 0.026, pullFrom: hAlong - 0.022 };
+  return { box: { x0, x1, y0, y1, z0, z1 }, rails: [...L.rails], cx: L.cx, runners: [L.cx - RUNNER, L.cx + RUNNER], zc: z0 + (pans === 20 ? 0.042 : 0.024) + 0.265, door };
 }
 
 /** A backward-curved fan blade in the wheel's plane: from radius r0 to r1, swept `sweep` radians, `t` thick, `depth` deep along +z. */
@@ -886,6 +2141,8 @@ function combi(pans: 6 | 10 | 20): Builder {
     const glow = glowMaterial(0x2b2724);
     const fine1 = s.fine(1);
     const fine2 = s.fine(2);
+    /** The radius of the cavity liner's coves, and of the front frame's opening that matches them. */
+    const rc = big ? 0.03 : 0.025;
 
     /* Feet, or the stand. */
     const footX = [0.05, w - 0.05];
@@ -946,7 +2203,8 @@ function combi(pans: 6 | 10 | 20): Builder {
     const xR = L.panel.x1;
     slab(s, p.ss, 0, sk, base, top - sk, zBack, zFrame - 0.0015, 0.0005);
     slab(s, p.ss, 0, xR, top - sk, top, zBack, L.zDoorFront, 0.0005);
-    slab(s, p.ss, 0, xR, top - 0.012, top - sk, L.zDoorFront - sk, L.zDoorFront, 0.0005);
+    // The top's front return, stopped short of the upper hinge bracket at the left.
+    slab(s, p.ss, 0.033, xR, top - 0.012, top - sk, L.zDoorFront - sk, L.zDoorFront, 0.0005);
     slab(s, p.ssDull, 0.001, xR - 0.001, base, base + sk, zBack, zFrame - 0.0015);
     slab(s, p.ssDull, 0, xR, base, top - sk, zBack - sk, zBack);
     // Folded side returns at the back corners, and the skin's screws down the rear edge.
@@ -957,7 +2215,7 @@ function combi(pans: 6 | 10 | 20): Builder {
       const fw = L.panel.x0;
       const fh = top - sk - base;
       const sh = roundRect(fw, fh, 0.002, fw / 2, base + fh / 2);
-      rectPath(sh, cav.x1 - cav.x0, cav.y1 - cav.y0, 0.006, cx, (cav.y0 + cav.y1) / 2, true);
+      rectPath(sh, cav.x1 - cav.x0, cav.y1 - cav.y0, rc, cx, (cav.y0 + cav.y1) / 2, true);
       s.add(p.ss, plate(s, sh, 0.0015), [0, 0, zFrame - 0.0015]);
     }
     // The gasket: a hollow EPDM profile on the cavity frame, pressed by the door's inner pane.
@@ -983,37 +2241,94 @@ function combi(pans: 6 | 10 | 20): Builder {
         slab(s, p.ss, cav.x0, cav.x1, cav.y0 - 0.006, cav.y0 - 0.0045, z0g, z1g);
       }
     } else {
-      const y0 = base + 0.005;
+      // A deep-drawn trough under the door, its rim rolled, falling to an outlet at its right end that drains into the
+      // cavity's drain; it stands a little proud of the shut door so that the door's condensate falls into it when it
+      // opens.
       const y1 = L.door.y0 - 0.004;
+      const dep = Math.min(0.02, y1 - base - 0.006);
       const [x0, x1] = [L.door.x0 + 0.03, L.door.x1];
-      const zf = L.zDoorFront + 0.003;
-      slab(s, p.ss, x0, x1, y0, y0 + 0.0012, zFrame, zf, 0.0005);
-      slab(s, p.ss, x0, x1, y0, y1, zf - 0.0012, zf, 0.0005);
-      for (const x of [x0, x1 - 0.0012]) slab(s, p.ss, x, x + 0.0012, y0, y1, zFrame, zf, 0.0004);
-      if (fine2) s.add(p.enamel, cyl(s, 0.005, 0.0008, "y", 12), [x1 - 0.02, y0 + 0.0016, (zFrame + zf) / 2]);
+      const zf = L.zDoorFront + 0.006;
+      const tw = x1 - x0;
+      const td = zf - zFrame;
+      const trough = fine2
+        ? vessel(s, tw, td, 0.008, [
+            [0.006, -dep],
+            [0.0015, -dep + 0.004],
+            [0, -0.004],
+            [-0.0012, -0.0012],
+            [0, 0],
+            [0.0016, -0.0008],
+            [0.0026, -0.004],
+            [0.0074, -dep + 0.0012],
+          ])
+        : vessel(s, tw, td, 0.006, [
+            [0.006, -dep],
+            [0, -0.002],
+            [0, 0],
+            [0.0022, -0.002],
+            [0.0074, -dep + 0.0012],
+          ]);
+      s.add(p.ss, trough, [(x0 + x1) / 2, y1, (zFrame + zf) / 2]);
+      if (fine2) {
+        // The outlet: a dark hole in a pressed dimple, its pipe stub down through the base.
+        const zc = (zFrame + zf) / 2;
+        s.add(p.enamel, cyl(s, 0.0055, 0.0008, "y", 16), [x1 - 0.022, y1 - dep + 0.0016, zc]);
+        s.add(p.ss, torus(s, 0.0062, 0.0011, "y", Math.PI * 2, 18, 6), [x1 - 0.022, y1 - dep + 0.0016, zc]);
+        s.add(p.ss, cyl(s, 0.006, y1 - dep - base - 0.001, "y", 14, 0.006, true), [x1 - 0.022, (y1 - dep + base + 0.001) / 2, zc]);
+      }
     }
-    // Hinge brackets: a pin top and bottom on the frame's left edge, the door's knuckles turning on them.
-    const pivot: V3 = [L.door.x0, 0, L.zDoorBack];
-    for (const y of [L.door.y1 + 0.0015, Math.max(0.0005, L.door.y0 - 0.0105)]) {
-      slab(s, p.ssBright, 0, 0.034, y, y + 0.009, zFrame, L.zDoorBack + 0.009, 0.0015);
-      if (fine2) screw(s, p.ssBright, [0.022, y + 0.0045, L.zDoorBack + 0.009], 0.0022);
+    // Hinges. The door turns on two pins standing in the plane of its outer face, just in from its left edge, so that it
+    // swings forward and its leaf never passes behind the front into the space beside the oven (a griddle or a
+    // toaster may stand flush there). Each pin is carried by a cast bracket fixed to the cavity frame, one over the
+    // door and one under it, ending in a knuckle round the pin; the door's own knuckles, on straps along its left
+    // edge, turn on the same pins between them, a bronze washer in each joint.
+    const kr = 0.0075;
+    const pivot: V3 = [L.door.x0 + HINGE_IN, 0, L.zDoorFront];
+    {
+      const [px, pz] = [pivot[0], pivot[2]];
+      const ns = s.seg(20, 10);
+      const yLo = Math.max(0.0015, L.door.y0 - 0.0105);
+      for (const [b0, b1] of [[L.door.y1 + 0.0015, top - sk - 0.0003], [yLo, L.door.y0 - 0.0015]] as const) {
+        bit(s, p.ss, 0.0006, 0.031, b0 + 0.0004, b1 - 0.0004, zFrame, pz - 0.0025, 0.0012);
+        s.add(p.ssBright, cyl(s, kr, b1 - b0, "y", ns), [px, (b0 + b1) / 2, pz]);
+        if (fine2) {
+          // The bracket's two screws into the frame, on its front.
+          screw(s, p.ssBright, [0.024, (b0 + b1) / 2, pz - 0.0025], 0.0019);
+          // The washer between this knuckle and the door's.
+          const yw = b0 > L.door.y1 ? L.door.y1 + 0.00075 : L.door.y0 - 0.00075;
+          s.add(p.brass, cyl(s, kr * 0.92, 0.0011, "y", ns), [px, yw, pz]);
+        }
+      }
+      // The lower pin's head under its knuckle, where there is room above the floor.
+      if (fine1 && yLo > 0.004) s.add(p.ssBright, lathe(s, [[0, 0], [kr * 0.5, 0], [kr * 0.62, 0.0008], [kr * 0.68, 0.0018], [kr * 0.68, 0.003], [0, 0.003]], s.seg(16, 8)), [px, yLo - 0.0025, pz]);
     }
 
     /* The cavity: deep-drawn stainless, its runners, the fan and element behind the air baffle. */
     const ct = 0.0015;
+    // The liner is drawn from one sheet, so its walls meet the ceiling and the floor in generous coves. The left half
+    // and the ceiling stay; the right wall and its two coves belong to the cutaway.
+    const nArc = s.seg(8, 3);
+    const linerL: SecPt[] = [
+      ...covePts(cav.x0 + rc, cav.y0 + rc, rc, -Math.PI / 2, -Math.PI, nArc),
+      ...covePts(cav.x0 + rc, cav.y1 - rc, rc, Math.PI, Math.PI / 2, nArc),
+      [cav.x1 - rc, cav.y1, 0, -1],
+    ];
+    const linerR: SecPt[] = [...covePts(cav.x1 - rc, cav.y1 - rc, rc, Math.PI / 2, 0, nArc), ...covePts(cav.x1 - rc, cav.y0 + rc, rc, 0, -Math.PI / 2, nArc)];
     if (fine1) {
-      slab(s, p.ss, cav.x0 - ct, cav.x0, cav.y0, cav.y1, cav.wall, cav.z1);
-      slab(s, p.ss, cav.x0 - ct, cav.x1 + ct, cav.y1, cav.y1 + ct, cav.wall, cav.z1);
-      slab(s, p.ssHeat, cav.x0 - ct, cav.x1 + ct, cav.y0, cav.y1, cav.wall - ct, cav.wall);
+      s.add(p.ss, sweepZ(linerL, cav.wall, cav.z1, ct));
+      {
+        const bw = roundRect(cav.x1 - cav.x0, cav.y1 - cav.y0, rc, cx, (cav.y0 + cav.y1) / 2);
+        s.add(p.ssHeat, plate(s, bw, ct, 0, 8), [0, 0, cav.wall - ct]);
+      }
       // The floor, its drain at the back under the baffle's foot.
       const dz = cav.z0 + 0.04;
       const fz1 = big ? cav.z1 - 0.035 : cav.z1;
-      const fl = roundRect(cav.x1 - cav.x0 + 2 * ct, fz1 - cav.wall, 0, cx, (fz1 + cav.wall) / 2);
+      const fl = roundRect(cav.x1 - cav.x0 - 2 * rc, fz1 - cav.wall, 0, cx, (fz1 + cav.wall) / 2);
       fl.holes.push(circleHole(cx, dz, 0.024));
       const flg = plate(s, fl, ct);
       flg.rotateX(Math.PI / 2);
       s.add(p.ss, flg, [0, cav.y0, 0]);
-      if (big) slab(s, p.ss, cav.x0 - ct, cav.x1 + ct, cav.y0 - ct, cav.y0, cav.z1 - 0.008, cav.z1);
+      if (big) slab(s, p.ss, cav.x0 + rc, cav.x1 - rc, cav.y0 - ct, cav.y0, cav.z1 - 0.008, cav.z1);
       s.add(p.enamel, lathe(s, [[0.024, 0], [0.023, -0.012], [0.016, -0.03], [0, -0.032]], 20), [cx, cav.y0 - ct, dz]);
       // The drain's strainer: a slotted stainless cap.
       if (fine2) {
@@ -1236,50 +2551,86 @@ function combi(pans: 6 | 10 | 20): Builder {
       tube(t, p.ssBright, [[xl + 0.03, yt - 0.06, zf], [xl + 0.03, yt - 0.06, zf + 0.012], [xr - 0.03, yt - 0.06, zf + 0.012], [xr - 0.03, yt - 0.06, zf]], 0.009, 0.008, 12);
     }
 
-    /* The door: a stainless frame carrying three panes, its outer one smoked with a black border; hinged left. */
+    /*
+     * The door, hinged left: a stainless chassis glazed three times. The outer pane, 6 mm toughened glass with a grey
+     * tint, covers the whole front; a black frit fired onto its back hides the chassis and leaves a clear window, its
+     * edge broken into the printer's halftone. The middle pane sits in the chassis behind a dark spacer; the inner
+     * pane, which the gasket seals on, rides on a stainless carrier that swings out for cleaning between the panes.
+     * Through the window one sees down into the door: the reveal, the spacer, the carrier's frame set well back, and
+     * the cavity beyond it.
+     */
     const door = s.joint("cavity_door", pivot);
+    // Built from the door's back face at its left edge: x along the door, y absolute, z out through its thickness.
+    door.push([-HINGE_IN, 0, L.zDoorBack - L.zDoorFront]);
     {
       const W = L.door.x1 - L.door.x0;
       const T = L.zDoorFront - L.zDoorBack;
       const [y0, y1] = [L.door.y0, L.door.y1];
       const H = y1 - y0;
       const ym = (y0 + y1) / 2;
-      door.add(p.glassSmoke, rbox(door, W, H, 0.006, 0.004), [W / 2, ym, T - 0.003]);
-      // Black enamel border fired onto the outer pane's back, hiding the frame.
-      if (fine1) {
-        const fr = roundRect(W - 0.002, H - 0.002, 0.004, W / 2, ym);
-        rectPath(fr, W - 0.085, H - 0.1, 0.01, W / 2 - 0.008, ym, true);
-        door.add(p.enamel, plate(door, fr, 0.001), [0, 0, T - 0.0076]);
-      }
-      // Frame: stiles and rails of formed stainless, the door's visible edges.
+      const dx = L.door.x0;
+      // The clear window (door frame: x from the hinge pivot, y absolute): the cavity opening and a margin.
+      const win = { x0: cav.x0 - dx - 0.024, x1: cav.x1 - dx + 0.024, y0: Math.max(cav.y0 - 0.03, y0 + 0.03), y1: cav.y1 + 0.024 };
+      const [wcx, wcy, ww, wh] = [(win.x0 + win.x1) / 2, (win.y0 + win.y1) / 2, win.x1 - win.x0, win.y1 - win.y0];
+      pane(door, fm.paneSmoke, fm.paneEdge, W, H, 0.006, [W / 2, ym, T - 0.003]);
+      door.add(fm.frit, fritGeom(door, W, H, W / 2, ym, win, 0.022), [0, 0, T - 0.0066]);
+      // The chassis: formed stainless round the window, its reveal seen through it at an angle.
       const fz0 = 0.0068;
       const fz1 = T - 0.0082;
-      slab(door, p.ss, 0, 0.032, y0, y1, fz0, fz1, 0.002);
-      slab(door, p.ss, W - 0.048, W, y0, y1, fz0, fz1, 0.002);
-      slab(door, p.ss, 0.03, W - 0.046, y1 - 0.038, y1, fz0, fz1, 0.002);
-      slab(door, p.ss, 0.03, W - 0.046, y0, y0 + 0.048, fz0, fz1, 0.002);
-      // The middle pane, and the inner pane on its own carrier: it swings out for cleaning between the panes.
-      if (fine1) door.add(p.glass, box(W - 0.05, H - 0.06, 0.004), [W / 2 - 0.006, ym, T * 0.5]);
-      const ix0 = cav.x0 - 0.034 - L.door.x0;
-      const ix1 = cav.x1 + 0.034 - L.door.x0;
+      {
+        const sh = roundRect(W - 0.002, H - 0.002, 0.004, W / 2, ym);
+        rectPath(sh, ww + 0.012, wh + 0.012, 0.025, wcx, wcy, true);
+        door.add(p.ss, plate(door, sh, fz1 - fz0, fine1 ? 0.0012 : 0), [0, 0, fz0]);
+      }
+      // The middle pane in its dark spacer.
+      if (fine1) {
+        const zm = fz0 + (fz1 - fz0) * 0.58;
+        pane(door, fm.paneClear, fm.paneEdge, ww + 0.03, wh + 0.03, 0.004, [wcx, wcy, zm]);
+        const sp = roundRect(ww + 0.016, wh + 0.016, 0.027, wcx, wcy);
+        rectPath(sp, ww + 0.003, wh + 0.003, 0.0215, wcx, wcy, true);
+        door.add(p.enamel, plate(door, sp, 0.012, fine2 ? 0.0008 : 0), [0, 0, zm - 0.006]);
+      }
+      // The inner pane, and the carrier that holds it: a formed frame whose opening is a little larger than the cavity's.
+      const ix0 = cav.x0 - 0.034 - dx;
+      const ix1 = cav.x1 + 0.034 - dx;
       const iy0 = Math.max(cav.y0 - 0.034, y0 + 0.012);
       const iy1 = cav.y1 + 0.034;
-      door.add(p.glass, rbox(door, ix1 - ix0, iy1 - iy0, 0.005, 0.003), [(ix0 + ix1) / 2, (iy0 + iy1) / 2, 0.0025]);
+      const [icx, icy] = [(ix0 + ix1) / 2, (iy0 + iy1) / 2];
+      pane(door, fm.paneClear, fm.paneEdge, ix1 - ix0, iy1 - iy0, 0.005, [icx, icy, 0.0025]);
+      if (fine1) {
+        const cr = roundRect(ix1 - ix0 - 0.002, iy1 - iy0 - 0.002, 0.006, icx, icy);
+        rectPath(cr, cav.x1 - cav.x0 + 0.016, Math.min(cav.y1 - cav.y0 + 0.016, iy1 - iy0 - 0.03), 0.02, cx - dx, (cav.y0 + cav.y1) / 2, true);
+        door.add(p.ss, plate(door, cr, 0.006, fine2 ? 0.001 : 0), [0, 0, 0.0069]);
+      }
       // The door's back sheet round the inner pane (heat-tinted from the cavity side).
       {
         const bs = roundRect(W - 0.002, H - 0.002, 0.003, W / 2, ym);
-        rectPath(bs, ix1 - ix0 - 0.03, iy1 - iy0 - 0.03, 0.006, (ix0 + ix1) / 2, (iy0 + iy1) / 2, true);
+        rectPath(bs, ix1 - ix0 - 0.03, iy1 - iy0 - 0.03, 0.006, icx, icy, true);
         door.add(p.ssDull, plate(door, bs, 0.0012), [0, 0, 0.0055]);
       }
       if (fine2) {
-        // Clips holding the inner pane, and the condensate lip along its foot.
-        for (const yy of [iy0 + 0.08, iy1 - 0.08]) slab(door, p.ssBright, ix1 - 0.012, ix1 + 0.008, yy - 0.012, yy + 0.012, -0.0012, 0.0055, 0.001);
+        // The carrier's hinge knuckles at the left, its quarter-turn catches at the right, and the condensate lip
+        // along the inner pane's foot.
+        for (const yy of [iy0 + 0.1, iy1 - 0.1]) {
+          door.add(p.ssBright, cyl(door, 0.004, 0.034, "y", 12), [ix0 + 0.006, yy, 0.0005 - 0.004]);
+          slab(door, p.ssBright, ix0 + 0.004, ix0 + 0.03, yy - 0.012, yy + 0.012, -0.0012, 0.0055, 0.001);
+        }
+        for (const yy of [iy0 + 0.08, iy1 - 0.08]) {
+          slab(door, p.ssBright, ix1 - 0.012, ix1 + 0.008, yy - 0.012, yy + 0.012, -0.0012, 0.0055, 0.001);
+          door.add(p.ssBright, cyl(door, 0.0065, 0.004, "z", 16), [ix1 - 0.004, yy, -0.0032]);
+          door.add(p.enamel, box(0.009, 0.0015, 0.0012), [ix1 - 0.004, yy, -0.0058], [0, 0, 0.5]);
+        }
         slab(door, p.ss, ix0 + 0.02, ix1 - 0.02, iy0 - 0.006, iy0 + 0.002, -0.004, 0.0055, 0.001);
-        // The latch tongue that the frame's striker catches.
+        // The latch: a sprung tongue with a roller that the frame's striker catches.
         slab(door, p.ssBright, W - 0.03, W - 0.012, ym - 0.03, ym + 0.03, -0.005, 0.0068, 0.002);
+        door.add(p.rubber, cyl(door, 0.006, 0.014, "x", 14), [W - 0.021, ym, -0.0075]);
       }
-      // Hinge knuckles round the pins.
-      for (const yy of [y1 - 0.02, y0 + 0.02]) door.add(p.ssBright, cyl(door, 0.0062, 0.04, "y", 16), [0.0001, yy, 0.0062 - 0.006]);
+      // The door's hinge knuckles round the pins, at its outer face, each on a strap screwed along its left edge.
+      for (const [k0, k1] of [[y1 - 0.034, y1 + 0.0001], [y0 - 0.0001, y0 + 0.034]] as const) {
+        door.add(p.ssBright, cyl(door, 0.0075, k1 - k0, "y", s.seg(20, 10)), [HINGE_IN, (k0 + k1) / 2, T]);
+        if (fine1) bit(door, p.ssBright, -0.003, 0.0015, k0 + 0.002, k1 - 0.002, 0.008, T - 0.002, 0.0008);
+        if (fine2) for (const z of [0.016, T * 0.55]) screw(door, p.ssBright, [-0.003, (k0 + k1) / 2, z], 0.0018, [0, -Math.PI / 2, 0]);
+      }
       // The handle: a heavy vertical grip on cast standoffs at the door's right edge.
       const hl = big ? 0.5 : pans === 10 ? 0.36 : 0.26;
       const hx = W - 0.03;
@@ -1291,12 +2642,13 @@ function combi(pans: 6 | 10 | 20): Builder {
       }
       tube(door, p.bakelite, [[hx, hy + hl / 2, hz + 0.018], [hx, hy + hl / 2 - 0.035, hz + 0.026], [hx, hy - hl / 2 + 0.035, hz + 0.026], [hx, hy - hl / 2, hz + 0.018]], 0.0115, 0.03, 16);
     }
+    door.pop();
 
     /* The right-hand column: side panel, cavity wall and controls, all hidden by the cutaway. */
     const cut = s.joint("cutaway", [0, 0, 0]);
     {
       slab(cut, p.ss, xR - sk, xR, base, top - sk, zBack, zFrame, 0.0005);
-      if (fine1) slab(cut, p.ss, cav.x1, cav.x1 + ct, cav.y0, cav.y1, cav.wall, cav.z1);
+      if (fine1) cut.add(p.ss, sweepZ(linerR, cav.wall, cav.z1, ct));
       // Ventilation louvres for the electronics at the side's lower rear, the data plate at its lower front.
       if (fine1) louvres(cut, [xR + 0.0001, base + 0.12, zBack + 0.12], [0, Math.PI / 2, 0], 6, 0.11, 0.016);
       dataPlate(cut, [xR, base + 0.09, zFrame - 0.12], [0, Math.PI / 2, 0]);
@@ -1313,7 +2665,7 @@ function combi(pans: 6 | 10 | 20): Builder {
       const fy1 = Math.min(py1 - 0.008, sTop + 0.028);
       const dialY = sTop - shh - 0.075;
       const fy0 = pans === 6 ? py0 + 0.008 : dialY - 0.14;
-      slab(cut, p.bakelite, fx0, fx1, fy0, fy1, P.z - 0.003, P.z, 0.003);
+      slab(cut, fm.blackGlass, fx0, fx1, fy0, fy1, P.z - 0.003, P.z, 0.003);
       const pcx = (fx0 + fx1) / 2;
       slab(cut, p.screen, pcx - sw / 2, pcx + sw / 2, sTop - shh, sTop, P.z - 0.001, P.z + 0.0008, 0.0015);
       if (fine1) cut.add(fm.combiUi, new THREE.PlaneGeometry(sw - 0.006, shh - 0.007), [pcx, sTop - shh / 2, P.z + 0.0014]);
@@ -1337,18 +2689,72 @@ function combi(pans: 6 | 10 | 20): Builder {
       // Below the fascia (tall units): the column's face, a louvred service panel at its foot.
       if (fine1 && pans !== 6) louvres(cut, [pcx, py0 + 0.12, P.z - 0.002], [0, 0, 0], 8, fw - 0.06, 0.016);
       if (fine2 && pans !== 6) for (const sy of [py0 + 0.03, fy0 - 0.03]) for (const sx of [P.x0 + 0.02, P.x1 - 0.02]) screw(cut, p.ssBright, [sx, sy, P.z - 0.002], 0.0024);
-      // The hand shower: a spray gun in a holder at the column's foot, its hose reeled inside.
+      // The hand shower: a spray gun parked nozzle up in a moulded cradle, its hose drawn off a retracting reel
+      // inside the column through a grommet beside it, hanging in a loop.
       if (fine2) {
-        const hy = pans === 6 ? py0 + 0.06 : py0 + 0.25;
+        const hy = pans === 6 ? py0 + 0.13 : py0 + 0.25;
         const hz = P.z - 0.002;
-        slab(cut, p.plastic, pcx - 0.024, pcx + 0.024, hy - 0.045, hy + 0.035, hz, hz + 0.005, 0.004);
-        tube(cut, p.bakelite, [[pcx, hy - 0.036, hz + 0.016], [pcx, hy + 0.012, hz + 0.016], [pcx, hy + 0.024, hz + 0.012]], 0.0095, 0.012, 14);
-        cut.add(p.ssBright, cyl(cut, 0.0085, 0.012, "y", 16, 0.0075), [pcx, hy + 0.029, hz + 0.011]);
-        cut.add(p.charcoal, box(0.006, 0.022, 0.008), [pcx, hy - 0.008, hz + 0.027], [0.15, 0, 0]);
-        tube(cut, p.rubber, [[pcx, hy - 0.036, hz + 0.016], [pcx, hy - 0.05, hz + 0.008], [pcx, hy - 0.05, hz - 0.002]], 0.005, 0.008, 8);
+        cut.add(p.plastic, rbox(cut, 0.046, 0.074, 0.006, 0.0025), [pcx, hy - 0.004, hz + 0.003]);
+        cut.add(p.plastic, rbox(cut, 0.036, 0.012, 0.024, 0.004), [pcx, hy - 0.036, hz + 0.014]);
+        // The gun: its grip, the head bent forward, a stainless nozzle with its spray face, and the trigger.
+        const gz = hz + 0.024;
+        cut.add(p.bakelite, rbox(cut, 0.026, 0.07, 0.03, 0.011), [pcx, hy - 0.006, gz]);
+        cut.at([pcx, hy + 0.026, gz + 0.002], [0.38, 0, 0], () => {
+          cut.add(p.bakelite, lathe(cut, [[0, 0], [0.0135, 0], [0.0135, 0.008], [0.0115, 0.018], [0.0092, 0.026], [0, 0.026]], 24));
+          cut.add(p.ssBright, lathe(cut, [[0, 0.025], [0.0092, 0.025], [0.0096, 0.03], [0.0088, 0.038], [0.0082, 0.039], [0, 0.039]], 24));
+          cut.add(p.enamel, cyl(cut, 0.0062, 0.0006, "y", 16), [0, 0.0392, 0]);
+        });
+        tube(cut, p.charcoal, [[pcx, hy + 0.018, gz + 0.016], [pcx, hy + 0.012, gz + 0.025], [pcx, hy - 0.02, gz + 0.023], [pcx, hy - 0.03, gz + 0.016]], 0.0035, 0.008, 8);
+        cut.add(p.ssBright, cyl(cut, 0.0072, 0.012, "y", 16), [pcx, hy - 0.046, gz]);
+        // The hose, and the grommet it runs through.
+        const gx = pcx + 0.048;
+        const gy = hy - 0.055;
+        cut.add(p.ssBright, torus(cut, 0.0095, 0.0024, "z", Math.PI * 2, 24, 8), [gx, gy, hz + 0.0016]);
+        cut.add(p.rubber, cyl(cut, 0.0072, 0.002, "z", 16), [gx, gy, hz + 0.001]);
+        tube(cut, p.rubber, [[pcx, hy - 0.052, gz], [pcx + 0.003, hy - 0.088, gz + 0.006], [pcx + 0.026, hy - 0.104, gz + 0.004], [gx, hy - 0.09, hz + 0.016], [gx, gy, hz + 0.008], [gx, gy, hz - 0.004]], 0.0058, 0.014, 12);
       }
-      // The column's left cheek, where it meets the door's right edge, and the door's striker.
-      slab(cut, p.ss, P.x0, P.x0 + sk, py0, py1, zFrame, P.z - 0.004);
+      // The core-temperature probe: a needle on a silicone grip, parked in its holder on the right wall at the front,
+      // its cord hanging in a loop down the wall and up to its socket near the top.
+      if (fine2) {
+        const px = cav.x1 - 0.011;
+        const pz = cav.z1 - 0.013;
+        const yh = cav.y0 + (cav.y1 - cav.y0) * 0.42;
+        const sy = cav.y1 - 0.07;
+        const sz = cav.z1 - 0.05;
+        slab(cut, p.ss, cav.x1 - 0.003, cav.x1, yh - 0.034, yh + 0.002, pz - 0.009, pz + 0.009, 0.001);
+        slab(cut, p.ss, px + 0.003, cav.x1 - 0.003, yh - 0.028, yh - 0.004, pz - 0.0012, pz + 0.0012, 0.0004);
+        cut.add(p.ss, cyl(cut, 0.0042, 0.03, "y", 16, 0.0042, true), [px, yh - 0.015, pz]);
+        cut.add(p.ssBright, torus(cut, 0.0042, 0.0008, "y", Math.PI * 2, 16, 4), [px, yh, pz]);
+        cut.add(p.ssBright, cyl(cut, 0.0016, 0.124, "y", 10), [px, yh + 0.008 - 0.062, pz]);
+        cut.add(p.ssBright, cyl(cut, 0.0002, 0.008, "y", 10, 0.0016), [px, yh - 0.12, pz]);
+        cut.add(p.gasket, lathe(cut, [[0, 0], [0.0042, 0], [0.0062, 0.006], [0.0066, 0.034], [0.0058, 0.046], [0.004, 0.054], [0.0026, 0.068], [0, 0.07]], 20), [px, yh + 0.006, pz]);
+        for (let i = 0; i < 5; i++) cut.add(p.gasket, torus(cut, 0.0066, 0.0007, "y", Math.PI * 2, 18, 4), [px, yh + 0.016 + i * 0.005, pz]);
+        tube(
+          cut,
+          p.gasket,
+          [
+            [px, yh + 0.074, pz],
+            [px, yh + 0.098, pz - 0.006],
+            [px - 0.001, yh + 0.082, pz - 0.024],
+            [cav.x1 - 0.013, cav.y0 + 0.09, pz - 0.032],
+            [cav.x1 - 0.014, cav.y0 + 0.062, sz + 0.004],
+            [cav.x1 - 0.015, cav.y0 + 0.1, sz],
+            [cav.x1 - 0.016, sy - 0.03, sz],
+            [cav.x1 - 0.018, sy, sz],
+          ],
+          0.0021,
+          0.018,
+          8,
+          false,
+        );
+        cut.add(p.ssBright, cyl(cut, 0.012, 0.004, "x", 24), [cav.x1 - 0.002, sy, sz]);
+        cut.add(p.plastic, cyl(cut, 0.0068, 0.014, "x", 16, 0.0085), [cav.x1 - 0.011, sy, sz]);
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2;
+          cut.add(p.plastic, box(0.01, 0.0016, 0.0016), [cav.x1 - 0.011, sy + Math.cos(a) * 0.0082, sz + Math.sin(a) * 0.0082], [a, 0, 0]);
+        }
+      }
+      // The door's striker on the frame.
       if (fine2) slab(cut, p.ssBright, L.door.x1 - 0.034, L.door.x1 - 0.008, (py0 + py1) / 2 - 0.04, (py0 + py1) / 2 + 0.04, zFrame, zFrame + 0.004, 0.0015);
     }
 
@@ -1375,8 +2781,14 @@ function combi(pans: 6 | 10 | 20): Builder {
         s.add(p.brass, cyl(s, 0.008, 0.008, "z", 16), [x, base + 0.08, zb - 0.022]);
         if (fine2) s.add(i ? p.ledGreen : fm.red, cyl(s, 0.0115, 0.002, "z", 16), [x, base + 0.08, zb - 0.001]);
       }
-      s.add(p.poly, cyl(s, 0.025, base - 0.014, "y", 20), [cx, (base + 0.014) / 2, zBack + 0.06]);
-      s.add(p.ssBright, torus(s, 0.026, 0.003, "y", Math.PI * 2, 24, 6), [cx, base - 0.02, zBack + 0.06]);
+      // The drain: down through the base on the stand and countertop models; the floor model's leaves at the back.
+      if (base > 0.03) {
+        s.add(p.poly, cyl(s, 0.025, base - 0.014, "y", 20), [cx, (base + 0.014) / 2, zBack + 0.06]);
+        s.add(p.ssBright, torus(s, 0.026, 0.003, "y", Math.PI * 2, 24, 6), [cx, base - 0.02, zBack + 0.06]);
+      } else {
+        tube(s, p.poly, [[cx, 0.06, zBack + 0.004], [cx, 0.06, -L.d + 0.012], [cx, 0.001, -L.d + 0.012]], 0.011, 0.014, 16);
+        s.add(p.ssBright, torus(s, 0.012, 0.002, "z", Math.PI * 2, 24, 6), [cx, 0.06, zb - 0.002]);
+      }
       s.add(p.bakelite, cyl(s, 0.014, 0.016, "z", 6), [w - 0.08, top - 0.1, zb - 0.008]);
       tube(s, p.rubber, [[w - 0.08, top - 0.1, zb - 0.016], [w - 0.08, top - 0.12, zb - 0.014], [w - 0.06, base + 0.02, zb - 0.014], [w - 0.06, 0.006, zb - 0.014]], 0.009, 0.03, 10);
       if (fine2) s.add(p.brass, cyl(s, 0.004, 0.02, "z", 8), [0.06, base + 0.06, zb - 0.01]);
@@ -1391,6 +2803,7 @@ function combi(pans: 6 | 10 | 20): Builder {
     }
 
     return (b) => {
+      layerGlass(b.group);
       const fans = fanJoints.map((n) => b.joints.get(n));
       const doorJ = b.joints.get("cavity_door");
       const cutJ = b.joints.get("cutaway");
@@ -1438,10 +2851,11 @@ function gnPan(s: Shop, w: number, d: number, depth: number): THREE.BufferGeomet
   const t = 0.0008;
   const lip = 0.008;
   const dr = depth * 0.08;
+  // The outer wall starts at the curl's foot, `lip` in: a sheet t thick, its inner face never outside its outer one.
   if (!s.fine(2))
     return vessel(s, w, d, 0.028, [
       [lip + dr + 0.008, -depth],
-      [lip + 0.0015, -0.006],
+      [lip, -0.006],
       [0, -0.002],
       [0.0015, 0],
       [lip + t, -0.002],
@@ -1450,7 +2864,7 @@ function gnPan(s: Shop, w: number, d: number, depth: number): THREE.BufferGeomet
   return vessel(s, w, d, 0.028, [
     [lip + dr + 0.012, -depth],
     [lip + dr + 0.003, -depth + 0.004],
-    [lip + 0.0015, -0.006],
+    [lip, -0.006],
     [lip - 0.002, -0.0035],
     [0.0015, -0.003],
     [0, -0.0015],
@@ -1665,7 +3079,7 @@ const holdingCabinet: Builder = (s, e) => {
     dial(j, p.bakelite, p.ssBright, [0, 0, 0], 0.022);
     knobs.push(name);
     if (fine1) s.add(i ? humLamp : heatLamp, cyl(s, 0.0035, 0.003, "z", 12), [x + (i ? -0.05 : 0.05), pY + 0.03, pz + 0.002]);
-    if (fine2) s.add(p.enamel, cyl(s, 0.032, 0.0005, "z", 32), [x, pY, pz + 0.0013]);
+    if (fine2) s.add(p.enamel, cyl(s, 0.032, 0.0006, "z", 32), [x, pY, pz + 0.0017]);
   }
   // Power switch.
   if (fine1) slab(s, p.plastic, cx + 0.12, cx + 0.145, pY - 0.035, pY - 0.005, pz, pz + 0.006, fine2 ? 0.002 : 0);
@@ -1691,8 +3105,16 @@ const holdingCabinet: Builder = (s, e) => {
     rectPath(skin, wx1 - wx0, wy1 - wy0, 0.012, (wx0 + wx1) / 2, (wy0 + wy1) / 2, true);
     door.add(p.ss, plate(door, skin, T - 0.004, fine1 ? 0.002 : 0), [0, 0, 0.004]);
     door.add(p.ssDull, plate(door, skin, 0.004), [0, 0, 0]);
-    door.add(p.glass, box(wx1 - wx0 + 0.02, wy1 - wy0 + 0.02, 0.004), [(wx0 + wx1) / 2, (wy0 + wy1) / 2, T - 0.008]);
-    if (fine1) door.add(p.glass, box(wx1 - wx0 + 0.02, wy1 - wy0 + 0.02, 0.004), [(wx0 + wx1) / 2, (wy0 + wy1) / 2, 0.01]);
+    // The window: a sealed double-glazed unit, two 4 mm panes held apart by a dark spacer that runs round the
+    // reveal, so that the gap between them reads; their edges sit in the door's rebate.
+    const [wcx, wcy, ww, wh] = [(wx0 + wx1) / 2, (wy0 + wy1) / 2, wx1 - wx0, wy1 - wy0];
+    pane(door, fm.paneClear, fm.paneEdge, ww + 0.012, wh + 0.012, 0.004, [wcx, wcy, T - 0.006]);
+    if (fine1) {
+      pane(door, fm.paneClear, fm.paneEdge, ww + 0.012, wh + 0.012, 0.004, [wcx, wcy, 0.008]);
+      const sp = roundRect(ww + 0.004, wh + 0.004, 0.013, wcx, wcy);
+      rectPath(sp, ww - 0.018, wh - 0.018, 0.006, wcx, wcy, true);
+      door.add(p.charcoal, plate(door, sp, T - 0.0186, fine2 ? 0.0006 : 0), [0, 0, 0.0103]);
+    }
     // The window's trim ring.
     if (fine1) {
       const tr = roundRect(wx1 - wx0 + 0.024, wy1 - wy0 + 0.024, 0.016, (wx0 + wx1) / 2, (wy0 + wy1) / 2);
@@ -1716,6 +3138,7 @@ const holdingCabinet: Builder = (s, e) => {
   }
 
   return (b) => {
+    layerGlass(b.group);
     setLamp(heatLamp, 0);
     setLamp(humLamp, 0);
     const doorJ = b.joints.get("cabinet_door");
@@ -1802,20 +3225,53 @@ const microwave: Builder = (s, e) => {
   dataPlate(s, [w * 0.5, h * 0.35, zb], [0, Math.PI, 0], 0.08, 0.045);
   if (fine1) tube(s, p.rubber, [[w - 0.06, 0.07, zb], [w - 0.06, 0.07, -d + 0.0005], [w - 0.06, yb + 0.004, -d + 0.0005]], 0.004, 0.02, 8);
 
-  // The cavity.
+  // The cavity: welded stainless, its side walls each a sheet with a punched patch (the lamp's grille at the upper
+  // front left, the cooling air's inlet at the upper rear right), stamped with two shelf ribs; the back pressed with a
+  // stiffening panel.
   if (fine1) {
-    slab(s, p.ssDull, cav.x0 - 0.0012, cav.x0, cav.y0, cav.y1, cav.z0, cav.z1);
-    slab(s, p.ssDull, cav.x1, cav.x1 + 0.0012, cav.y0, cav.y1, cav.z0, cav.z1);
-    slab(s, p.ssDull, cav.x0, cav.x1, cav.y1, cav.y1 + 0.0012, cav.z0, cav.z1);
-    slab(s, p.ssDull, cav.x0, cav.x1, cav.y0, cav.y1, cav.z0 - 0.0012, cav.z0);
+    const t = 0.0012;
+    const lampAt = { y: cav.y1 - 0.045, z: cav.z1 - 0.11, w: 0.06, h: 0.04 };
+    const inletAt = { y: cav.y1 - 0.06, z: cav.z0 + 0.1, w: 0.08, h: 0.0533 };
+    const sideWall = (x: number, hole: { y: number; z: number; w: number; h: number }) => {
+      // In the plate's own frame x runs along -z and y up; it is turned to stand in the yz plane, t thick along +x.
+      const sh = roundRect(cav.z1 - cav.z0, cav.y1 - cav.y0, 0, -(cav.z0 + cav.z1) / 2, (cav.y0 + cav.y1) / 2);
+      sh.holes.push(rectPath(new THREE.Path(), hole.w, hole.h, fine2 ? 0.004 : 0, -hole.z, hole.y, true) as THREE.Path);
+      const g = plate(s, sh, t);
+      g.rotateY(Math.PI / 2);
+      s.add(p.ssDull, g, [x, 0, 0]);
+    };
+    sideWall(cav.x0 - t, lampAt);
+    sideWall(cav.x1, inletAt);
+    slab(s, p.ssDull, cav.x0, cav.x1, cav.y1, cav.y1 + t, cav.z0, cav.z1);
+    slab(s, p.ssDull, cav.x0, cav.x1, cav.y0, cav.y1, cav.z0 - t, cav.z0);
+    // The punched patches: the lamp glowing behind its grille in a dark reflector box; darkness behind the inlet.
+    s.add(fm.grille, new THREE.PlaneGeometry(lampAt.w, lampAt.h).rotateY(Math.PI / 2), [cav.x0 - t / 2, lampAt.y, lampAt.z]);
+    s.add(lamp, new THREE.PlaneGeometry(lampAt.w, lampAt.h).rotateY(Math.PI / 2), [cav.x0 - 0.007, lampAt.y, lampAt.z]);
+    {
+      const [ly0, ly1, lz0, lz1] = [lampAt.y - lampAt.h / 2, lampAt.y + lampAt.h / 2, lampAt.z - lampAt.w / 2, lampAt.z + lampAt.w / 2];
+      slab(s, p.ssBright, cav.x0 - 0.0075, cav.x0 - t, ly0 - 0.001, ly1 + 0.001, lz0 - 0.001, lz0);
+      slab(s, p.ssBright, cav.x0 - 0.0075, cav.x0 - t, ly0 - 0.001, ly1 + 0.001, lz1, lz1 + 0.001);
+      slab(s, p.ssBright, cav.x0 - 0.0075, cav.x0 - t, ly0 - 0.001, ly0, lz0, lz1);
+      slab(s, p.ssBright, cav.x0 - 0.0075, cav.x0 - t, ly1, ly1 + 0.001, lz0, lz1);
+    }
+    s.add(fm.grille, new THREE.PlaneGeometry(inletAt.w, inletAt.h).rotateY(-Math.PI / 2), [cav.x1 + t / 2, inletAt.y, inletAt.z]);
+    s.add(p.enamel, new THREE.PlaneGeometry(inletAt.w, inletAt.h).rotateY(-Math.PI / 2), [cav.x1 + 0.008, inletAt.y, inletAt.z]);
+    // Shelf ribs stamped into both side walls, standing 3 mm proud.
+    for (const x of [cav.x0, cav.x1])
+      for (const y of [cav.y0 + 0.075, cav.y0 + 0.145]) s.add(p.ssDull, fine2 ? rbox(s, 0.006, 0.011, cav.z1 - cav.z0 - 0.07, 0.0029) : box(0.004, 0.009, cav.z1 - cav.z0 - 0.07), [x, y, (cav.z0 + cav.z1) / 2 - 0.01]);
+    // The back's pressed panel: a shallow raised field with soft edges.
+    if (fine2) s.add(p.ssDull, rbox(s, cav.x1 - cav.x0 - 0.06, cav.y1 - cav.y0 - 0.07, 0.006, 0.0028), [(cav.x0 + cav.x1) / 2, (cav.y0 + cav.y1) / 2, cav.z0 - 0.0015]);
     // The ceramic floor over the bottom feed, sealed into its frame.
     slab(s, p.ceramic, cav.x0, cav.x1, cav.y0 - 0.006, cav.y0, cav.z0, cav.z1, fine2 ? 0.001 : 0);
-    // Mica waveguide cover on the right wall, the stirrer cover above.
-    s.add(fm.mica, new THREE.PlaneGeometry(0.12, 0.09).rotateY(-Math.PI / 2), [cav.x1 - 0.0008, (cav.y0 + cav.y1) / 2 + 0.03, (cav.z0 + cav.z1) / 2 - 0.04]);
+    if (fine2) for (const x of [cav.x0 + 0.0015, cav.x1 - 0.0015]) s.add(p.gasket, cyl(s, 0.0018, cav.z1 - cav.z0, "z", 8), [x, cav.y0, (cav.z0 + cav.z1) / 2]);
+    // Mica waveguide cover on the right wall, the stirrer cover above, each held by plastic rivets.
+    const wg: V3 = [cav.x1 - 0.0008, cav.y1 - 0.042, (cav.z0 + cav.z1) / 2 + 0.02];
+    s.add(fm.mica, new THREE.PlaneGeometry(0.12, 0.072).rotateY(-Math.PI / 2), wg);
     s.add(fm.mica, new THREE.PlaneGeometry(0.16, 0.2).rotateX(Math.PI / 2), [(cav.x0 + cav.x1) / 2, cav.y1 - 0.0008, (cav.z0 + cav.z1) / 2]);
-    // The lamp behind its perforated patch, top left.
-    s.add(lamp, new THREE.PlaneGeometry(0.05, 0.035).rotateY(Math.PI / 2), [cav.x0 + 0.0004, cav.y1 - 0.04, cav.z1 - 0.12]);
-    s.add(fm.perf, new THREE.PlaneGeometry(0.05, 0.035).rotateY(Math.PI / 2), [cav.x0 + 0.0012, cav.y1 - 0.04, cav.z1 - 0.12]);
+    if (fine2) {
+      for (const sz of [-1, 1]) s.add(p.hdpe, lathe(s, [[0, 0], [0.004, 0], [0.0036, 0.0012], [0, 0.0016]], 12), [wg[0], wg[1], wg[2] + sz * 0.052], [0, 0, Math.PI / 2]);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) s.add(p.hdpe, lathe(s, [[0, 0], [0.004, 0], [0.0036, 0.0012], [0, 0.0016]], 12), [(cav.x0 + cav.x1) / 2 + sx * 0.07, cav.y1 - 0.0008, (cav.z0 + cav.z1) / 2 + sz * 0.09], [Math.PI, 0, 0]);
+    }
   } else slab(s, p.charcoal, cav.x0, cav.x1, cav.y0, cav.y1, cav.z0, cav.z1 - 0.003);
 
   // The door.
@@ -1864,6 +3320,7 @@ class Chain {
   readonly mesh: THREE.InstancedMesh;
   private L: number;
   private off = 0;
+  private m = new THREE.Matrix4();
   constructor(
     private cx: number,
     private zF: number,
@@ -1907,13 +3364,14 @@ class Chain {
     m.makeRotationX(a).setPosition(this.cx, y, z);
   }
   private place(): void {
-    const m = new THREE.Matrix4();
+    const { m } = this;
     for (let i = 0; i < this.mesh.count; i++) {
       this.at((((i * this.pitch + this.off) % this.L) + this.L) % this.L, m);
       this.mesh.setMatrixAt(i, m);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
-    this.mesh.computeBoundingSphere();
+    // The links only move round the same loop, so its bounds, taken once, hold however far the belt has run.
+    if (!this.mesh.boundingSphere) this.mesh.computeBoundingSphere();
   }
   advance(dist: number): void {
     this.off = (this.off + dist) % this.L;
@@ -1984,6 +3442,7 @@ const conveyorToaster: Builder = (s, e) => {
     const sh = roundRect(x1 - x0, h - yb, 0.006, cx, (h + yb) / 2);
     rectPath(sh, belt.x1 - belt.x0 + 0.02, feed.y1 - feed.y0, 0.006, cx, (feed.y0 + feed.y1) / 2, true);
     rectPath(sh, belt.x1 - belt.x0 + 0.02, dis.y1 - dis.y0, 0.006, cx, (dis.y0 + dis.y1) / 2, true);
+    rectPath(sh, belt.x1 - belt.x0 + 0.004, 0.016, 0.002, cx, yb + 0.011, true);
     s.add(p.ss, plate(s, sh, 0.0015, fine1 ? 0.0006 : 0), [0, 0, zf - 0.0015]);
     // A heat deflector lip over the feed.
     s.add(p.ss, box(belt.x1 - belt.x0 + 0.04, 0.0012, 0.022), [cx, feed.y1 + 0.004, zf + 0.008], [-0.25, 0, 0]);
@@ -1994,7 +3453,7 @@ const conveyorToaster: Builder = (s, e) => {
   dial(heatKnob, p.bakelite, p.ssBright, [0, 0, 0], 0.018);
   const speedKnob = s.joint("speed_knob", [cx + 0.03, kY, zf]);
   dial(speedKnob, p.bakelite, p.ssBright, [0, 0, 0], 0.018);
-  if (fine2) for (const x of [cx - 0.09, cx + 0.03]) s.add(p.enamel, cyl(s, 0.027, 0.0005, "z", 32), [x, kY, zf + 0.0004]);
+  if (fine2) for (const x of [cx - 0.09, cx + 0.03]) s.add(p.enamel, cyl(s, 0.027, 0.0006, "z", 32), [x, kY, zf + 0.0007]);
   slab(s, p.plastic, cx + 0.1, cx + 0.125, kY - 0.016, kY + 0.016, zf, zf + 0.008, 0.002);
   const pilot = liveLamp(0xffa040);
   s.add(pilot, cyl(s, 0.004, 0.004, "z", 12), [cx + 0.1125, kY + 0.028, zf + 0.002]);
@@ -2029,36 +3488,106 @@ const conveyorToaster: Builder = (s, e) => {
         }
     }
   }
-  for (const x of [belt.x0 - 0.006, belt.x1 + 0.006]) slab(s, p.ss, x - 0.0008, x + 0.0008, belt.yC - 0.022, yTop + 0.018, belt.zF - 0.03, -0.004, 0.0004);
-  slab(s, p.ss, belt.x0 - 0.007, belt.x1 + 0.007, belt.yC - 0.024, belt.yC - 0.0225, zf, -0.004, 0.0004);
+  // The loading end: the belt runs out over the front on two side plates bolted to the front panel, each carrying
+  // the front shaft's bearing and standing a little above the belt as a guide; a crumb sheet under the belt between
+  // them. Nothing here moves but the belt.
+  {
+    const t = 0.0015;
+    const [py0, py1] = [belt.yC - 0.02, yTop + 0.012];
+    const [pz0, pz1] = [zf - 0.002, -0.0008];
+    for (const [sg, xo] of [
+      [-1, belt.x0 - 0.007],
+      [1, belt.x1 + 0.007 + t],
+    ] as const) {
+      if (!fine1) {
+        slab(s, p.ss, xo - t, xo, py0, py1, pz0, pz1);
+        continue;
+      }
+      const g = plate(s, roundRect(pz1 - pz0, py1 - py0, 0.011, (pz0 + pz1) / 2, (py0 + py1) / 2), t, fine2 ? 0.0004 : 0);
+      g.rotateY(-Math.PI / 2);
+      s.add(p.ss, g, [xo, 0, 0]);
+      const xb = xo - (sg < 0 ? t : 0) + sg * 0.003;
+      s.add(p.ssBright, cyl(s, 0.0075, 0.006, "x", 18), [xb, belt.yC, belt.zF]);
+      if (fine2) {
+        s.add(p.ssBright, cyl(s, 0.0042, 0.008, "x", 6), [xb + sg * 0.004, belt.yC, belt.zF]);
+        for (const y of [py0 + 0.01, py1 - 0.01]) screw(s, p.ssBright, [xo - (sg < 0 ? t : 0), y, zf + 0.012], 0.0022, [0, (sg * Math.PI) / 2, 0]);
+      }
+    }
+    slab(s, p.ss, belt.x0 - 0.007, belt.x1 + 0.007, py0 + 0.001, py0 + 0.002, zf, -0.004, 0.0003);
+  }
   let chain: Chain | null = null;
   if (fine1) {
     chain = new Chain(cx, belt.zF, belt.zR, belt.yC, belt.R + 0.0012, fine2 ? 0.0127 : 0.0254, belt.x1 - belt.x0, p.chrome);
     s.extra(chain.mesh);
     s.tris += chain.tris;
   } else s.add(p.chrome, box(belt.x1 - belt.x0, 0.002, belt.zF - belt.zR), [cx, yTop, (belt.zF + belt.zR) / 2]);
-  // Bread riding the belt, toast arriving on the tray: a crust round a crumb face that browns.
-  const slice = (at: V3, rot: V3, done: boolean) =>
-    s.at(at, rot, () => {
-      s.add(done ? fm.crust : fm.crustRaw, rbox(s, 0.1, 0.012, 0.095, 0.005), [0, 0, 0]);
-      if (fine2) for (const sy of [-1, 1]) s.add(done ? fm.toast : fm.crumb, rbox(s, 0.09, 0.001, 0.085, 0.0004), [0, sy * 0.0058, 0.002]);
-    });
+  // Bread: slices of a sandwich loaf, their crowns toward the back; two waiting on the belt, half fed into the
+  // opening, one well inside, and one toasted coming down onto the front tray. Toast curls a little as it dries.
+  const slice = (at: V3, rot: V3, done: boolean) => {
+    const g = flatFood(s, breadShape(), 0.0125, fine2 ? 0.0022 : 0.0016);
+    if (done) {
+      const pa = g.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < pa.count; i++) pa.setY(i, pa.getY(i) + 0.0016 * ((pa.getX(i) / 0.055) ** 2 + (pa.getZ(i) / 0.06) ** 2));
+    }
+    s.add(done ? fm.breadToast : fm.breadRaw, g, at, rot);
+  };
+  const ty = yTop + 0.0012 + 0.00625;
   if (fine1) {
-    slice([cx - 0.06, yTop + 0.0075, -0.04], [0, 0.05, 0], false);
-    slice([cx + 0.055, yTop + 0.0075, -0.2], [0, -0.04, 0], true);
+    slice([cx - 0.0655, ty, -0.072], [0, 0.03, 0], false);
+    slice([cx + 0.0655, ty, -0.088], [0, -0.025, 0], false);
+    slice([cx + 0.05, ty, -0.27], [0, 0.04, 0], true);
   }
-  // The return chute from the back, and the front discharge tray with its raised sides.
+  // The return chute from the back, and the front toast tray: a drawn stainless tray with a rolled rim, standing out
+  // of the discharge and falling slightly toward the front.
   if (fine1) {
     const g = box(belt.x1 - belt.x0 + 0.01, 0.0012, Math.hypot(belt.zR - zf, 0.1));
     s.add(p.ss, g, [cx, (0.152 + dis.y0 + 0.008) / 2, (belt.zR + zf) / 2], [Math.atan2(0.152 - dis.y0 - 0.008, zf - belt.zR), 0, 0]);
   }
-  slab(s, p.ss, belt.x0 - 0.005, belt.x1 + 0.005, dis.y0, dis.y0 + 0.0015, zf - 0.03, -0.004, 0.0005);
-  slab(s, p.ss, belt.x0 - 0.005, belt.x1 + 0.005, dis.y0, dis.y0 + 0.02, -0.0055, -0.004, 0.0005);
-  for (const x of [belt.x0 - 0.005, belt.x1 + 0.0035]) slab(s, p.ss, x, x + 0.0015, dis.y0, dis.y0 + 0.02, zf, -0.004, 0.0005);
-  if (fine1) slice([cx - 0.02, dis.y0 + 0.0085, -0.05], [0.04, 0.3, 0], true);
-  // The crumb tray, its pull tab under the discharge.
-  slab(s, p.ss, belt.x0, belt.x1, yb + 0.002, yb + 0.016, zb + 0.02, zf + 0.0015, 0.0006);
-  slab(s, p.ssBright, cx - 0.03, cx + 0.03, yb + 0.004, yb + 0.014, zf + 0.0015, zf + 0.009, 0.002);
+  {
+    const tw = belt.x1 - belt.x0 + 0.012;
+    const td = 0.13;
+    const dep = 0.018;
+    const tz = zf - 0.08 + td / 2;
+    const prof: [number, number][] = fine2
+      ? [
+          [0.009, -dep],
+          [0.003, -dep + 0.004],
+          [0.0008, -0.004],
+          [-0.0016, -0.0014],
+          [0, 0],
+          [0.0016, -0.0009],
+          [0.0022, -0.004],
+          [0.0042, -dep + 0.0042],
+          [0.0102, -dep + 0.0012],
+        ]
+      : [
+          [0.008, -dep],
+          [0, -0.002],
+          [0, 0],
+          [0.0022, -0.002],
+          [0.0092, -dep + 0.0012],
+        ];
+    s.at([cx, dis.y0 + dep + 0.002, tz], [0.07, 0, 0], () => {
+      if (fine1) {
+        s.add(p.ss, vessel(s, tw, td, 0.01, prof));
+        slice([-0.03, -dep + 0.0012 + 0.0065, -0.002], [0, 0.04, 0], true);
+      } else s.add(p.ss, box(tw, dep, td), [0, -dep / 2, 0]);
+    });
+  }
+  // The crumb tray: a shallow drawn pan the full length of the base, its front plate closing a slot in the front
+  // panel, a pull tab on it. open() draws it out.
+  const trayRest: V3 = [0, 0, 0];
+  const tray = s.joint("crumb_tray", trayRest);
+  {
+    const tw = belt.x1 - belt.x0;
+    const z0 = zb + 0.02;
+    const z1 = zf - 0.0005;
+    if (fine1)
+      tray.add(p.ssDull, vessel(tray, tw, z1 - z0, 0.006, [[0.004, -0.0135], [0, -0.0005], [0, 0], [0.001, 0], [0.005, -0.0125]]), [cx, yb + 0.0165, (z0 + z1) / 2]);
+    tray.add(p.ss, rbox(tray, tw + 0.012, 0.021, 0.0015, 0.0006), [cx, yb + 0.011, zf + 0.00075]);
+    tray.add(p.ssBright, rbox(tray, 0.06, 0.009, 0.007, 0.002), [cx, yb + 0.011, zf + 0.0015 + 0.0035]);
+    if (fine2) tray.add(p.enamel, rbox(tray, 0.044, 0.003, 0.0012, 0.0005), [cx, yb + 0.011, zf + 0.0015 + 0.0072]);
+  }
   dataPlate(s, [x1, 0.1, zf - 0.08], [0, Math.PI / 2, 0], 0.07, 0.04);
   if (fine1) tube(s, p.rubber, [[cx + 0.1, 0.08, zb], [cx + 0.1, 0.08, -d + 0.0005], [cx + 0.1, yb + 0.004, -d + 0.0005]], 0.004, 0.02, 8);
 
@@ -2068,8 +3597,11 @@ const conveyorToaster: Builder = (s, e) => {
     const sj = sprockets.map((n) => b.joints.get(n));
     turnJoint(b.joints.get("speed_knob"), "z", -speed * Math.PI * 1.5);
     setLamp(pilot, 0);
+    const trayJ = b.joints.get("crumb_tray");
     return {
       glows: [glow],
+      // The only thing on a conveyor toaster that opens is its crumb tray.
+      open: (f) => slideJoint(trayJ, "z", Math.max(0, Math.min(1, f)) * 0.14, trayRest),
       set: (name, v) => {
         if (name === "heat") {
           setGlow(glow, v);
@@ -2197,12 +3729,52 @@ const airFryer: Builder = (s, e) => {
         dr.at([cx, y, pzc], [Math.PI / 2, 0, 0], () => rectLoop(dr, p.ss, -bw / 2, bw / 2, -bd / 2, bd / 2, 0, 0.0025, 0.012, 6));
       // Fries: a heap close up, a lumpy fill further off.
       const fr = rng(91);
-      dr.add(fm.fries, foodTop(dr, bw - 0.01, bd - 0.01, 0.01, 0.016, 0.07, 4), [cx, by0 + 0.072, pzc]);
-      if (fine2)
-        for (let i = 0; i < 70; i++) {
-          const L = 0.05 + fr() * 0.04;
-          dr.add(fm.fries, box(0.0085, 0.0085, L), [cx + (fr() - 0.5) * (bw - 0.06), by0 + 0.07 + fr() * 0.035, pzc + (fr() - 0.5) * (bd - 0.08)], [(fr() - 0.5) * 0.9, fr() * 3.14, (fr() - 0.5) * 0.6]);
+      const hy0 = by0 + 0.072;
+      dr.add(fm.fries, foodTop(dr, bw - 0.01, bd - 0.01, 0.01, 0.016, 0.07, 4), [cx, hy0, pzc]);
+      if (fine2) {
+        // The loose fries over the heap, dropped one by one so that each comes to rest on the heap or on the fries
+        // already there: a height map in 1 cm cells, starting from the heap's own surface.
+        const k = (Math.PI * 2) / 0.07;
+        const [hw, hd] = [(bw - 0.01) / 2, (bd - 0.01) / 2];
+        const heapAt = (x: number, z: number) => {
+          const edge = Math.min(hw - Math.abs(x), hd - Math.abs(z));
+          const lump = Math.sin(x * k + 4) * Math.cos(z * k * 0.8 + 6.8) + 0.55 * Math.sin((x * 0.6 - z) * k * 1.9 + 12.4) + 0.3 * Math.cos((x + z * 0.7) * k * 3.3 + 2.8);
+          return hy0 + 0.016 * (0.5 + 0.32 * lump) - 0.016 * 0.6 * Math.exp(-Math.max(0, edge) / (0.07 * 0.25));
+        };
+        const hc = 0.01;
+        const [gx, gz] = [Math.ceil((2 * hw) / hc), Math.ceil((2 * hd) / hc)];
+        const hm = new Float32Array((gx + 1) * (gz + 1));
+        for (let j = 0; j <= gz; j++) for (let i = 0; i <= gx; i++) hm[j * (gx + 1) + i] = heapAt(-hw + i * hc, -hd + j * hc);
+        const cellOf = (x: number, z: number) => {
+          const i = Math.max(0, Math.min(gx, Math.round((x + hw) / hc)));
+          const j = Math.max(0, Math.min(gz, Math.round((z + hd) / hc)));
+          return j * (gx + 1) + i;
+        };
+        for (let n = 0; n < 104; n++) {
+          const L = 0.042 + fr() * 0.05;
+          const a = 0.0072 + fr() * 0.0026;
+          const yaw = fr() * Math.PI;
+          const [ca, sa] = [Math.cos(yaw), Math.sin(yaw)];
+          const ex = Math.abs(ca) * (L / 2) + a;
+          const ez = Math.abs(sa) * (L / 2) + a;
+          const px = (fr() * 2 - 1) * Math.max(0, bw / 2 - 0.006 - ex);
+          const pz = (fr() * 2 - 1) * Math.max(0, bd / 2 - 0.006 - ez);
+          // Rotated by yaw about y, the fry's +x runs along (cos yaw, -sin yaw) in xz.
+          const along = (t: number): [number, number] => [px + ca * t, pz - sa * t];
+          const ts = [-0.5, -0.25, 0, 0.25, 0.5].map((f) => f * L);
+          const hs = ts.map((t) => hm[cellOf(...along(t))]!);
+          let slope = Math.max(-0.35, Math.min(0.35, (hs[4]! - hs[0]!) / L));
+          if (fr() < 0.3) slope *= 0.3;
+          let yc = -Infinity;
+          for (const [q, t] of ts.entries()) yc = Math.max(yc, hs[q]! - slope * t + a * 0.42);
+          const tint = fr();
+          dr.add(fm.fry[tint < 0.42 ? 0 : tint < 0.84 ? 1 : 2]!, fryGeom(L, a, (fr() - 0.5) * 0.007, (fr() - 0.5) * 0.5), [cx + px, yc, pzc + pz], [0, yaw, Math.atan(slope)]);
+          for (const t of ts) {
+            const c0 = cellOf(...along(t));
+            hm[c0] = Math.max(hm[c0]!, yc + slope * t + a * 0.6);
+          }
         }
+      }
     }
   }
   dr.add(p.ss, box(0.001, 0.001, 0.001), [cx, 0.1, zf - 0.01]);
@@ -2276,9 +3848,9 @@ const sousVide: Builder = (s, e) => {
   {
     const i0 = insetAt(0.004) + 0.001;
     const i1 = insetAt(yw) + 0.001;
-    s.add(p.water, vessel(s, tw, td, 0.03, [[i0 + 0.006, 0.0035], [i0, 0.006], [i1, yw]], [true, false]), [cx, 0, tzc]);
+    s.add(fm.bath, vessel(s, tw, td, 0.03, [[i0 + 0.006, 0.0035], [i0, 0.006], [i1, yw]], [true, false]), [cx, 0, tzc]);
     // The meniscus climbing the wall: a narrow band that reads as the water line.
-    if (fine1) s.add(p.water, vessel(s, tw, td, 0.03, [[i1 + 0.0012, yw - 0.0035], [i1 + 0.0006, yw + 0.001], [i1 - 0.0004, yw + 0.0022]], [false, false]), [cx, 0, tzc]);
+    if (fine1) s.add(fm.bath, vessel(s, tw, td, 0.03, [[i1 + 0.0012, yw - 0.0035], [i1 + 0.0006, yw + 0.001], [i1 - 0.0004, yw + 0.0022]], [false, false]), [cx, 0, tzc]);
   }
   const sw = tw - 2 * (insetAt(yw) + 0.001);
   const sd = td - 2 * (insetAt(yw) + 0.001);
@@ -2299,7 +3871,7 @@ const sousVide: Builder = (s, e) => {
       pa.setXYZ(i, x, 0, z);
     }
   }
-  const surf = new THREE.Mesh(surfG, p.water);
+  const surf = new THREE.Mesh(surfG, fm.bath);
   surf.renderOrder = 2;
   const base = Float32Array.from(surfG.attributes.position!.array as Float32Array);
   s.extra(surf, [cx, yw, tzc]);
@@ -2324,7 +3896,7 @@ const sousVide: Builder = (s, e) => {
     s.add(p.ssBright, cyl(s, 0.0355, 0.018, "y", 32), [cx, 0.232, ccz]);
     s.add(p.charcoal, rbox(s, 0.05, 0.07, 0.018, 0.006), [cx, 0.3, ccz + 0.03]);
     slab(s, p.screen, cx - 0.02, cx + 0.02, 0.297, 0.325, ccz + 0.039, ccz + 0.0405, 0.001);
-    s.add(fm.sousDisplay, new THREE.PlaneGeometry(0.036, 0.016), [cx, 0.312, ccz + 0.0408]);
+    s.add(fm.sousDisplay, new THREE.PlaneGeometry(0.036, 0.016), [cx, 0.312, ccz + 0.0412]);
     s.add(heatLamp, torus(s, 0.006, 0.0009, "z", Math.PI * 2, 20, 4), [cx, 0.282, ccz + 0.0393]);
     const wheel = s.joint("set_wheel", [cx, ht, ccz]);
     wheel.add(p.ssBright, cyl(wheel, 0.026, 0.008, "y", 32), [0, 0.004, 0]);
@@ -2348,46 +3920,42 @@ const sousVide: Builder = (s, e) => {
     s.add(fm.poly, g, [0, rim + 0.0045, 0]);
     s.add(fm.poly, rbox(s, 0.08, 0.012, 0.02, 0.004), [cx, rim + 0.011, tzc + td / 2 - 0.04]);
   }
-  // The bags: a steak standing in its bag clipped to the side, a salmon fillet on the floor.
+  // The bags: a ribeye hanging in its bag from a clip on the left wall, a salmon portion lying on the floor. Each is
+  // built lying flat in its own frame (the food in xz); the hanging bag is stood on edge, its open end set over to
+  // pass up the inside of the wall under the clip.
   if (fine1) {
-    const bag = (food: () => void, bw: number, bh: number, bt: number) => {
-      food();
-      s.add(fm.bag, rbox(s, bw, bh, bt, Math.min(0.01, bt / 2 - 1e-4)), [0, 0, 0]);
-      s.add(fm.bag, box(bw + 0.004, 0.035, 0.0012), [0, bh / 2 + 0.016, 0]);
-    };
-    s.at([0.064, 0.115, -0.2], [0, Math.PI / 2, 0.06], () =>
-      bag(
-        () => {
-          const st = new THREE.Shape();
-          st.moveTo(-0.07, -0.045);
-          st.bezierCurveTo(-0.02, -0.06, 0.05, -0.055, 0.075, -0.02);
-          st.bezierCurveTo(0.085, 0.02, 0.06, 0.05, 0.02, 0.055);
-          st.bezierCurveTo(-0.03, 0.06, -0.08, 0.03, -0.07, -0.045);
-          const g = plate(s, st, 0.026, s.fine(2) ? 0.004 : 0);
-          g.translate(0, 0, -0.013);
-          s.add(fm.beef, g, [0, 0, 0]);
-          s.add(fm.fat, rbox(s, 0.11, 0.01, 0.024, 0.004), [0.005, 0.052, 0], [0, 0, -0.1]);
+    const steakT = 0.026;
+    const steakBev = fine2 ? 0.0045 : 0.003;
+    // Stood up: the frame's x runs toward the front of the tub (-z), its y toward the right (+x), its z down.
+    s.at([0.058, 0.1, -0.2], [Math.PI / 2, 0, -Math.PI / 2], () => {
+      s.add(fm.beef, flatFood(s, steakShape(), steakT, steakBev));
+      vacBag(
+        s,
+        fm.bag,
+        steakShape(),
+        steakT,
+        steakBev,
+        {
+          x0: -0.106,
+          x1: 0.104,
+          z0: -0.113,
+          z1: 0.082,
+          seal: { axis: "z", a: -0.104, b: -0.092 },
+          bend: (z) => -0.022 * sstep(-0.066, -0.082, z),
         },
-        0.18,
-        0.14,
-        0.034,
-      ),
-    );
-    // Its clip over the tub's wall, pinching the bag's seal.
+        71,
+      );
+    });
+    // Its clip over the tub's wall, pinching the bag's open end against the wall.
     slab(s, p.enamel, 0.004, 0.022, rim - 0.035, rim + 0.007, -0.212, -0.188, 0.002);
     slab(s, p.enamel, 0.004, 0.05, rim + 0.001, rim + 0.007, -0.212, -0.188, 0.002);
     slab(s, p.enamel, 0.044, 0.05, rim - 0.03, rim + 0.007, -0.212, -0.188, 0.002);
-    s.at([cx + 0.03, 0.03, -0.24], [0, 0.5, 0], () =>
-      bag(
-        () => {
-          s.add(fm.salmon, rbox(s, 0.16, 0.024, 0.075, 0.01), [0, 0, 0]);
-          if (s.fine(2)) for (let i = 0; i < 6; i++) s.add(fm.fat, box(0.003, 0.0006, 0.06), [-0.06 + i * 0.024, 0.0121, 0], [0, 0.5, 0]);
-        },
-        0.2,
-        0.036,
-        0.11,
-      ),
-    );
+    const salT = 0.024;
+    const salBev = fine2 ? 0.006 : 0.004;
+    s.at([0.18, 0.0065 + salT / 2 + 0.0011, -0.25], [0, 0.1, 0], () => {
+      s.add(fm.salmon, flatFood(s, salmonShape(), salT, salBev));
+      vacBag(s, fm.bag, salmonShape(), salT, salBev, { x0: -0.1, x1: 0.1, z0: -0.058, z1: 0.06, seal: { axis: "x", a: 0.08, b: 0.092 }, flat: true }, 83);
+    });
   }
 
   return () => {
@@ -2418,15 +3986,185 @@ const sousVide: Builder = (s, e) => {
 /* Four-well hot-food table                                                                                       */
 /* ------------------------------------------------------------------------------------------------------------ */
 
-/** A pan's food at `level` below its rim (negative y), lumped: the food meets the drafted wall where it is. */
-function panFood(s: Shop, w: number, d: number, depth: number, level: number, amp: number, lambda: number, seed: number): THREE.BufferGeometry {
+/** How far in from its outline a gnPan's inner wall stands at height y below the rim (negative), at this detail. */
+function panWallIn(s: Shop, depth: number, y: number): number {
   const lip = 0.008;
   const t = 0.0008;
   const dr = depth * 0.08;
-  const u = Math.min(1, Math.max(0, (-level - 0.002) / (depth - 0.006)));
-  const inset = s.fine(1) ? lip + t + u * (dr + 0.003) + 0.0015 : 0.004;
-  const g = foodTop(s, w - 2 * inset, d - 2 * inset, Math.max(0.004, 0.028 - inset), amp, lambda, seed);
-  g.translate(0, level, 0);
+  const [i1, y1] = s.fine(2) ? [lip + dr + t + 0.003, -depth + 0.004 + t] : [lip + dr + t + 0.008, -depth + t];
+  const f = Math.max(0, Math.min(1, (y + 0.002) / (y1 + 0.002)));
+  return lip + t + f * (i1 - lip - t);
+}
+
+/** Signed distance from (x, z) to a w × d rectangle centred on the origin, corners rounded by r: negative inside. */
+function rrSdf(x: number, z: number, w: number, d: number, r: number): number {
+  const qx = Math.abs(x) - (w / 2 - r);
+  const qz = Math.abs(z) - (d / 2 - r);
+  return Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0) - r;
+}
+
+/** How a food lies in its pan, in metres, heights from the pan's rim. */
+interface Lie {
+  /** Where the food meets the wall, below the rim. */
+  edge: number;
+  /** How far it climbs the steel above that (a sauce's meniscus, rice packed to the wall), and over what distance in. */
+  climb: number;
+  climbIn: number;
+  /** The crown of its heap above the edge (its peak off centre, where the spoon left it), and how far in from the wall the food takes to rise to it. */
+  heap: number;
+  rise: number;
+  /** Lumps: [height, wavelength] pairs. */
+  lumps: readonly (readonly [number, number])[];
+  /** The depth of the spoon's swirl cut into a soft heap. */
+  swirl?: number;
+  /** Mesh spacing relative to the usual, for a food with finer relief. */
+  step?: number;
+  seed: number;
+}
+
+/**
+ * A food's surface height at (x, z) over its outline w × d (corners r): at the wall it stands at `edge` plus its climb
+ * up the steel, and it rises away from the wall into its heap, lumps and swirls. Lumps finer than the mesh can carry
+ * at this detail are left to the food's bump map.
+ */
+function lieHeight(s: Shop, w: number, d: number, r: number, L: Lie): (x: number, z: number) => number {
+  const n = noiseField(L.seed);
+  const q = rng(L.seed * 7 + 3);
+  const [px, pz] = [(q() - 0.5) * w * 0.3, (q() - 0.5) * d * 0.3];
+  const [ax, az] = [w / 2 + Math.abs(px), d / 2 + Math.abs(pz)];
+  const [ox, oz] = [q() * 30, q() * 30];
+  const minLam = s.fine(2) ? 0.015 : s.fine(1) ? 0.04 : 1;
+  const lumps = L.lumps.filter(([, lam]) => lam >= minLam);
+  return (x, z) => {
+    const dIn = Math.max(0, -rrSdf(x, z, w, d, r));
+    const crown = (1 - Math.min(1, ((x - px) / ax) ** 2 + ((z - pz) / az) ** 2)) ** 1.3;
+    let body = L.heap * crown;
+    for (const [k, [a, lam]] of lumps.entries()) body += a * n((x + ox + k * 7.7) / lam, (z + oz + k * 3.1) / lam);
+    if (L.swirl && s.fine(2)) {
+      // A two-armed spiral about the peak, ridges 40 mm apart, as the back of a spoon leaves a soft heap.
+      const ang = Math.atan2(z - pz, x - px);
+      body += L.swirl * crown * (0.5 + 0.5 * Math.sin(Math.hypot(x - px, z - pz) * 157 - ang * 2));
+    }
+    return L.edge + L.climb * Math.exp(-dIn / L.climbIn) + sstep(0, L.rise, dIn) * body;
+  };
+}
+
+/**
+ * The top of a pan's food over its outline w × d (corners r), heights from `h`: meshed in rings that follow the wall
+ * in to a line down the middle, where the last ring's two sides meet and are welded, closest together at the wall,
+ * where the food meets the steel. UVs are (x, z) in metres.
+ */
+function foodMesh(s: Shop, w: number, d: number, r: number, h: (x: number, z: number) => number, step = 1): THREE.BufferGeometry {
+  const fine2 = s.fine(2);
+  const fine1 = s.fine(1);
+  const sp = (fine2 ? 0.013 : fine1 ? 0.04 : 1) * step;
+  const kc = fine2 ? 5 : fine1 ? 2 : 1;
+  const [hx, hz] = [w / 2, d / 2];
+  const dMax = Math.min(hx, hz);
+  const near = fine2 ? [0, 0.0015, 0.004] : [0];
+  const last = near[near.length - 1]!;
+  const k = Math.max(1, Math.ceil((dMax - last) / sp));
+  const rings = [...near, ...Array.from({ length: k }, (_, i) => last + ((i + 1) / k) * (dMax - last))];
+  // Each ring has the same points: kc + 1 round each corner, and the long and short sides split as the outline's are.
+  const nx = Math.max(0, Math.round((2 * (hx - r)) / sp) - 1);
+  const nz = Math.max(0, Math.round((2 * (hz - r)) / sp) - 1);
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  let N = 0;
+  for (const dl of rings) {
+    const [ex, ez] = [hx - dl, hz - dl];
+    // The rings round their corners more as they close in, so none folds to a sharp corner until the last, a line.
+    const rj = Math.max(0, Math.min(ex, ez, Math.max(r - dl, Math.min(ex, ez) * 0.35 * (dl / dMax))));
+    const [cx, cz] = [ex - rj, ez - rj];
+    const corners = [
+      [cx, cz, 0, nx],
+      [-cx, cz, Math.PI / 2, nz],
+      [-cx, -cz, Math.PI, nx],
+      [cx, -cz, Math.PI * 1.5, nz],
+    ] as const;
+    const ring: [number, number][] = [];
+    for (const [c, [ox, oz, a0, ns]] of corners.entries()) {
+      for (let i = 0; i <= kc; i++) {
+        const a = a0 + (i / kc) * (Math.PI / 2);
+        ring.push([ox + rj * Math.cos(a), oz + rj * Math.sin(a)]);
+      }
+      // The straight run to the next corner.
+      const [qx, qz] = ring[ring.length - 1]!;
+      const [nx2, nz2, na] = corners[(c + 1) % 4]!;
+      const [tx, tz] = [nx2 + rj * Math.cos(na), nz2 + rj * Math.sin(na)];
+      for (let i = 1; i <= ns; i++) ring.push([qx + ((tx - qx) * i) / (ns + 1), qz + ((tz - qz) * i) / (ns + 1)]);
+    }
+    N = ring.length;
+    for (const [x, z] of ring) {
+      pos.push(x, h(x, z), z);
+      uv.push(x, z);
+    }
+  }
+  const M = rings.length;
+  // The last ring lies on the middle line, each of its points there twice or more: weld them, so the surface runs
+  // smoothly across the line.
+  const weld = new Map<string, number>();
+  const at = (k: number) => {
+    if (k < (M - 1) * N) return k;
+    const key = Math.round(pos[k * 3]! * 1e6) + "," + Math.round(pos[k * 3 + 2]! * 1e6);
+    const w0 = weld.get(key);
+    if (w0 !== undefined) return w0;
+    weld.set(key, k);
+    return k;
+  };
+  for (let j = 0; j < M - 1; j++)
+    for (let i = 0; i < N; i++) {
+      const a = j * N + i;
+      const b = j * N + ((i + 1) % N);
+      const c = at(a + N);
+      const e = at(b + N);
+      idx.push(a, c, b);
+      if (c !== e) idx.push(b, c, e);
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** A whole green bean `L` long, `r` thick, bowed by `bow`, along x: a slightly flattened pod tapering to its tips. */
+function podGeom(L: number, r: number, bow: number, n = 6, m = 8): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i <= m; i++) {
+    const e = (2 * i) / m - 1;
+    const rr = r * Math.sqrt(Math.max(0, 1 - Math.abs(e) ** 5)) * (1 + 0.05 * Math.sin(e * Math.PI * 4));
+    for (let j = 0; j < n; j++) {
+      const a = (j / n) * Math.PI * 2;
+      pos.push((e * L) / 2, bow * (1 - e * e) + rr * Math.cos(a), rr * Math.sin(a) * 0.86);
+    }
+  }
+  // The section runs anticlockwise from +y toward +z, so (along the section) × (along the pod) faces out.
+  for (let i = 0; i < m; i++)
+    for (let j = 0; j < n; j++) {
+      const a = i * n + j;
+      const b = i * n + ((j + 1) % n);
+      idx.push(a, b, a + n, b, b + n, a + n);
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** A kidney bean, 17 × 10 × 7 mm, lying flat along x, its hilum side (+z) drawn in. */
+function kidneyBean(): THREE.BufferGeometry {
+  const g = new THREE.SphereGeometry(1, 9, 6);
+  const p = g.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < p.count; i++) {
+    const [x, y, z] = [p.getX(i), p.getY(i), p.getZ(i)];
+    p.setXYZ(i, x * 0.0085, y * 0.0036, z * 0.005 * (z > 0 ? 1 - 0.4 * (1 - x * x) : 1) + 0.0022 * x * x);
+  }
+  g.computeVertexNormals();
   return g;
 }
 
@@ -2481,24 +4219,94 @@ const steamTable: Builder = (s, e) => {
       s.add(p.water, box(0.27, 0.002, 0.47), [x, top - 0.17, zc]);
     }
   // The pans and their food: mac and cheese; green beans and rice in halves; chili; mash, corn and gravy in thirds.
+  // Each food meets its pan's drafted wall at its own level, 0.2 mm into the 0.8 mm steel (crossing it, never lying
+  // along it), and rises from there into its heap, below the rim.
   const py = top + 0.003;
-  const fill = (x: number, z: number, pw: number, pd: number, depth: number, m: Mat, level: number, amp: number, lambda: number, seed: number) => {
+  const depth = 0.1;
+  const fill = (x: number, z: number, pw: number, pd: number, m: Mat, L: Lie) => {
     if (fine1) s.add(p.ss, gnPan(s, pw, pd, depth), [x, py, z]);
-    s.add(m, panFood(s, pw, pd, depth, level, amp, lambda, seed), [x, py, z]);
+    const iw = fine1 ? panWallIn(s, depth, L.edge + L.climb) - 0.0002 : 0.004;
+    const [fw, fd, fr] = [pw - 2 * iw, pd - 2 * iw, Math.max(0.002, 0.028 - iw)];
+    const h = lieHeight(s, fw, fd, fr, L);
+    s.add(m, foodMesh(s, fw, fd, fr, h, L.step), [x, py, z]);
+    return { x, z, h, fw, fd };
   };
-  fill(wells[0]!, zc, 0.325, 0.53, 0.1, fm.mac, -0.028, 0.012, 0.05, 1);
-  fill(wells[1]!, zc - 0.133, 0.325, 0.265, 0.1, fm.greens, -0.03, 0.01, 0.04, 2);
-  fill(wells[1]!, zc + 0.133, 0.325, 0.265, 0.1, fm.rice, -0.026, 0.008, 0.06, 3);
-  fill(wells[2]!, zc, 0.325, 0.53, 0.1, fm.chili, -0.026, 0.004, 0.08, 4);
-  for (const [k, m] of [fm.mash, fm.corn, fm.gravy].entries()) fill(wells[3]!, zc + (k - 1) * 0.177, 0.325, 0.176, 0.1, m, k === 2 ? -0.03 : -0.025, k === 0 ? 0.018 : k === 1 ? 0.006 : 0.001, k === 0 ? 0.05 : 0.025, 5 + k);
+  // Baked mac: a low dome, lumpy where the elbows pile. Green beans: a loose heap. Rice: heaped up to the middle and
+  // packed against the steel. Chili: a thick sauce, nearly level, its meniscus climbing the wall.
+  const mac = fill(wells[0]!, zc, 0.325, 0.53, fm.mac, { edge: -0.033, climb: 0.0015, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.005, 0.045], [0.002, 0.022]], seed: 1 });
+  const greens = fill(wells[1]!, zc - 0.133, 0.325, 0.265, fm.greensHeap, { edge: -0.045, climb: 0, climbIn: 0.003, heap: 0.016, rise: 0.04, lumps: [[0.007, 0.05], [0.003, 0.025]], seed: 2 });
+  fill(wells[1]!, zc + 0.133, 0.325, 0.265, fm.rice, { edge: -0.036, climb: 0.002, climbIn: 0.004, heap: 0.022, rise: 0.045, lumps: [[0.004, 0.04], [0.0018, 0.02]], seed: 3 });
+  const chili = fill(wells[2]!, zc, 0.325, 0.53, fm.chili, { edge: -0.031, climb: 0.003, climbIn: 0.0025, heap: 0.006, rise: 0.02, lumps: [[0.0035, 0.05], [0.0015, 0.028]], seed: 4 });
+  // Mash swirled by the spoon; corn; gravy, level but for its meniscus.
+  const thirds: [Mat, Lie][] = [
+    [fm.mash, { edge: -0.032, climb: 0.001, climbIn: 0.003, heap: 0.016, rise: 0.035, lumps: [[0.004, 0.04]], swirl: 0.008, step: 0.7, seed: 5 }],
+    [fm.corn, { edge: -0.033, climb: 0.0012, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.003, 0.03], [0.0015, 0.016]], seed: 6 }],
+    [fm.gravy, { edge: -0.036, climb: 0.002, climbIn: 0.002, heap: 0, rise: 0.01, lumps: [[0.0004, 0.06]], seed: 7 }],
+  ];
+  for (const [k, [m, L]] of thirds.entries()) fill(wells[3]!, zc + (k - 1) * 0.177, 0.325, 0.176, m, L);
   // Adaptor bars across the wells between the fractional pans.
   for (const z of [zc]) slab(s, p.ss, wells[1]! - 0.16, wells[1]! + 0.16, top, top + 0.003, z - 0.0015, z + 0.0015, r2(0.0005));
   for (const z of [zc - 0.0885, zc + 0.0885]) slab(s, p.ss, wells[3]! - 0.16, wells[3]! + 0.16, top, top + 0.003, z - 0.0015, z + 0.0015, r2(0.0005));
   if (fine2) {
-    // Green beans, kidney beans in the chili.
     const r = rng(5);
-    for (let i = 0; i < 46; i++) s.add(fm.greens, cyl(s, 0.0035, 0.05 + r() * 0.03, "x", 6), [wells[1]! + (r() - 0.5) * 0.25, py - 0.022 + r() * 0.006, zc - 0.133 + (r() - 0.5) * 0.18], [0, r() * 3.14, (r() - 0.5) * 0.3]);
-    for (let i = 0; i < 40; i++) s.add(fm.bean, new THREE.SphereGeometry(0.006, 6, 4), [wells[2]! + (r() - 0.5) * 0.26, py - 0.021 + r() * 0.003, zc + (r() - 0.5) * 0.44], [0, r() * 3, 0], [1.5, 0.7, 0.9]);
+    // Elbows standing out of the mac: each end's tube sunk at least half into the sauce, the arch well clear of it.
+    const eu = new THREE.Euler();
+    const v = new THREE.Vector3();
+    const [R, tr] = [0.0058, 0.0023];
+    for (let tries = 0, placed = 0; tries < 400 && placed < 70; tries++) {
+      const arc = 2.1 + r() * 0.6;
+      const t0 = (Math.PI - arc) / 2;
+      const [ex, ez] = [(r() - 0.5) * (mac.fw - 0.03), (r() - 0.5) * (mac.fd - 0.03)];
+      const rot: V3 = [(r() - 0.5) * 1, r() * Math.PI * 2, (r() - 0.5) * 1];
+      eu.set(rot[0], rot[1], rot[2]);
+      const at = (a: number) => v.set(R * Math.cos(a), R * Math.sin(a), 0).applyEuler(eu);
+      let cy = Infinity;
+      for (const a of [t0, Math.PI - t0]) {
+        at(a);
+        cy = Math.min(cy, mac.h(ex + v.x, ez + v.z) - v.y - tr * 0.5);
+      }
+      at(Math.PI / 2);
+      if (cy + v.y + tr < mac.h(ex + v.x, ez + v.z) + 0.003) continue;
+      const g = new THREE.TorusGeometry(R, tr, 5, 8, arc);
+      g.rotateZ(t0);
+      s.add(r() < 0.4 ? fm.elbowBrown : fm.elbow, g, [mac.x + ex, py + cy, mac.z + ez], rot);
+      placed++;
+    }
+    // Kidney beans in the chili, mostly under the sauce, their backs showing.
+    for (let i = 0; i < 80; i++) {
+      const [bx, bz] = [(r() - 0.5) * (chili.fw - 0.03), (r() - 0.5) * (chili.fd - 0.03)];
+      s.add(fm.bean, kidneyBean(), [chili.x + bx, py + chili.h(bx, bz) - 0.0012 - r() * 0.0012, chili.z + bz], [(r() - 0.5) * 0.3, r() * Math.PI * 2, (r() - 0.5) * 0.3]);
+    }
+    // Green beans dropped one by one onto the heap, each coming to rest on it or on the beans already there: a height
+    // map in 1 cm cells, starting from the heap's own surface.
+    {
+      const [hw, hd] = [greens.fw / 2 - 0.006, greens.fd / 2 - 0.006];
+      const hc = 0.01;
+      const [gx, gz] = [Math.ceil((2 * hw) / hc), Math.ceil((2 * hd) / hc)];
+      const hm = new Float32Array((gx + 1) * (gz + 1));
+      for (let j = 0; j <= gz; j++) for (let i = 0; i <= gx; i++) hm[j * (gx + 1) + i] = greens.h(-hw + i * hc, -hd + j * hc);
+      const cell = (x: number, z: number) => Math.max(0, Math.min(gz, Math.round((z + hd) / hc))) * (gx + 1) + Math.max(0, Math.min(gx, Math.round((x + hw) / hc)));
+      for (let n = 0; n < 64; n++) {
+        const L = 0.06 + r() * 0.04;
+        const rad = 0.0036 + r() * 0.0006;
+        const yaw = r() * Math.PI;
+        const [ca, sa] = [Math.cos(yaw), Math.sin(yaw)];
+        const bx = (r() * 2 - 1) * Math.max(0, hw - Math.abs(ca) * (L / 2) - rad);
+        const bz = (r() * 2 - 1) * Math.max(0, hd - Math.abs(sa) * (L / 2) - rad);
+        // Turned by yaw about y, the pod's +x runs along (cos yaw, -sin yaw) in xz.
+        const along = (t: number) => cell(bx + ca * t, bz - sa * t);
+        const ts = [-0.5, -0.25, 0, 0.25, 0.5].map((f) => f * L);
+        const hs = ts.map((t) => hm[along(t)]!);
+        const slope = Math.max(-0.3, Math.min(0.3, (hs[4]! - hs[0]!) / L));
+        let yc = -Infinity;
+        for (const [k, t] of ts.entries()) yc = Math.max(yc, hs[k]! - slope * t + rad * 0.55);
+        // Nothing heaped up over the rim.
+        if (yc > -0.012) continue;
+        const tone = r() < 0.45 ? fm.greensDark : fm.greens;
+        s.add(tone, podGeom(L, rad, (r() - 0.35) * 0.008), [greens.x + bx, py + yc, greens.z + bz], [0, yaw, Math.atan(slope)]);
+        for (const t of ts) hm[along(t)] = Math.max(hm[along(t)]!, yc + slope * t + rad * 0.8);
+      }
+    }
     // A serving spoon in the mac, a ladle in the chili.
     const bowl: [number, number][] = [];
     for (let i = 0; i <= 8; i++) bowl.push([Math.sin((i / 8) * Math.PI / 2) * 0.042, -Math.cos((i / 8) * Math.PI / 2) * 0.034]);
@@ -2507,12 +4315,15 @@ const steamTable: Builder = (s, e) => {
     // The spoon: a shallow oval bowl half buried, its handle up over the pan's back rim.
     const sx = wells[0]! + 0.02;
     const sz = zc + 0.1;
-    s.add(p.ssBright, lathe(s, bowl, 24), [sx, py - 0.024, sz], [-0.12, 0, 0], [0.75, 0.45, 1.05]);
-    tube(s, p.ssBright, [[sx, py - 0.022, sz + 0.042], [sx + 0.006, py - 0.005, sz + 0.1], [sx + 0.012, py + 0.016, zc + 0.262], [sx + 0.013, py + 0.008, zc + 0.3]], 0.0042, 0.02, 8);
+    const sy = py + mac.h(sx - mac.x, sz - mac.z);
+    s.add(p.ssBright, lathe(s, bowl, 24), [sx, sy - 0.002, sz], [-0.12, 0, 0], [0.75, 0.45, 1.05]);
+    tube(s, p.ssBright, [[sx, sy, sz + 0.042], [sx + 0.006, py - 0.005, sz + 0.1], [sx + 0.012, py + 0.016, zc + 0.262], [sx + 0.013, py + 0.008, zc + 0.3]], 0.0042, 0.02, 8);
+    // The ladle: its bowl full, sitting a little proud of the chili.
     const lx = wells[2]! - 0.06;
     const lz = zc - 0.1;
-    s.add(p.ssBright, lathe(s, bowl, 24), [lx, py - 0.018, lz], [0.18, 0, -0.12]);
-    tube(s, p.ssBright, [[lx + 0.042, py - 0.012, lz], [wells[2]! + 0.12, py + 0.026, lz - 0.03], [wells[2]! + 0.163, py + 0.03, lz - 0.035], [wells[2]! + 0.168, py + 0.004, lz - 0.035]], 0.0045, 0.008, 8);
+    const ly = py + chili.h(lx - chili.x, lz - chili.z) + 0.006;
+    s.add(p.ssBright, lathe(s, bowl, 24), [lx, ly, lz], [0.18, 0, -0.12]);
+    tube(s, p.ssBright, [[lx + 0.042, ly + 0.006, lz], [wells[2]! + 0.12, py + 0.026, lz - 0.03], [wells[2]! + 0.163, py + 0.03, lz - 0.035], [wells[2]! + 0.168, py + 0.004, lz - 0.035]], 0.0045, 0.008, 8);
   }
   // The server's side: the control panel, the cutting board on its brackets.
   const kY = 0.73;
@@ -2524,10 +4335,24 @@ const steamTable: Builder = (s, e) => {
     knobs.push(name);
     if (fine1) s.add(lamp, cyl(s, 0.005, 0.005, "z", 14), [x + 0.06, kY + 0.02, zf + 0.0025]);
     if (fine2) s.add(p.ssBright, torus(s, 0.006, 0.0012, "z", Math.PI * 2, 16, 4), [x + 0.06, kY + 0.02, zf + 0.001]);
-    if (fine2) s.add(p.enamel, cyl(s, 0.029, 0.0005, "z", 32), [x, kY, zf + 0.0004]);
+    if (fine2) s.add(p.enamel, cyl(s, 0.029, 0.0006, "z", 32), [x, kY, zf + 0.0007]);
   }
   dataPlate(s, [w - 0.1, 0.68, zf], [0, 0, 0], 0.08, 0.045);
-  slab(s, p.hdpe, 0.005, w - 0.005, 0.8, 0.8127, zf + 0.002, -0.004, fine1 ? 0.003 : 0);
+  {
+    // The board: 12.7 mm HDPE, its edges chamfered 2 mm.
+    const [bw, bd, bt] = [w - 0.01, -0.004 - (zf + 0.002), 0.0127];
+    let g: THREE.BufferGeometry;
+    if (fine1) {
+      const ch = 0.002;
+      g = new THREE.ExtrudeGeometry(roundRect(bw - 2 * ch, bd - 2 * ch, 0.006), { depth: bt - 2 * ch, bevelEnabled: true, bevelThickness: ch, bevelSize: ch, bevelSegments: 1, curveSegments: fine2 ? 4 : 2 });
+      g.translate(0, 0, ch);
+      g.rotateX(-Math.PI / 2);
+    } else {
+      g = box(bw, bt, bd).translate(0, bt / 2, 0);
+      boxUVs(g, 1);
+    }
+    s.add(fm.board, g, [w / 2, 0.8, (zf + 0.002 - 0.004) / 2]);
+  }
   if (fine1) for (const x of [0.15, w / 2, w - 0.15]) {
     const tri = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(0.16, 0), new THREE.Vector2(0, -0.08)]);
     const g = plate(s, tri, 0.003);

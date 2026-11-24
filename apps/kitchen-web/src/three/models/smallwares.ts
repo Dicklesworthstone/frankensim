@@ -130,6 +130,106 @@ function paint(w: number, h: number, f: (x: number, y: number) => readonly [numb
   return c;
 }
 
+/** Value noise that tiles every P lattice cells in x and in y, 0..1. */
+function pnoise(seed: number, P: number): (x: number, y: number) => number {
+  const r = rng(seed);
+  const v = new Float32Array(P * P);
+  for (let i = 0; i < v.length; i++) v[i] = r();
+  return (x, y) => {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    const fx = x - xi;
+    const fy = y - yi;
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    const x0 = ((xi % P) + P) % P;
+    const y0 = ((yi % P) + P) % P;
+    const x1 = (x0 + 1) % P;
+    const y1 = (y0 + 1) % P;
+    const a = v[y0 * P + x0];
+    const b = v[y0 * P + x1];
+    const c = v[y1 * P + x0];
+    const d = v[y1 * P + x1];
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  };
+}
+/** Value noise that tiles every Px lattice cells in x and Py in y (for grain finer across than along), 0..1. */
+function apnoise(seed: number, Px: number, Py: number): (x: number, y: number) => number {
+  const r = rng(seed);
+  const v = new Float32Array(Px * Py);
+  for (let i = 0; i < v.length; i++) v[i] = r();
+  return (x, y) => {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    const fx = x - xi;
+    const fy = y - yi;
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    const x0 = ((xi % Px) + Px) % Px;
+    const y0 = ((yi % Py) + Py) % Py;
+    const x1 = (x0 + 1) % Px;
+    const y1 = (y0 + 1) % Py;
+    const a = v[y0 * Px + x0];
+    const b = v[y0 * Px + x1];
+    const c = v[y1 * Px + x0];
+    const d = v[y1 * Px + x1];
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  };
+}
+/** Fractal sum that keeps a periodic noise's tiling: each octave exactly twice the last. */
+function tfbm(n: (x: number, y: number) => number, x: number, y: number, oct = 4): number {
+  let s = 0;
+  let a = 0.5;
+  let f = 1;
+  let norm = 0;
+  for (let i = 0; i < oct; i++) {
+    s += a * n(x * f + i * 31, y * f + i * 57);
+    norm += a;
+    a *= 0.5;
+    f *= 2;
+  }
+  return s / norm;
+}
+
+/**
+ * A tangent-space normal map from a height field (metres of relief per texel is `k`): +u right, +v up the image, as
+ * three reads a canvas (flipped, so that row 0 is v = 1).
+ */
+function normalTex(h: Float32Array, w: number, hh: number, k: number, wrap: boolean): THREE.CanvasTexture {
+  const [c, x] = canvas(w, hh);
+  const img = x.createImageData(w, hh);
+  const d = img.data;
+  const at = (i: number, j: number) => {
+    if (wrap) return h[((j + hh) % hh) * w + ((i + w) % w)];
+    return h[clamp(j, 0, hh - 1) * w + clamp(i, 0, w - 1)];
+  };
+  for (let j = 0; j < hh; j++)
+    for (let i = 0; i < w; i++) {
+      const dx = (at(i + 1, j) - at(i - 1, j)) * k;
+      const dy = (at(i, j - 1) - at(i, j + 1)) * k;
+      const l = Math.hypot(dx, dy, 1);
+      const o = (j * w + i) * 4;
+      d[o] = (0.5 - (0.5 * dx) / l) * 255;
+      d[o + 1] = (0.5 - (0.5 * dy) / l) * 255;
+      d[o + 2] = (0.5 + 0.5 / l) * 255;
+      d[o + 3] = 255;
+    }
+  x.putImageData(img, 0, 0);
+  return canvasTex(c, false, wrap);
+}
+/** A grey canvas texture (roughness, clearcoat) from values 0..1. */
+function greyTex(v: ArrayLike<number>, w: number, hh: number, wrap: boolean): THREE.CanvasTexture {
+  const [c, x] = canvas(w, hh);
+  const img = x.createImageData(w, hh);
+  for (let k = 0; k < w * hh; k++) {
+    const g = clamp(v[k] * 255, 0, 255);
+    img.data[k * 4] = img.data[k * 4 + 1] = img.data[k * 4 + 2] = g;
+    img.data[k * 4 + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  return canvasTex(c, false, wrap);
+}
+
 function std(p: THREE.MeshStandardMaterialParameters, uv: "box" | "own" = "box", uvScale?: number): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial(p);
   m.userData.uv = uv;
@@ -189,29 +289,33 @@ let fin: Finishes | null = null;
 
 function finishes(): Finishes {
   if (fin) return fin;
-  // Cast iron: dark speckled colour with a sandy bump, repeating every 80 mm.
-  const ni = noise2(4401);
-  const ironC = paint(256, 256, (x, y) => {
-    const n = fbm(ni, x / 9, y / 9, 3);
-    const g = fbm(ni, x / 1.3, y / 1.3, 2);
-    const v = 28 + n * 12 + (g - 0.5) * 14;
-    return [v + 2, v + 1, v];
+  // Cast iron: dark speckled colour over a sand-cast grain (a normal map), tiling every 80 mm without a seam.
+  const ni = pnoise(4401, 32);
+  const nig = pnoise(4402, 192);
+  const IW = 512;
+  const ironH = new Float32Array(IW * IW);
+  const ironR = new Float32Array(IW * IW);
+  const ironC = paint(IW, IW, (x, y) => {
+    const n = tfbm(ni, (x / IW) * 32, (y / IW) * 32, 4);
+    const g = tfbm(nig, (x / IW) * 192, (y / IW) * 192, 2);
+    // The sand grain, and here and there a smoother polished patch where the seasoning has built up.
+    const polish = smooth(0.58, 0.72, n);
+    ironH[y * IW + x] = (g - 0.5) * (1 - 0.7 * polish) + 0.4 * n;
+    ironR[y * IW + x] = 0.58 - 0.2 * polish + (g - 0.5) * 0.12;
+    const v = 24 + n * 12 + (g - 0.5) * 12 * (1 - 0.6 * polish);
+    return [v + 3, v + 1.5, v];
   });
-  const ironB = paint(256, 256, (x, y) => {
-    const g = fbm(ni, x / 1.1 + 40, y / 1.1, 2);
-    const v = 128 + (g - 0.5) * 200;
-    return [v, v, v];
-  });
-  const iron = std({ color: 0xffffff, metalness: 0.42, roughness: 0.52, map: canvasTex(ironC, true, true), bumpMap: canvasTex(ironB, false, true), bumpScale: 0.9 }, "box", 1 / 0.08);
-  // Carbon steel: blue-black, bronze-brown where the seasoning is thinner, 160 mm repeat.
-  const nc = noise2(9127);
+  const iron = std({ color: 0xffffff, metalness: 0.4, roughness: 1, map: canvasTex(ironC, true, true), roughnessMap: greyTex(ironR, IW, IW, true), normalMap: normalTex(ironH, IW, IW, 2.4, true) }, "box", 1 / 0.08);
+  // Carbon steel's strap handle and rivets (box projected): blue-black with bronze where the oil was thinner.
+  const nc = pnoise(9127, 16);
+  const ncf = pnoise(9128, 128);
   const carbC = paint(256, 256, (x, y) => {
-    const n = fbm(nc, x / 40, y / 40, 4);
-    const b = smooth(0.52, 0.78, n) * 0.8;
-    const f = (fbm(nc, x / 2, y / 2, 2) - 0.5) * 8;
-    return [lerp(30, 66, b) + f, lerp(32, 48, b) + f, lerp(40, 34, b) + f];
+    const n = tfbm(nc, (x / 256) * 16, (y / 256) * 16, 4);
+    const b = smooth(0.5, 0.78, n) * 0.7;
+    const f = (tfbm(ncf, (x / 256) * 128, (y / 256) * 128, 2) - 0.5) * 7;
+    return [lerp(28, 74, b) + f, lerp(29, 52, b) + f, lerp(34, 32, b) + f];
   });
-  const carbon = std({ color: 0xffffff, metalness: 0.68, roughness: 0.42, map: canvasTex(carbC, true, true) }, "box", 1 / 0.16);
+  const carbon = std({ color: 0xffffff, metalness: 0.6, roughness: 0.44, map: canvasTex(carbC, true, true) }, "box", 1 / 0.16);
   // PTFE: charcoal with the light fleck of the reinforced coating.
   const r = rng(77);
   const [pc, px] = canvas(256, 256);
@@ -234,8 +338,8 @@ function finishes(): Finishes {
     bx.fillRect(rb() * 256, rb() * 256, 1, 20 + rb() * 120);
   }
   const blade = phys({ color: 0xd4d8dc, metalness: 1, roughness: 0.24, map: canvasTex(bc, true, true), anisotropy: 0.5, anisotropyRotation: PI / 2 }, "box", 1 / 0.2);
-  const bottle = phys({ color: 0x2e5a24, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.5, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.5, side: THREE.DoubleSide, depthWrite: false }, "own");
-  const wine = phys({ color: 0x1c0507, metalness: 0, roughness: 0.08, clearcoat: 1, clearcoatRoughness: 0.05 }, "own");
+  const bottle = phys({ color: 0x1b3916, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.4, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.5, side: THREE.DoubleSide, depthWrite: false }, "own");
+  const wine = phys({ color: 0x170306, metalness: 0, roughness: 0.1, clearcoat: 0.4, clearcoatRoughness: 0.08, sheen: 0.5, sheenColor: new THREE.Color(0.35, 0.02, 0.05) }, "own");
   // Label paper: faint fibre.
   const nl = noise2(555);
   const labC = paint(128, 128, (x, y) => {
@@ -278,10 +382,101 @@ function finishes(): Finishes {
     foil: std({ color: 0x5a1220, metalness: 0.85, roughness: 0.32 }),
     label: std({ color: 0xffffff, metalness: 0, roughness: 0.86, map: canvasTex(labC, true, true) }, "box", 1 / 0.04),
     bubble: phys({ color: 0xf4f8fa, metalness: 0, roughness: 0.04, transparent: true, opacity: 0.42, clearcoat: 1, depthWrite: false }, "own"),
-    stock: phys({ color: 0x8a5a1e, metalness: 0, roughness: 0.04, transparent: true, opacity: 0.86, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.8, depthWrite: false }, "own"),
+    stock: phys({ color: 0xffffff, map: brothTexture(), metalness: 0, roughness: 0.04, transparent: true, opacity: 0.88, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.8, depthWrite: false }, "own"),
   };
   return fin;
 }
+
+/**
+ * Seasoned carbon steel, inside and out, as discs unwrapped by arc length from the axis (the rim at 0.47 of the
+ * texture from its middle): blue-black in the cooking well where the oil has polymerised thickest, a heat ring round
+ * the flame's footprint, bronze to brown up the walls with the runs the oil left, worn steel at the rim. Outside, the
+ * base is scuffed dark steel with faint temper rings; the walls brown-black with bronze patches. One material, so the
+ * pan is one draw: the inside's disc is the atlas's upper half (v 0.5..1), the outside's the lower.
+ */
+let carbonMat: THREE.MeshStandardMaterial | null = null;
+function carbonBody(): THREE.MeshStandardMaterial {
+  if (carbonMat) return carbonMat;
+  const S = 1024;
+  const n1 = noise2(9131);
+  const n2 = noise2(9132);
+  const n3 = pnoise(9133, 96);
+  const make = (inside: boolean) => {
+    const rough = new Float32Array(S * S);
+    const c = paint(S, S, (i, j) => {
+      const dx = (i + 0.5) / S - 0.5;
+      const dy = 0.5 - (j + 0.5) / S;
+      const rho = Math.hypot(dx, dy) / 0.47;
+      const ang = Math.atan2(dy, dx) / TAU + 0.5;
+      const X = dx * 0.45;
+      const Y = dy * 0.45;
+      const m = fbm(n1, X * 45 + (inside ? 0 : 50), Y * 45, 4);
+      const fine = fbm(n2, X * 500, Y * 500, 2);
+      // Runs of oil down the walls: stretched along the radius, periodic round it.
+      const run = tfbm(n3, ang * 96, rho * 7, 3);
+      let col: [number, number, number];
+      let r: number;
+      if (inside) {
+        const well = smooth(0.6, 0.46, rho);
+        const blot = smooth(0.42, 0.68, m);
+        const floorC: RGB = [lerp(20, 40, blot), lerp(21, 31, blot), lerp(26, 24, blot)];
+        const heat = Math.exp(-(((rho - 0.36) / 0.09) ** 2)) * 0.22;
+        const up = smooth(0.48, 0.97, rho);
+        const bronze = smooth(0.42, 0.82, 0.55 * m + 0.45 * run) * (0.3 + 0.55 * up);
+        const wallC: RGB = [lerp(32, 90, bronze), lerp(28, 64, bronze), lerp(27, 42, bronze)];
+        col = [lerp(wallC[0], floorC[0], well) * (1 - heat), lerp(wallC[1], floorC[1], well) * (1 - heat), lerp(wallC[2], floorC[2], well) * (1 - heat * 0.6)];
+        // The rim's edge, worn back toward bare steel.
+        const rim = smooth(0.95, 1.0, rho);
+        col = [lerp(col[0], 86, rim), lerp(col[1], 80, rim), lerp(col[2], 74, rim)];
+        r = lerp(0.46, 0.3, well) - 0.06 * blot * well + 0.1 * rim;
+      } else {
+        const base = smooth(0.5, 0.4, rho);
+        // Concentric scuffs on the base, and faint temper colours where the flame's ring heated it.
+        const scuff = fbm(n2, rho * 900, ang * 3, 2);
+        const temper = Math.exp(-(((rho - 0.33) / 0.05) ** 2));
+        const baseC: RGB = [38 + (scuff - 0.5) * 14 + temper * 30 * m, 39 + (scuff - 0.5) * 14 + temper * 18 * m, 42 + (scuff - 0.5) * 14 + temper * 10 * (1 - m)];
+        const bronze = smooth(0.5, 0.84, 0.6 * m + 0.4 * run) * 0.65;
+        const wallC: RGB = [lerp(30, 84, bronze), lerp(27, 60, bronze), lerp(26, 38, bronze)];
+        col = [lerp(wallC[0], baseC[0], base), lerp(wallC[1], baseC[1], base), lerp(wallC[2], baseC[2], base)];
+        r = lerp(0.42, 0.56, base) + (scuff - 0.5) * 0.1 * base;
+      }
+      const g = 1 + (fine - 0.5) * 0.18;
+      rough[j * S + i] = clamp(r + (fine - 0.5) * 0.08, 0.15, 0.9);
+      return [col[0] * g, col[1] * g, col[2] * g];
+    });
+    return { c, rough };
+  };
+  // A fine orange-peel and pitting relief, tiled ten times across the disc.
+  const H = 256;
+  const np = pnoise(9134, 64);
+  const hp = new Float32Array(H * H);
+  for (let j = 0; j < H; j++) for (let i = 0; i < H; i++) hp[j * H + i] = tfbm(np, (i / H) * 64, (j / H) * 64, 3) - 0.3 * smooth(0.72, 0.8, tfbm(np, (i / H) * 64 + 9, (j / H) * 64, 2));
+  const nrm = normalTex(hp, H, H, 1.2, true);
+  nrm.repeat.set(10, 20);
+  const inner = make(true);
+  const outer = make(false);
+  const [c, x] = canvas(S, 2 * S);
+  x.drawImage(inner.c, 0, 0);
+  x.drawImage(outer.c, 0, S);
+  const rough = new Float32Array(2 * S * S);
+  rough.set(inner.rough, 0);
+  rough.set(outer.rough, S * S);
+  carbonMat = std({ color: 0xffffff, metalness: 0.58, roughness: 1, map: canvasTex(c, true), roughnessMap: greyTex(rough, S, 2 * S, false), normalMap: nrm, normalScale: new THREE.Vector2(0.22, 0.22) }, "own");
+  return carbonMat;
+}
+/** Turn a carbon-steel profile, unwrapped flat from the axis onto its half of the atlas, its rim at the disc's. */
+function carbonTurned(s: Shop, mat: THREE.Material, prof0: readonly P2[], n0: number, warp: ((th: number, r: number, y: number) => P2) | undefined, inside: boolean): void {
+  const prof = lodProf(s, prof0);
+  const n = s.detail === 2 ? n0 : Math.max(s.detail === 1 ? 12 : 10, Math.round(n0 * (s.detail === 1 ? 0.5 : 0.45)));
+  const key = new THREE.MeshBasicMaterial();
+  key.userData = { uvScale: 0.47 / arcLength(prof0), polarCentre: true };
+  const g = revolve(prof, n, warp, key, true);
+  key.dispose();
+  const uv = g.attributes.uv as THREE.BufferAttribute;
+  for (let i = 0; i < uv.count; i++) uv.setY(i, (inside ? 0.5 : 0) + 0.5 * uv.getY(i));
+  s.add(mat, g);
+}
+const arcLength = (p: readonly P2[]) => p.reduce((s, q, k) => (k ? s + Math.hypot(q[0] - p[k - 1][0], q[1] - p[k - 1][1]) : 0), 0);
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* Geometry: rings, revolves, lofts                                                                               */
@@ -435,12 +630,14 @@ function revolve(prof: readonly P2[], n: number, warp?: (th: number, r: number, 
     const total = arcLen[arcLen.length - 1];
     const startsOnAxis = prof[0][0] < 1e-4;
     const endsOnAxis = prof[prof.length - 1][0] < 1e-4;
+    // A centred finish (one disc of texture, not a tile) puts the axis at the texture's middle.
+    const c0 = uvOf.userData.polarCentre ? 0.5 : 0;
     return ringMesh(rings, {
       uv: (j, i) => {
         const fromEnd = endsOnAxis && (!startsOnAxis || arcLen[j] > total / 2);
         const sd = (fromEnd ? total - arcLen[j] : arcLen[j]) * scale;
         const th = (i / n) * TAU;
-        return [sd * Math.cos(th) + (fromEnd ? 0.37 : 0), sd * Math.sin(th)];
+        return [c0 + sd * Math.cos(th) + (fromEnd && !c0 ? 0.37 : 0), c0 + sd * Math.sin(th)];
       },
     });
   }
@@ -466,7 +663,8 @@ function turned(s: Shop, mat: THREE.Material, prof0: readonly P2[], n0: number, 
   const prof = lodProf(s, prof0);
   const n = s.detail === 2 ? n0 : Math.max(s.detail === 1 ? 12 : 10, Math.round(n0 * (s.detail === 1 ? 0.5 : 0.45)));
   // Spun finishes carry turned UVs; isotropic ones (iron, patina, coatings) unwrap flat from the axis.
-  if (mat.userData.uv === "own") s.add(mat, revolve(prof, n, warp, mat), at);
+  if (mat.userData.polarCentre) s.add(mat, revolve(prof, n, warp, mat, true), at);
+  else if (mat.userData.uv === "own") s.add(mat, revolve(prof, n, warp, mat), at);
   else {
     const m = own(mat);
     s.add(m, revolve(prof, n, warp, m, true), at);
@@ -758,7 +956,13 @@ function handleEye(s: Shop, mat: THREE.Material, at: V3, tilt: number, ro: numbe
   arc(prof, ro - e, th / 2 - e, e, 0, PI / 2, k, true);
   arc(prof, ri + e, th / 2 - e, e, PI / 2, PI, k, true);
   prof.push(prof[0]);
-  s.add(mat, revolve(prof, s.fine(2) ? 30 : 10), at, [tilt, 0, 0]);
+  // Cast iron's grain takes turned UVs (a box projection tears across the ring's faces where its normal swings between
+  // axes), as the body's do, so they merge; an unmapped metal or the strap's fine mottle needs none.
+  const n = s.fine(2) ? 40 : 10;
+  if (mat === finishes().iron) {
+    const m = own(mat);
+    s.add(m, revolve(prof, n, undefined, m), at, [tilt, 0, 0]);
+  } else s.add(mat, revolve(prof, n), at, [tilt, 0, 0]);
 }
 
 /**
@@ -795,7 +999,12 @@ export function skillet(s: Shop, kind: SkilletKind, diameterM: number, opts: { h
   const warp = iron ? spoutWarp([0, PI], 0.0065 * (D / 0.2), H) : undefined;
   const outMat = iron ? f.iron : kind === "carbon_steel" ? f.carbon : kind === "nonstick" ? f.anod : kind === "aluminum" ? f.spunAlu : kind === "tri_ply" ? f.spunBright : f.spun;
   const inMat = iron ? f.iron : kind === "carbon_steel" ? f.carbon : kind === "nonstick" ? f.ptfe : kind === "aluminum" ? f.spunAlu : f.spun;
-  if (outMat === inMat) turned(s, outMat, [...b.outer, ...b.cap.slice(1, -1), ...b.inner], n, warp);
+  if (kind === "carbon_steel") {
+    // Seasoning is a map of the whole pan (darkest in the well), so each side is one disc scaled to its section.
+    const cm = carbonBody();
+    carbonTurned(s, cm, [...b.outer, ...b.cap.slice(1)], n, warp, false);
+    carbonTurned(s, cm, b.inner, n, warp, true);
+  } else if (outMat === inMat) turned(s, outMat, [...b.outer, ...b.cap.slice(1, -1), ...b.inner], n, warp);
   else {
     turned(s, outMat, b.outer, n, warp);
     turned(s, inMat, b.inner, n, warp);
@@ -902,7 +1111,8 @@ export function skillet(s: Shop, kind: SkilletKind, diameterM: number, opts: { h
       const sec = s.fine(2) ? rr2(A, Bh, Math.min(A, Bh) * 0.8, 5, 4, 2) : rr2(A, Bh, Math.min(A, Bh) * 0.8, 1, s.detail, 1);
       return groove ? sec.map(([x, y]) => [x, y > 0 ? y - groove * Math.max(0, 1 - (x / (A * 0.78)) ** 2) * smooth(0.02, 0.2, u) * (y / Bh) : y] as P2) : sec;
     }));
-    if (s.fine(1)) handleEye(s, hMat, [0, yEnd, zEye], -rise, ro, strap ? 0.0066 : 0.0068, strap ? 0.0042 : 0.0085);
+    // The brushed stick's grain cannot follow the eye round; its eye is the polished steel its rivets are.
+    if (s.fine(1)) handleEye(s, hMat === p.ss ? p.ssBright : hMat, [0, yEnd, zEye], -rise, ro, strap ? 0.0066 : 0.0068, strap ? 0.0042 : 0.0085);
     if (sleeve) {
       // The silicone sleeve, slid over the handle from the end: a soft oval, swelling a little under the palm.
       const sp = pts.slice(k0, pts.length - 1);
@@ -1075,19 +1285,83 @@ const stockpot: Builder = (s, e) => {
     rivet(lid, p.ssBright, [x + Math.sign(x) * 0.004, lidH + 0.0003, 0], [0, 1, 0], 0.0024, 0.001);
   }
 
+  // Capacity marks etched up the inside wall, as a commercial stockpot carries them: a tick every litre, longer ones
+  // numbered every two. A band 0.3 mm proud of the steel (its chords stay clear of the wall's), pulled toward the eye
+  // in depth as well, its marks cut out by alpha so nothing is drawn but the etching.
+  if (s.fine(2)) {
+    const floorY = disc + t;
+    const rD = R - t - 0.0003;
+    const area = PI * (R - t) * (R - t);
+    const y1 = H - 0.03;
+    const litres = Math.floor(((y1 - floorY) * area) / 0.001);
+    const half = 0.07;
+    const th0 = PI + 0.35;
+    const GW = 128;
+    const GH = 2048;
+    const [gc, gx] = canvas(GW, GH);
+    gx.clearRect(0, 0, GW, GH);
+    gx.fillStyle = "rgba(58, 61, 66, 1)";
+    gx.font = "bold 30px Helvetica, Arial, sans-serif";
+    gx.textBaseline = "middle";
+    const yPx = (y: number) => GH * (1 - (y - floorY) / (y1 - floorY));
+    // The band's texels are not square on the wall (its arc over 128 across, its height over 2048 up), so the
+    // numerals are drawn narrowed by the ratio to come out in their true proportions.
+    const squash = (y1 - floorY) / GH / ((2 * half * rD) / GW);
+    for (let l = 1; l <= litres; l++) {
+      const yy = yPx(floorY + (l * 0.001) / area);
+      const long = l % 2 === 0;
+      gx.fillRect(8, yy - 1.5, long ? 56 : 30, 3);
+      if (long) {
+        gx.setTransform(squash, 0, 0, 1, 70, yy);
+        gx.fillText(`${l} L`, 0, 0);
+        gx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+    }
+    const gm = std({ color: 0xffffff, map: canvasTex(gc, true), metalness: 0.6, roughness: 0.55, alphaTest: 0.5, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }, "own");
+    const nS = 24;
+    const band: number[][] = [];
+    for (const y of [floorY, y1]) {
+      const ring: number[] = [];
+      for (let k = 0; k <= nS; k++) {
+        const a = th0 + half - (2 * half * k) / nS;
+        ring.push(cx + rD * Math.cos(a), y, cz + rD * Math.sin(a));
+      }
+      band.push(ring);
+    }
+    const g = ringMesh(band, { closed: false, uv: (j, i) => [1 - i / nS, j] });
+    // Face the axis.
+    const nn = g.attributes.normal as THREE.BufferAttribute;
+    if (nn.getX(0) * Math.cos(th0 + half) + nn.getZ(0) * Math.sin(th0 + half) > 0) {
+      const ix = g.index!;
+      for (let k = 0; k < ix.count; k += 3) {
+        const a = ix.getX(k + 1);
+        ix.setX(k + 1, ix.getX(k + 2));
+        ix.setX(k + 2, a);
+      }
+      g.computeVertexNormals();
+    }
+    s.add(gm, g);
+  }
+
   // The liquid: a disc inside the wall, its surface rolled by the boil in `tick`; bubbles and steam on top.
   const floor = disc + t;
-  const Rin = R - t - 0.0005;
+  // The surface's edge runs 0.3 mm into the steel, so no sliver of wall shows between them; rings close up toward it
+  // so that the meniscus (about the capillary length, 2.7 mm, high and wide) has room to curve.
+  const Rin = R - t + 0.0003;
   const K = s.seg(14, 4);
   const N = s.fine(2) ? 64 : s.seg(48, 16);
+  const men = s.fine(2) ? [0.008, 0.0045, 0.0024, 0.0012, 0.0005, 0] : s.fine(1) ? [0.005, 0.0015, 0] : [];
+  const radii: number[] = [];
+  const rEnd = men.length ? Rin - men[0] : Rin;
+  for (let j = 0; j <= K; j++) radii.push((rEnd * j) / K);
+  for (const m of men.slice(1)) radii.push(Rin - m);
   const rings: number[][] = [];
-  for (let j = 0; j <= K; j++) {
+  for (const rr of radii) {
     const ring: number[] = [];
-    const rr = (Rin * j) / K;
     for (let i = 0; i < N; i++) ring.push(rr * Math.cos((i / N) * TAU), 0, rr * Math.sin((i / N) * TAU));
     rings.push(ring);
   }
-  const surf = ringMesh(rings, { uv: (j, i) => [0.5 + (0.5 * j * Math.cos((i / N) * TAU)) / K, 0.5 + (0.5 * j * Math.sin((i / N) * TAU)) / K] });
+  const surf = ringMesh(rings, { uv: (j, i) => [0.5 + (0.5 * radii[j] * Math.cos((i / N) * TAU)) / Rin, 0.5 + (0.5 * radii[j] * Math.sin((i / N) * TAU)) / Rin] });
   // The inner-to-outer ring order makes it face down; turn it to face up.
   const ix = surf.index!;
   for (let k = 0; k < ix.count; k += 3) {
@@ -1156,8 +1430,8 @@ const stockpot: Builder = (s, e) => {
         dy += amp * 0.25 * Math.sin((x + z) * 230 - t * 11);
         dy += amp * 1.2 * Math.exp(-((x - cxw) ** 2 + (z - czw) ** 2) / (Rin * Rin * 0.12)) * (0.6 + 0.4 * Math.sin(t * 3.3));
       }
-      // The meniscus climbs the wall a little.
-      pos.setY(i, dy * edge + 0.0012 * Math.pow(rr, 12));
+      // The meniscus climbs the wall.
+      pos.setY(i, dy * edge + (men.length ? 0.0024 * Math.exp(-(Rin - Math.hypot(x, z)) / 0.0016) : 0));
     }
     pos.needsUpdate = true;
     surf.computeVertexNormals();
@@ -1221,11 +1495,58 @@ const stockpot: Builder = (s, e) => {
       },
       tick: (t) => {
         clock = t;
-        if (boil > 0 || level > 0) place(t);
+        // Off the boil nothing here moves with time (no ripples, bubbles or steam), and set() has already laid the
+        // surface, so a still pot costs nothing a frame.
+        if (boil > 0) place(t);
       },
     };
   };
 };
+
+/**
+ * A brown stock's surface seen from above, the pot's disc mapped onto the square: amber, a little cloudier and paler
+ * in patches where the collagen and fine solids hang, the eyes of rendered fat floating on it in drifts, each a
+ * paler gold disc with a dark refracting rim.
+ */
+function brothTexture(): THREE.CanvasTexture {
+  const W = 512;
+  const n = noise2(1718);
+  const [c, x] = canvas(W, W);
+  const img = x.createImageData(W, W);
+  for (let j = 0; j < W; j++)
+    for (let i = 0; i < W; i++) {
+      const k = (j * W + i) * 4;
+      const v = fbm(n, i / 70, j / 70, 3);
+      const cl = smooth(0.45, 0.75, fbm(n, i / 30 + 40, j / 30, 3));
+      img.data[k] = lerp(132, 162, v) + 18 * cl;
+      img.data[k + 1] = lerp(80, 100, v) + 14 * cl;
+      img.data[k + 2] = lerp(26, 34, v) + 8 * cl;
+      img.data[k + 3] = 255;
+    }
+  x.putImageData(img, 0, 0);
+  const r = rng(1719);
+  for (let d = 0; d < 9; d++) {
+    // A drift of fat: many small eyes and a few large about a centre.
+    const dx = 60 + r() * (W - 120);
+    const dy = 60 + r() * (W - 120);
+    const m = 14 + Math.floor(r() * 30);
+    for (let k = 0; k < m; k++) {
+      const a = r() * TAU;
+      const rr = Math.pow(r(), 0.7) * 70;
+      const ex = dx + Math.cos(a) * rr;
+      const ey = dy + Math.sin(a) * rr;
+      const er = 0.9 + Math.pow(r(), 3) * 6.5;
+      x.beginPath();
+      x.ellipse(ex, ey, er, er * (0.85 + 0.15 * r()), r() * PI, 0, TAU);
+      x.fillStyle = `rgba(${206 + Math.floor(r() * 20)}, ${150 + Math.floor(r() * 20)}, 56, 0.55)`;
+      x.fill();
+      x.lineWidth = Math.max(0.6, er * 0.16);
+      x.strokeStyle = "rgba(84, 46, 12, 0.4)";
+      x.stroke();
+    }
+  }
+  return canvasTex(c, true);
+}
 
 let rippleTex: THREE.CanvasTexture | null = null;
 /** Ripples and burst bubble cells on boiling liquid: a tileable bump, 120 mm per repeat. */
@@ -1360,21 +1681,43 @@ function panFoods(): Record<string, THREE.Material> {
     const fat = smooth(0.8, 0.86, fbm(n, x / 4 + 50, y / 4, 2)) * 0.45;
     return [lerp(48, 66, v) + fat * 50, lerp(21, 28, v) + fat * 30, lerp(9, 12, v) + fat * 8];
   });
-  // Braised meat: dark mahogany under its glaze, lighter where fibres split open, near black on the edges.
-  // Fibres bundled and wandering (the coordinates warped), split open here and there to a redder brown.
-  const warp = (x: number, y: number): P2 => [x + 14 * (fbm(n, x / 60 + 3, y / 60, 2) - 0.5), y + 10 * (fbm(n, x / 50, y / 50 + 8, 2) - 0.5)];
-  const meatC = paint(256, 256, (x, y) => {
-    const [wx, wy] = warp(x, y);
-    const f = fbm(n, wx / 1.6, wy / 16, 3);
-    const v = fbm(n, x / 26 + 9, y / 26, 3);
-    const split = smooth(0.6, 0.78, f);
-    const glaze = smooth(0.42, 0.25, v);
-    return [lerp(62, 84, v) * (1 - 0.4 * glaze) + split * 46, lerp(30, 40, v) * (1 - 0.4 * glaze) + split * 18, lerp(15, 19, v) * (1 - 0.35 * glaze) + split * 8];
-  });
-  const meatB = paint(256, 256, (x, y) => {
-    const [wx, wy] = warp(x, y);
-    const f = 0.7 * fbm(n, wx / 1.6, wy / 16, 3) + 0.3 * fbm(n, x / 5 + 40, y / 5, 2);
-    return [f * 255, f * 255, f * 255];
+  // Braised meat, a 5 cm tile with u along the grain: bundles of fibre a millimetre or two across, wandering, split
+  // apart into dark crevices; a mahogany glaze over most of it, torn patches showing the redder, matt strands.
+  const MT = 512;
+  const nWv = apnoise(8101, 4, 4);
+  const nBd = apnoise(8102, 5, 36);
+  const nSt = apnoise(8103, 8, 140);
+  const nTr = apnoise(8104, 6, 6);
+  const mC = new Uint8ClampedArray(MT * MT * 3);
+  const mH = new Float32Array(MT * MT);
+  const mR = new Float32Array(MT * MT);
+  for (let j = 0; j < MT; j++)
+    for (let i = 0; i < MT; i++) {
+      const u = i / MT;
+      const v = j / MT;
+      const vw = v + 0.035 * (tfbm(nWv, u * 4, v * 4, 2) - 0.5);
+      const bd = tfbm(nBd, u * 5, vw * 36, 2);
+      const st = tfbm(nSt, u * 8, vw * 140, 2);
+      const crev = smooth(0.3, 0.2, bd);
+      const torn = 0.75 * smooth(0.64, 0.76, tfbm(nTr, u * 6, v * 6, 2));
+      const k = j * MT + i;
+      mH[k] = 0.55 * bd + 0.3 * st * (0.4 + 0.6 * torn) - 0.45 * crev;
+      const glaze = 1 - torn;
+      const lv = 0.92 + 0.16 * st;
+      const c: [number, number, number] = [
+        lerp(lerp(90, 108, st), lerp(56, 74, bd), glaze) * lv,
+        lerp(lerp(46, 56, st), lerp(26, 34, bd), glaze) * lv,
+        lerp(lerp(28, 34, st), lerp(13, 17, bd), glaze) * lv,
+      ];
+      const dk = 1 - 0.5 * crev;
+      mC[k * 3] = c[0] * dk;
+      mC[k * 3 + 1] = c[1] * dk;
+      mC[k * 3 + 2] = c[2] * dk;
+      mR[k] = clamp01(lerp(0.42, 0.7, torn) + 0.2 * crev + 0.08 * (st - 0.5));
+    }
+  const meatC = paint(MT, MT, (i, j) => {
+    const k = (j * MT + i) * 3;
+    return [mC[k], mC[k + 1], mC[k + 2]];
   });
   // Steamed long-grain rice: grains drawn one by one, slightly translucent at their ends.
   const r = rng(616);
@@ -1409,18 +1752,33 @@ function panFoods(): Record<string, THREE.Material> {
     const o = fbm(n, x / 9 + 30, y / 9, 3) > 0.6;
     return o ? [212, 112, 32] : [lerp(40, 96, v), lerp(80, 140, v), lerp(20, 40, v)];
   });
-  // Soup: a vegetable broth, golden, fat eyes on its surface.
+  // Soup: a vegetable broth, golden and a little cloudy, small eyes of fat on it, each paler with a dark rim.
   const soupC = paint(256, 256, (x, y) => {
     const v = fbm(n, x / 24, y / 24, 3);
-    const eye = fbm(n, x / 5 + 70, y / 5, 2) > 0.7 ? 1 : 0;
-    return [lerp(168, 196, v) + eye * 30, lerp(104, 128, v) + eye * 26, lerp(34, 46, v) + eye * 10];
+    const f = fbm(n, x / 2.6 + 70, y / 2.6, 2) * smooth(0.45, 0.65, fbm(n, x / 40 + 9, y / 40, 2));
+    const eye = smooth(0.66, 0.69, f);
+    const rim = smooth(0.62, 0.66, f) - eye;
+    return [lerp(160, 184, v) + eye * 34 - rim * 50, lerp(96, 116, v) + eye * 30 - rim * 36, lerp(30, 40, v) + eye * 8 - rim * 12];
   });
   foodCache = {
     sauce: phys({ color: 0xffffff, map: canvasTex(sauceC, true, true), roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.3 }, "box", 1 / 0.16),
-    meat: phys({ color: 0xffffff, map: canvasTex(meatC, true, true), bumpMap: canvasTex(meatB, false, true), bumpScale: 3.2, roughness: 0.55, clearcoat: 0.3, clearcoatRoughness: 0.3 }, "box", 1 / 0.05),
+    meat: phys(
+      {
+        color: 0xffffff,
+        map: canvasTex(meatC, true, true),
+        normalMap: normalTex(mH, MT, MT, 3, true),
+        normalScale: new THREE.Vector2(1.1, 1.1),
+        roughnessMap: greyTex(mR, MT, MT, true),
+        roughness: 1,
+        clearcoat: 0.22,
+        clearcoatRoughness: 0.35,
+      },
+      "own",
+    ),
     carrot: phys({ color: 0xc85e1a, roughness: 0.45, clearcoat: 0.35, clearcoatRoughness: 0.25, sheen: 0.3, sheenColor: new THREE.Color(1, 0.6, 0.3) }, "box"),
     onion: phys({ color: 0xc08e58, roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.08 }, "box"),
-    rice: std({ color: 0xffffff, map: canvasTex(rc, true, true), bumpMap: canvasTex(rbc, false, true), bumpScale: 3, roughness: 0.55 }, "box", 1 / 0.07),
+    // 512 px a 240 mm tile: each grain, 15 px long, is 7 mm, as cooked long grain is.
+    rice: std({ color: 0xffffff, map: canvasTex(rc, true, true), bumpMap: canvasTex(rbc, false, true), bumpScale: 4, roughness: 0.5 }, "box", 1 / 0.24),
     veg: phys({ color: 0xffffff, map: canvasTex(vegC, true, true), roughness: 0.35, clearcoat: 0.5 }, "box", 1 / 0.1),
     broccoli: std({ color: 0x3f6b26, roughness: 0.75 }, "box"),
     bean: phys({ color: 0x5a8a2e, roughness: 0.32, clearcoat: 0.5 }, "box"),
@@ -1450,6 +1808,14 @@ function chunk(s: Shop, w: number, h: number, d: number, seed: number): THREE.Bu
     const yy = sp(y) * (y < 0 ? 0.75 : 1) - (y > 0.6 ? (y - 0.6) * 0.3 : 0);
     p.setXYZ(i, (sp(x) * k * w) / 2, (yy * k * h) / 2, (sp(z) * k * d) / 2);
   }
+  // The grain runs along the chunk's length: u along x, v round it, both in 5 cm tiles; v's seam is underneath.
+  const per = (PI * (h + d)) / 2;
+  const uvs = new Float32Array(p.count * 2);
+  for (let i = 0; i < p.count; i++) {
+    uvs[i * 2] = p.getX(i) / 0.05 + seed * 0.37;
+    uvs[i * 2 + 1] = ((Math.atan2(p.getZ(i), p.getY(i)) / TAU) * per) / 0.05;
+  }
+  g.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   g.computeVertexNormals();
   return g;
 }
@@ -1467,7 +1833,13 @@ function foodBed(s: Shop, kind: PanFood, A: number, B: number, rc: number, inA: 
   const surfMat = kind === 0 ? m.sauce : kind === 1 ? m.rice : kind === 2 ? m.veg : m.soup;
   const prof: P2[] = [];
   const steps = kind === 1 || kind === 2 ? s.seg(8, 2) : s.seg(4, 2);
-  for (let j = 0; j <= steps; j++) prof.push([-B * (1 - j / steps) + 1e-5, 0]);
+  const liquid = kind === 0 || kind === 3;
+  // A liquid climbs the steel in a meniscus a few millimetres high; its edge runs on into the wall, never short of it.
+  const men = liquid && s.fine(2) ? [-0.007, -0.0035, -0.0016, -0.0006, 0] : [];
+  const menY = [0, 0.0003, 0.0009, 0.0017, 0.0026];
+  const flatEnd = men.length ? men[0] : 1e-5;
+  for (let j = 0; j <= steps; j++) prof.push([lerp(-B + 1e-5, flatEnd, j / steps), 0]);
+  for (let j = 1; j < men.length; j++) prof.push([men[j], menY[j]]);
   const g = rrRevolve(prof, A, B, rc, k, mx, mz);
   // The inner-to-outer order faces down; turn it up. Rice mounds a little and is never quite level.
   const ix = g.index!;
@@ -1665,15 +2037,106 @@ class LiveCanvas {
   readonly x: CanvasRenderingContext2D;
   readonly img: ImageData;
   readonly tex: THREE.CanvasTexture;
-  constructor(readonly w: number, readonly h: number) {
+  constructor(readonly w: number, readonly h: number, srgb = true) {
     [this.c, this.x] = canvas(w, h);
     this.img = this.x.createImageData(w, h);
     this.img.data.fill(255);
-    this.tex = canvasTex(this.c, true);
+    this.tex = canvasTex(this.c, srgb);
   }
   push(): void {
     this.x.putImageData(this.img, 0, 0);
     this.tex.needsUpdate = true;
+  }
+  /** Repaint as a tangent-space normal map of the height field `h` (see normalTex), clamped at the edges. */
+  normals(h: Float32Array, k: number): void {
+    const { w, h: hh } = this;
+    const d = this.img.data;
+    for (let j = 0; j < hh; j++) {
+      const j0 = j > 0 ? j - 1 : j;
+      const j1 = j < hh - 1 ? j + 1 : j;
+      for (let i = 0; i < w; i++) {
+        const i0 = i > 0 ? i - 1 : i;
+        const i1 = i < w - 1 ? i + 1 : i;
+        const dx = (h[j * w + i1] - h[j * w + i0]) * k;
+        const dy = (h[j0 * w + i] - h[j1 * w + i]) * k;
+        const l = 1 / Math.sqrt(dx * dx + dy * dy + 1);
+        const o = (j * w + i) * 4;
+        d[o] = (0.5 - 0.5 * dx * l) * 255;
+        d[o + 1] = (0.5 - 0.5 * dy * l) * 255;
+        d[o + 2] = (0.5 + 0.5 * l) * 255;
+      }
+    }
+    this.push();
+  }
+}
+
+/** Integer hash of a lattice cell to 0..1. */
+function hash2(i: number, j: number, s: number): number {
+  let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(s, 1103515245)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * Cellular (Worley) noise over a box: seeds jittered one to a cell of size `c`. `at` writes the nearest seed's
+ * distance, the second's, the nearest's id and the second's (0..1). Muscle bundles, fat cells, crumb, blisters.
+ */
+class Cells {
+  private readonly px: Float32Array;
+  private readonly pz: Float32Array;
+  private readonly id: Float32Array;
+  private readonly nx: number;
+  private readonly nz: number;
+  constructor(private readonly x0: number, private readonly z0: number, x1: number, z1: number, private readonly c: number, seed: number) {
+    this.nx = Math.ceil((x1 - x0) / c) + 3;
+    this.nz = Math.ceil((z1 - z0) / c) + 3;
+    const n = this.nx * this.nz;
+    this.px = new Float32Array(n);
+    this.pz = new Float32Array(n);
+    this.id = new Float32Array(n);
+    for (let j = 0; j < this.nz; j++)
+      for (let i = 0; i < this.nx; i++) {
+        const k = j * this.nx + i;
+        this.px[k] = i + hash2(i, j, seed);
+        this.pz[k] = j + hash2(i, j, seed + 7);
+        this.id[k] = hash2(i, j, seed + 13);
+      }
+  }
+  at(x: number, z: number, out: Float64Array): void {
+    const gx = (x - this.x0) / this.c + 1;
+    const gz = (z - this.z0) / this.c + 1;
+    const ix = Math.floor(gx);
+    const iz = Math.floor(gz);
+    let f1 = 1e9;
+    let f2 = 1e9;
+    let id = 0;
+    let id2 = 0;
+    for (let dj = -1; dj <= 1; dj++) {
+      const jj = iz + dj;
+      if (jj < 0 || jj >= this.nz) continue;
+      for (let di = -1; di <= 1; di++) {
+        const ii = ix + di;
+        if (ii < 0 || ii >= this.nx) continue;
+        const k = jj * this.nx + ii;
+        const dx = this.px[k] - gx;
+        const dz = this.pz[k] - gz;
+        const d = dx * dx + dz * dz;
+        if (d < f1) {
+          f2 = f1;
+          id2 = id;
+          f1 = d;
+          id = this.id[k];
+        } else if (d < f2) {
+          f2 = d;
+          id2 = this.id[k];
+        }
+      }
+    }
+    out[0] = Math.sqrt(f1) * this.c;
+    out[1] = Math.sqrt(f2) * this.c;
+    out[2] = id;
+    out[3] = id2;
   }
 }
 
@@ -1787,55 +2250,86 @@ class Ribeye {
   }
 }
 
-/** Raw-to-seared colour stops of lean and of fat, against local browning k (0 raw, 1 deep crust, beyond: charring). */
-const SEAR_K = [0, 0.2, 0.5, 0.8, 1.05, 1.35] as const;
-const LEAN_SEAR: RGB[] = [
-  [0, 0, 0],
-  [132, 96, 80],
-  [122, 72, 40],
-  [98, 52, 24],
-  [74, 37, 16],
-  [44, 23, 10],
-];
-const FAT_SEAR: RGB[] = [
-  [0, 0, 0],
-  [232, 212, 172],
-  [214, 166, 94],
-  [180, 118, 54],
-  [140, 82, 34],
-  [80, 44, 16],
-];
-/** The colour of beef at temperature tc on a surface not in contact: raw red, rare, pink, grey. */
+/** Colour ramps against local browning k (0 raw, 1 a deep crust, beyond it charring), as lookup tables. */
+const SEAR_N = 512;
+const SEAR_MAX = 1.4;
+function searLUT(at: readonly number[], c: readonly RGB[]): Float32Array {
+  const out = new Float32Array(SEAR_N * 3);
+  for (let i = 0; i < SEAR_N; i++) out.set(ramp(at, c, (i / (SEAR_N - 1)) * SEAR_MAX), i * 3);
+  return out;
+}
+/** Lean: the surface proteins grey first, then gold, chestnut, a deep mahogany crust, char. */
+const LEAN_LUT = searLUT(
+  [0.05, 0.18, 0.36, 0.58, 0.8, 1.0, 1.2, 1.4],
+  [
+    [140, 100, 90],
+    [154, 106, 76],
+    [152, 94, 50],
+    [130, 72, 34],
+    [108, 57, 26],
+    [86, 44, 20],
+    [58, 30, 13],
+    [30, 17, 8],
+  ],
+);
+/** Fat: translucent, then golden, caramel, dark. */
+const FAT_LUT = searLUT(
+  [0.05, 0.25, 0.5, 0.8, 1.1, 1.4],
+  [
+    [234, 216, 184],
+    [226, 184, 116],
+    [198, 138, 62],
+    [152, 92, 38],
+    [100, 56, 22],
+    [42, 24, 10],
+  ],
+);
+/** The colour of beef at temperature tc where it is not seared: raw red, rare, pink, grey. */
 const BEEF_T = [38, 50, 57, 63, 70, 85] as const;
 const BEEF_C: RGB[] = [
-  [142, 26, 34],
-  [158, 38, 44],
-  [180, 76, 74],
-  [172, 110, 100],
-  [142, 106, 92],
-  [124, 92, 78],
+  [134, 22, 30],
+  [150, 36, 42],
+  [168, 70, 70],
+  [164, 106, 96],
+  [146, 110, 96],
+  [126, 94, 80],
 ];
 
 const steakBuilder: Builder = (s, e) => {
   const a = e.w / 2;
   const b = e.d / 2;
-  // Raw thickness: thickening as it cooks (set "shrink") brings it to the box's height.
+  // Raw thickness at the eye's crown: thickening as it cooks (set "shrink") brings it to the box's height.
   const T = e.h / (1 + 0.35 * 0.3);
   const rib = new Ribeye(a, b, 5150);
   const nRel = noise2(611);
   const nFine = noise2(612);
-  const nFib = noise2(613);
   const nEdge = noise2(614);
-  const relief = (x: number, z: number) => 0.65 * fbm(nRel, x * 150 + 3, z * 150 + 7, 3) + 0.35 * fbm(nRel, x * 55 + 31, z * 55, 2);
-  const spotOf = (x: number, z: number) => smooth(0.38, 0.66, relief(x, z));
+  const nWarp = noise2(615);
+  const nOn = noise2(616);
+  const nThk = noise2(617);
+  const relief = (x: number, z: number) => 0.6 * fbm(nRel, x * 150 + 3, z * 150 + 7, 3) + 0.4 * fbm(nRel, x * 55 + 31, z * 55, 2);
+  const spotOf = (x: number, z: number) => smooth(0.36, 0.66, relief(x, z));
 
-  // --- The mesh: two cut faces and the rounded side, one closed body so that their normals meet smoothly. ---
+  // --- The body: a slight dome over the eye, thinner toward the cap's tail, a lumpy top; one closed mesh. ---
+  /** The top's height at (x, z), its depth in from the outline d: never above T (the box allows for shrink). */
+  const topH = (x: number, z: number, edgeFade: number) => {
+    const [th, d] = rib.polar(x, z);
+    const crown = smooth(0, 0.04, d);
+    const tail = Math.max(0, Math.cos(clamp(adiff(th, rib.thC) / 1.6, -1, 1) * (PI / 2))) * (1 - crown * 0.5);
+    const lump = fbm(nThk, x * 28 + 4, z * 28, 3) - 0.5;
+    const seam = rib.capW(th) > 0.0008 ? Math.exp(-(((d - rib.fatW(th) - rib.capW(th)) / 0.0022) ** 2)) : 0;
+    const h = T * (0.905 + 0.075 * crown - 0.05 * tail + 0.05 * lump) - 0.00035 * seam + 0.0006 * (relief(x, z) - 0.5) * edgeFade;
+    return Math.min(T, h);
+  };
   const N = [28, 64, 160][s.detail];
   const K = [4, 9, 22][s.detail];
   const M = [4, 6, 14][s.detail];
-  const er = 0.0036;
   const O: P2[] = [];
-  for (let i = 0; i < N; i++) O.push(rib.outline((i / N) * TAU));
+  const thO: number[] = [];
+  for (let i = 0; i < N; i++) {
+    thO.push((i / N) * TAU);
+    O.push(rib.outline((i / N) * TAU));
+  }
   const nrm: P2[] = O.map((_, i) => {
     const p0 = O[(i + N - 1) % N];
     const p1 = O[(i + 1) % N];
@@ -1843,8 +2337,11 @@ const steakBuilder: Builder = (s, e) => {
     const l = Math.hypot(tx, tz);
     return [tz / l, -tx / l];
   });
-  // Point the normals outward (the outline runs from +x toward +z, so (tz, -tx) points out).
-  const Q: P2[] = O.map((p, i) => [p[0] - nrm[i][0] * er, p[1] - nrm[i][1] * er]);
+  // The edge's rounding: soft over the fat cap, tighter on the lean; the bottom flatter, where it lies on the pan.
+  const erT = thO.map((th) => 0.0034 + 0.0026 * smooth(0.0016, 0.0045, rib.fatW(th)));
+  const erB = erT.map((r) => r * 0.6);
+  const Q: P2[] = O.map((p, i) => [p[0] - nrm[i][0] * erT[i], p[1] - nrm[i][1] * erT[i]]);
+  const Qb: P2[] = O.map((p, i) => [p[0] - nrm[i][0] * erB[i], p[1] - nrm[i][1] * erB[i]]);
   let cxs = 0;
   let czs = 0;
   for (const [x, z] of Q) {
@@ -1852,61 +2349,64 @@ const steakBuilder: Builder = (s, e) => {
     czs += z / N;
   }
   const pos: number[] = [];
-  const kind: number[] = []; // 0 face, 1 side
   const perim: number[] = [];
   const rowV: number[] = [];
-  const push = (x: number, y: number, z: number, kd: number, u = 0, v = 0) => {
+  const push = (x: number, y: number, z: number, u = 0, v = 0) => {
     pos.push(x, y, z);
-    kind.push(kd);
     perim.push(u);
     rowV.push(v);
     return pos.length / 3 - 1;
   };
-  // Cumulative perimeter, for the side's u.
   const plen = [0];
   for (let i = 1; i <= N; i++) plen.push(plen[i - 1] + Math.hypot(O[i % N][0] - O[i - 1][0], O[i % N][1] - O[i - 1][1]));
   const L = plen[N];
   const faceY = (x: number, z: number, k: number, top: boolean) => {
     const fade = 1 - Math.pow(k / K, 3);
     if (!top) return 0.00025 * relief(x, z) * fade;
-    return T + (0.0011 * (1 - (k / K) ** 2) + 0.0009 * (relief(x, z) - 0.5)) * fade;
+    return topH(x, z, fade);
   };
   // Face normals from the height field itself, so that the fan of the polar grid never shows in the shading.
   const faceN = new Map<number, [number, number, number]>();
   const ringOf = (k: number, top: boolean) => {
     const out: number[] = [];
+    const R = top ? Q : Qb;
     for (let i = 0; i < N; i++) {
-      const x = cxs + (Q[i][0] - cxs) * (k / K);
-      const z = czs + (Q[i][1] - czs) * (k / K);
-      const v = push(x, faceY(x, z, k, top), z, 0);
+      const x = cxs + (R[i][0] - cxs) * (k / K);
+      const z = czs + (R[i][1] - czs) * (k / K);
+      const v = push(x, faceY(x, z, k, top), z);
       const ep = 0.0004;
-      const rr = Math.hypot(x - cxs, z - czs) || 1e-6;
-      const kf = (dx: number, dz: number) => (k * Math.hypot(x + dx - cxs, z + dz - czs)) / rr;
-      const gx = (faceY(x + ep, z, kf(ep, 0), top) - faceY(x - ep, z, kf(-ep, 0), top)) / (2 * ep);
-      const gz = (faceY(x, z + ep, kf(0, ep), top) - faceY(x, z - ep, kf(0, -ep), top)) / (2 * ep);
+      const gx = (faceY(x + ep, z, k, top) - faceY(x - ep, z, k, top)) / (2 * ep);
+      const gz = (faceY(x, z + ep, k, top) - faceY(x, z - ep, k, top)) / (2 * ep);
       const l = Math.hypot(gx, 1, gz);
       faceN.set(v, top ? [-gx / l, 1 / l, -gz / l] : [gx / l, -1 / l, gz / l]);
       out.push(v);
     }
     return out;
   };
-  const topC = push(cxs, faceY(cxs, czs, 0, true), czs, 0);
+  const topC = push(cxs, faceY(cxs, czs, 0, true), czs);
   const topR: number[][] = [];
   for (let k = 1; k < K; k++) topR.push(ringOf(k, true));
-  // Side rows from the top junction (s = 1) to the bottom junction (s = -1), denser toward the rounded edges.
+  // Side rows from the top junction (sj = 1) to the bottom one (sj = -1), denser toward the rounded edges; the
+  // lean sags a little outward at mid-height.
+  const yTop = Q.map(([x, z]) => faceY(x, z, K, true));
   const q = 3;
   const side: number[][] = [];
   for (let j = 0; j <= M; j++) {
     const sj = Math.cos((PI * j) / M);
-    const off = er * (Math.pow(Math.max(0, 1 - Math.pow(Math.abs(sj), q)), 1 / q) - 1);
-    const y = T / 2 + (sj * T) / 2;
+    const sup = Math.pow(Math.max(0, 1 - Math.pow(Math.abs(sj), q)), 1 / q) - 1;
     const row: number[] = [];
-    for (let i = 0; i < N; i++) row.push(push(O[i][0] + nrm[i][0] * off, y, O[i][1] + nrm[i][1] * off, 1, plen[i] / L, (sj + 1) / 2));
+    for (let i = 0; i < N; i++) {
+      const er = sj >= 0 ? erT[i] : erB[i];
+      const sag = 0.0007 * (1 - sj * sj) * (1 - 0.6 * smooth(0.0016, 0.004, rib.fatW(thO[i])));
+      const off = er * sup + sag;
+      const y = (yTop[i] * (sj + 1)) / 2;
+      row.push(push(O[i][0] + nrm[i][0] * off, y, O[i][1] + nrm[i][1] * off, plen[i] / L, (sj + 1) / 2));
+    }
     side.push(row);
   }
   const botR: number[][] = [];
   for (let k = K - 1; k >= 1; k--) botR.push(ringOf(k, false));
-  const botC = push(cxs, 0, czs, 0);
+  const botC = push(cxs, 0, czs);
   const faceTris: number[] = [];
   const sideTris: number[] = [];
   const quad = (A: number[], B: number[], out: number[]) => {
@@ -1948,8 +2448,9 @@ const steakBuilder: Builder = (s, e) => {
     nr[v * 3 + 1] = y / l;
     nr[v * 3 + 2] = z / l;
   }
+  // The faces are mapped straight down onto the tissue map; the side by its length round and its height, both in
+  // proportion to their true size (the side's texels are near square), so nothing smears.
   const faceGeo = subGeometry(pos, nr, ix.slice(0, faceTris.length), (v) => [(pos[v * 3] + a) / (2 * a), (pos[v * 3 + 2] + b) / (2 * b)]);
-  // The side's u wraps: give it a seam column by hand.
   const sideIx = ix.slice(faceTris.length);
   const seamFix = new Map<number, number>();
   const extraPos = pos.slice();
@@ -1978,256 +2479,361 @@ const steakBuilder: Builder = (s, e) => {
   const nrX = Array.from(nr);
   for (const [v, w] of seamFix) nrX.splice(w * 3, 3, nr[v * 3], nr[v * 3 + 1], nr[v * 3 + 2]);
   const sideGeo = subGeometry(extraPos, nrX, fixTris, (v) => [perim[v], rowV[v]]);
-  void kind;
 
-  // --- The cut face's tissue map: fat fraction, which muscle, fibre, relief, crust grain, depth from the edge. ---
+  // --- The tissue map of the cut, shared by both faces and (at the outline) by the side. ---
   const FW = s.detail === 2 ? 1024 : s.detail === 1 ? 512 : 192;
   const FH = Math.round((FW * b) / a);
   const pxm = FW / (2 * a);
-  const marb = (() => {
-    const [, mx] = canvas(FW, FH);
-    mx.fillStyle = "#000";
-    mx.fillRect(0, 0, FW, FH);
-    mx.lineCap = "round";
-    mx.lineJoin = "round";
+  const NP = FW * FH;
+  const fF = new Uint8Array(NP); // fat 0..255
+  const fEF = new Uint8Array(NP); // the outer fat edge
+  const fR = new Uint8Array(NP); // raw colour
+  const fG = new Uint8Array(NP);
+  const fB = new Uint8Array(NP);
+  const fSpot = new Uint8Array(NP);
+  const fFine = new Uint8Array(NP);
+  const hRaw = new Float32Array(NP);
+  const hCrust = new Float32Array(NP);
+  const fine2 = s.fine(1);
+  // Bundles of fibres seen end on (fascicles, ~1.6 mm), the secondary bundles whose walls carry the marbling
+  // (~5 mm, smaller in the loose cap), fat cells for flecks, and crust blisters.
+  const pad = 0.01;
+  const cFas = fine2 ? new Cells(-a - pad, -b - pad, a + pad, b + pad, 0.0016, 31) : null;
+  const cEye = new Cells(-a - pad, -b - pad, a + pad, b + pad, 0.0056, 37);
+  const cCap = new Cells(-a - pad, -b - pad, a + pad, b + pad, 0.0042, 41);
+  const cFl = new Cells(-a - pad, -b - pad, a + pad, b + pad, 0.0021, 43);
+  const cCr = fine2 ? new Cells(-a - pad, -b - pad, a + pad, b + pad, 0.0011, 47) : null;
+  const wo = new Float64Array(4);
+  const [kx, kz] = rib.outline(rib.thK);
+  const kd = rib.fatW(rib.thK) + rib.capW(rib.thK) + 0.0008;
+  const kl = Math.hypot(kx, kz);
+  const kcx = kx * (1 - kd / kl);
+  const kcz = kz * (1 - kd / kl);
+  const ta = Math.atan2(kz, kx) + PI / 2;
+  const [xx, xz] = rib.outline(rib.thX);
+  const xd = rib.fatW(rib.thX) + 0.0065;
+  const xl = Math.hypot(xx, xz);
+  const cxx = xx * (1 - xd / xl);
+  const cxz = xz * (1 - xd / xl);
+  // A few long intermuscular streaks running in from the cap's seam across the eye.
+  const streaks: P2[][] = [];
+  {
     const r = rng(9091);
-    const toPx = (x: number, z: number): P2 => [(x + a) * pxm, (1 - (z + b) / (2 * b)) * FH];
-    const region = (x: number, z: number) => {
-      const [th, d] = rib.polar(x, z);
-      const fw = rib.fatW(th);
-      const cw = rib.capW(th);
-      if (d < fw + 0.0005) return -1;
-      return d < fw + cw ? 1 : 0;
-    };
-    // Intramuscular fat: flecks and short streaks, heavier in the cap and toward the eye's rim, the eye's heart leaner.
-    const count = s.detail === 2 ? 2300 : s.detail === 1 ? 1100 : 320;
-    for (let i = 0; i < count; i++) {
-      let x = (r() * 2 - 1) * a;
-      let z = (r() * 2 - 1) * b;
-      const reg = region(x, z);
-      if (reg < 0) continue;
-      const [, d] = rib.polar(x, z);
-      if (reg === 0 && r() > 0.25 + 0.75 * smooth(0.036, 0.008, d)) continue;
-      mx.fillStyle = mx.strokeStyle = `rgba(255,255,255,${(0.6 + r() * 0.4).toFixed(2)})`;
-      if (r() < 0.55) {
-        // A fleck: an irregular blob, two or three overlapping ellipses.
-        const rr = (0.00025 + r() * r() * 0.0011) * pxm;
-        for (let k = 0; k < 2 + Math.floor(r() * 2); k++) {
-          mx.beginPath();
-          const [px, py] = toPx(x + (r() - 0.5) * rr / pxm, z + (r() - 0.5) * rr / pxm);
-          mx.ellipse(px, py, rr * (0.6 + r()), rr * (0.3 + r() * 0.5), r() * PI, 0, TAU);
-          mx.fill();
-        }
-        continue;
-      }
-      let ang = r() * TAU;
-      const steps = 2 + Math.floor(r() * 5);
-      let wid = (reg === 1 ? 0.0002 + r() * 0.00045 : 0.00012 + r() * 0.00035) * pxm;
-      mx.lineWidth = Math.max(0.7, wid);
-      let [px, py] = toPx(x, z);
-      for (let k = 0; k < steps; k++) {
-        ang += (r() - 0.5) * 1.1;
-        const st = 0.0005 + r() * 0.0012;
-        x += Math.cos(ang) * st;
-        z += Math.sin(ang) * st;
-        if (region(x, z) < 0) break;
-        const [qx, qy] = toPx(x, z);
-        mx.beginPath();
-        mx.moveTo(px, py);
-        mx.lineTo(qx, qy);
-        mx.stroke();
-        [px, py] = [qx, qy];
-        wid *= 0.6 + r() * 0.6;
-        mx.lineWidth = Math.max(0.6, wid);
-      }
-    }
-    for (let i = 0; i < 4; i++) {
-      const th = rib.thK + (r() - 0.5) * 0.5;
+    for (let i = 0; i < 5; i++) {
+      const th = rib.thK + (r() - 0.5) * 1.4;
       const [ox, oz] = rib.outline(th);
       const d0 = rib.fatW(th) + rib.capW(th) + 0.001;
       let x = ox * (1 - d0 / Math.hypot(ox, oz));
       let z = oz * (1 - d0 / Math.hypot(ox, oz));
       let ang = Math.atan2(-z, -x) + (r() - 0.5) * 1.2;
-      mx.strokeStyle = "rgba(255,255,255,0.95)";
-      mx.lineWidth = (0.0005 + r() * 0.0006) * pxm;
-      mx.beginPath();
-      mx.moveTo(...toPx(x, z));
-      const len = 8 + Math.floor(r() * 14);
+      const pts: P2[] = [[x, z]];
+      const len = 6 + Math.floor(r() * 16);
       for (let k = 0; k < len; k++) {
-        ang += (r() - 0.5) * 0.8;
-        x += Math.cos(ang) * 0.0011;
-        z += Math.sin(ang) * 0.0011;
-        mx.lineTo(...toPx(x, z));
-        if (k > 3 && r() < 0.12) mx.lineWidth *= 0.7;
+        ang += (r() - 0.5) * 0.7;
+        x += Math.cos(ang) * 0.0012;
+        z += Math.sin(ang) * 0.0012;
+        pts.push([x, z]);
       }
-      mx.stroke();
+      streaks.push(pts);
     }
-    return mx.getImageData(0, 0, FW, FH).data;
-  })();
-  const fF = new Uint8Array(FW * FH); // fat 0..255
-  const fM = new Uint8Array(FW * FH); // 0 eye, 1 cap, 2 complexus
-  const fFib = new Uint8Array(FW * FH);
-  const fSpot = new Uint8Array(FW * FH);
-  const fFine = new Uint8Array(FW * FH);
-  const fEdge = new Uint8Array(FW * FH);
-  const fEdgeFat = new Uint8Array(FW * FH);
+  }
+  let sx0 = Infinity;
+  let sx1 = -Infinity;
+  let sz0 = Infinity;
+  let sz1 = -Infinity;
+  for (const pts of streaks)
+    for (const [x, z] of pts) {
+      sx0 = Math.min(sx0, x - 0.002);
+      sx1 = Math.max(sx1, x + 0.002);
+      sz0 = Math.min(sz0, z - 0.002);
+      sz1 = Math.max(sz1, z + 0.002);
+    }
+  const streakD = (x: number, z: number): [number, number] => {
+    let best = 1;
+    let along = 0;
+    if (x < sx0 || x > sx1 || z < sz0 || z > sz1) return [best, along];
+    for (const pts of streaks)
+      for (let k = 0; k < pts.length - 1; k++) {
+        const [x0, z0] = pts[k];
+        const [x1, z1] = pts[k + 1];
+        const dx = x1 - x0;
+        const dz = z1 - z0;
+        const t = clamp(((x - x0) * dx + (z - z0) * dz) / (dx * dx + dz * dz), 0, 1);
+        const dd = Math.hypot(x - x0 - dx * t, z - z0 - dz * t);
+        if (dd < best) {
+          best = dd;
+          along = (k + t) / (pts.length - 1);
+        }
+      }
+    return [best, along];
+  };
+  const tissue = (x: number, z: number, k: number) => {
+    const [th, d0] = rib.polar(x, z);
+    // Organic boundaries: each line between tissues wanders by a millimetre or so.
+    const d = d0 + 0.0011 * (fbm(nEdge, x * 300, z * 300, 2) - 0.5);
+    const fw = rib.fatW(th);
+    const cw = rib.capW(th);
+    let fat = 0;
+    let mus = 0;
+    let ef = 0;
+    if (d < fw) {
+      // The cap's fat edge is solid; the eye's free side has only a thin translucent silverskin.
+      fat = fw < 0.0016 ? 0.5 : 1;
+      ef = 1;
+    } else if (cw > 0.0008 && d < fw + cw) mus = 1;
+    else if (cw > 0.0008 && d < fw + cw + 0.0011 + 0.0012 * nEdge(th * 9, 3)) fat = 0.97;
+    // The kernel: a lens of fat in the seam; the complexus: a small muscle at the cap's end, rimmed with fat.
+    const ux = x - kcx;
+    const uz = z - kcz;
+    const al = ux * Math.cos(ta) + uz * Math.sin(ta);
+    const ac = -ux * Math.sin(ta) + uz * Math.cos(ta);
+    if ((al / 0.0125) ** 2 + (ac / 0.0058) ** 2 < 0.75 + 0.5 * fbm(nEdge, x * 160 + 40, z * 160, 2)) fat = 1;
+    const cpx = (((x - cxx) / 0.0078) ** 2 + ((z - cxz) / 0.0056) ** 2) / (0.7 + 0.6 * fbm(nEdge, x * 140, z * 140 + 70, 2));
+    if (cpx < 1) {
+      mus = 2;
+      fat = Math.max(0, fat - 0.6);
+    } else if (cpx < 1.22 && fat < 1) fat = Math.max(fat, 0.9 * smooth(0.3, 0.55, fbm(nEdge, x * 400, z * 400, 2)));
+    // Marbling: fat laid down in the walls between bundles of fibres, a lacy network, denser in the cap and toward
+    // the eye's rim, the eye's heart leaner; flecks of fat cells between; a few long streaks.
+    const wx = x + 0.0055 * (fbm(nWarp, x * 70, z * 70, 3) - 0.5) + 0.0016 * (fbm(nWarp, x * 260 + 9, z * 260, 2) - 0.5);
+    const wz = z + 0.0055 * (fbm(nWarp, x * 70 + 17, z * 70, 3) - 0.5) + 0.0016 * (fbm(nWarp, x * 260, z * 260 + 9, 2) - 0.5);
+    const dens = mus === 1 ? 0.62 : mus === 2 ? 0.3 : 0.2 + 0.34 * smooth(0.034, 0.008, d - fw - cw);
+    let marb = 0;
+    if (!ef) {
+      // Whole walls between two bundles carry fat or none, so the threads run on and stop rather than crazing.
+      (mus === 1 ? cCap : cEye).at(wx, wz, wo);
+      const edge = (wo[1] - wo[0]) / 2;
+      const pair = hash2(Math.round(Math.min(wo[2], wo[3]) * 1e7), Math.round(Math.max(wo[2], wo[3]) * 1e7), 61);
+      const along = fbm(nOn, wx * 330 + 50, wz * 330, 2);
+      const on = (pair < dens ? 1 : 0) * smooth(0.3, 0.45, along + 0.25 * (dens - pair));
+      const wid = (0.00013 + 0.0005 * Math.pow(along, 2) * (0.7 + dens)) * (1 + 1.2 * smooth(0.0006, 0, wo[0] - 0.5 * wo[1]));
+      marb = on * smooth(wid * 1.8, wid * 0.25, edge);
+      // Fine threads off the main walls, fewer and thinner, and flecks of fat cells between.
+      cFl.at(wx * 1.03 + 0.003, wz, wo);
+      const e2 = (wo[1] - wo[0]) / 2;
+      const p2 = hash2(Math.round(Math.min(wo[2], wo[3]) * 1e7), Math.round(Math.max(wo[2], wo[3]) * 1e7), 67);
+      if (p2 < dens * 0.35) marb = Math.max(marb, smooth(0.00014, 0.00004, e2) * smooth(0.35, 0.6, along) * 0.8);
+      const rf = 0.00014 + 0.00055 * hash2(Math.round(wo[2] * 1e6), 3, 5) * (0.4 + dens);
+      if (wo[2] < dens * 0.3) marb = Math.max(marb, smooth(rf, rf * 0.4, wo[0]) * 0.9);
+      const [sd, sa] = streakD(x, z);
+      const sw = 0.0009 * (1 - sa) + 0.00015;
+      if (mus === 0) marb = Math.max(marb, smooth(sw, sw * 0.5, sd));
+      fat = Math.max(fat, marb);
+    }
+    // The raw colour: cherry red, the cap a shade deeper and the complexus darker, each bundle a little different.
+    let fas = 0;
+    let fid = 0.5;
+    if (cFas) {
+      cFas.at(wx, wz, wo);
+      fas = smooth(0.00011, 0.0, (wo[1] - wo[0]) / 2);
+      fid = wo[2];
+    }
+    const lv = fbm(nFine, x * 60, z * 60, 3);
+    const base: RGB = mus === 1 ? [124, 20, 30] : mus === 2 ? [106, 17, 26] : [134, 22, 30];
+    const sh = (0.9 + 0.14 * lv + 0.04 * (fid - 0.5)) * (1 - 0.035 * fas);
+    // Fat: creamy, layered in the cap's edge, pink where a thin fleck lets the lean show through.
+    const fatTone = ef ? 1 - 0.04 * Math.sin(d * 2400 + 6 * fbm(nEdge, x * 90, z * 90, 2)) : 1;
+    const fatC: RGB = fw < 0.0016 && ef ? [220, 196, 196] : [240 * fatTone, 231 * fatTone, 212 * fatTone];
+    const fa = fat;
+    fR[k] = clamp(lerp(base[0] * sh, fatC[0], fa), 0, 255);
+    fG[k] = clamp(lerp(base[1] * sh, fatC[1], fa), 0, 255);
+    fB[k] = clamp(lerp(base[2] * sh, fatC[2], fa), 0, 255);
+    fF[k] = Math.round(fat * 255);
+    fEF[k] = ef ? 255 : 0;
+    const fine = fbm(nFine, x * 850, z * 850, 3);
+    fSpot[k] = Math.round(spotOf(x, z) * 255);
+    fFine[k] = Math.round(fine * 255);
+    // Relief: fat stands a hair proud of the lean, the bundles' walls are faint grooves. The crust: blistered and
+    // craggy, its high spots where the pan touched hardest.
+    hRaw[k] = 0.00006 * fat - 0.000018 * fas + 0.00005 * (lv - 0.5);
+    if (cCr) cCr.at(x, z, wo);
+    const blister = cCr ? smooth(0.0007, 0.0, wo[0]) * (wo[2] < 0.55 ? 1 : 0.3) : 0;
+    hCrust[k] = 0.00014 * (fine - 0.5) + 0.00009 * blister + 0.0001 * (spotOf(x, z) - 0.5);
+  };
   for (let j = 0; j < FH; j++)
-    for (let i = 0; i < FW; i++) {
-      const x = -a + (i + 0.5) / pxm;
-      const z = -b + (1 - (j + 0.5) / FH) * 2 * b;
-      const [th, d0] = rib.polar(x, z);
-      // Organic boundaries: each line between tissues wanders by a millimetre or so.
-      const d = d0 + 0.0011 * (fbm(nEdge, x * 300, z * 300, 2) - 0.5);
-      const fw = rib.fatW(th);
-      const cw = rib.capW(th);
-      const k = j * FW + i;
-      let fat = 0;
-      let mus = 0;
-      let edgeFat = 0;
-      if (d < fw) {
-        // The ventral side's thin silverskin is a translucent membrane, the cap's fat edge solid.
-        fat = fw < 0.0016 ? 0.55 : 1;
-        edgeFat = 1;
-      } else if (cw > 0.0008 && d < fw + cw) mus = 1;
-      else if (cw > 0.0008 && d < fw + cw + 0.0009 + 0.0007 * nEdge(th * 9, 3)) fat = 0.95;
-      // The kernel: a lens of fat in the seam; the complexus: a small muscle at the cap's end, rimmed with fat.
-      const [kx, kz] = rib.outline(rib.thK);
-      const kd = rib.fatW(rib.thK) + rib.capW(rib.thK) + 0.0008;
-      const kl = Math.hypot(kx, kz);
-      const kcx = kx * (1 - kd / kl);
-      const kcz = kz * (1 - kd / kl);
-      const ta = Math.atan2(kz, kx) + PI / 2;
-      const [ux, uz] = [x - kcx, z - kcz];
-      const along = ux * Math.cos(ta) + uz * Math.sin(ta);
-      const across = -ux * Math.sin(ta) + uz * Math.cos(ta);
-      const wob = 0.75 + 0.5 * fbm(nEdge, x * 160 + 40, z * 160, 2);
-      const lens = (along / 0.0115) ** 2 + (across / 0.0052) ** 2;
-      if (lens < wob) fat = 1;
-      const [xx, xz] = rib.outline(rib.thX);
-      const xd = rib.fatW(rib.thX) + 0.0065;
-      const xl = Math.hypot(xx, xz);
-      const cxx = xx * (1 - xd / xl);
-      const cxz = xz * (1 - xd / xl);
-      const cpx = (((x - cxx) / 0.0078) ** 2 + ((z - cxz) / 0.0056) ** 2) / (0.7 + 0.6 * fbm(nEdge, x * 140, z * 140 + 70, 2));
-      if (cpx < 1) {
-        mus = 2;
-        fat = Math.max(0, fat - 0.6);
-      } else if (cpx < 1.2 && fat < 1) fat = Math.max(fat, 0.85 * smooth(0.35, 0.6, fbm(nEdge, x * 400, z * 400, 2)));
-      const m = marb[k * 4] / 255;
-      if (!edgeFat) fat = Math.max(fat, m * 0.95);
-      fF[k] = Math.round(fat * 255);
-      fM[k] = mus;
-      fEdgeFat[k] = edgeFat ? 255 : 0;
-      fFib[k] = Math.round(fbm(nFib, x * 1700, z * 1700, 2) * 255);
-      fSpot[k] = Math.round(spotOf(x, z) * 255);
-      fFine[k] = Math.round(fbm(nFine, x * 850, z * 850, 3) * 255);
-      fEdge[k] = Math.round(clamp01(d0 / 0.006) * 255);
-    }
+    for (let i = 0; i < FW; i++) tissue(-a + (i + 0.5) / pxm, -b + (1 - (j + 0.5) / FH) * 2 * b, j * FW + i);
   const face = new LiveCanvas(FW, FH);
-  // Static bump: the high spots, the crust's grain, fat standing a little proud of the lean.
-  const bumpC = paint(FW, FH, (i, j) => {
-    const k = j * FW + i;
-    const v = 70 + fSpot[k] * 0.35 + (fFine[k] - 128) * 0.55 + fF[k] * 0.12;
-    return [v, v, v];
-  });
-  const faceMat = phys({ map: face.tex, bumpMap: canvasTex(bumpC, false), bumpScale: 0.6, roughness: 0.4, clearcoat: 0.4, clearcoatRoughness: 0.32, metalness: 0 }, "own");
+  const faceNrm = new LiveCanvas(FW, FH, false);
+  const hNow = new Float32Array(NP);
+  const nK = 1 / (2 / pxm);
+  const faceMat = phys({ map: face.tex, normalMap: faceNrm.tex, normalScale: new THREE.Vector2(1, 1), roughness: 0.4, clearcoat: 0.4, clearcoatRoughness: 0.32, metalness: 0 }, "own");
+
+  // --- The side: the tissue at the outline, carried down through the thickness (the fibres run through it). ---
   const SW = s.detail === 2 ? 1024 : s.detail === 1 ? 512 : 192;
   const SH = s.detail === 2 ? 128 : s.detail === 1 ? 64 : 24;
-  const sideC = new LiveCanvas(SW, SH);
-  const sideMat = phys({ map: sideC.tex, roughness: 0.42, clearcoat: 0.4, clearcoatRoughness: 0.35, metalness: 0 }, "own");
-  // The side's tissue round the perimeter: fat outside the cap, lean (with its silverskin) elsewhere.
-  const sFat = new Float32Array(SW);
-  const sNoise = new Float32Array(SW * SH);
+  const SP = SW * SH;
+  const sR = new Uint8Array(SP);
+  const sG = new Uint8Array(SP);
+  const sB = new Uint8Array(SP);
+  const sF = new Uint8Array(SP);
+  const sEF = new Uint8Array(SP);
+  const sSpot = new Uint8Array(SP);
+  const sN = new Uint8Array(SP);
+  const sMem = new Uint8Array(SP);
+  const sH = new Float32Array(SP);
+  const sideOfV = (v: number) => {
+    // The plan offset of the side surface at height fraction v (0 at the bottom junction, 1 at the top).
+    const sj = 2 * v - 1;
+    return Math.pow(Math.max(0, 1 - Math.pow(Math.abs(sj), q)), 1 / q) - 1;
+  };
   for (let i = 0; i < SW; i++) {
     const u = (i + 0.5) / SW;
     let lo = 0;
     while (lo < N - 1 && plen[lo + 1] / L < u) lo++;
-    const th = ((lo + (u * L - plen[lo]) / (plen[lo + 1] - plen[lo])) / N) * TAU;
-    sFat[i] = smooth(0.0016, 0.0028, rib.fatW(th));
-    // Fibres run through the steak's thickness, so its side is striated vertically; the membrane over it is smooth.
-    for (let j = 0; j < SH; j++) sNoise[j * SW + i] = 0.35 * fbm(nFib, u * 1400, (j / SH) * 3, 2) + 0.65 * fbm(nEdge, u * 120, (j / SH) * 4, 3);
+    const f = (u * L - plen[lo]) / (plen[lo + 1] - plen[lo]);
+    const th = ((lo + f) / N) * TAU;
+    const [ox, oz] = rib.outline(th);
+    const hi = (lo + 1) % N;
+    const nx0 = lerp(nrm[lo][0], nrm[hi][0], f);
+    const nz0 = lerp(nrm[lo][1], nrm[hi][1], f);
+    const er = lerp(erT[lo], erT[hi], f);
+    for (let j = 0; j < SH; j++) {
+      const v = 1 - (j + 0.5) / SH;
+      const k = j * SW + i;
+      // The plan point under this texel, a hair inside the surface; the fibres wave a little through the height.
+      const wav = 0.0016 * (fbm(nWarp, u * L * 140, v * 5, 2) - 0.5);
+      const fwt = rib.fatW(th);
+      const off = er * (v >= 0.5 ? 1 : 0.6) * sideOfV(v) - (fwt < 0.0016 ? fwt + 0.0007 : 0.0005);
+      const px = ox + nx0 * off - nz0 * wav;
+      const pz = oz + nz0 * off + nx0 * wav;
+      const fx = clamp((px + a) * pxm - 0.5, 0, FW - 1.001);
+      const fy = clamp((1 - (pz + b) / (2 * b)) * FH - 0.5, 0, FH - 1.001);
+      const fi = Math.floor(fx);
+      const fj = Math.floor(fy);
+      const tx = fx - fi;
+      const ty = fy - fj;
+      const fk = fj * FW + fi;
+      const bl = (A: Uint8Array) => lerp(lerp(A[fk], A[fk + 1], tx), lerp(A[fk + FW], A[fk + FW + 1], tx), ty);
+      const stri = fbm(nFine, u * L * 1400, v * T * 140, 2);
+      const g = 0.95 + 0.1 * stri;
+      const ef = bl(fEF) / 255;
+      // Marbling meets the side as soft streaks, not the cut face's crisp threads; the fat edge stays solid.
+      const fat0 = bl(fF) / 255;
+      const dash = smooth(0.42, 0.62, fbm(nOn, u * L * 300 + 7, v * T * 90, 2));
+      const isFat = lerp(fat0 * 0.45 * dash, fat0, ef);
+      const lr = (bl(fR) - fat0 * 240) / Math.max(0.05, 1 - fat0);
+      const lg = (bl(fG) - fat0 * 231) / Math.max(0.05, 1 - fat0);
+      const lb = (bl(fB) - fat0 * 212) / Math.max(0.05, 1 - fat0);
+      const lean = fat0 > 0.95 ? [134, 22, 30] : [clamp(lr, 60, 200), clamp(lg, 10, 120), clamp(lb, 15, 120)];
+      // The cap's fat in section: creamy, faintly yellow, with the grain of its connective sheets running across it.
+      const fn = stri * 0.6 + 0.4 * fbm(nFine, u * L * 90 + 3, v * T * 30, 2);
+      sR[k] = clamp(lerp(lean[0] * g, 238 - 10 * fn, isFat), 0, 255);
+      sG[k] = clamp(lerp(lean[1] * g, 228 - 14 * fn, isFat), 0, 255);
+      sB[k] = clamp(lerp(lean[2] * g, 208 - 26 * fn, isFat), 0, 255);
+      sF[k] = Math.round(isFat * 255);
+      sEF[k] = ef > 0.5 ? 255 : 0;
+      sSpot[k] = fSpot[fk];
+      sN[k] = Math.round(fbm(nEdge, u * L * 260, v * T * 260, 3) * 255);
+      // Silverskin: a pearly film in patches over the lean of the eye's free side.
+      sMem[k] = Math.round(smooth(0.48, 0.7, fbm(nOn, u * L * 90, v * T * 60, 3)) * (1 - isFat) * 255);
+      sH[k] = 0.00005 * (stri - 0.5) + 0.00004 * isFat;
+    }
   }
+  const sideC = new LiveCanvas(SW, SH);
+  const sideNrm = new LiveCanvas(SW, SH, false);
+  sideNrm.normals(sH, 1 / (2 * (L / SW)));
+  const sideMat = phys({ map: sideC.tex, normalMap: sideNrm.tex, roughness: 0.42, clearcoat: 0.4, clearcoatRoughness: 0.35, metalness: 0 }, "own");
 
-  const leanRaw: RGB[] = [
-    [152, 24, 32],
-    [134, 20, 30],
-    [146, 30, 38],
-  ];
   let browning = 0;
   let core = Number.NaN;
   let shrink = 0;
+  /** Local browning at a texel: the high spots and the grain take it first. */
+  const kOf = (bb: number, spot: number, fine: number) => clamp(bb * (0.92 + 0.22 * spot) + (fine - 0.5) * 0.24 * bb, 0, SEAR_MAX);
   const paintFace = () => {
     const d = face.img.data;
     const bb = browning;
-    for (let k = 0; k < FW * FH; k++) {
+    const w0 = smooth(0, 0.08, bb);
+    for (let k = 0; k < NP; k++) {
       const fat = fF[k] / 255;
-      const fib = fFib[k] / 255;
-      const spot = fSpot[k] / 255;
       const fine = fFine[k] / 255;
-      const edge = 0.86 + 0.14 * (fEdge[k] / 255);
-      const kk = clamp((bb * (0.8 + 0.42 * spot) + (fine - 0.5) * 0.3 * bb) * edge, 0, 1.25);
-      const lr = leanRaw[fM[k]];
-      const sh = 0.8 + 0.28 * fib;
-      LEAN_SEAR[0] = [lr[0] * sh, lr[1] * sh, lr[2] * sh];
-      const ef = fEdgeFat[k] ? 1 : 0;
-      FAT_SEAR[0] = [236 - ef * 4, 226 - ef * 8, 210 - ef * 18];
-      const lc = ramp(SEAR_K, LEAN_SEAR, kk);
-      const fc = ramp(SEAR_K, FAT_SEAR, kk * 0.92);
-      // Thin flecks of fat show the lean's pink through them.
-      // Seared flecks take colour with the lean round them.
-      const fa = (fat < 1 ? Math.pow(fat, 0.8) : 1) * (ef ? 1 : 1 - 0.4 * Math.min(1, kk));
-      const grain = 1 + (fine - 0.5) * 0.3 * Math.min(1, kk);
-      d[k * 4] = clamp(lerp(lc[0], fc[0], fa) * grain, 0, 255);
-      d[k * 4 + 1] = clamp(lerp(lc[1], fc[1], fa) * grain, 0, 255);
-      d[k * 4 + 2] = clamp(lerp(lc[2], fc[2], fa) * grain, 0, 255);
+      const kk = kOf(bb, fSpot[k] / 255, fine);
+      const w = w0 * smooth(0, 0.14, kk);
+      const li = Math.round((kk / SEAR_MAX) * (SEAR_N - 1)) * 3;
+      const fi = Math.round(((kk * 0.9) / SEAR_MAX) * (SEAR_N - 1)) * 3;
+      // Seared lean and fat, mixed as the tissue is; a fleck of fat in a crust takes colour with the lean round it.
+      const fa = fEF[k] ? 1 : fat * (1 - 0.7 * Math.min(1, kk));
+      const sr = lerp(LEAN_LUT[li], FAT_LUT[fi], fa);
+      const sg = lerp(LEAN_LUT[li + 1], FAT_LUT[fi + 1], fa);
+      const sb = lerp(LEAN_LUT[li + 2], FAT_LUT[fi + 2], fa);
+      const grain = 1 + (fine - 0.5) * 0.4 * Math.min(1, kk);
+      d[k * 4] = clamp(lerp(fR[k], sr, w) * grain, 0, 255);
+      d[k * 4 + 1] = clamp(lerp(fG[k], sg, w) * grain, 0, 255);
+      d[k * 4 + 2] = clamp(lerp(fB[k], sb, w) * grain, 0, 255);
+      hNow[k] = hRaw[k] * (1 - 0.7 * w) + hCrust[k] * smooth(0.1, 0.9, kk);
     }
     face.push();
+  };
+  let lastN = -1;
+  const paintNormals = () => {
+    if (Math.abs(browning - lastN) < 0.04 && lastN >= 0) return;
+    lastN = browning;
+    faceNrm.normals(hNow, nK);
   };
   const paintSide = () => {
     const d = sideC.img.data;
     const bb = browning;
     const tc = Number.isFinite(core) ? core : 14 + 46 * Math.pow(bb, 1.2);
-    const crustD = 0.0007 + 0.0018 * bb;
+    // The seared band at each face, and below it the grey band where the meat passed about 66 °C.
+    const crustD = 0.0006 + 0.0016 * bb;
     for (let j = 0; j < SH; j++) {
       const v = 1 - (j + 0.5) / SH;
       const dv = Math.min(v, 1 - v) * T;
-      // Temperature in from the seared faces: the grey band is where it passed about 66 °C.
-      const tau = bb > 0.01 ? tc + (Math.max(tc + 1, 102) - tc) * Math.exp(-dv / 0.0035) * smooth(0, 0.15, bb) : tc;
+      const tau = bb > 0.01 ? tc + (Math.max(tc + 1, 104) - tc) * Math.exp(-dv / 0.0034) * smooth(0, 0.15, bb) : tc;
       const cooked = ramp(BEEF_T, BEEF_C, tau);
+      const cw = smooth(42, 56, tau);
+      const fatTone = smooth(55, 85, tau);
       for (let i = 0; i < SW; i++) {
         const k = j * SW + i;
-        const nz = sNoise[k];
-        const fat = sFat[i];
-        let lean = cooked;
-        // Silverskin: a pale translucent film over the lean.
-        const sk = smooth(0.5, 0.7, nz) * 0.18;
-        lean = [lerp(lean[0], 214, sk), lerp(lean[1], 190, sk), lerp(lean[2], 186, sk)];
-        const fatTone = smooth(55, 80, tau);
-        const fatC: [number, number, number] = [lerp(234, 226, fatTone), lerp(224, 204, fatTone), lerp(206, 160, fatTone)];
-        let c: [number, number, number] = [lerp(lean[0], fatC[0], fat), lerp(lean[1], fatC[1], fat), lerp(lean[2], fatC[2], fat)];
+        const fat = sF[k] / 255;
+        const nz = sN[k] / 255;
+        // Lean: its own raw shade where raw, the cooked colour (keeping the shade's variation) where hot.
+        const rr = sR[k];
+        const rg = sG[k];
+        const rb = sB[k];
+        const shade = (rr + rg + rb) / (150 + 28 + 36);
+        let c0 = lerp(rr, cooked[0] * lerp(shade, 1, 0.5), cw);
+        let c1 = lerp(rg, cooked[1] * lerp(shade, 1, 0.5), cw);
+        let c2 = lerp(rb, cooked[2] * lerp(shade, 1, 0.5), cw);
+        const mem = (sMem[k] / 255) * 0.22 * (1 - 0.6 * cw);
+        c0 = lerp(c0, 216, mem);
+        c1 = lerp(c1, 196, mem);
+        c2 = lerp(c2, 192, mem);
+        // Fat warms from cream to a rendered gold as it heats.
+        const fc0 = lerp(rr, 232, fatTone * fat);
+        const fc1 = lerp(rg, 196, fatTone * fat);
+        const fc2 = lerp(rb, 146, fatTone * fat);
+        c0 = lerp(c0, fc0, fat);
+        c1 = lerp(c1, fc1, fat);
+        c2 = lerp(c2, fc2, fat);
         if (dv < crustD && bb > 0.01) {
-          const kk = bb * (0.6 + 0.5 * nz) * smooth(crustD, crustD * 0.3, dv) * 1.05;
-          LEAN_SEAR[0] = c;
-          FAT_SEAR[0] = c;
-          const lc = ramp(SEAR_K, LEAN_SEAR, kk);
-          const fc = ramp(SEAR_K, FAT_SEAR, kk * 0.9);
-          c = [lerp(lc[0], fc[0], fat), lerp(lc[1], fc[1], fat), lerp(lc[2], fc[2], fat)];
+          // Seared where the pan reached: the face's own browning at the junction, fading into the side.
+          const kk = kOf(bb, sSpot[k] / 255, nz) * smooth(crustD, crustD * 0.15, dv);
+          const w = smooth(0, 0.14, kk);
+          const li = Math.round((kk / SEAR_MAX) * (SEAR_N - 1)) * 3;
+          const fi = Math.round(((kk * 0.9) / SEAR_MAX) * (SEAR_N - 1)) * 3;
+          const fa = sEF[k] ? 1 : fat * (1 - 0.45 * Math.min(1, kk));
+          c0 = lerp(c0, lerp(LEAN_LUT[li], FAT_LUT[fi], fa), w);
+          c1 = lerp(c1, lerp(LEAN_LUT[li + 1], FAT_LUT[fi + 1], fa), w);
+          c2 = lerp(c2, lerp(LEAN_LUT[li + 2], FAT_LUT[fi + 2], fa), w);
         }
-        const g = 0.94 + 0.1 * nz;
-        d[k * 4] = clamp(c[0] * g, 0, 255);
-        d[k * 4 + 1] = clamp(c[1] * g, 0, 255);
-        d[k * 4 + 2] = clamp(c[2] * g, 0, 255);
+        const g = 0.95 + 0.1 * nz;
+        d[k * 4] = clamp(c0 * g, 0, 255);
+        d[k * 4 + 1] = clamp(c1 * g, 0, 255);
+        d[k * 4 + 2] = clamp(c2 * g, 0, 255);
       }
     }
     sideC.push();
   };
   const dress = () => {
-    faceMat.bumpScale = 0.5 + 2.4 * browning;
-    faceMat.roughness = lerp(0.36, 0.62, browning);
+    // Raw: wet and glossy. Seared: a drier, rougher crust that still glistens with rendered fat.
+    faceMat.normalScale.setScalar(1 + 1.2 * browning);
+    faceMat.roughness = lerp(0.36, 0.6, browning);
     sideMat.roughness = lerp(0.38, 0.52, browning);
-    faceMat.clearcoat = lerp(0.42, 0.28, browning);
+    faceMat.clearcoat = lerp(0.28, 0.3, browning);
+    faceMat.clearcoatRoughness = lerp(0.26, 0.4, browning);
   };
   paintFace();
+  paintNormals();
   paintSide();
   dress();
   const j = s.joint("steak", [a, 0, -b]);
@@ -2248,6 +2854,7 @@ const steakBuilder: Builder = (s, e) => {
           if (Math.abs(browning - lastB) > 0.004) {
             lastB = browning;
             paintFace();
+            paintNormals();
             paintSide();
             dress();
           }
@@ -2319,14 +2926,15 @@ function bouleProf(R: number, H: number, y0: number): BouleProf {
 }
 
 /** Crust colour against local browning: raw dough, pale gold, golden, chestnut, deep caramel, nearly burnt. */
-const CRUST_K = [0, 0.2, 0.45, 0.7, 0.95, 1.2] as const;
+const CRUST_K = [0, 0.2, 0.42, 0.62, 0.82, 1.0, 1.2] as const;
 const CRUST_C: RGB[] = [
-  [212, 192, 158],
-  [218, 180, 120],
-  [196, 136, 64],
-  [142, 80, 36],
-  [90, 50, 24],
-  [50, 28, 13],
+  [214, 196, 164],
+  [222, 182, 118],
+  [200, 134, 60],
+  [156, 90, 38],
+  [112, 60, 25],
+  [80, 40, 17],
+  [46, 24, 10],
 ];
 
 const bouleBuilder: Builder = (s, e) => {
@@ -2357,7 +2965,7 @@ const bouleBuilder: Builder = (s, e) => {
     const t = Math.abs(phi) / PHI;
     return t >= 1 ? 0 : Math.sqrt(1 - t * t);
   };
-  const ringPhase = (s0: number, th: number) => s0 / 0.042 + th / TAU;
+  const ringPhase = (s0: number, th: number) => s0 / 0.042 + th / TAU + 1.7 * (fbm(nLump, Math.cos(th) * s0 * 7 + 11, Math.sin(th) * s0 * 7, 3) - 0.5);
   const ringFade = (s0: number) => smooth(0.02, 0.07, s0) * (1 - smooth(0.56, 0.64, s0));
 
   let spring = 1.85;
@@ -2381,9 +2989,9 @@ const bouleBuilder: Builder = (s, e) => {
     const g = gEnd(phi);
     if (g > 0 && ds > -0.1 && ds < 0.2) {
       const d = ds * L;
-      const W = (0.0016 + 0.022 * f) * g;
-      const Dp = (0.0012 + 0.011 * f) * g;
-      const Hr = 0.003 * f * g;
+      const W = (0.0016 + 0.017 * f) * g;
+      const Dp = (0.001 + 0.0065 * f) * g;
+      const Hr = 0.0025 * f * g;
       if (d < 0) h += Hr * smooth(-0.014, -0.0015, d);
       else if (d < W) {
         const u = d / W;
@@ -2501,8 +3109,8 @@ const bouleBuilder: Builder = (s, e) => {
       const phi = lerp(-PHIE, PHIE, e / nE);
       const te = Math.sqrt(Math.max(0, 1 - (phi / PHIE) ** 2));
       const g = gEnd(phi);
-      const W = (0.0016 + 0.022 * f) * g;
-      const Hr = 0.003 * f * g;
+      const W = (0.0016 + 0.017 * f) * g;
+      const Hr = 0.0025 * f * g;
       // The material direction away from the score's centre at this point, and along it.
       const ca = Math.cos(phi);
       const sa = Math.sin(phi);
@@ -2523,14 +3131,14 @@ const bouleBuilder: Builder = (s, e) => {
       if (Nn.y < 0) Nn.negate();
       A.addScaledVector(Nn, -A.dot(Nn)).normalize();
       // The section: a curved lip from its root (buried in the crust) up and over the opening.
-      const earH = ((0.0004 + 0.0078 * f) * Math.pow(g, 0.7) - 0.003 * (1 - smooth(0, 0.12, f))) * te;
-      const bury = -0.0008 - 0.0025 * (1 - smooth(0, 0.12, f));
-      const b0x = -0.002;
-      const c1x = 0.004 * te;
-      const b2x = (0.0035 + 0.55 * W) * te;
+      const earH = ((0.0004 + 0.0056 * f) * Math.pow(g, 0.7) - 0.003 * (1 - smooth(0, 0.12, f))) * te;
+      const bury = -0.0012 - 0.0025 * (1 - smooth(0, 0.12, f));
+      const b0x = -0.0025;
+      const c1x = 0.0035 * te;
+      const b2x = (0.0025 + 0.45 * W) * te;
       const b0y = bury;
-      const c1y = 0.6 * earH + Hr * 0.1;
-      const b2y = earH;
+      const c1y = 1.05 * earH + Hr * 0.2;
+      const b2y = earH * 0.8;
       for (let k = 0; k < LOOP; k++) {
         const topSheet = k < KT;
         const u = topSheet ? k / (KT - 1) : (LOOP - 1 - k) / (KT - 1);
@@ -2541,7 +3149,7 @@ const bouleBuilder: Builder = (s, e) => {
         const tl = Math.hypot(tx, ty) || 1;
         tx /= tl;
         ty /= tl;
-        const th = lerp(0.0045, 0.0012, u) * (0.4 + 0.6 * te) * smooth(0, 0.1, f + 0.02);
+        const th = lerp(0.0055, 0.0017, u * u) * (0.45 + 0.55 * te) * smooth(0, 0.1, f + 0.02);
         const sg = topSheet ? 0.5 : -0.5;
         const sx = x - ty * th * sg;
         const sy = y + tx * th * sg;
@@ -2592,6 +3200,7 @@ const bouleBuilder: Builder = (s, e) => {
   const lBl = new Uint8Array(NP);
   const lFl = new Uint8Array(NP);
   const lSt = new Uint8Array(NP);
+  const lTear = new Uint8Array(NP);
   const zone = new Uint8Array(NP); // 0 loaf, 1 ear crust, 2 ear underside
   for (let j = 0; j < TW; j++)
     for (let i = 0; i < TW; i++) {
@@ -2630,6 +3239,8 @@ const bouleBuilder: Builder = (s, e) => {
       lFl[k] = Math.round(fbm(nFl, p * 22, q * 22, 3) * 255);
       // Stretch marks in the opening run along the cut.
       lSt[k] = Math.round(fbm(nSt, ds * 140, phi * 3, 2) * 255);
+      // Where the flour in the rings tore apart as the dough stretched.
+      lTear[k] = Math.round(fbm(nSt, p * 95 + 40, q * 95, 2) * 255);
     }
   const tex = new LiveCanvas(TW, TW);
   const bumpC = paint(TW, TW, (i, j) => {
@@ -2653,31 +3264,33 @@ const bouleBuilder: Builder = (s, e) => {
       if (z) {
         const uu = lS[k];
         const g = gEnd(lG[k]);
-        const kk = z === 1 ? c * (1.0 + 0.24 * uu * g + 0.16 * (fine - 0.5) + 0.08 * bl) : c * (0.5 + 0.36 * uu * uu + 0.12 * (lSt[k] / 255 - 0.5));
+        const kk = z === 1 ? c * (1.02 + 0.34 * uu * uu * g + 0.16 * (fine - 0.5) + 0.06 * bl) : c * (0.72 + 0.4 * uu * uu + 0.16 * (lSt[k] / 255 - 0.5));
         col = ramp(CRUST_K, CRUST_C, kk);
       } else {
         const s0 = lS[k];
         const ring = lRing[k] / 255;
         const rf = ringFade(s0);
         const fl = lFl[k] / 255;
-        let kk = c * (0.9 + 0.2 * (fine - 0.5) + 0.07 * bl + 0.14 * (fl - 0.5) + 0.08 * (1 - ring) * rf + 0.12 * smooth(0.6, 0.7, s0));
+        let kk = c * (0.98 + 0.22 * (fine - 0.5) + 0.05 * bl + 0.16 * (fl - 0.5) + 0.06 * (1 - ring) * rf + 0.1 * smooth(0.6, 0.7, s0) - 0.1 * smooth(0.12, 0.0, s0));
         let open = 0;
         const g = gEnd(lG[k]);
         if (g > 0) {
           const dm = lD[k] * L;
-          const W = (0.0016 + 0.022 * f) * g;
-          if (dm < 0) kk += c * 0.34 * g * smooth(-0.007, 0, dm);
+          const W = (0.0016 + 0.017 * f) * g;
+          if (dm < 0) kk += c * 0.3 * g * smooth(-0.007, 0, dm);
           else if (dm < W) {
             const u = dm / W;
             open = smooth(0, 0.12, u) * smooth(1, 0.8, u);
-            const ko = c * (0.56 + 0.3 * smooth(0.5, 1, u) + 0.12 * (lSt[k] / 255 - 0.5));
+            const ko = c * (0.74 + 0.26 * smooth(0.55, 1, u) + 0.18 * (lSt[k] / 255 - 0.5));
             kk = lerp(kk, ko, open);
           } else kk += c * 0.2 * g * smooth(W + 0.004, W, dm);
         }
         col = ramp(CRUST_K, CRUST_C, kk);
         // Rice flour from the banneton: in the cane's grooves and in patches, thinning as the dough stretches.
-        const fa = smooth(flourT, flourT + 0.25, ring * (0.35 + 0.9 * fl)) * 0.85 + smooth(0.68, 0.85, fl) * 0.16 * smooth(0.04, 0.12, s0) * (1 - smooth(0.5, 0.62, s0));
-        const a = clamp01(fa) * (1 - open) * (1 - 0.3 * c);
+        // The spring tears the flour into dashes, the more the further down the sides the dough stretched.
+        const tear = smooth(0.3 + 0.25 * f * smooth(0.1, 0.5, s0), 0.5 + 0.25 * f * smooth(0.1, 0.5, s0), lTear[k] / 255);
+        const fa = smooth(flourT, flourT + 0.22, ring * (0.35 + 0.9 * fl)) * 0.9 * tear * (1 - 0.45 * smooth(0.3, 0.58, s0)) + smooth(0.7, 0.86, fl) * 0.14 * smooth(0.04, 0.12, s0) * (1 - smooth(0.5, 0.62, s0));
+        const a = clamp01(fa) * (1 - open) * (1 - 0.25 * c);
         col = [lerp(col[0], flourC[0], a), lerp(col[1], flourC[1], a), lerp(col[2], flourC[2], a)];
       }
       d[k * 4] = clamp(col[0], 0, 255);
@@ -2685,8 +3298,8 @@ const bouleBuilder: Builder = (s, e) => {
       d[k * 4 + 2] = clamp(col[2], 0, 255);
     }
     tex.push();
-    mat.roughness = lerp(0.72, 0.56, c);
-    mat.clearcoat = 0.16 * c;
+    mat.roughness = lerp(0.8, 0.66, c);
+    mat.clearcoat = 0.05 * c;
   };
   repaint();
   const j = s.joint("boule", [e.w / 2, 0, -e.d / 2]);
@@ -2728,10 +3341,18 @@ const eggBuilder: Builder = (s, e) => {
   const nT = noise2(4402);
   const nL = noise2(4403);
   const nB = noise2(4404);
+  const nY = noise2(4405);
   // The white's outline about the yolk, irregular as an egg spreads in a pan; fitted to the box.
   const Rof = (th: number) =>
     0.045 * (1 + 0.08 * Math.cos(2 * th + 0.7) + 0.05 * Math.cos(3 * th - 1.1) + 0.035 * Math.cos(5 * th + 0.4) + 0.012 * Math.cos(9 * th + 2) + 0.07 * (fbm(nO, Math.cos(th) * 2 + 3, Math.sin(th) * 2 + 5, 3) - 0.5));
   const rtOf = (th: number) => 0.025 * (1 + 0.16 * (fbm(nT, Math.cos(th) * 1.6 + 7, Math.sin(th) * 1.6, 2) - 0.5));
+  // The yolk's footprint, a little out of round, and its dome: low and broad, its sides standing up from the white.
+  const RY = 0.0166;
+  const yRof = (th: number) => RY * (1 + 0.035 * Math.cos(2 * th + 1.3) + 0.02 * Math.cos(3 * th - 0.4) + 0.05 * (fbm(nY, Math.cos(th) * 1.5 + 2, Math.sin(th) * 1.5, 2) - 0.5));
+  // Its foot only a little below the white's surface, so that little of it shows through a white still setting.
+  const YB = 0.0056;
+  const YH = 0.0122;
+  const yolkY = (rho: number, x: number) => YB + (YH - YB) * Math.sqrt(Math.max(0, 1 - Math.pow(Math.min(1, rho), 2.4))) + 0.0005 * (x / RY) * (1 - rho * rho);
   let [x0, x1, z0, z1] = [1, -1, 1, -1];
   for (let i = 0; i < 720; i++) {
     const th = (i / 720) * TAU;
@@ -2747,17 +3368,21 @@ const eggBuilder: Builder = (s, e) => {
   const toZ = (z: number) => -e.d + (z - z0) * sz;
   const yx = toX(0);
   const yz = toZ(0);
-  /** The white's thickness at (r, θ) about the yolk: a thin spread, the thick white standing round the yolk. */
+  /** The thick white standing round the yolk, 0..1. */
   const thick = (r: number, th: number) => smooth(rtOf(th) + 0.007, rtOf(th) - 0.003, r);
+  /** The width of the browned lace at the edge, by angle. */
+  const laceW = (th: number) => 0.005 + 0.008 * fbm(nT, Math.cos(th) * 3 + 11, Math.sin(th) * 3, 2);
   const hOf = (r: number, th: number) => {
     const R = Rof(th);
-    let h = 0.0021 + 0.0042 * thick(r, th) + 0.0009 * smooth(0.022, 0.012, r);
-    const er = 0.0028;
-    if (r > R - er) h *= Math.sqrt(Math.max(0, 1 - ((r - (R - er)) / er) ** 2));
-    // A crisp edge ruffles as it fries.
-    const edge = smooth(0.009, 0, R - r);
-    h += edge * 0.0007 * (fbm(nL, Math.cos(th) * 20 + r * 300, Math.sin(th) * 20, 2) - 0.4) * smooth(0, 0.0015, R - r);
-    return 0.0003 + Math.max(0, h);
+    const yr = yRof(th);
+    // The thin white spreads to a skin at its edge; the thick white mounds round the yolk and rises against it.
+    let h = lerp(0.0019, 0.00055, smooth(R - 0.017, R - 0.0004, r)) + 0.0039 * thick(r, th) + 0.0016 * smooth(yr * 1.45, yr * 0.98, r);
+    // Gentle swells where the white ran, and the lace lifting and crinkling as it crisps.
+    h += 0.00035 * (fbm(nB, Math.cos(th) * 4 + r * 90, Math.sin(th) * 4 - r * 60, 2) - 0.5) * smooth(0.02, 0.03, r);
+    const edge = smooth(R - laceW(th) - 0.002, R - 0.0008, r);
+    h += edge * (0.00022 + 0.0006 * (fbm(nL, Math.cos(th) * 26 + r * 400, Math.sin(th) * 26, 2) - 0.45));
+    h *= smooth(R + 0.0002, R - 0.0009, r) * 0.6 + 0.4;
+    return Math.max(0.00026, h);
   };
 
   // --- The white: a polar grid from under the yolk to its edge. ---
@@ -2773,7 +3398,7 @@ const eggBuilder: Builder = (s, e) => {
       const r = lerp(rIn, Rof(th), t);
       const X = toX(r * Math.cos(th));
       const Z = toZ(r * Math.sin(th));
-      pos.push(X, k === K ? 0.0003 : hOf(r, th), Z);
+      pos.push(X, k === K ? 0.00026 : hOf(r, th), Z);
       uvs.push(X / e.w, (Z + e.d) / e.d);
     }
   }
@@ -2808,15 +3433,18 @@ const eggBuilder: Builder = (s, e) => {
     }
   }
 
-  // --- Its texture: translucent raw albumen setting to white, the edge browning into lace with holes. ---
-  const TW = [128, 384, 768][s.detail];
+  // --- Its texture: translucent raw albumen setting opaque white, the edge frying into brown lace with holes. ---
+  const TW = [128, 384, 1024][s.detail];
   const TH = Math.round((TW * e.d) / e.w);
   const NP = TW * TH;
   const lR = new Float32Array(NP);
+  const lW = new Float32Array(NP);
   const lTk = new Uint8Array(NP);
   const lLace = new Uint8Array(NP);
   const lHole = new Uint8Array(NP);
   const lBub = new Uint8Array(NP);
+  const lFr = new Uint8Array(NP);
+  const hW = new Float32Array(NP);
   for (let j = 0; j < TH; j++)
     for (let i = 0; i < TW; i++) {
       const k = j * TW + i;
@@ -2827,80 +3455,186 @@ const eggBuilder: Builder = (s, e) => {
       const r = Math.hypot(x, z);
       const th = Math.atan2(z, x);
       lR[k] = Rof(th) - r;
+      lW[k] = laceW(th);
       lTk[k] = Math.round(thick(r, th) * 255);
-      lLace[k] = Math.round(fbm(nL, x * 260, z * 260, 3) * 255);
-      lHole[k] = Math.round(fbm(nB, x * 520, z * 520, 2) * 255);
-      lBub[k] = Math.round(smooth(0.66, 0.74, fbm(nB, x * 900 + 40, z * 900, 2)) * 255);
+      const lace = fbm(nL, x * 260, z * 260, 3);
+      lLace[k] = Math.round(lace * 255);
+      // Bubbles of steam that burst through the thinnest white leave holes rimmed in brown; smaller ones blister.
+      const hv = fbm(nB, x * 640, z * 640, 2) * 0.75 + 0.25 * fbm(nB, x * 1500 + 9, z * 1500, 1);
+      lHole[k] = Math.round(clamp01(hv) * 255);
+      const bub = smooth(0.64, 0.74, fbm(nB, x * 1100 + 40, z * 1100, 2));
+      lBub[k] = Math.round(bub * 255);
+      // The frill: the edge itself, eaten back irregularly.
+      lFr[k] = Math.round(fbm(nL, Math.cos(th) * 60 + 3, Math.sin(th) * 60 + r * 500, 2) * 255);
+      const eb = smooth(0.012, 0, lR[k]);
+      hW[k] = 0.35 * bub * (0.4 + eb) + 0.5 * (lace - 0.5) * eb + 0.12 * fbm(nY, x * 400, z * 400, 2);
     }
   const tex = new LiveCanvas(TW, TH);
-  const bumpC = paint(TW, TH, (i, j) => {
-    const k = j * TW + i;
-    const b = 140 + lBub[k] * 0.25 + (lLace[k] - 128) * 0.3 * smooth(0.01, 0, lR[k]);
-    return [b, b, b];
-  });
-  const whiteM = phys({ map: tex.tex, bumpMap: canvasTex(bumpC, false), bumpScale: 0.6, roughness: 0.22, clearcoat: 0.7, clearcoatRoughness: 0.14, metalness: 0, transparent: true, alphaTest: 0.08 }, "own");
-  const LACE_K = [0, 0.35, 0.7, 1] as const;
+  const whiteM = phys(
+    { map: tex.tex, normalMap: normalTex(hW, TW, TH, 3.2 * (TW / 1024), false), normalScale: new THREE.Vector2(0.8, 0.8), roughness: 0.22, clearcoat: 0.7, clearcoatRoughness: 0.14, metalness: 0, transparent: true, alphaTest: 0.08 },
+    "own",
+  );
+  const LACE_K = [0, 0.2, 0.45, 0.7, 1] as const;
   const LACE_C: RGB[] = [
-    [250, 249, 243],
-    [222, 178, 104],
-    [172, 108, 46],
-    [104, 60, 26],
+    [250, 249, 244],
+    [238, 214, 164],
+    [214, 160, 82],
+    [166, 102, 42],
+    [108, 62, 26],
   ];
   let set = 0.9;
   const repaint = () => {
     const d = tex.img.data;
     const lace = smooth(0.62, 1, set);
+    // Once the albumen has set it is opaque; only the raw and setting white lets the pan and the yolk show through.
+    const opaque = set >= 0.5;
+    if (whiteM.transparent === opaque) {
+      whiteM.transparent = !opaque;
+      whiteM.alphaTest = opaque ? 0.5 : 0.08;
+      whiteM.needsUpdate = true;
+    }
     for (let k = 0; k < NP; k++) {
       const dr = lR[k];
-      if (dr < -0.0004) {
+      // The frilled edge: up to 1.6 mm eaten back from the outline once it crisps.
+      const cut = lace * 0.0016 * (lFr[k] / 255);
+      if (dr < cut - 0.0002) {
         d[k * 4 + 3] = 0;
         continue;
       }
       const tk = lTk[k] / 255;
       const sl = clamp01(set * 1.35 - 0.35 * tk - 0.04 * (lLace[k] / 255 - 0.5));
       const op = smooth(0, 0.85, sl);
-      let col: [number, number, number] = [lerp(206, 250, op), lerp(210, 249, op), lerp(190, 243, op)];
-      let a = lerp(0.26, 1, Math.pow(op, 0.8));
+      let col: [number, number, number] = [lerp(206, 250, op), lerp(210, 249, op), lerp(190, 244, op)];
+      // Clouding to opaque by the time it sets (the thick white last), so the switch to opaque at 0.5 is seamless.
+      let a = opaque ? 1 : lerp(0.26, 1, smooth(0, 0.5, set - 0.12 * tk * Math.max(0, 1 - 2 * set)));
       // Small bubbles set as pale specks.
       const bub = lBub[k] / 255;
-      col = [lerp(col[0], 255, bub * 0.3 * op), lerp(col[1], 255, bub * 0.3 * op), lerp(col[2], 255, bub * 0.3 * op)];
-      const eb = smooth(0.011, 0.0, dr);
+      col = [lerp(col[0], 255, bub * 0.25 * op), lerp(col[1], 255, bub * 0.25 * op), lerp(col[2], 255, bub * 0.25 * op)];
+      const w = lW[k];
+      const eb = smooth(w, 0, dr - cut);
       if (lace > 0 && eb > 0) {
-        const lk = clamp01(lace * eb * (0.55 + 0.9 * (lLace[k] / 255 - 0.25)));
+        const hv = lHole[k] / 255;
+        const thr = 1 - 0.42 * lace * smooth(w * 0.8, 0.0006, dr - cut);
+        const rim = smooth(thr - 0.09, thr, hv);
+        const lk = clamp01(lace * (Math.pow(eb, 1.6) * (0.6 + 0.9 * (lLace[k] / 255 - 0.3)) + 0.55 * rim * eb + 0.12 * bub * eb));
         col = ramp(LACE_K, LACE_C, lk);
-        a = Math.max(a, smooth(0, 0.3, lk));
-        // Lace: the thinnest white fries through into holes.
-        if (lHole[k] / 255 > 1 - 0.38 * lace * smooth(0.0055, 0.0005, dr)) a = 0;
+        // The thinnest white fries through into holes.
+        if (hv > thr) a = 0;
       }
-      if (dr < 0) a *= smooth(-0.0004, 0, dr);
       d[k * 4] = clamp(col[0], 0, 255);
       d[k * 4 + 1] = clamp(col[1], 0, 255);
       d[k * 4 + 2] = clamp(col[2], 0, 255);
       d[k * 4 + 3] = clamp(a * 255, 0, 255);
     }
     tex.push();
-    whiteM.roughness = lerp(0.12, 0.34, set);
-    whiteM.clearcoat = lerp(0.9, 0.5, set);
+    whiteM.roughness = lerp(0.12, 0.36, set);
+    whiteM.clearcoat = lerp(0.9, 0.45, set);
   };
   repaint();
   s.add(whiteM, white);
 
-  // --- The yolk: a dome standing in the thick white, glossy under its membrane. ---
-  const yolkC = paint(128, 128, (x, y) => {
-    const v = fbm(nB, x / 18, y / 18, 3);
-    return [lerp(232, 248, v), lerp(122, 146, v), lerp(6, 20, v)];
-  });
-  const yolkM = phys({ color: 0xffffff, map: canvasTex(yolkC, true, true), roughness: 0.16, clearcoat: 1, clearcoatRoughness: 0.05, sheen: 0.4, sheenColor: new THREE.Color(1, 0.75, 0.35), metalness: 0 }, "own", 1 / 0.03);
-  const ry = 0.0166;
-  const yc = 0.0026;
-  const yprof: P2[] = [];
-  const nY = [4, 9, 18][s.detail];
-  const aMax = Math.acos((0.0004 - yc) / (0.86 * ry));
-  for (let k = 0; k <= nY; k++) {
-    const a = aMax * (1 - k / nY);
-    yprof.push([ry * Math.sin(a), yc + 0.86 * ry * Math.cos(a)]);
+  // --- The yolk: a low dome standing in the thick white, glossy under its membrane, its own grid and planar map. ---
+  const nYr = [4, 9, 18][s.detail];
+  const nYs = [10, 24, 48][s.detail];
+  const span = RY * 2.3;
+  const yp: number[] = [];
+  const yu: number[] = [];
+  for (let j = 0; j <= nYr; j++) {
+    const rho = Math.sin(((j === 0 ? 0.02 : j) / nYr) * (PI / 2));
+    for (let i = 0; i <= nYs; i++) {
+      const th = (i / nYs) * TAU;
+      const r = rho * yRof(th);
+      const x = r * Math.cos(th);
+      const z = r * Math.sin(th);
+      // In the white's frame, which is stretched to fill the box.
+      yp.push(x * sx, yolkY(rho, x), z * sz);
+      yu.push(0.5 + x / span, 0.5 + z / span);
+    }
   }
-  s.add(yolkM, revolve(yprof, [10, 24, 48][s.detail], undefined, yolkM, true), [yx, 0, yz]);
+  const yi: number[] = [];
+  for (let j = 0; j < nYr; j++)
+    for (let i = 0; i < nYs; i++) {
+      const a = j * (nYs + 1) + i;
+      const b = a + 1;
+      const c = a + nYs + 2;
+      const d = a + nYs + 1;
+      yi.push(a, d, b, b, d, c);
+    }
+  const yolk = new THREE.BufferGeometry();
+  yolk.setAttribute("position", new THREE.Float32BufferAttribute(yp, 3));
+  yolk.setAttribute("uv", new THREE.Float32BufferAttribute(yu, 2));
+  yolk.setIndex(yi);
+  yolk.computeVertexNormals();
+  {
+    const nn = yolk.attributes.normal as THREE.BufferAttribute;
+    if (nn.getY(0) < 0) {
+      for (let t = 0; t < yi.length; t += 3) [yi[t + 1], yi[t + 2]] = [yi[t + 2], yi[t + 1]];
+      yolk.setIndex(yi);
+      yolk.computeVertexNormals();
+    }
+    // The ring at the seam, and the apex: one normal each.
+    for (let j = 0; j <= nYr; j++) {
+      const a = j * (nYs + 1);
+      const b = a + nYs;
+      const v = new THREE.Vector3(nn.getX(a) + nn.getX(b), nn.getY(a) + nn.getY(b), nn.getZ(a) + nn.getZ(b)).normalize();
+      nn.setXYZ(a, v.x, v.y, v.z);
+      nn.setXYZ(b, v.x, v.y, v.z);
+    }
+    for (let i = 0; i <= nYs; i++) nn.setXYZ(i, 0, 1, 0);
+  }
+  // Its colour: deep orange at the crown paling to gold at the sides, faintly mottled, with a film of white over its
+  // foot that turns opaque as the white sets; the membrane's fine wrinkles in the normals.
+  const YW = [64, 128, 384][s.detail];
+  const ytex = new LiveCanvas(YW, YW);
+  const yRho = new Float32Array(YW * YW);
+  const yMot = new Uint8Array(YW * YW);
+  const yFilm = new Uint8Array(YW * YW);
+  const yH = new Float32Array(YW * YW);
+  for (let j = 0; j < YW; j++)
+    for (let i = 0; i < YW; i++) {
+      const k = j * YW + i;
+      const x = ((i + 0.5) / YW - 0.5) * span;
+      const z = (0.5 - (j + 0.5) / YW) * span;
+      const th = Math.atan2(z, x);
+      const rho = Math.hypot(x, z) / yRof(th);
+      yRho[k] = rho;
+      yMot[k] = Math.round(fbm(nY, x * 260 + 5, z * 260, 3) * 255);
+      yFilm[k] = Math.round(fbm(nT, x * 380, z * 380 + 3, 2) * 255);
+      yH[k] = 0.6 * fbm(nY, x * 900, z * 900 + 7, 2) * smooth(0.55, 0.95, rho) + 0.2 * fbm(nO, x * 300, z * 300, 2);
+    }
+  const yolkM = phys(
+    {
+      map: ytex.tex,
+      normalMap: normalTex(yH, YW, YW, 1.6 * (YW / 384), false),
+      normalScale: new THREE.Vector2(0.5, 0.5),
+      roughness: 0.14,
+      clearcoat: 1,
+      clearcoatRoughness: 0.06,
+      sheen: 0.25,
+      sheenColor: new THREE.Color(1, 0.62, 0.15),
+      metalness: 0,
+    },
+    "own",
+  );
+  const repaintYolk = () => {
+    const d = ytex.img.data;
+    const film = 0.45 * smooth(0.45, 1, set);
+    for (let k = 0; k < YW * YW; k++) {
+      const rho = yRho[k];
+      const m = yMot[k] / 255 - 0.5;
+      const g = smooth(0.25, 0.95, rho);
+      let c: [number, number, number] = [lerp(226, 240, g) * (1 + 0.04 * m), lerp(96, 138, g) * (1 + 0.1 * m), lerp(0, 8, g) + 6 * m];
+      // The white's film over the yolk's foot, ragged at its top.
+      const f = film * smooth(0.84, 0.98, rho + 0.06 * (yFilm[k] / 255 - 0.5));
+      c = [lerp(c[0], 248, f), lerp(c[1], 236, f), lerp(c[2], 212, f)];
+      d[k * 4] = clamp(c[0], 0, 255);
+      d[k * 4 + 1] = clamp(c[1], 0, 255);
+      d[k * 4 + 2] = clamp(c[2], 0, 255);
+    }
+    ytex.push();
+  };
+  repaintYolk();
+  s.add(yolkM, yolk, [yx, 0, yz]);
   return () => ({
     set: (name, v) => {
       if (name === "set") {
@@ -2908,6 +3642,7 @@ const eggBuilder: Builder = (s, e) => {
         if (Math.abs(nv - set) > 0.004) {
           set = nv;
           repaint();
+          repaintYolk();
         }
       }
     },
@@ -2921,21 +3656,22 @@ const eggBuilder: Builder = (s, e) => {
 const FRY_K = [0, 0.25, 0.5, 0.75, 1, 1.25] as const;
 const FRY_C: RGB[] = [
   [232, 222, 186],
-  [238, 214, 150],
-  [222, 162, 70],
-  [194, 122, 40],
-  [150, 84, 28],
+  [240, 214, 146],
+  [228, 170, 74],
+  [200, 126, 42],
+  [154, 86, 28],
   [98, 56, 20],
 ];
 
 const friesBuilder: Builder = (s, e) => {
   const r = rng(3131);
-  const count = [24, 40, 110][s.detail];
-  const P = [4, 8, 12][s.detail];
-  const LS = [1, 2, 3][s.detail];
+  const count = [24, 40, 90][s.detail];
+  const P = [4, 8, 16][s.detail];
+  const LS = [1, 2, 6][s.detail];
   const half = 0.00476;
-  // The pile: fries dropped one at a time onto a height field, each coming to rest on what is below it.
-  const cell = 0.003;
+  // The pile: fries dropped one at a time onto a height field. Each comes to rest on the upper convex hull of what
+  // is under it, touching a support on either side of its middle; one that would slide off is dropped elsewhere.
+  const cell = 0.002;
   const nx = Math.ceil(e.w / cell);
   const nz = Math.ceil(e.d / cell);
   const hf = new Float32Array(nx * nz);
@@ -2956,7 +3692,7 @@ const friesBuilder: Builder = (s, e) => {
   const side = new THREE.Vector3();
   const ax = new THREE.Vector3();
   const Y = new THREE.Vector3(0, 1, 0);
-  // Section: a rounded square, P points, a corner every quarter (u = 0.125, 0.375, ...).
+  // Section: directions round a rounded square, P points, a corner every quarter (u = 0.125, 0.375, ...).
   const sec: [number, number, number][] = [];
   for (let k = 0; k < P; k++) {
     const c = Math.floor((k * 4) / P);
@@ -2964,96 +3700,105 @@ const friesBuilder: Builder = (s, e) => {
     const ang = PI / 4 + (c * PI) / 2 + (P === 4 ? 0 : (f - 0.5 + 0.5 / (P / 4)) * (PI / 2) * 0.9);
     sec.push([Math.cos(ang), Math.sin(ang), (k + 0.5) / P]);
   }
+  const S = 15;
+  const hs = new Float64Array(S);
   for (let n = 0; n < count; n++) {
-    const L = 0.05 + r() * 0.045;
-    const a0 = half * (0.9 + 0.18 * r());
-    // The rounded square's corner reaches a little past its half-size.
-    const a = a0 * 1.2;
-    let best: { cx: number; cz: number; psi: number; ya: number; yb: number } | null = null;
+    const L = 0.045 + 0.05 * Math.pow(r(), 0.8);
+    const a0 = half * (0.88 + 0.22 * r());
+    // The end at q = 1 is where the strip ran out at the potato's curve: some taper and round off there.
+    const tip = r() < 0.55 ? 0.25 + 0.2 * r() : 0;
+    const bow = (r() - 0.5) * 0.005 * (L / 0.07);
+    const roll0 = (r() - 0.5) * 0.24;
+    const twist = (r() - 0.5) * 0.3;
+    const uOff = r();
+    const m = a0 * 1.3 + Math.abs(bow);
+    let best: { cx: number; cz: number; psi: number; yc: number; sl: number } | null = null;
     let bestH = Infinity;
-    for (let t = 0; t < 6; t++) {
+    for (let t = 0; t < 8; t++) {
       const psi = r() * PI;
-      const [dx, dz] = [Math.cos(psi) * (L / 2), Math.sin(psi) * (L / 2)];
+      const [cp, sp] = [Math.cos(psi), Math.sin(psi)];
+      const [dx, dz] = [cp * (L / 2), sp * (L / 2)];
       // Most fall toward the middle of the basket and heap there; the rest anywhere in it.
-      const wide = r() < 0.35;
-      const cx = clamp(e.w / 2 + (wide ? (r() - 0.5) * e.w : gauss() * e.w * 0.17), Math.abs(dx) + a + 0.0004, e.w - Math.abs(dx) - a - 0.0004);
-      const cz = clamp(-e.d / 2 + (wide ? (r() - 0.5) * e.d : gauss() * e.d * 0.17), -e.d + Math.abs(dz) + a + 0.0004, -Math.abs(dz) - a - 0.0004);
-      // Rest on the highest support in each half, then clear anything between.
-      const S = 9;
-      let ya = 0;
-      let yb = 0;
-      const hs: number[] = [];
-      for (let k = 0; k < S; k++) {
-        const q = k / (S - 1) - 0.5;
-        let h = 0;
-        for (const o of [-a, 0, a]) h = Math.max(h, hAt(cx + 2 * q * dx - (o * dz) / (L / 2), cz + 2 * q * dz + (o * dx) / (L / 2)));
-        hs.push(h);
-        if (q <= 0) ya = Math.max(ya, h);
-        if (q >= 0) yb = Math.max(yb, h);
-      }
+      const wide = r() < 0.3;
+      const cx = clamp(e.w / 2 + (wide ? (r() - 0.5) * e.w : gauss() * e.w * 0.16), Math.abs(dx) + m, e.w - Math.abs(dx) - m);
+      const cz = clamp(-e.d / 2 + (wide ? (r() - 0.5) * e.d : gauss() * e.d * 0.16), -e.d + Math.abs(dz) + m, -Math.abs(dz) - m);
       for (let k = 0; k < S; k++) {
         const q = k / (S - 1);
-        const need = hs[k] - lerp(ya, yb, q);
-        if (need > 0) {
-          ya += need;
-          yb += need;
+        const lat = bow * Math.sin(PI * q);
+        let h = 0;
+        for (const o of [-1, -0.5, 0, 0.5, 1]) {
+          const off = lat + o * a0;
+          h = Math.max(h, hAt(cx + (2 * q - 1) * dx + sp * off, cz + (2 * q - 1) * dz - cp * off));
         }
+        hs[k] = h;
       }
-      const slope = Math.atan2(yb - ya, L);
-      if (Math.abs(slope) > 0.5) {
-        const m = (ya + yb) / 2;
-        const lim = Math.tan(0.5) * (L / 2);
-        ya = clamp(ya, m - lim, m + lim);
-        yb = clamp(yb, m - lim, m + lim);
-      }
-      const top = Math.max(ya, yb) + 2 * a;
+      // The hull at the middle, and the slope of its edge there (the flattest, where a support sits under the middle).
+      let yc = -1;
+      let sl = 0;
+      for (let i = 0; i <= (S - 1) / 2; i++)
+        for (let j = (S - 1) / 2; j < S; j++) {
+          const qi = i / (S - 1);
+          const qj = j / (S - 1);
+          const v = i === j ? hs[i] : hs[i] + ((hs[j] - hs[i]) * (0.5 - qi)) / (qj - qi);
+          const g = i === j ? 0 : (hs[j] - hs[i]) / ((qj - qi) * L);
+          if (v > yc + 1e-7 || (Math.abs(v - yc) <= 1e-7 && Math.abs(g) < Math.abs(sl))) {
+            yc = v;
+            sl = g;
+          }
+        }
+      let lift = 0;
+      for (let k = 0; k < S; k++) lift = Math.max(lift, hs[k] - (yc + sl * (k / (S - 1) - 0.5) * L));
+      yc += lift;
+      if (Math.abs(Math.atan(sl)) > 0.5) continue;
+      const top = yc + Math.abs(sl) * (L / 2) + 2.3 * a0;
       if (top > e.h - 0.0005) continue;
-      const score = (ya + yb) / 2 + r() * 0.004;
+      const score = yc + r() * 0.004;
       if (score < bestH) {
         bestH = score;
-        best = { cx, cz, psi, ya: ya + a, yb: yb + a };
+        best = { cx, cz, psi, yc, sl };
       }
     }
     if (!best) continue;
-    const { cx, cz, psi, ya, yb } = best;
-    const A = new THREE.Vector3(cx - (Math.cos(psi) * L) / 2, ya, cz - (Math.sin(psi) * L) / 2);
-    const B = new THREE.Vector3(cx + (Math.cos(psi) * L) / 2, yb, cz + (Math.sin(psi) * L) / 2);
+    const { cx, cz, psi, yc, sl } = best;
+    const cosT = 1 / Math.sqrt(1 + sl * sl);
+    const lift = (a0 * (1.02 + 0.5 * Math.abs(roll0) + 0.25 * Math.abs(twist))) / cosT;
+    const A = new THREE.Vector3(cx - (Math.cos(psi) * L) / 2, yc - (sl * L) / 2 + lift, cz - (Math.sin(psi) * L) / 2);
+    const B = new THREE.Vector3(cx + (Math.cos(psi) * L) / 2, yc + (sl * L) / 2 + lift, cz + (Math.sin(psi) * L) / 2);
     ax.subVectors(B, A).normalize();
     side.crossVectors(Y, ax).normalize();
     up.crossVectors(ax, side).normalize();
-    const roll = (r() - 0.5) * 0.3 + (r() < 0.5 ? 0 : PI / 4) * (P === 4 ? 0 : 0);
-    const [cr, sr] = [Math.cos(roll), Math.sin(roll)];
     const band = Math.floor(r() * 4);
-    // A fry bridging a gap droops; one lying on the bottom cannot.
-    const sag = Math.min(0.0012 + r() * 0.0025, Math.max(0, Math.min(ya, yb) - a - 0.0002));
-    const wob = (r() - 0.5) * 0.002;
-    const taper = 0.94 + r() * 0.08;
+    const sizeOf = (q: number) => a0 * (1 + 0.04 * Math.sin(q * 7 + n)) * (tip > 0 ? lerp(1 - tip * 1.4, 1, smooth(1, 1 - tip, q)) : 1);
     const base = pos.length / 3;
+    const ctr = new THREE.Vector3();
     for (let k = 0; k <= LS; k++) {
       const q = k / LS;
-      const ctr = new THREE.Vector3().lerpVectors(A, B, q).addScaledVector(up, -sag * 4 * q * (1 - q)).addScaledVector(side, wob * Math.sin(PI * q));
-      const aa = a0 * lerp(1, taper, q);
+      ctr.lerpVectors(A, B, q).addScaledVector(side, bow * Math.sin(PI * q));
+      const aa = sizeOf(q);
+      // Square in the body, rounder toward the tip.
+      const round = tip > 0 ? smooth(1 - tip, 1, q) * 0.6 : 0;
+      const roll = roll0 + twist * q;
+      const [cr, sr] = [Math.cos(roll), Math.sin(roll)];
       for (let j = 0; j <= P; j++) {
         const [c0, s0, u] = sec[j % P];
-        // A square of half-size aa with corners rounded: push the circle's points out toward the square.
         const sq = Math.max(Math.abs(c0), Math.abs(s0));
-        const kx = (c0 / sq) * 0.78 + c0 * 0.3;
-        const ky = (s0 / sq) * 0.78 + s0 * 0.3;
+        const kx = lerp((c0 / sq) * 0.78 + c0 * 0.3, c0 * 1.05, round);
+        const ky = lerp((s0 / sq) * 0.78 + s0 * 0.3, s0 * 1.05, round);
         const lx = (kx * cr - ky * sr) * aa;
         const ly = (kx * sr + ky * cr) * aa;
         pos.push(ctr.x + side.x * lx + up.x * ly, ctr.y + side.y * lx + up.y * ly, ctr.z + side.z * lx + up.z * ly);
-        uv.push(j === P ? 1 + u - 1 / P / 2 + 1 / P / 2 : u, (band + 0.04 + 0.92 * q) / 4);
+        uv.push((j === P ? 1 + sec[0][2] : u) + uOff, (band + 0.04 + 0.92 * q) / 4);
       }
     }
     for (let k = 0; k < LS; k++)
       for (let j = 0; j < P; j++) {
-        const a0 = base + k * (P + 1) + j;
-        const b0 = a0 + 1;
-        const c0 = a0 + P + 2;
-        const d0 = a0 + P + 1;
-        idx.push(a0, b0, d0, b0, c0, d0);
+        const a0i = base + k * (P + 1) + j;
+        const b0 = a0i + 1;
+        const c0 = a0i + P + 2;
+        const d0 = a0i + P + 1;
+        idx.push(a0i, b0, d0, b0, c0, d0);
       }
-    // The cut ends, browned most.
+    // The cut ends, browned most; a little domed at close range, as frying rounds them.
     for (const end of [0, LS]) {
       const ring = base + end * (P + 1);
       const c = pos.length / 3;
@@ -3065,8 +3810,9 @@ const friesBuilder: Builder = (s, e) => {
         my += pos[(ring + j) * 3 + 1] / P;
         mz += pos[(ring + j) * 3 + 2] / P;
       }
+      const dome = s.detail === 2 ? 0.22 * sizeOf(end ? 1 : 0) * (end ? 1 : -1) : 0;
       const capBase = pos.length / 3 + 1;
-      pos.push(mx, my, mz);
+      pos.push(mx + ax.x * dome, my + ax.y * dome, mz + ax.z * dome);
       uv.push(0.5, (band + (end ? 0.985 : 0.015)) / 4);
       for (let j = 0; j < P; j++) {
         pos.push(pos[(ring + j) * 3], pos[(ring + j) * 3 + 1], pos[(ring + j) * 3 + 2]);
@@ -3078,16 +3824,16 @@ const friesBuilder: Builder = (s, e) => {
         else idx.push(c, capBase + j1, capBase + j);
       }
     }
-    // The fry now lies on the field.
-    const tl = 2 * a + 0.0004;
-    for (let k = 0; k <= 16; k++) {
-      const q = k / 16;
-      const px = lerp(A.x, B.x, q);
-      const pz = lerp(A.z, B.z, q);
-      const py = lerp(ya, yb, q) - a + tl;
-      for (const o of [-a, 0, a]) {
-        const i = clamp(Math.floor((px - side.x * o) / cell), 0, nx - 1);
-        const j = clamp(Math.floor((pz - side.z * o + e.d) / cell), 0, nz - 1);
+    // The fry now lies on the field: its top along its whole length and width.
+    const steps = Math.ceil(L / (cell * 0.5));
+    for (let k = 0; k <= steps; k++) {
+      const q = k / steps;
+      ctr.lerpVectors(A, B, q).addScaledVector(side, bow * Math.sin(PI * q));
+      const aa = sizeOf(q) * 1.15;
+      const py = ctr.y + aa;
+      for (let o = -aa; o <= aa + 1e-9; o += cell * 0.5) {
+        const i = clamp(Math.floor((ctr.x + side.x * o) / cell), 0, nx - 1);
+        const j = clamp(Math.floor((ctr.z + side.z * o + e.d) / cell), 0, nz - 1);
         hf[j * nx + i] = Math.max(hf[j * nx + i], py);
       }
     }
@@ -3103,33 +3849,47 @@ const friesBuilder: Builder = (s, e) => {
     const p1 = new THREE.Vector3().fromArray(pos, idx[1] * 3);
     const p2 = new THREE.Vector3().fromArray(pos, idx[2] * 3);
     const nrm = new THREE.Vector3().crossVectors(p1.clone().sub(p0), p2.clone().sub(p0));
-    const ctr = new THREE.Vector3();
-    for (let j = 0; j < P; j++) ctr.add(new THREE.Vector3().fromArray(pos, j * 3));
-    ctr.divideScalar(P);
-    if (nrm.dot(p0.clone().sub(ctr)) < 0) {
+    const c0 = new THREE.Vector3();
+    for (let j = 0; j < P; j++) c0.add(new THREE.Vector3().fromArray(pos, j * 3));
+    c0.divideScalar(P);
+    if (nrm.dot(p0.clone().sub(c0)) < 0) {
       for (let t = 0; t < idx.length; t += 3) [idx[t + 1], idx[t + 2]] = [idx[t + 2], idx[t + 1]];
       g.setIndex(idx);
       g.computeVertexNormals();
     }
   }
-  // The shared skin: four bands of fries browning at slightly different rates, corners and cut ends first.
+  // The shared skin: four bands of fries browning at slightly different rates; corners, cut ends and tips first.
+  // Noise is laid out in millimetres of skin (about 38 round, 75 along) and blended across u's seam, so nothing
+  // streaks lengthwise; small blisters stand up where the surface puffed in the oil.
   const FU = [32, 64, 128][s.detail];
   const FV = [256, 512, 1024][s.detail];
   const nF = noise2(3132);
+  const nB = noise2(3133);
+  const seam = (n: (x: number, y: number) => number, u: number, y: number, k: number, oct: number) =>
+    (1 - u) * fbm(n, u * k, y, oct) + u * fbm(n, (u - 1) * k, y, oct);
   const lN = new Uint8Array(FU * FV);
   const lBl = new Uint8Array(FU * FV);
+  const lSp = new Uint8Array(FU * FV);
+  const hB = new Float32Array(FU * FV);
   for (let j = 0; j < FV; j++)
     for (let i = 0; i < FU; i++) {
-      lN[j * FU + i] = Math.round(fbm(nF, (i / FU) * 6, (j / FV) * 90, 3) * 255);
-      lBl[j * FU + i] = Math.round(smooth(0.64, 0.78, fbm(nF, (i / FU) * 30 + 50, (j / FV) * 500, 2)) * 255);
+      const u = (i + 0.5) / FU;
+      const y = (j / FV) * 4 * 75;
+      const k = j * FU + i;
+      const mot = seam(nF, u, y / 9, 38 / 9, 3);
+      const bl = smooth(0.6, 0.72, seam(nB, u, y / 1.3, 38 / 1.3, 2));
+      const fine = seam(nB, u, y / 0.5 + 40, 38 / 0.5, 1);
+      lN[k] = Math.round(mot * 255);
+      lBl[k] = Math.round(bl * 255);
+      lSp[k] = Math.round(smooth(0.74, 0.8, seam(nF, u, y / 0.8 + 90, 38 / 0.8, 2)) * 255);
+      hB[k] = 0.55 * bl + 0.25 * fine + 0.2 * mot;
     }
   const tex = new LiveCanvas(FU, FV);
   tex.tex.wrapS = THREE.RepeatWrapping;
-  const bump = paint(FU, FV, (i, j) => {
-    const b = 128 + lBl[j * FU + i] * 0.35 + (lN[j * FU + i] - 128) * 0.25;
-    return [b, b, b];
-  });
-  const mat = phys({ map: tex.tex, bumpMap: canvasTex(bump, false), bumpScale: 0.8, roughness: 0.5, clearcoat: 0.3, clearcoatRoughness: 0.3, metalness: 0 }, "own");
+  const mat = phys(
+    { map: tex.tex, normalMap: normalTex(hB, FU, FV, 1.4 * (FU / 128), true), normalScale: new THREE.Vector2(0.9, 0.9), roughness: 0.5, clearcoat: 0.3, clearcoatRoughness: 0.35, metalness: 0 },
+    "own",
+  );
   let browning = 0.75;
   const repaint = () => {
     const d = tex.img.data;
@@ -3138,22 +3898,25 @@ const friesBuilder: Builder = (s, e) => {
       const band = Math.min(3, Math.floor(vb * 4));
       const q = clamp01((vb * 4 - band - 0.04) / 0.92);
       const mult = [0.86, 0.96, 1.05, 1.16][band];
-      const endness = Math.exp(-((Math.min(q, 1 - q) / 0.07) ** 2));
+      const endness = Math.exp(-((Math.min(q, 1 - q) / 0.06) ** 2)) + 0.35 * smooth(0.8, 1, q);
       for (let i = 0; i < FU; i++) {
         const u = (i + 0.5) / FU;
         const cu = Math.abs(((u + 0.125) % 0.25) - 0.125);
-        const corner = Math.exp(-((cu / 0.03) ** 2));
+        const corner = Math.exp(-((cu / 0.025) ** 2));
         const k = j * FU + i;
-        const kk = browning * mult * (0.82 + 0.28 * corner + 0.42 * endness + 0.2 * (lN[k] / 255 - 0.5) + 0.1 * (lBl[k] / 255));
+        const bl = lBl[k] / 255;
+        const kk = browning * mult * (0.88 + 0.26 * corner + 0.42 * endness + 0.3 * (lN[k] / 255 - 0.5) + 0.06 * bl + 0.3 * (lSp[k] / 255));
         const c = ramp(FRY_K, FRY_C, kk);
-        d[k * 4] = c[0];
-        d[k * 4 + 1] = c[1];
-        d[k * 4 + 2] = c[2];
+        // Blister tops catch less colour than their rims.
+        const lit = 1 + 0.05 * bl;
+        d[k * 4] = clamp(c[0] * lit, 0, 255);
+        d[k * 4 + 1] = clamp(c[1] * lit, 0, 255);
+        d[k * 4 + 2] = clamp(c[2] * lit, 0, 255);
       }
     }
     tex.push();
-    mat.roughness = lerp(0.6, 0.42, browning);
-    mat.clearcoat = lerp(0.05, 0.22, browning);
+    mat.roughness = lerp(0.62, 0.44, browning);
+    mat.clearcoat = lerp(0.05, 0.25, browning);
   };
   repaint();
   s.add(mat, g);
@@ -3175,24 +3938,13 @@ const friesBuilder: Builder = (s, e) => {
 /* ------------------------------------------------------------------------------------------------------------ */
 
 const braiseBuilder: Builder = (s, e) => {
-  const m = panFoods();
-  // The block takes the pan's taper (0.155 rad) and corners; its sauce stands 22 mm below the box's top, the meat
-  // proud of it.
-  const level = e.h - 0.022;
-  const grow = Math.tan(0.155) * level;
-  const A = e.w / 2 - grow;
-  const B = e.d / 2 - grow;
-  const rc = 0.022;
+  // The braise in the pan it was cooked in, the pan filling the box: its sauce stands 24 mm below the rim, the
+  // short rib proud of it, carrot and pearl onion between.
   s.at([e.w / 2, 0, -e.d / 2], [0, 0, 0], () => {
-    const prof: P2[] = [];
-    const steps = s.seg(4, 2);
-    for (let j = 0; j <= steps; j++) prof.push([-B * (1 - j / steps) + 1e-5, 0]);
-    const ws = s.seg(6, 2);
-    for (let j = 1; j <= ws; j++) prof.push([(grow * j) / ws, (level * j) / ws]);
-    const g = rrRevolve(prof, A, B, rc, s.seg(6, 2), s.seg(24, 4), s.seg(14, 3));
-    g.computeVertexNormals();
-    s.add(m.sauce, outwardOpen(g, [0, level / 2, 0]));
-    s.at([0, level, 0], [0, 0, 0], () => foodBed(s, 0, A + grow, B + grow, rc + grow, A + grow - 0.012, B + grow - 0.012, 4242));
+    const sec = panBody(s, e.w, e.d, e.h);
+    const y = e.h - 0.024;
+    const d = sec.innerD(y) + 0.001;
+    s.at([0, y, 0], [0, 0, 0], () => foodBed(s, 0, sec.A0 + d, sec.B0 + d, sec.rc0 + d, sec.A0 + sec.innerD(0), sec.B0 + sec.innerD(0), 4242));
   });
   return () => ({});
 };
@@ -3279,6 +4031,49 @@ function gridMesh(nu: number, nv: number, at: (i: number, k: number) => V3, upY:
  * bolster, the tang running the handle's length between two acetal scales on three rivets. It rests on its handle
  * and its point, so it lies a degree or two off level.
  */
+/**
+ * A knife's steels with their own UVs, u along the blade (0..1 over 250 mm, so the grain never repeats) and v across
+ * it (0..1 over 64 mm): the flats ground lengthwise in one continuous grain, the edge bevel honed across in satin.
+ */
+let knifeCache: { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStandardMaterial } | null = null;
+function knifeMats(): { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStandardMaterial } {
+  if (knifeCache) return knifeCache;
+  const r = rng(3134);
+  const nA = noise2(3135);
+  const BW = 1024;
+  const BH = 512;
+  // Each grind line: a brightness across, fading in and out along its run.
+  const row = new Float32Array(BH);
+  const ph = new Float32Array(BH);
+  for (let j = 0; j < BH; j++) {
+    row[j] = (r() - 0.5) * (r() < 0.08 ? 2.4 : 1);
+    ph[j] = r() * 200;
+  }
+  const bR = new Float32Array(BW * BH);
+  const bc = paint(BW, BH, (i, j) => {
+    const fade = smooth(0.3, 0.7, fbm(nA, i / 90 + ph[j], j * 0.37, 2));
+    const l = row[j] * fade + 0.25 * (fbm(nA, i / 200, j / 30 + 40, 2) - 0.5);
+    bR[j * BW + i] = 0.2 + 0.08 * Math.abs(l) + 0.04 * (fbm(nA, i / 60 + 9, j / 60, 2) - 0.5);
+    const v = 214 + 26 * l;
+    return [v, v + 2, v + 5];
+  });
+  const blade = phys(
+    { color: 0xd8dce0, metalness: 1, roughness: 1, map: canvasTex(bc, true), roughnessMap: greyTex(bR, BW, BH, false), anisotropy: 0.6, anisotropyRotation: 0 },
+    "own",
+  );
+  // The bevel: honing scratches across it, a touch off square, satin.
+  const EW = 2048;
+  const er: number[] = [];
+  for (let i = 0; i < EW; i++) er.push((r() - 0.5) * (r() < 0.1 ? 2 : 1));
+  const ec = paint(EW, 8, (i, j) => {
+    const v = 226 + 22 * er[(i + j) % EW];
+    return [v, v + 1, v + 3];
+  });
+  const bevel = std({ color: 0xeceef0, metalness: 1, roughness: 0.3, map: canvasTex(ec, true) }, "own");
+  knifeCache = { blade, bevel };
+  return knifeCache;
+}
+
 function chefKnife(inches: 8 | 10): Builder {
   return (s, e) => {
     const p = palette();
@@ -3292,9 +4087,13 @@ function chefKnife(inches: 8 | 10): Builder {
     const yc = 0.0095;
     const xSp = e.w - 0.0012;
     const xEd = 0.0012;
-    const xT = xEd + 0.55 * (xSp - xEd);
-    const spine = (t: number) => (t < 0.55 ? xSp : xSp - (xSp - xT) * ((t - 0.55) / 0.45) ** 1.8);
-    const edgeX = (t: number) => (t < 0.5 ? xEd : xEd + (xT - xEd) * ((t - 0.5) / 0.5) ** 2.4);
+    // The eight has the fuller belly and a higher point; the ten a longer flat, a spine that falls away from nearer
+    // the heel in a long straight taper, and its point lower, nearer the edge's line.
+    const xT = xEd + (big ? 0.38 : 0.55) * (xSp - xEd);
+    const sF = big ? 0.36 : 0.55;
+    const eF = big ? 0.6 : 0.45;
+    const spine = (t: number) => (t < sF ? xSp : xSp - (xSp - xT) * ((t - sF) / (1 - sF)) ** (big ? 1.35 : 1.8));
+    const edgeX = (t: number) => (t < eF ? xEd : xEd + (xT - xEd) * ((t - eF) / (1 - eF)) ** (big ? 2.0 : 2.2));
     const zm = -Lh / 2;
     const Z = (z: number) => z - zm;
     const tsU = (u: number) => (0.0071 + 0.0012 * Math.sin(PI * u)) * (u > 0.93 ? Math.sqrt(Math.max(0, 1 - ((u - 0.93) / 0.07) ** 2)) : 1);
@@ -3323,7 +4122,7 @@ function chefKnife(inches: 8 | 10): Builder {
       const xe = edgeX(t);
       const hh = Math.max(0, xs - xe);
       const ts = lerp(big ? 0.0027 : 0.0025, 0.0009, Math.pow(t, 1.2));
-      const wb = Math.min(0.0012, 0.35 * hh);
+      const wb = Math.min(0.0017, 0.35 * hh);
       const tb = 0.00035 * Math.min(1, hh / 0.004) + 0.0001;
       const face = (k: number, sg: number): number[] => {
         const q = k / nX;
@@ -3339,8 +4138,10 @@ function chefKnife(inches: 8 | 10): Builder {
       main.push(m);
       bevel.push([...face(nX, 1), xe, yc, z, ...face(nX, -1)]);
     }
-    s.add(f.blade, ringMesh(main, { closed: false }));
-    s.add(f.edge, ringMesh(bevel, { closed: false }));
+    const km = knifeMats();
+    const uOf = (j: number) => (Math.pow(j / nL, 0.9) * Lb) / 0.25;
+    s.add(km.blade, ringMesh(main, { closed: false, uv: (j, i) => [uOf(j), clamp01((main[j][i * 3] - xEd) / 0.064)] }));
+    s.add(km.bevel, ringMesh(bevel, { closed: false, uv: (j, i) => [uOf(j), i / 2] }));
     // --- Handle outline: its top in line with the spine, its butt hooking down a little. ---
     const xHi = (u: number) => xSp + 0.0002 - 0.0012 * Math.sin(PI * u);
     const hh = (u: number) => 0.0215 + 0.0035 * Math.sin(PI * u * 0.9) + 0.002 * smooth(0.85, 1, u);
@@ -3389,12 +4190,12 @@ function chefKnife(inches: 8 | 10): Builder {
       top.push(x, yc + 0.0012, Z(zU(u)));
       bot.push(x, yc - 0.0012, Z(zU(u)));
     }
-    s.add(f.blade, outwardOpen(ringMesh([top, bot], { closed: true }), [(xSp + 0.02) / 2, yc, Z(-Lh / 2)]));
+    s.add(km.blade, outwardOpen(ringMesh([top, bot], { closed: true }), [(xSp + 0.02) / 2, yc, Z(-Lh / 2)]));
     if (s.fine(1))
       for (const u of [0.2, 0.5, 0.8])
         for (const sg of s.fine(2) ? [1, -1] : [1]) {
           const y = yc + sg * (0.0012 + ts(u)) - sg * 0.0001;
-          s.add(p.ssBright, cyl(s, 0.0024, 0.0006, "y", 16), [(xLo(u) + xHi(u)) / 2, y, Z(zU(u))]);
+          s.add(p.ssBright, cyl(s, 0.0024, 0.0006, "y", s.fine(2) ? 36 : 16), [(xLo(u) + xHi(u)) / 2, y, Z(zU(u))]);
         }
     s.pop();
     return () => ({});
@@ -3713,32 +4514,49 @@ const ladleBuilder: Builder = (s, e) => {
   ];
   turned(s, f.spunBright, prof, s.seg(72, 10), undefined, [cx, 0, cz]);
   const top = e.h - 0.0013;
+  // The handle runs out level, then the hook: one smooth circular turn of 8.5 mm radius, down and back under the
+  // handle (its outside 0.4 mm inside the box's end), sampled densely so that it reads as bent strip, not facets.
+  const rh = 0.0085;
+  const zc = -0.0015 - rh;
   const path = bentPath(
     [
       [cx, 0.0445, cz + Rr - 0.003],
       [cx, 0.06, cz + Rr + 0.012],
       [cx, top - 0.002, cz + Rr + 0.05],
       [cx, top, -0.03],
-      [cx, top, -0.012],
-      [cx, top - 0.012, -0.0018],
-      [cx, top - 0.022, -0.009],
+      [cx, top, zc],
     ],
     0.01,
-    [10, 24, 56][s.detail],
+    [8, 18, 40][s.detail],
   );
+  const nA = [3, 8, 24][s.detail];
+  for (let k = 1; k <= nA; k++) {
+    const a = PI / 2 - (k / nA) * (PI * 1.12);
+    path.push([cx, top - rh + rh * Math.sin(a), zc + rh * Math.cos(a)]);
+  }
   const nP = path.length;
-  s.add(
-    p.ss,
-    sweep(
-      path,
-      (j) => {
-        const q = j / (nP - 1);
-        const w = q < 0.08 ? lerp(0.016, 0.0115, q / 0.08) : q < 0.75 ? lerp(0.0115, 0.0165, (q - 0.08) / 0.67) : lerp(0.0165, 0.011, (q - 0.75) / 0.25);
-        return superSec(w / 2, 0.0011, 5, [8, 12, 16][s.detail]);
-      },
-      [1, 0, 0],
-    ),
+  const nS = [8, 12, 16][s.detail];
+  const strip = sweep(
+    path,
+    (j) => {
+      const q = j / (nP - 1);
+      const w = q < 0.08 ? lerp(0.016, 0.0115, q / 0.08) : q < 0.75 ? lerp(0.0115, 0.0165, (q - 0.08) / 0.67) : lerp(0.0165, 0.011, (q - 0.75) / 0.25);
+      return superSec(w / 2, 0.0011, 5, nS);
+    },
+    [1, 0, 0],
   );
+  // The strip's grain runs along it, round the hook too: u by arc length, v round the section (both in metres, as
+  // the box projection would give on a flat face), so no seam crosses the bend.
+  {
+    const uvA = strip.attributes.uv as THREE.BufferAttribute;
+    let al = 0;
+    for (let j = 0; j < nP; j++) {
+      if (j > 0) al += Math.hypot(path[j][0] - path[j - 1][0], path[j][1] - path[j - 1][1], path[j][2] - path[j - 1][2]);
+      for (let i = 0; i < nS; i++) uvA.setXY(j * nS + i, al, (i / nS) * 0.03);
+    }
+    uvA.needsUpdate = true;
+  }
+  s.add(own(p.ss), strip);
   return () => ({});
 };
 
@@ -3750,6 +4568,164 @@ const ladleBuilder: Builder = (s, e) => {
  * 750 mL in dark green glass: a deep punt, straight shoulders, a long neck with its collar under a foil capsule, a
  * plain cream label. set("level", 0..1) is the fraction of 750 mL left, its surface at the height that holds it.
  */
+/**
+ * The bottle's label, a 93 mm square of cream laid paper printed in claret and black: a double-rule border, a small
+ * engraving of vineyard rows on a hillside, the wine's description, volume and strength. No maker's name. Its laid
+ * and chain lines and the ink's slight gloss are in the normal and roughness maps.
+ */
+let labelCache: THREE.MeshStandardMaterial | null = null;
+function labelMat(): THREE.MeshStandardMaterial {
+  if (labelCache) return labelCache;
+  const W = 1024;
+  const [c, x] = canvas(W, W);
+  const nP = noise2(5551);
+  const img = x.createImageData(W, W);
+  const hP = new Float32Array(W * W);
+  for (let j = 0; j < W; j++)
+    for (let i = 0; i < W; i++) {
+      const k = j * W + i;
+      // Laid lines about a millimetre apart, chain lines every 25 mm, the fibre's cloud over both.
+      const laid = 0.5 + 0.5 * Math.cos((j / W) * 93 * TAU);
+      const cd = (((i / W) * 93) % 25) - 12.5;
+      const chain = Math.exp(-(cd * cd) / 0.5);
+      const fib = fbm(nP, i / 6, j / 6, 3);
+      hP[k] = 0.25 * laid + 0.3 * chain + 0.6 * fib;
+      const v = (fib - 0.5) * 16 - 4 * laid - 6 * chain;
+      img.data[k * 4] = 238 + v;
+      img.data[k * 4 + 1] = 229 + v;
+      img.data[k * 4 + 2] = 204 + v * 1.1;
+      img.data[k * 4 + 3] = 255;
+    }
+  x.putImageData(img, 0, 0);
+  const claret = "rgb(96, 22, 34)";
+  const ink = "rgb(34, 26, 24)";
+  // The border: a heavy rule and a hairline inside it.
+  x.strokeStyle = claret;
+  x.lineWidth = 9;
+  x.strokeRect(46, 46, W - 92, W - 92);
+  x.lineWidth = 2.5;
+  x.strokeRect(68, 68, W - 136, W - 136);
+  x.textAlign = "center";
+  x.textBaseline = "alphabetic";
+  const spaced = (t: string, y: number, px: number, sp: number, font: string, col: string) => {
+    x.font = `${px}px ${font}`;
+    x.fillStyle = col;
+    const w = [...t].reduce((a, ch) => a + x.measureText(ch).width + sp, -sp);
+    let cx0 = W / 2 - w / 2;
+    x.textAlign = "left";
+    for (const ch of t) {
+      x.fillText(ch, cx0, y);
+      cx0 += x.measureText(ch).width + sp;
+    }
+    x.textAlign = "center";
+  };
+  const serif = "Georgia, 'Times New Roman', serif";
+  spaced("ESTATE GROWN", 150, 34, 9, serif, ink);
+  // The engraving: a hillside of vine rows under a low sun, in fine hatching.
+  x.save();
+  x.beginPath();
+  x.ellipse(W / 2, 330, 250, 140, 0, 0, TAU);
+  x.clip();
+  x.strokeStyle = ink;
+  x.lineWidth = 1.6;
+  for (let k = 0; k < 44; k++) {
+    const yy = 200 + k * 7;
+    x.beginPath();
+    x.moveTo(W / 2 - 260, yy);
+    x.lineTo(W / 2 + 260, yy);
+    if (yy < 300) {
+      x.globalAlpha = 0.35;
+      x.stroke();
+      x.globalAlpha = 1;
+    }
+  }
+  // The sun.
+  x.beginPath();
+  x.arc(W / 2 + 120, 268, 34, 0, TAU);
+  x.fillStyle = "rgba(96, 22, 34, 0.18)";
+  x.fill();
+  x.stroke();
+  // Hills, then rows running down them toward the eye.
+  const hill = (yy: number, a: number, ph: number) => (t: number) => yy + a * Math.sin(t * 0.012 + ph);
+  for (const [h0, amp, ph, sh] of [
+    [318, 22, 0.4, 0.55],
+    [352, 18, 2.1, 0.75],
+  ] as const) {
+    const hy = hill(h0, amp, ph);
+    x.beginPath();
+    x.moveTo(W / 2 - 270, 500);
+    for (let t = -270; t <= 270; t += 6) x.lineTo(W / 2 + t, hy(t));
+    x.lineTo(W / 2 + 270, 500);
+    x.closePath();
+    x.fillStyle = `rgba(238, 229, 204, 1)`;
+    x.fill();
+    x.lineWidth = 2;
+    x.stroke();
+    x.lineWidth = 1.4;
+    for (let t = -270; t <= 270; t += 13) {
+      x.globalAlpha = sh;
+      x.beginPath();
+      x.moveTo(W / 2 + t, hy(t) + 4);
+      x.lineTo(W / 2 + t * 1.5, 500);
+      x.stroke();
+      // Vines as small ticks along each row.
+      for (let q = 0.08; q < 1; q += 0.16) {
+        const px = W / 2 + lerp(t, t * 1.5, q);
+        const py = lerp(hy(t) + 4, 500, q);
+        x.beginPath();
+        x.arc(px, py - 2, 2 + 3 * q, 0, TAU);
+        x.stroke();
+      }
+      x.globalAlpha = 1;
+    }
+  }
+  x.restore();
+  x.strokeStyle = claret;
+  x.lineWidth = 3;
+  x.beginPath();
+  x.ellipse(W / 2, 330, 250, 140, 0, 0, TAU);
+  x.stroke();
+  x.fillStyle = claret;
+  x.font = `italic 92px ${serif}`;
+  x.fillText("Red Table Wine", W / 2, 590);
+  // An ornamental rule.
+  x.strokeStyle = claret;
+  x.lineWidth = 2;
+  x.beginPath();
+  x.moveTo(W / 2 - 200, 636);
+  x.lineTo(W / 2 - 22, 636);
+  x.moveTo(W / 2 + 22, 636);
+  x.lineTo(W / 2 + 200, 636);
+  x.stroke();
+  x.beginPath();
+  x.moveTo(W / 2, 622);
+  x.lineTo(W / 2 + 12, 636);
+  x.lineTo(W / 2, 650);
+  x.lineTo(W / 2 - 12, 636);
+  x.closePath();
+  x.fill();
+  spaced("DRY  ·  OAK AGED", 712, 38, 7, serif, ink);
+  spaced("PRODUCE OF THE VALLEY", 770, 28, 6, serif, ink);
+  x.font = `40px ${serif}`;
+  x.fillStyle = ink;
+  x.textAlign = "left";
+  x.fillText("750 mL", 118, 920);
+  x.textAlign = "right";
+  x.fillText("13.5% vol", W - 118, 920);
+  x.textAlign = "center";
+  // Ink: a touch glossier than the paper, and pressed in.
+  const ink8 = x.getImageData(0, 0, W, W).data;
+  const rough = new Float32Array(W * W);
+  for (let k = 0; k < W * W; k++) {
+    const lum = (ink8[k * 4] + ink8[k * 4 + 1] + ink8[k * 4 + 2]) / 765;
+    const inked = smooth(0.72, 0.45, lum);
+    rough[k] = lerp(0.88, 0.55, inked);
+    hP[k] -= 1.2 * inked;
+  }
+  labelCache = std({ color: 0xffffff, metalness: 0, roughness: 1, map: canvasTex(c, true), roughnessMap: greyTex(rough, W, W, false), normalMap: normalTex(hP, W, W, 0.5, false), normalScale: new THREE.Vector2(0.6, 0.6) }, "own");
+  return labelCache;
+}
+
 const bottleBuilder: Builder = (s, e) => {
   const f = finishes();
   const cx = e.w / 2;
@@ -3822,23 +4798,25 @@ const bottleBuilder: Builder = (s, e) => {
   ];
   const capL = s.detail === 0 ? [cap[1], cap[2], cap[4], cap[7], cap[8], cap[9], cap[10], cap[15]] : cap;
   s.add(f.foil, outward(revolve(capL.slice().reverse(), n)), [cx, 0, cz]);
-  // Label: a band round the front of the body.
+  // Label: a band round the front of the body, read from the front (u right to left round +x... so u = 1 - k / nl).
+  // Its chords stand clear of the glass's own, never through them: 0.2 mm off the glass at their nearest.
   const lab: number[][] = [];
   const nl = [6, 12, 28][s.detail];
+  const rL = Math.max(Rb + 0.0002, (Rb + 0.0002) / Math.cos(1.25 / nl)) + 0.0002;
   for (const y of [0.055, 0.148]) {
     const ring: number[] = [];
     for (let k = 0; k <= nl; k++) {
       const th = PI / 2 - 1.25 + (2.5 * k) / nl;
-      ring.push(cx + (Rb + 0.0004) * Math.cos(th), y, cz + (Rb + 0.0004) * Math.sin(th));
+      ring.push(cx + rL * Math.cos(th), y, cz + rL * Math.sin(th));
     }
     lab.push(ring);
   }
-  s.add(f.label, outwardOpen(ringMesh(lab, { closed: false }), [cx, 0.1, cz]));
+  s.add(labelMat(), outwardOpen(ringMesh(lab, { closed: false, uv: (j, i) => [1 - i / nl, j] }), [cx, 0.1, cz]));
   // The wine: the inside of the glass filled to its level; the level found from the volume it holds.
   const winner = inner
     .slice()
     .reverse()
-    .map(([r, y]) => [Math.max(0, r - 0.0002), y + 0.0002] as P2);
+    .map(([r, y]) => [Math.max(0, r - 0.0006), y + 0.0006] as P2);
   const vol: number[] = [0];
   for (let k = 1; k < winner.length; k++) {
     const [r0, y0] = winner[k - 1];

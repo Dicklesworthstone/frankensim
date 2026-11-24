@@ -352,6 +352,209 @@ export function bar(shop: Shop, pts: readonly V3[], r: number, bend = r * 3, rad
   return mergeGeometries(caps.map(normalise), false) ?? tube;
 }
 
+/**
+ * A round wire or tube bent along a polyline, the same shape as `bar` (straight runs, each corner rounded by a curve
+ * that starts `bend` before it), but sampled where it bends rather than evenly along its length: a straight run is a
+ * single segment, a bend is split by its angle. Its frames are carried round the bends without twisting, and its
+ * normals are the tube's own. Oven racks, wire shelving, ladders, long handles and rails cost a tenth of `bar`'s
+ * triangles this way. The wire is closed at both ends when there is detail to show it.
+ */
+export function wire(shop: Shop, pts: readonly V3[], r: number, bend = r * 3, radial = 12): THREE.BufferGeometry {
+  const v = pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+  const step = shop.detail === 2 ? Math.PI / 14 : shop.detail === 1 ? Math.PI / 7 : Math.PI / 3.5;
+  const line: THREE.Vector3[] = [v[0]!.clone()];
+  const push = (p: THREE.Vector3) => {
+    if (p.distanceToSquared(line[line.length - 1]!) > 1e-12) line.push(p);
+  };
+  for (let i = 1; i < v.length - 1; i++) {
+    const p = v[i]!;
+    const inDir = p.clone().sub(v[i - 1]!);
+    const outDir = v[i + 1]!.clone().sub(p);
+    const [lenIn, lenOut] = [inDir.length(), outDir.length()];
+    inDir.normalize();
+    outDir.normalize();
+    const ang = Math.acos(Math.max(-1, Math.min(1, inDir.dot(outDir))));
+    const cut = Math.min(bend, lenIn * 0.49, lenOut * 0.49);
+    if (ang < 1e-3 || cut < 1e-6) {
+      push(p.clone());
+      continue;
+    }
+    const a = p.clone().addScaledVector(inDir, -cut);
+    const b = p.clone().addScaledVector(outDir, cut);
+    const k = Math.max(2, Math.ceil(ang / step));
+    for (let j = 0; j <= k; j++) {
+      const t = j / k;
+      push(a.clone().multiplyScalar((1 - t) * (1 - t)).addScaledVector(p, 2 * (1 - t) * t).addScaledVector(b, t * t));
+    }
+  }
+  push(v[v.length - 1]!.clone());
+  const n = line.length;
+  const m = shop.seg(radial, 5);
+  // Tangents, and normals carried along by the rotation from each tangent to the next.
+  const T = line.map((_, i) => line[Math.min(n - 1, i + 1)]!.clone().sub(line[Math.max(0, i - 1)]!).normalize());
+  const N: THREE.Vector3[] = [];
+  const t0 = T[0]!;
+  const seed = Math.abs(t0.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  N.push(seed.sub(t0.clone().multiplyScalar(seed.dot(t0))).normalize());
+  const q = new THREE.Quaternion();
+  for (let i = 1; i < n; i++) {
+    q.setFromUnitVectors(T[i - 1]!, T[i]!);
+    const nn = N[i - 1]!.clone().applyQuaternion(q);
+    N.push(nn.sub(T[i]!.clone().multiplyScalar(nn.dot(T[i]!))).normalize());
+  }
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  let run = 0;
+  const d = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    if (i > 0) run += line[i]!.distanceTo(line[i - 1]!);
+    const B = new THREE.Vector3().crossVectors(T[i]!, N[i]!);
+    for (let j = 0; j <= m; j++) {
+      const th = (j / m) * Math.PI * 2;
+      d.copy(N[i]!).multiplyScalar(Math.cos(th)).addScaledVector(B, Math.sin(th));
+      pos.push(line[i]!.x + d.x * r, line[i]!.y + d.y * r, line[i]!.z + d.z * r);
+      nrm.push(d.x, d.y, d.z);
+      uv.push(run, j / m);
+    }
+  }
+  const w = m + 1;
+  for (let i = 0; i < n - 1; i++)
+    for (let j = 0; j < m; j++) {
+      const [a, b, c, e] = [i * w + j, (i + 1) * w + j, i * w + j + 1, (i + 1) * w + j + 1];
+      idx.push(a, c, b, c, e, b);
+    }
+  if (shop.detail > 0)
+    for (const [end, sign] of [
+      [0, -1],
+      [n - 1, 1],
+    ] as const) {
+      const base = pos.length / 3;
+      const t = T[end]!;
+      pos.push(line[end]!.x, line[end]!.y, line[end]!.z);
+      nrm.push(t.x * sign, t.y * sign, t.z * sign);
+      uv.push(0, 0);
+      for (let j = 0; j < m; j++) {
+        const o = (end * w + j) * 3;
+        pos.push(pos[o]!, pos[o + 1]!, pos[o + 2]!);
+        nrm.push(t.x * sign, t.y * sign, t.z * sign);
+        uv.push(0, 0);
+      }
+      for (let j = 0; j < m; j++) {
+        const [a, b] = [base + 1 + j, base + 1 + ((j + 1) % m)];
+        sign > 0 ? idx.push(base, a, b) : idx.push(base, b, a);
+      }
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+/**
+ * A 2D section swept along a path of points: the section's x runs across the path (to its right, looking along it with
+ * `up` overhead) and its y along `up`, turned at every point to the path's direction there. The section is a closed
+ * outline, counter-clockwise; it is not repeated at its end. `scale(i)` stretches it across and up at point i (a
+ * tapering finger, a flattened coil); `closed` joins the path's end to its start (a frame, a ring); an open path is
+ * capped at both ends unless `caps` is false. Normals are smooth round the section and along the path, so a section
+ * with sharp corners should repeat each corner point. UVs run along the path (u, metres) and round the section (v).
+ */
+export function sweep(
+  path: readonly V3[],
+  section: readonly (readonly [number, number])[],
+  opts: { closed?: boolean; caps?: boolean; up?: V3; scale?: (i: number) => readonly [number, number] } = {},
+): THREE.BufferGeometry {
+  const closed = opts.closed ?? false;
+  const P = path.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+  const n = P.length;
+  const m = section.length;
+  const up0 = new THREE.Vector3(...(opts.up ?? [0, 1, 0]));
+  const pos: number[] = [];
+  const uv: number[] = [];
+  let run = 0;
+  const t = new THREE.Vector3();
+  const sd = new THREE.Vector3();
+  const u = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    const a = P[closed ? (i - 1 + n) % n : Math.max(0, i - 1)]!;
+    const b = P[closed ? (i + 1) % n : Math.min(n - 1, i + 1)]!;
+    t.subVectors(b, a).normalize();
+    sd.crossVectors(t, up0);
+    if (sd.lengthSq() < 1e-10) sd.set(1, 0, 0);
+    sd.normalize();
+    u.crossVectors(sd, t).normalize();
+    // Keep the section's width through a corner: stretch it across by 1/cos of half the turn.
+    let k = 1;
+    if (closed || (i > 0 && i < n - 1)) {
+      const t0 = new THREE.Vector3().subVectors(P[i]!, a).normalize();
+      const t1 = new THREE.Vector3().subVectors(b, P[i]!).normalize();
+      const c = t0.dot(t1);
+      if (t0.lengthSq() > 0 && t1.lengthSq() > 0) k = 1 / Math.max(0.5, Math.sqrt((1 + c) / 2));
+    }
+    const [sx, sy] = opts.scale ? opts.scale(i) : [1, 1];
+    if (i > 0) run += P[i]!.distanceTo(P[i - 1]!);
+    for (let j = 0; j < m; j++) {
+      const [x, y] = section[j]!;
+      const q = P[i]!.clone().addScaledVector(sd, x * sx * k).addScaledVector(u, y * sy);
+      pos.push(q.x, q.y, q.z);
+      uv.push(run, j / m);
+    }
+  }
+  const idx: number[] = [];
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    const i1 = (i + 1) % n;
+    for (let j = 0; j < m; j++) {
+      const j1 = (j + 1) % m;
+      const [A, B, C, D] = [i * m + j, i * m + j1, i1 * m + j1, i1 * m + j];
+      idx.push(A, C, B, A, D, C);
+    }
+  }
+  if (!closed && (opts.caps ?? true)) {
+    const tri = THREE.ShapeUtils.triangulateShape(section.map(([x, y]) => new THREE.Vector2(x, y)), []);
+    // A counter-clockwise section's own triangles face back down the path: right for the start cap, flipped for the end.
+    for (const [end, flip] of [
+      [0, false],
+      [n - 1, true],
+    ] as const) {
+      const base = pos.length / 3;
+      for (let j = 0; j < m; j++) {
+        const o = (end * m + j) * 3;
+        pos.push(pos[o]!, pos[o + 1]!, pos[o + 2]!);
+        uv.push(0, 0);
+      }
+      for (const [a, b, c] of tri) flip ? idx.push(base + a!, base + c!, base + b!) : idx.push(base + a!, base + b!, base + c!);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * A cast bar's section, top at y = 0 and `h` deep, `w` across its crown: drafted sides flaring to `w · flare` at the
+ * foot, a shallow elliptical crown `crown` high, the foot's corners eased. Counter-clockwise, for `sweep`. A crowned top
+ * meets a crossing bar's crown along a line, never over an area, so cast grids never show coplanar flicker.
+ */
+export function castSection(w: number, h: number, crown = Math.min(0.004, w * 0.32), flare = 1.22, arc = 6): [number, number][] {
+  const out: [number, number][] = [];
+  const wb = (w * flare) / 2;
+  const ease = Math.min(0.0015, h * 0.12);
+  out.push([-wb + ease, -h], [wb - ease, -h], [wb, -h + ease]);
+  for (let i = 0; i <= arc; i++) {
+    const a = (i / arc) * Math.PI;
+    out.push([(w / 2) * Math.cos(a), -crown + crown * Math.sin(a)]);
+  }
+  out.push([-wb, -h + ease]);
+  return out;
+}
+
 /** A flat plate cut from `shape` (in its own xy), `t` thick, standing along +z from 0, with an edge chamfer `bevel`. */
 export function plate(shop: Shop, shape: THREE.Shape, t: number, bevel = 0, curve = 12): THREE.BufferGeometry {
   const g = new THREE.ExtrudeGeometry(shape, {

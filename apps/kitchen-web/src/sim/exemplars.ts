@@ -25,7 +25,7 @@ export interface CameraPose {
 export interface StaffWaypointRoute {
   readonly cohort: "p05" | "p50" | "p95";
   readonly role: string;
-  /** Floor path in Blender Z-up [x_m, y_m] coordinates (converted via blenderToThree). */
+  /** Floor path in the manifests' Z-up [x_m, y_m] coordinates (the hero maps y to three.js -z). */
   readonly waypoints: readonly (readonly [number, number])[];
   readonly speedMps: number;
   readonly accentHex: string;
@@ -56,7 +56,7 @@ export interface ExemplarSpec {
 export const EXEMPLARS: readonly ExemplarSpec[] = [
   {
     id: "mall_qsr_400",
-    shortName: "Mall QSR 400",
+    shortName: "Mall counter",
     fullName: "Mall Food-Court QSR · 400 sq ft",
     areaSqFt: 400,
     roomM: [4.88, 7.62, 2.743],
@@ -87,7 +87,7 @@ export const EXEMPLARS: readonly ExemplarSpec[] = [
   },
   {
     id: "freestanding_qsr_1450",
-    shortName: "Freestanding QSR",
+    shortName: "Drive-thru",
     fullName: "Freestanding Drive-Thru QSR · 1,450 sq ft",
     areaSqFt: 1450,
     roomM: [9.754, 13.716, 3.048],
@@ -119,7 +119,7 @@ export const EXEMPLARS: readonly ExemplarSpec[] = [
   },
   {
     id: "fast_casual_1100",
-    shortName: "Fast-Casual 1100",
+    shortName: "Fast casual",
     fullName: "Exhibition Fast-Casual · 1,100 sq ft",
     areaSqFt: 1100,
     roomM: [7.315, 14.021, 3.048],
@@ -150,7 +150,7 @@ export const EXEMPLARS: readonly ExemplarSpec[] = [
   },
   {
     id: "fine_dining_950",
-    shortName: "Fine Dining 950",
+    shortName: "Fine dining",
     fullName: "European-Island Brigade · 950 sq ft",
     areaSqFt: 950,
     roomM: [6.706, 13.106, 3.048],
@@ -181,7 +181,7 @@ export const EXEMPLARS: readonly ExemplarSpec[] = [
   },
   {
     id: "commissary_catering_3200",
-    shortName: "Commissary 3200",
+    shortName: "Commissary",
     fullName: "Production Catering Commissary · 3,200 sq ft",
     areaSqFt: 3200,
     roomM: [15.24, 19.507, 3.658],

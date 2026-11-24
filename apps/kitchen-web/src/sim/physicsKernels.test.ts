@@ -11,6 +11,7 @@ import {
   stepWalkinKernel,
 } from "./physicsKernels";
 import * as refKernels from "../../../kitchen-lab/public/live/physics-kernels.mjs";
+import { FAST_RANGE, HOLD_HORIZON_MIN, buildFastEstimate, fullModelHoldTimes } from "./carrierFastEstimate";
 
 describe("conservation physics kernels parity & invariants", () => {
   test("stove kernel deglaze drops pan temp, releases vapor, and matches Rust-parity reference <1e-12", () => {
@@ -83,5 +84,52 @@ describe("conservation physics kernels parity & invariants", () => {
     stepCarrierKernel(sSealed, { ventFraction: 0.0 }, 1200);
     stepCarrierKernel(sVented, { ventFraction: 0.9 }, 1200);
     expect(sVented.crispness_index).toBeGreaterThan(sSealed.crispness_index);
+  });
+});
+
+describe("delivery-box fast estimate (the page's 'Fast estimate' toggle)", () => {
+  const { table, estimate } = buildFastEstimate();
+
+  test("its quoted worst error is measured and small, and it answers most of its range", () => {
+    expect(table.checkedPoints).toBeGreaterThan(1500);
+    expect(table.boundMin.soggyMin).toBeGreaterThan(0);
+    expect(table.boundMin.soggyMin).toBeLessThan(5);
+    expect(table.boundMin.below135Min).toBeLessThan(5);
+    expect(table.refusedPoints / (table.checkedPoints + table.refusedPoints)).toBeLessThan(0.35);
+  });
+
+  test("at points it was never checked at, it stays near its quoted error", () => {
+    // A different generator from the table's own check set. The quoted error is the worst found at its check points,
+    // not a proof, so allow half again on top of it.
+    let seed = 987654321;
+    const r = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296;
+    let answered = 0;
+    for (let n = 0; n < 800; n++) {
+      const cfg = {
+        ventFraction: r(),
+        foodMassKg: FAST_RANGE.massKg[0] + r() * (FAST_RANGE.massKg[1] - FAST_RANGE.massKg[0]),
+        ambientC: FAST_RANGE.ambientC[0] + r() * (FAST_RANGE.ambientC[1] - FAST_RANGE.ambientC[0]),
+        initialFoodC: FAST_RANGE.initialFoodC[0] + r() * (FAST_RANGE.initialFoodC[1] - FAST_RANGE.initialFoodC[0]),
+      };
+      const e = estimate(cfg);
+      if (!e.inRange) continue;
+      answered++;
+      const truth = fullModelHoldTimes(cfg);
+      expect(Math.abs(e.times.soggyMin - truth.soggyMin)).toBeLessThanOrEqual(1.5 * table.boundMin.soggyMin + 1e-9);
+      expect(Math.abs(e.times.below135Min - truth.below135Min)).toBeLessThanOrEqual(1.5 * table.boundMin.below135Min + 1e-9);
+    }
+    expect(answered).toBeGreaterThan(500);
+  });
+
+  test("it refuses outside its range, and at the vent setting where the box stops going soggy", () => {
+    const dock = estimate({ ventFraction: 0.1, foodMassKg: 11.5, ambientC: 42 });
+    expect(dock.inRange).toBe(false);
+    if (!dock.inRange) expect(dock.reason).toBe("range");
+    // At 4.5 kg and 22 °C the sealed box is soggy in minutes and the open one never within three hours.
+    expect(fullModelHoldTimes({ ventFraction: 0.3, foodMassKg: 4.5, ambientC: 22 }).soggyMin).toBeLessThan(30);
+    expect(fullModelHoldTimes({ ventFraction: 0.7, foodMassKg: 4.5, ambientC: 22 }).soggyMin).toBe(HOLD_HORIZON_MIN);
+    const edge = estimate({ ventFraction: 0.5, foodMassKg: 4.5, ambientC: 22 });
+    expect(edge.inRange).toBe(false);
+    if (!edge.inRange) expect(edge.reason).toBe("edge");
   });
 });

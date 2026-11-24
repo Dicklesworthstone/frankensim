@@ -30,7 +30,7 @@ import type { Detail } from "./shop";
 
 export type Cohort = "p05" | "p50" | "p95";
 export type Side = "L" | "R";
-export type WorkKind = "stand" | "saute" | "stir" | "plate" | "chop" | "carry" | "push" | "lift";
+export type WorkKind = "stand" | "saute" | "stir" | "plate" | "chop" | "carry" | "push" | "lift" | "pick" | "place";
 export type RomKey =
   | "neck_pitch"
   | "neck_yaw"
@@ -2343,10 +2343,28 @@ export interface WorkOpts {
   at?: THREE.Vector3;
   /** World height of the work surface (grate, counter, board, pass shelf, rack bar, low shelf). */
   surfaceY?: number;
-  /** Horizontal distance from the grip to the pan centre (saute), metres. */
+  /** Horizontal distance from the grip to the pan centre (saute), metres; for a push without `at`, how far ahead
+   *  of the root (the floor point between the feet) the bar or uprights stand. */
   reach?: number;
-  /** Half the distance between a carried item's grip points along its x axis (hotel pan: 0.27). */
+  /** Half the distance between a carried item's grip points along its x axis (hotel pan: 0.27); for a push, half
+   *  the distance between the hands on the bar, or between the two uprights. */
   halfWidth?: number;
+  /** Push: the hands close round two vertical uprights (a speed rack's corner posts), thumbs up, rather than a
+   *  horizontal bar. */
+  uprights?: boolean;
+  /** Pick, place and carry: the pan held turned, its long side pointing away from the body and a hand on each long
+   *  side, so that it slides lengthwise onto a combi oven's runners (`at` is then its rim centre there). */
+  panTurn?: boolean;
+  /** A turned pick or place at runners: the last stretch (metres) the palms push the pan home by its near end, once
+   *  the hands on its sides have come up to the oven's frame (a pick pulls it out as far by that end first). */
+  push?: number;
+  /** Carry, and a turned pick or place: the height (world) the pan's rim is held at, rather than at the waist (the
+   *  rail it goes onto, while it is slid in or out). */
+  holdY?: number;
+  /** A carry work step with `holdY`: go to it from the waist or `fromY` ("up"), or from it to the waist or `fromY`
+   *  ("down"), over the step's first second. */
+  raise?: "up" | "down";
+  fromY?: number;
   /** Tempo multiplier. */
   tempo?: number;
 }
@@ -3842,35 +3860,264 @@ function panGrips(st: Staff, p: BodyPose, itemPos: THREE.Vector3, itemQ: THREE.Q
 }
 
 /** Hands on a push bar (a speed rack's handle), palms forward and down. */
-function barGrips(st: Staff, p: BodyPose, barPos: THREE.Vector3, barQ: THREE.Quaternion): void {
-  const half = 0.2 * st.B.s;
+function barGrips(st: Staff, p: BodyPose, barPos: THREE.Vector3, barQ: THREE.Quaternion, half = 0.2 * st.B.s, upright = false): void {
   for (let i = 0; i < 2; i++) {
     const sd = i === 0 ? 1 : -1;
     const a = p.arms[i]!;
     a.ik = 1;
-    // A round bar: the fist may roll round it to keep the wrist straight.
-    a.roll = (75 * Math.PI) / 180;
     a.spinMax = 0;
     a.grip = "bar";
     a.pos.copy(V(sd * half, 0, 0).applyQuaternion(barQ).add(barPos));
-    a.a.copy(V(-sd, 0, 0).applyQuaternion(barQ));
-    a.b.copy(V(0, -0.45, 0.89).applyQuaternion(barQ));
-    a.pole.set(sd * 0.55, -0.8, -0.2).normalize();
+    if (upright) {
+      // A fist round a corner post, thumb up: the palm on the post's near face, turned a little in, so the fingers
+      // wrap its outer side and the far face (clear of the slides inside the frame). The fist may roll a little
+      // round the post to keep the wrist straight.
+      a.roll = 0.35;
+      a.a.copy(V(0, 1, 0).applyQuaternion(barQ));
+      a.b.copy(V(-sd * 0.32, 0, 0.95).normalize().applyQuaternion(barQ));
+      a.pole.set(sd * 0.6, -0.75, -0.25).normalize();
+      a.radius = 0.0145;
+    } else {
+      // A round bar: the fist may roll round it to keep the wrist straight.
+      a.roll = (75 * Math.PI) / 180;
+      a.a.copy(V(-sd, 0, 0).applyQuaternion(barQ));
+      a.b.copy(V(0, -0.45, 0.89).applyQuaternion(barQ));
+      a.pole.set(sd * 0.55, -0.8, -0.2).normalize();
+      a.radius = 0.0125;
+    }
     a.shape = "bar";
     a.close = 1;
-    a.radius = 0.0125;
   }
+}
+/** A pan turned square to the body: its long side (its own x) pointing away, along the body's z. */
+const TURN_Q = new THREE.Quaternion().setFromAxisAngle(Y, -Math.PI / 2);
+/** How far along a turned pan's long side the hands hold it, from its near end. */
+const TURN_GRIP = 0.1;
+
+/**
+ * The pan held turned: its near end clear of the apron by a few centimetres, its rim at `holdY` (world) or a little
+ * below the waist, the far end a touch higher than the near (the wrists' natural set).
+ */
+function turnedCarry(st: Staff, bob: number, pos: THREE.Vector3, q: THREE.Quaternion, holdY?: number): void {
+  const B = st.B;
+  const y = holdY ?? B.waistY - 0.03 * B.s;
+  // The belly where the pan's near end and the hands under its rim come by it.
+  let belly = 0;
+  for (const dy of [0, 0.05, 0.1]) belly = Math.max(belly, st.torso.at(y - dy, 0, _tv1).z);
+  pos.set(0, y + bob, belly + 0.035 + HOTEL_PAN.length / 2);
+  q.setFromAxisAngle(X, -0.02).multiply(TURN_Q);
+}
+
+/** Where a turned pan's centre is held ahead of the root (body z, metres), its rim at `holdY` (or the waist). */
+export function panHoldZ(st: Staff, holdY?: number): number {
+  turnedCarry(st, 0, _tv2, _tq, holdY);
+  return _tv2.z;
 }
 
 /**
- * The crouch that brings the hands to a low target: trunk inclination, knee bend and hips back, from c in [0, 1].
- * The shin leans at most 18 degrees (ankle dorsiflexion 20), the knee bends to 85, the trunk leans 50 from vertical.
+ * Hands on a turned pan: palms on its long side walls a hand's breadth from the near end, thumbs over the rim,
+ * fingers forward along the wall and free to tip down it ("sides"); or both palms on the near end wall, fingers down
+ * and out towards its corners, to push it home ("end", flat) or pull it out by its rim ("end", grasp).
  */
+function turnGrips(st: Staff, p: BodyPose, itemPos: THREE.Vector3, itemQ: THREE.Quaternion, mode: "sides" | "end", close: number, ik: number, shape: HandShape = "grasp"): void {
+  const K = HOTEL_PAN;
+  const H = st.B.hands.L;
+  const sh = H.sh;
+  const tilt0 = 12 * DEG;
+  const top = (phi: number) => Math.max(0.0335 * sh * Math.cos(phi) + 0.22 * H.HL * Math.sin(phi), 0.0272 * sh * Math.cos(phi) + 0.36 * H.HL * Math.sin(phi));
+  const tanT = Math.tan(K.taper);
+  const ct = Math.cos(K.taper);
+  const stT = Math.sin(K.taper);
+  const inv = _q3.copy(itemQ).invert();
+  // Which of the pan's long walls is on the body's left, and which end is nearer the body.
+  const left = Math.sign(V(1, 0, 0).applyQuaternion(inv).z) || 1;
+  const near = -(Math.sign(V(0, 0, 1).applyQuaternion(inv).x) || 1);
+  for (let i = 0; i < 2; i++) {
+    const sd = i === 0 ? 1 : -1;
+    const sz = sd * left;
+    const a = p.arms[i]!;
+    if (mode === "sides") {
+      const y = -(K.lip + 0.0035) - top(tilt0);
+      const wallZ = K.width / 2 - K.flange - -y * tanT;
+      const n = V(0, -stT, sz * ct);
+      const down = V(0, -ct, -sz * stT);
+      const fingers = V(-near * Math.cos(tilt0), 0, 0).addScaledVector(down, Math.sin(tilt0));
+      const g = V(near * (K.length / 2 - TURN_GRIP), y, sz * wallZ).addScaledVector(n, 0.0045);
+      setPalm(a, g.clone().applyQuaternion(itemQ).add(itemPos), fingers.applyQuaternion(itemQ), n.clone().negate().applyQuaternion(itemQ), V(sd * 0.55, -0.8, -0.25), "grasp", close);
+      a.ik = ik;
+      const tip = 78 * DEG;
+      a.spinMax = tip;
+      // A positive turn about this axis tips the fingers down the wall, on either hand.
+      a.spinAxis.copy(n).multiplyScalar(near * sz).applyQuaternion(itemQ);
+      a.spinPivot.copy(g).applyQuaternion(itemQ).add(itemPos);
+      const rise = -y - 0.004;
+      const out = K.flange + -y * tanT + 0.006;
+      a.spinShift.set(0, rise, sz * out).multiplyScalar(1 / Math.sin(tip)).applyQuaternion(itemQ);
+    } else {
+      // The palm low on the end wall towards its corner, the fingers up and a little out, curled over the rim (the
+      // wrist bent back, elbows down, as one pushes a drawer shut; pulling, they hook the rim).
+      const y = -0.068;
+      const wallX = K.length / 2 - K.flange - -y * tanT;
+      const n = V(near * ct, -stT, 0);
+      const up = V(near * stT, ct, 0);
+      const fingers = V(0, 0, sz * 0.45).addScaledVector(up, 0.9);
+      const g = V(near * wallX, y, sz * 0.075).addScaledVector(n, 0.0045);
+      setPalm(a, g.applyQuaternion(itemQ).add(itemPos), fingers.applyQuaternion(itemQ), n.clone().negate().applyQuaternion(itemQ), V(sd * 0.6, -0.8, -0.1), shape, close);
+      a.ik = ik;
+    }
+  }
+}
+
+/** Seconds a turned pick or place at runners takes (with `push`), or off a counter. */
+export const TURN_PUSH_S = 4.6;
+const TURN_PICK_S = 3.5;
+const TURN_PLACE_S = 3.3;
+/** Seconds a "pick" or "place" with these options takes. */
+export function panSeconds(kind: "pick" | "place", o: WorkOpts = {}): number {
+  if (!o.panTurn) return kind === "pick" ? PICK_S : PLACE_S;
+  if (o.push) return TURN_PUSH_S;
+  return kind === "pick" ? TURN_PICK_S : TURN_PLACE_S;
+}
+
+/** The turned pan at its spot (body space): its rim centre and its turn, square to the body. */
+function turnedSpot(st: Staff, o: WorkOpts, pos: THREE.Vector3, q: THREE.Quaternion): void {
+  pos.copy(target(st, o, V(0, (o.surfaceY ?? 0.914) + HOTEL_PAN.depth, 0.62 * st.B.s)));
+  q.copy(TURN_Q);
+}
+
+let turnScratch: [BodyPose, BodyPose, BodyPose] | null = null;
+
 /**
- * Lower the body for a reach down: c = 0 stands, c = 1 is a half squat with the knees at 85 degrees, the ankles at
- * 18 degrees of dorsiflexion (near their limit) and the trunk leaning 50 degrees; beyond 1 (to 1.3) the legs stay
- * and the back stoops further, as tall people do over a low shelf.
+ * A turned pan taken from or put on its spot. Off or onto a counter: lowered square onto it (or lifted from it) and
+ * brought to the turned carry. At runners (`push`): slid lengthwise from the held pan (rim at the rail's height)
+ * until the hands on its sides come up to the oven's frame, let go, the palms put to its near end and it pushed home;
+ * a pick hooks that end out first, takes it by the sides and slides it out to the hold.
  */
+function turnedPickPlacePose(st: Staff, kind: "pick" | "place", tt: number, o: WorkOpts, p: BodyPose, clock: number): BodyPose {
+  const B = st.B;
+  turnScratch ??= [newPose(), newPose(), newPose()];
+  const [sides, end, aux] = turnScratch;
+  standPose(st, tt, p);
+  p.pelvis.x *= 0.4;
+  const spotP = V();
+  const spotQ = new THREE.Quaternion();
+  turnedSpot(st, o, spotP, spotQ);
+  const holdP = V();
+  const holdQ = new THREE.Quaternion();
+  turnedCarry(st, 0, holdP, holdQ, o.holdY);
+  const P = o.push ?? 0;
+  const itemP = V();
+  const itemQ = new THREE.Quaternion();
+  // The hands' weights on the sides and on the end, and how closed each is.
+  let wSide = 1;
+  let cSide = 0;
+  let wEnd = 0;
+  let cEnd = 0;
+  let back = 0;
+  let reach = 1;
+  const D = panSeconds(kind, o);
+  // On a pick the clock runs backwards through a place's way (the hands' changes of grip are their own).
+  if (P > 0) {
+    const tp = kind === "place" ? tt : D - tt;
+    // The pan: from the hold, slid level to where the hands stop at the frame, then pushed home.
+    const u1 = mj(clamp(tp / 1.4, 0, 1));
+    const u2 = mj(clamp((tp - 2.35) / 0.9, 0, 1));
+    const mid = spotP.clone().addScaledVector(V(0, 0, 1), -P);
+    itemP.lerpVectors(holdP, mid, u1).lerp(spotP, u2);
+    // Level with the runners from the first (the flange rides onto them), the hold's tilt eased out as it goes in.
+    itemP.y = lerp(holdP.y, spotP.y, smooth(0, 0.35, tp));
+    itemQ.slerpQuaternions(holdQ, spotQ, smooth(0.2, 1.2, tp));
+    if (kind === "place") {
+      // Slid in on the sides (to 1.4 s), let go, the palms over to the near end, pushed home (2.35 to 3.25 s).
+      cSide = 1 - smooth(1.4, 1.65, tt);
+      wEnd = smooth(1.65, 2.15, tt);
+      cEnd = smooth(2.1, 2.35, tt) * (1 - smooth(3.25, 3.45, tt));
+      back = smooth(3.3, 3.6, tt);
+      reach = 1 - smooth(3.55, 4.5, tt);
+    } else {
+      // Reach to the near end and take its rim (to 1.2 s), pull it out (to 2.25 s), let go, over to the sides,
+      // close on them, slide it out to the hold (3.2 s on).
+      reach = smooth(0.1, 0.9, tt);
+      back = 1 - smooth(0.2, 0.9, tt);
+      cEnd = smooth(0.9, 1.2, tt) * (1 - smooth(2.25, 2.45, tt));
+      wEnd = 1 - smooth(2.45, 2.95, tt);
+      cSide = smooth(2.95, 3.2, tt);
+    }
+    wSide = 1 - wEnd;
+  } else {
+    // Off or onto a counter: square over it, down the last centimetre (up it, on a pick), the hands on the sides.
+    const tp = kind === "place" ? tt : D - tt;
+    const u = mj(clamp(tp / 1.5, 0, 1));
+    const above = spotP.clone().add(V(0, 0.012, 0));
+    itemP.lerpVectors(holdP, above, u).lerp(spotP, smooth(1.5, 1.8, tp));
+    itemQ.slerpQuaternions(holdQ, spotQ, u);
+    wSide = 1;
+    if (kind === "place") {
+      cSide = 1 - smooth(1.8, 2.1, tt);
+      reach = 1 - smooth(2.1, 3.2, tt);
+      back = smooth(1.9, 2.3, tt);
+    } else {
+      reach = smooth(0.1, 1.1, tt);
+      cSide = smooth(1.05, 1.35, tt);
+      back = 1 - smooth(0.3, 1.0, tt);
+    }
+  }
+  p.itemOn = true;
+  p.itemPos.copy(itemP);
+  p.itemQuat.copy(itemQ);
+  // A low counter asks for a crouch (as a pick of a pan crosswise does).
+  copyPose(sides, p);
+  turnGrips(st, sides, spotP, spotQ, "sides", 1, 1);
+  const cLow = pickCrouch(st, [sides.arms[0]!.pos.clone(), sides.arms[1]!.pos.clone()]);
+  const c = cLow * reach;
+  if (c > 0) crouchDeep(st, p, c);
+  // A lean towards the far work at the runners.
+  if (P > 0) p.flex += 8 * DEG * smooth(0.6, 1.4, kind === "place" ? tt : D - tt) * reach;
+  // The two grips on the pan as it is now; the hands drawn back off it once let go.
+  copyPose(sides, p);
+  copyPose(end, p);
+  turnGrips(st, sides, itemP, itemQ, "sides", cSide, 1);
+  turnGrips(st, end, itemP, itemQ, "end", cEnd, 1);
+  for (const q of [sides, end])
+    for (const a of q.arms) {
+      a.pos.z -= 0.04 * back;
+      a.pos.y += 0.015 * back;
+    }
+  const wE = wEnd / Math.max(1e-6, wEnd + wSide);
+  blendPose(aux, sides, end, wE);
+  // Arms in from the hang (or back to it) by the reach: the grip's target, the hang's free swing.
+  for (let i = 0; i < 2; i++) {
+    const a = p.arms[i]!;
+    const g = aux.arms[i]!;
+    a.grip = g.grip;
+    a.pos.copy(g.pos);
+    a.a.copy(g.a);
+    a.b.copy(g.b);
+    a.pole.copy(g.pole);
+    a.shape = g.shape;
+    a.close = g.close;
+    a.radius = g.radius;
+    a.roll = g.roll;
+    a.spinMax = lerp(sides.arms[i]!.spinMax, end.arms[i]!.spinMax, wE);
+    a.spinAxis.copy(g.spinAxis);
+    a.spinPivot.copy(g.spinPivot);
+    a.spinShift.copy(g.spinShift);
+    a.ik = reach;
+  }
+  p.gaze.copy(itemP).add(V(0, -0.05, 0.12)).lerp(V(0, B.eyeY - 0.3, 2.5), 0.15);
+  // Exactly the carry at the held end of the way (on the shared clock), and standing at the free end.
+  pickScratch ??= [newPose(), newPose()];
+  const [carry, stand] = pickScratch;
+  const held = kind === "pick" ? smooth(D - 0.45, D, tt) : 1 - smooth(0, 0.45, tt);
+  if (held > 0) blendPose(p, p, workPose(st, "carry", clock, { ...o, raise: undefined }, carry), held);
+  const free = kind === "pick" ? 1 - smooth(0, 0.3, tt) : smooth(D - 0.4, D, tt);
+  if (free > 0) blendPose(p, p, standPose(st, clock, stand), free);
+  p.itemOn = true;
+  p.itemPos.copy(itemP);
+  p.itemQuat.copy(itemQ);
+  return p;
+}
+
 function crouch(st: Staff, p: BodyPose, c: number): void {
   const B = st.B;
   const cl = Math.min(c, 1);
@@ -3888,6 +4135,156 @@ function crouch(st: Staff, p: BodyPose, c: number): void {
   p.flex = 0.02 + 0.45 * lean + 0.7 * 50 * DEG * cx;
 }
 
+/**
+ * Down to a full squat, for the lowest shelves: up to c = 1 the crouch above; on to c = 2 the knees bend on to 125
+ * degrees with the shins leaning further over the feet (the heels lift where the ankles run out of range) and the
+ * trunk leans on a little, the hips sitting back over the heels.
+ */
+function crouchDeep(st: Staff, p: BodyPose, c: number): void {
+  if (c <= 1) return crouch(st, p, c);
+  const B = st.B;
+  const e = Math.min(c - 1, 1);
+  const phi = (18 + 17 * e) * DEG;
+  const kappa = (85 + 40 * e) * DEG;
+  const ank = V(0, B.ankY, 0);
+  const knee = ank.clone().add(V(0, Math.cos(phi), Math.sin(phi)).multiplyScalar(B.shin));
+  const th = kappa - phi;
+  const hip = knee.clone().add(V(0, Math.cos(th), -Math.sin(th)).multiplyScalar(B.thigh));
+  p.pelvis.set(p.pelvis.x, hip.y, hip.z + 0.006 * B.s);
+  // The pelvis tucks under as the hips go down (keeping the hips inside their range), the spine bending on instead.
+  const lean = 50 * DEG;
+  p.tilt = 0.04 + 0.55 * lean - 0.48 * e;
+  p.flex = 0.02 + 0.45 * lean + 0.42 * e;
+  // Past the full squat (c up to 2.6) the back rounds a little further and the shoulders reach forward and down
+  // (the shoulder blades round out) to reach the floor.
+  const x = clamp(c - 2, 0, 0.6) / 0.6;
+  if (x > 0) {
+    p.flex += 0.12 * x;
+    p.clav[0] = lerp(p.clav[0]!, -0.08, x);
+    p.clav[1] = lerp(p.clav[1]!, 0.26, x);
+    p.clav[2] = lerp(p.clav[2]!, -0.08, x);
+    p.clav[3] = lerp(p.clav[3]!, 0.26, x);
+  }
+}
+
+/**
+ * Up on the balls of the feet by `a` (radians of heel rise), the toes flat: each foot turns about the floor under
+ * its ball; with `pelvis` the hips go up by as much as the ankles do.
+ */
+function heelRaise(st: Staff, p: BodyPose, a: number, pelvis = true): void {
+  if (a <= 1e-4) return;
+  const B = st.B;
+  let rise = 0;
+  for (const f of p.feet) {
+    const ballL = V(0, -B.ankY, B.mtpFwd);
+    const ball = ballL.clone().applyQuaternion(f.quat).add(f.pos);
+    const y0 = f.pos.y;
+    f.quat.multiply(qAxis(X, a, _q1));
+    f.pos.copy(ballL.applyQuaternion(f.quat)).negate().add(ball);
+    f.toe = Math.max(f.toe, a);
+    rise += (f.pos.y - y0) / 2;
+  }
+  if (pelvis) p.pelvis.y += rise;
+}
+
+/**
+ * A pick's (or place's) phases t seconds in: the crouch as a fraction of the lowest it goes, the hands' reach and
+ * grip, and the pan's way between the shelf and the hold: `out` slides it out of (or into) the shelf, `go` carries it
+ * between there and the hold (0 at the shelf, 1 in the carry). The two overlap a little, so the pan comes out and up
+ * in one movement, at no more than about a metre a second.
+ */
+function pickPhase(kind: "pick" | "place", tt: number, high = 0): { c: number; reachW: number; close: number; out: number; go: number } {
+  if (kind === "pick") {
+    if (tt < 0.2) return { c: 0, reachW: 0, close: 0, out: 0, go: 0 };
+    if (tt < 1.6) {
+      const u = ease((tt - 0.2) / 1.4);
+      // The hands go out once the body is most of the way down; up to a high pan (no crouch) from the start.
+      return { c: u, reachW: smooth(lerp(0.5, 0, high), 1, u), close: 0, out: 0, go: 0 };
+    }
+    if (tt < 1.95) return { c: 1, reachW: 1, close: smooth(1.6, 1.9, tt), out: 0, go: 0 };
+    const out = ease(clamp((tt - 1.95) / 0.45, 0, 1));
+    const go = mj(clamp((tt - 2.25) / (PICK_S - 2.25), 0, 1));
+    return { c: 1 - go, reachW: 1, close: 1, out, go };
+  }
+  if (tt < 1.85) {
+    const go = 1 - mj(clamp(tt / 1.55, 0, 1));
+    const out = 1 - ease(clamp((tt - 1.4) / 0.45, 0, 1));
+    return { c: 1 - go, reachW: 1, close: 1, out, go };
+  }
+  if (tt < 2.2) return { c: 1, reachW: 1, close: 1 - smooth(1.85, 2.15, tt), out: 0, go: 0 };
+  // Hands off the pan first, then up.
+  const u = clamp((tt - 2.2) / (PLACE_S - 2.2), 0, 1);
+  return { c: 1 - ease(clamp((u - 0.2) / 0.8, 0, 1)), reachW: 1 - smooth(0, 0.3, u), close: 0, out: 0, go: 0 };
+}
+
+/** The crouch a pick needs to bring the shoulders within reach of the grips: none for a pan at or above the
+ *  shoulders (going down would take them further away). */
+function pickCrouch(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3]): number {
+  if (Math.min(goals[0].y, goals[1].y) > st.B.J.upper_arm_L!.y - 0.12 * st.B.s) return 0;
+  return crouchFor(st, goals, crouchDeep, 2.6);
+}
+
+/** How high a pan is for a pick or place: 0 a hand's span or more below the shoulders, 1 at or above them. */
+function pickHigh(st: Staff, o: WorkOpts): number {
+  const shY = st.B.J.upper_arm_L!.y;
+  const y = o.at ? o.at.y : (o.surfaceY ?? 0.32) + 0.1;
+  return smooth(shY - 0.25 * st.B.s, shY, y);
+}
+
+/** How much of a rise onto the toes a pan at this height asks for (0 at or below the shoulders, 1 well above). */
+function pickToes(st: Staff, o: WorkOpts): number {
+  const B = st.B;
+  const shelfY = o.at ? o.at.y : (o.surfaceY ?? 0.32) + 0.1;
+  const sh = B.J.upper_arm_L!.y;
+  return smooth(sh + 0.05 * B.s, sh + 0.3 * B.s, shelfY - 0.05);
+}
+
+/** How far up on the toes a pick or place goes, t seconds in: for a pan above the shoulders, while the hands are
+ *  at the shelf (until the pan is well on its way down). */
+function pickHeelRaise(st: Staff, o: WorkOpts, kind: WorkKind, tt: number): number {
+  const need = pickToes(st, o);
+  if (need <= 0 || o.panTurn || (kind !== "pick" && kind !== "place")) return 0;
+  const ph = pickPhase(kind, tt, pickHigh(st, o));
+  const atShelf = ph.reachW * (1 - smooth(0, 0.4, ph.go));
+  return 22 * DEG * need * atShelf;
+}
+
+/**
+ * How far (metres) a person's hands would fall short of a pan's grip points for a "pick" or "place" with these
+ * options, at the person's current placement: at the lowest crouch, or up on the toes for a high shelf, arms at
+ * full reach. 0 when the pan is in reach; otherwise stand that much closer (or choose another shelf). Place the
+ * person (st.place) where the pick will start first. It poses the body to measure, then puts the pose back, so call
+ * it while planning rather than every frame.
+ */
+export function pickShortfall(st: Staff, o: WorkOpts): number {
+  const B = st.B;
+  const s = B.s;
+  const shelf = target(st, o, V(0, (o.surfaceY ?? 0.32) + 0.1, 0.43 * s));
+  const lip = (sd: number) => shelf.clone().add(V(sd * (HOTEL_PAN.length / 2 - HOTEL_PAN.flange - 0.003), -0.05, -0.055));
+  let goals: readonly [THREE.Vector3, THREE.Vector3] = [lip(1), lip(-1)];
+  if (o.panTurn) {
+    // Turned: the hands on its sides at the spot, or (pushed home on runners) on its near end there.
+    const tmp = newPose();
+    const q = new THREE.Quaternion();
+    turnedSpot(st, o, shelf, q);
+    turnGrips(st, tmp, shelf, q, o.push ? "end" : "sides", 1, 1);
+    goals = [tmp.arms[0]!.pos.clone(), tmp.arms[1]!.pos.clone()];
+  }
+  const c = pickCrouch(st, goals);
+  const reach = (B.upper + B.fore) * 0.93 + 0.36 * B.d.hand_length_m;
+  const saved = copyPose(newPose(), st.current);
+  const tmp = newPose();
+  standPose(st, 0, tmp);
+  tmp.pelvis.x *= 0.4;
+  crouchDeep(st, tmp, c);
+  heelRaise(st, tmp, 22 * DEG * pickToes(st, o));
+  fitHips(st, tmp);
+  st.pose(tmp);
+  const short = Math.max(0, st.jointPos("upper_arm_L").distanceTo(goals[0]) - reach, st.jointPos("upper_arm_R").distanceTo(goals[1]) - reach);
+  st.pose(saved);
+  return short;
+}
+
 const crouchCache = new WeakMap<Staff, Map<string, number>>();
 
 /**
@@ -3895,8 +4292,8 @@ const crouchCache = new WeakMap<Staff, Map<string, number>>();
  * found by posing the body itself (so the spine's bend and the hips' fit are as they will be), then restoring it.
  * Cached per person and goal.
  */
-function crouchFor(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3]): number {
-  const key = goals.map((g) => g.toArray().map((x) => x.toFixed(3)).join(",")).join(";");
+function crouchFor(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3], how: (st: Staff, p: BodyPose, c: number) => void = crouch, cMax = 1.3): number {
+  const key = (how === crouch ? "" : "deep:") + goals.map((g) => g.toArray().map((x) => x.toFixed(3)).join(",")).join(";");
   let m = crouchCache.get(st);
   if (!m) crouchCache.set(st, (m = new Map()));
   const hit = m.get(key);
@@ -3909,7 +4306,7 @@ function crouchFor(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3]): n
   const ok = (c: number) => {
     standPose(st, 0, tmp);
     tmp.pelvis.x *= 0.4;
-    crouch(st, tmp, c);
+    how(st, tmp, c);
     fitHips(st, tmp);
     st.pose(tmp);
     return st.jointPos("upper_arm_L").distanceTo(goals[0]) <= reach && st.jointPos("upper_arm_R").distanceTo(goals[1]) <= reach;
@@ -3917,7 +4314,7 @@ function crouchFor(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3]): n
   let hi = 0;
   if (!ok(0)) {
     let lo = 0;
-    hi = 1.3;
+    hi = cMax;
     for (let k = 0; k < 16; k++) {
       const mid = (lo + hi) / 2;
       if (ok(mid)) hi = mid;
@@ -3930,10 +4327,21 @@ function crouchFor(st: Staff, goals: readonly [THREE.Vector3, THREE.Vector3]): n
   return hi;
 }
 
-/** A work pose at time t (seconds into the work) at the current placement. */
-export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {}, p: BodyPose = newPose()): BodyPose {
+/** Seconds a "pick" takes: from standing, down or out to the pan, hands closed on it, and up into the carry. */
+export const PICK_S = 3.85;
+/** Seconds a "place" takes: from the carry down or out onto the spot, hands opened and off, and standing again. */
+export const PLACE_S = 3.55;
+let pickScratch: [BodyPose, BodyPose] | null = null;
+
+/**
+ * The body's pose at work, t seconds into the work, at the current placement. `clock` is the time on the clock the neighbouring poses use (a Routine's
+ * time): "pick" starts from standing and ends in the carry at that time, and "place" the reverse, so they meet a
+ * walk with the pan, or standing, exactly. It defaults to t.
+ */
+export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {}, p: BodyPose = newPose(), clock?: number): BodyPose {
   const B = st.B;
   const s = B.s;
+  if (kind === "pick" || kind === "place") return o.panTurn ? turnedPickPlacePose(st, kind, t, o, p, clock ?? t) : pickPlacePose(st, kind, t, o, p, clock ?? t);
   standPose(st, t, p);
   const tempo = o.tempo ?? 1;
   const tt = t * tempo;
@@ -4069,6 +4477,24 @@ export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {},
     }
     case "carry": {
       const bob = 0.004 * Math.sin(tt * 2.1);
+      if (o.panTurn) {
+        // Turned: held by the long sides, at the waist or at a rail's height (rising to it, or coming down).
+        turnedCarry(st, bob, p.itemPos, p.itemQuat, o.holdY);
+        if (o.raise && o.holdY !== undefined) {
+          const u = smooth(0.1, 1.0, tt);
+          const k = o.raise === "up" ? u : 1 - u;
+          if (k < 1) {
+            turnedCarry(st, bob, _tv3, _tq, o.fromY);
+            p.itemPos.lerpVectors(_tv3, p.itemPos.clone(), k);
+          }
+        }
+        p.itemOn = true;
+        turnGrips(st, p, p.itemPos, p.itemQuat, "sides", 1, 1);
+        p.flex -= 2 * DEG;
+        p.gaze.set(0, B.eyeY - 0.3, 2.5);
+        balanceLoad(st, p);
+        break;
+      }
       carryFrame(st, bob, p.itemPos, p.itemQuat);
       p.itemOn = true;
       panGrips(st, p, p.itemPos, p.itemQuat, o.halfWidth ?? HOTEL_PAN.gripHalf, 1, 1);
@@ -4079,11 +4505,11 @@ export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {},
     }
     case "push": {
       const h = o.surfaceY ?? 1.02;
-      const bar = target(st, o, V(0, h, 0.5 * s));
+      const bar = target(st, o, V(0, h, o.reach ?? 0.5 * s));
       p.itemOn = true;
       p.itemPos.copy(bar);
       p.itemQuat.identity();
-      barGrips(st, p, bar, p.itemQuat);
+      barGrips(st, p, bar, p.itemQuat, o.halfWidth ?? 0.2 * s, o.uprights ?? false);
       p.flex += 10 * DEG;
       p.tilt += 0.06;
       p.pelvis.z += 0.03 * s;
@@ -4167,6 +4593,85 @@ export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {},
   return p;
 }
 
+
+/**
+ * Take a pan from a shelf into the carry ("pick"), or put it from the carry onto a shelf or counter ("place"). The
+ * pan's rim centre is `o.at` (world) on `o.surfaceY`; any height from a low shelf (about 0.1 m) to the top of a
+ * reach-in (about 1.6 m). The body goes as low as the hands need (`crouchFor`), no lower; above the waist it stays
+ * up and the arms reach. The pan comes off the shelf the way it went on: lifted clear of the rails, slid out
+ * towards the body (a short way at knee height, where the shins are), then carried up or down into the hold.
+ */
+function pickPlacePose(st: Staff, kind: "pick" | "place", tt: number, o: WorkOpts, p: BodyPose, clock: number): BodyPose {
+  const B = st.B;
+  const s = B.s;
+  standPose(st, tt, p);
+  p.pelvis.x *= 0.4;
+  const shelf = target(st, o, V(0, (o.surfaceY ?? 0.32) + 0.1, 0.43 * s));
+  const half = o.halfWidth ?? HOTEL_PAN.gripHalf;
+  const carryP = V();
+  const carryQ = new THREE.Quaternion();
+  carryFrame(st, 0, carryP, carryQ);
+  const lip = (sd: number) => shelf.clone().add(V(sd * (HOTEL_PAN.length / 2 - HOTEL_PAN.flange - 0.003), -0.05, -0.055));
+  const cLow = pickCrouch(st, [lip(1), lip(-1)]);
+  const high = pickHigh(st, o);
+  const { c, reachW, close, out, go } = pickPhase(kind, tt, high);
+  // The pan's way between the shelf and the hold: lifted clear of the rails and slid straight out (16 cm, clear of
+  // a reach-in's shelf front; less for a pan above the shoulders, which would come at the face), and only then up
+  // or down with the body as it rises or sinks. Low down it comes out in front of the shins, under the knees.
+  const slide =
+    Math.min(Math.max(0, shelf.z - carryP.z), 0.16 * s) * (1 - 0.6 * smooth(B.J.upper_arm_L!.y - 0.1 * s, B.J.upper_arm_L!.y + 0.1 * s, shelf.y));
+  const itemP = V(
+    lerp(shelf.x, carryP.x, go),
+    shelf.y + 0.012 * smooth(0, 0.25, out) + (carryP.y - shelf.y - 0.012) * go,
+    lerp(lerp(shelf.z, shelf.z - slide, out), carryP.z, go),
+  );
+  const itemQ = new THREE.Quaternion().slerp(carryQ, go);
+  p.itemOn = true;
+  p.itemPos.copy(itemP);
+  p.itemQuat.copy(itemQ);
+  crouchDeep(st, p, c * cLow);
+  heelRaise(st, p, pickHeelRaise(st, o, kind, tt));
+  panGrips(st, p, itemP, itemQ, half, close, reachW);
+  // Up to a pan at or above the shoulders the hands travel up in front of the body to it (the arm's IK on from early
+  // in the reach), rather than the arm swinging out sideways from its hang to the overhead solve.
+  const shY = B.J.upper_arm_L!.y;
+  if (high > 0 && reachW < 1) {
+    for (let i = 0; i < 2; i++) {
+      const a = p.arms[i]!;
+      const sd = i === 0 ? 1 : -1;
+      const from = V(sd * (Math.abs(B.J.upper_arm_L!.x) + 0.02 * s), shY - 0.8 * (B.upper + B.fore), 0.15 * s);
+      const path = V().lerpVectors(from, a.pos, ease(reachW));
+      a.pos.lerp(path, high);
+    }
+  }
+  for (const a of p.arms) {
+    a.flex = 0.06 + 0.9 * c * cLow;
+    a.elbow = 0.25;
+  }
+  const tall = 1 - c * Math.min(1, cLow / 0.4);
+  p.gaze.copy(itemP).lerp(V(0, B.eyeY - 0.45 * s, 1.8 * s), 0.5 * tall * (1 - go) * (itemP.y < B.eyeY - 0.3 ? 1 : 0)).lerp(V(0, B.eyeY, 3), go * 0.6);
+  // Exactly standing at the open end, exactly the carry at the other (on the shared clock).
+  pickScratch ??= [newPose(), newPose()];
+  const [carry, stand] = pickScratch;
+  const onShelf = out < 1e-6 && go < 1e-6;
+  if (kind === "pick") {
+    if (tt < 0.35) blendPose(p, standPose(st, clock, stand), p, smooth(0, 0.35, tt));
+    const w = smooth(PICK_S - 0.5, PICK_S, tt);
+    if (w > 0) blendPose(p, p, workPose(st, "carry", clock, o, carry), w);
+  } else {
+    const w = 1 - smooth(0, 0.5, tt);
+    if (w > 0) blendPose(p, p, workPose(st, "carry", clock, o, carry), w);
+    const ws = smooth(PLACE_S - 0.45, PLACE_S, tt);
+    if (ws > 0) blendPose(p, p, standPose(st, clock, stand), ws);
+  }
+  // The pan stays in the socket throughout: in the hands, or where it sits on the shelf.
+  p.itemOn = true;
+  if (onShelf) {
+    p.itemPos.copy(itemP);
+    p.itemQuat.copy(itemQ);
+  }
+  return p;
+}
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* Walking: a footstep plan along a smoothed path, feet planted where they land, the body carried over them.     */
@@ -4284,7 +4789,10 @@ export type RoutineStep =
   | { kind: "walk"; path: readonly (readonly [number, number])[]; speed?: number; upper?: Upper; opts?: WorkOpts }
   | { kind: "turn"; yaw: number; upper?: Upper; opts?: WorkOpts }
   | { kind: "work"; work: WorkKind; duration: number; opts?: WorkOpts }
-  | { kind: "stand"; duration: number };
+  | { kind: "stand"; duration: number }
+  /** A few centimetres in any direction (back from a counter, sideways along it) without turning: short steps,
+   *  two for up to about a third of a stride, more for further, the body carried with the feet. */
+  | { kind: "shuffle"; to: readonly [number, number]; upper?: Upper; opts?: WorkOpts };
 
 interface Seg {
   t0: number;
@@ -4316,6 +4824,21 @@ export interface RoutineState {
 
 const BIG = 1e9;
 
+/** What a segment's hands hold as it starts, and as it ends (a pick ends in the carry; a place starts in it). */
+function upAtStart(g: Seg): Upper {
+  return g.type === "work" && g.work === "place" ? "carry" : g.upper;
+}
+function upAtEnd(g: Seg): Upper {
+  return g.type === "work" && g.work === "pick" ? "carry" : g.upper;
+}
+/** Whether a segment ends (starts) in plain standing: its upper body is the standing pose there. */
+function standsAtEnd(g: Seg): boolean {
+  return upAtEnd(g) === "free" && (g.type !== "work" || g.work === "place");
+}
+function standsAtStart(g: Seg): boolean {
+  return upAtStart(g) === "free" && (g.type !== "work" || g.work === "pick");
+}
+
 /**
  * A person's timeline: walks, turns in place and work at stations, planned once into footsteps so that every pose
  * is a pure function of time. `apply(t)` places and poses the person; with `loop` the timeline repeats seamlessly
@@ -4333,6 +4856,9 @@ export class Routine {
   private pose = newPose();
   private aux = newPose();
 
+  /** When each step begins (seconds from the start), and after the last, when the routine ends. */
+  readonly stepTimes: number[] = [];
+
   constructor(readonly staff: Staff, start: { x: number; z: number; yaw: number }, steps: readonly RoutineStep[], readonly loop = true) {
     this.cx = start.x;
     this.cz = start.z;
@@ -4342,8 +4868,10 @@ export class Routine {
       this.plants[side].push(this.plant(x, z, this.cyaw + sgn(side) * TOE_OUT, -BIG, "init"));
     }
     for (const st of steps) {
+      this.stepTimes.push(this.t);
       if (st.kind === "turn") this.planTurn(st.yaw, st.upper ?? "free", st.opts);
       else if (st.kind === "walk") this.planWalk(st.path, st.speed ?? 1.0, st.upper ?? "free", st.opts);
+      else if (st.kind === "shuffle") this.planShuffle(st.to, st.upper ?? "free", st.opts);
       else {
         const dur = st.duration;
         if (dur <= 0) continue;
@@ -4353,6 +4881,7 @@ export class Routine {
         this.t += dur;
       }
     }
+    this.stepTimes.push(this.t);
     if (!this.segs.length) this.segs.push({ t0: 0, t1: 1, type: "stand", x: this.cx, z: this.cz, yaw0: this.cyaw, yaw1: this.cyaw, upper: "free" });
     this.duration = Math.max(this.t, 1e-3);
     // Weight transfer: a foot takes the load while the other is still down (double support) and hands it over
@@ -4418,6 +4947,39 @@ export class Routine {
     this.segs.push({ t0, t1, type: "turn", x: this.cx, z: this.cz, yaw0: this.cyaw, yaw1: this.cyaw + d, upper, opts });
     this.t = t1;
     this.cyaw = this.cyaw + d;
+  }
+
+  /** Step to (x, z) keeping the heading: pairs of short steps, the foot on the side moved towards leading. */
+  private planShuffle(to: readonly [number, number], upper: Upper, opts?: WorkOpts): void {
+    const s = this.staff.B.s;
+    const dx = to[0] - this.cx;
+    const dz = to[1] - this.cz;
+    const D = Math.hypot(dx, dz);
+    if (D < 0.004) return;
+    // A third of a stride (two steps at 1 m/s) a pair.
+    const pairs = Math.max(1, Math.ceil(D / (0.36 * s)));
+    const lat = dx * Math.cos(this.cyaw) - dz * Math.sin(this.cyaw);
+    const lead: Side = Math.abs(lat) > 0.35 * D ? (lat > 0 ? "L" : "R") : this.lastStep === "L" ? "R" : "L";
+    const other: Side = lead === "L" ? "R" : "L";
+    const t0 = this.t;
+    let k = 0;
+    for (let j = 1; j <= pairs; j++) {
+      const cx = this.cx + (dx * j) / pairs;
+      const cz = this.cz + (dz * j) / pairs;
+      for (const side of [lead, other]) {
+        const [x, z] = this.stanceAt(cx, cz, this.cyaw, side);
+        const lift = t0 + 0.2 + k * 0.5;
+        this.step(side, lift, "step", this.plant(x, z, this.cyaw + sgn(side) * TOE_OUT, lift + 0.36, "step"));
+        k++;
+      }
+    }
+    const t1 = t0 + 0.3 + k * 0.5;
+    // The root moves between the stances over the shuffle, carried by the feet; the heading stays.
+    const path = new FloorPath([[this.cx, this.cz], [to[0], to[1]]], 0.55 * s);
+    this.segs.push({ t0, t1, type: "turn", x: this.cx, z: this.cz, yaw0: this.cyaw, yaw1: this.cyaw, path, upper, opts });
+    this.t = t1;
+    this.cx = to[0];
+    this.cz = to[1];
   }
 
   private planWalk(pts: readonly (readonly [number, number])[], v: number, upper: Upper, opts?: WorkOpts): void {
@@ -4670,9 +5232,43 @@ export class Routine {
   /** The upper-body pose a segment holds at time t (standing, working, or carrying / pushing). */
   private upperPose(g: Seg, tm: number, p: BodyPose): BodyPose {
     const st = this.staff;
-    if (g.type === "work") return workPose(st, g.work!, tm - g.t0, g.opts ?? {}, p);
+    if (g.type === "work") return workPose(st, g.work!, tm - g.t0, g.opts ?? {}, p, tm);
     if (g.upper !== "free") return workPose(st, g.upper, tm, g.opts ?? {}, p);
     return standPose(st, tm, p);
+  }
+
+  /** Where the root is in a segment at routine time tm (and how far along a walk's path). */
+  private rootOf(g: Seg, tm: number): { x: number; z: number; yaw: number; along: number } {
+    if (g.type === "walk") {
+      const along = g.prog!.at(tm);
+      const a = g.path!.at(along);
+      return { x: a.x, z: a.z, yaw: a.yaw, along };
+    }
+    if (g.type === "turn") {
+      const u = ease(clamp((tm - g.t0 - 0.1) / Math.max(0.1, g.t1 - g.t0 - 0.3), 0, 1));
+      const yaw = g.yaw0 + wrapPi(g.yaw1 - g.yaw0) * u;
+      if (g.path) {
+        const a = g.path.at(g.path.length * u);
+        return { x: a.x, z: a.z, yaw, along: 0 };
+      }
+      return { x: g.x, z: g.z, yaw, along: 0 };
+    }
+    return { x: g.x, z: g.z, yaw: g.yaw0, along: 0 };
+  }
+
+  /** The root (floor point between the feet, and heading) at time t, as `apply(t)` places it, without posing. */
+  rootAt(t: number): { x: number; z: number; yaw: number } {
+    const D = this.duration;
+    const tm = this.loop ? ((t % D) + D) % D : clamp(t, 0, D);
+    const r = this.rootOf(this.segs[this.segIndex(tm)]!, tm);
+    return { x: r.x, z: r.z, yaw: r.yaw };
+  }
+
+  /** What the person is doing at time t (as `apply(t)` would report it), without posing. */
+  activityAt(t: number): RoutineState["activity"] {
+    const D = this.duration;
+    const tm = this.loop ? ((t % D) + D) % D : clamp(t, 0, D);
+    return this.segs[this.segIndex(tm)]!.type;
   }
 
   /** Place and pose the person at time t; returns what they are doing. */
@@ -4690,32 +5286,21 @@ export class Routine {
     const next = this.segs[gi < n - 1 ? gi + 1 : this.loop ? 0 : n - 1]!;
     const local = tm - g.t0;
     // Root placement.
-    let rx = g.x;
-    let rz = g.z;
-    let ryaw = g.yaw0;
-    let along = 0;
-    if (g.type === "walk") {
-      along = g.prog!.at(tm);
-      const a = g.path!.at(along);
-      rx = a.x;
-      rz = a.z;
-      ryaw = a.yaw;
-    } else if (g.type === "turn") {
-      const u = ease(clamp((tm - g.t0 - 0.1) / Math.max(0.1, g.t1 - g.t0 - 0.3), 0, 1));
-      ryaw = g.yaw0 + wrapPi(g.yaw1 - g.yaw0) * u;
-      if (g.path) {
-        const a = g.path.at(g.path.length * u);
-        rx = a.x;
-        rz = a.z;
-      }
-    }
-    st.place(rx, rz, ryaw);
+    const root = this.rootOf(g, tm);
+    const ryaw = root.yaw;
+    const along = root.along;
+    st.place(root.x, root.z, ryaw);
     // Upper body: the segment's own, eased from and to standing where the neighbours hold something else.
     const p = this.upperPose(g, tm, this.pose);
     const ramp = g.type === "work" ? 0.9 : 0.6;
     const span = g.t1 - g.t0;
-    const rIn = g.upper !== "free" && prev.upper === g.upper ? 1 : smooth(g.t0, g.t0 + Math.min(ramp, span / 2), tm);
-    const rOut = g.upper !== "free" && next.upper === g.upper ? 1 : 1 - smooth(g.t1 - Math.min(ramp, span / 2), g.t1, tm);
+    // What the hands hold as a segment starts and ends: a pick ends in the carry, a place starts in it. Where
+    // neighbours meet holding the same thing there is no ramp; nor where a pick starts, or a place ends, standing
+    // (they do that themselves, on the routine's clock).
+    const uS = upAtStart(g);
+    const uE = upAtEnd(g);
+    const rIn = (uS !== "free" && upAtEnd(prev) === uS) || (g.work === "pick" && g.type === "work" && standsAtEnd(prev)) ? 1 : smooth(g.t0, g.t0 + Math.min(ramp, span / 2), tm);
+    const rOut = (uE !== "free" && upAtStart(next) === uE) || (g.work === "place" && g.type === "work" && standsAtStart(next)) ? 1 : 1 - smooth(g.t1 - Math.min(ramp, span / 2), g.t1, tm);
     const wU = g.type === "work" || g.upper !== "free" ? rIn * rOut : 1;
     if (wU < 1) blendPose(p, standPose(st, tm, this.aux), p, wU);
     // Feet from the plan.
@@ -4731,6 +5316,8 @@ export class Routine {
       fo.quat.setFromAxisAngle(Y, f.yaw - ryaw).multiply(qAxis(X, -f.pitch, _q1));
       fo.toe = f.toe;
     }
+    // A pick or place up at a high shelf goes up on the toes (the hips are already up in the upper pose).
+    if (g.type === "work" && (g.work === "pick" || g.work === "place")) heelRaise(st, p, pickHeelRaise(st, g.opts ?? {}, g.work, local), false);
     // The gait on top: eased in and out at the segment's ends so it meets standing without a jump.
     const moving = g.type === "walk" || g.type === "turn";
     const restY = p.pelvis.y;
@@ -4803,9 +5390,17 @@ export class Routine {
         p.feet[i]!.quat.setFromAxisAngle(Y, f.yaw - ryaw).multiply(qAxis(X, -pitch, _q1));
       }
     const dy = p.pelvis.y - restY;
-    if (g.upper === "carry" || (g.type === "work" && g.work === "carry")) {
-      p.itemPos.y += dy;
-      for (const a of p.arms) if (a.ik > 0) a.pos.y += dy;
+    const held =
+      g.type === "work" && g.work === "pick"
+        ? smooth(g.t1 - 0.5, g.t1, tm)
+        : g.type === "work" && g.work === "place"
+          ? 1 - smooth(g.t0, g.t0 + 0.5, tm)
+          : g.upper === "carry" || (g.type === "work" && g.work === "carry")
+            ? 1
+            : 0;
+    if (held > 0) {
+      p.itemPos.y += dy * held;
+      for (const a of p.arms) if (a.ik > 0) a.pos.y += dy * held;
     }
     st.pose(p);
     return { activity: g.type, work: g.work, local, holding: p.itemOn, blocked: st.obstacles ? st.collide() : undefined };

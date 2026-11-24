@@ -46,15 +46,20 @@ function rng(seed: number): () => number {
   };
 }
 
-/** Food and packaging tiles, 8 across and 4 down. */
+/**
+ * Food and packaging tiles, 8 across and 6 down. The last two rows are the bake shop's: crusts and doughs mapped
+ * onto each roll from above, and whole sheet pans seen from across the room.
+ */
 export const T = {
   tomato: 0, lettuce: 1, onion: 2, cheese: 3, pepper: 4, olive: 5, jalapeno: 6, redOnion: 7,
   cucumber: 8, ham: 9, chicken: 10, mushroom: 11, corn: 12, pickle: 13, banana: 14, spinach: 15,
   chili: 16, rice: 17, braise: 18, mac: 19, roastVeg: 20, mash: 21, sauce: 22, soup: 23,
   kraft: 24, kraftLabel: 25, canRed: 26, canGreen: 27, lidRed: 28, lidBlue: 29, lidGreen: 30, white: 31,
+  crust: 32, cookie: 33, skin: 34, dough: 35, frosting: 36, parchment: 37, flourDust: 38, glaze: 39,
+  panRolls: 40, panCookies: 41, panChicken: 42, panDough: 43, panCake: 44, tubWhite: 45, canLid: 46, spare: 47,
 } as const;
 const AT_COLS = 8;
-const AT_ROWS = 4;
+const AT_ROWS = 6;
 const TILE = 128;
 
 type Piece = { c: string[]; n: number; w: [number, number]; h: [number, number]; shape: "rect" | "ellipse" | "ring" | "strip" | "disc" };
@@ -82,7 +87,13 @@ function drawTile(x: CanvasRenderingContext2D, t: number, base: string, pieces: 
       x.beginPath();
       if (p.shape === "rect" || p.shape === "strip") x.rect(-w / 2, -h / 2, w, h);
       else x.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
+      // Each piece casts a soft shadow on those under it, so the heap reads as pieces lying on pieces.
+      x.shadowColor = "rgba(0,0,0,0.42)";
+      x.shadowBlur = 2.5;
+      x.shadowOffsetX = 0.8;
+      x.shadowOffsetY = 1.3;
       x.fill();
+      x.shadowColor = "rgba(0,0,0,0)";
       if (p.shape === "ring") {
         x.fillStyle = "rgba(0,0,0,0.55)";
         x.beginPath();
@@ -100,6 +111,170 @@ function drawTile(x: CanvasRenderingContext2D, t: number, base: string, pieces: 
       x.restore();
     }
   x.restore();
+}
+
+/** The tile's top-left corner on the atlas canvas. */
+function tileAt(t: number): [number, number] {
+  return [(t % AT_COLS) * TILE, Math.floor(t / AT_COLS) * TILE];
+}
+
+/** A soft radial blob: `inner` at the centre fading to `outer` at radius `r` (canvas px). */
+function blob(x: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, stops: [number, string][]): void {
+  x.save();
+  x.translate(cx, cy);
+  x.scale(1, ry / rx);
+  const g = x.createRadialGradient(0, 0, 0, 0, 0, rx);
+  for (const [o, c] of stops) g.addColorStop(o, c);
+  x.fillStyle = g;
+  x.beginPath();
+  x.arc(0, 0, rx, 0, Math.PI * 2);
+  x.fill();
+  x.restore();
+}
+
+/**
+ * The bake shop's tiles. The single-piece tiles (crust, cookie, skin, dough) are seen from straight above, centred,
+ * so a dome mapped from above takes the colour of a roll: deep brown on the crown paling to the cream of its
+ * sides. The pan tiles are whole 18 × 26 in sheet pans (u across, v along), for the rack seen from the aisle.
+ */
+function drawBakery(x: CanvasRenderingContext2D): void {
+  const r = rng(77);
+  const speck = (ox: number, oy: number, n: number, cols: string[], s0: number, s1: number, rad = TILE / 2) => {
+    for (let i = 0; i < n; i++) {
+      const a = r() * Math.PI * 2;
+      const d = Math.sqrt(r()) * rad;
+      x.fillStyle = cols[Math.floor(r() * cols.length)]!;
+      const sz = s0 + r() * (s1 - s0);
+      x.beginPath();
+      x.ellipse(ox + TILE / 2 + Math.cos(a) * d, oy + TILE / 2 + Math.sin(a) * d, sz, sz * (0.5 + r() * 0.5), r() * 3, 0, Math.PI * 2);
+      x.fill();
+    }
+  };
+  const fill = (t: number, col: string) => {
+    const [ox, oy] = tileAt(t);
+    x.fillStyle = col;
+    x.fillRect(ox, oy, TILE, TILE);
+    return [ox, oy] as const;
+  };
+  {
+    // A baked roll's crust: glossy mahogany crown, golden shoulders, pale where it rose against its neighbours.
+    const [ox, oy] = fill(T.crust, "#e9cf9a");
+    blob(x, ox + 64, oy + 64, 64, 64, [[0, "#7c3c12"], [0.3, "#94521c"], [0.55, "#b4702c"], [0.75, "#cf9547"], [0.9, "#e0b36e"], [1, "#ebcc96"]]);
+    speck(ox, oy, 60, ["rgba(255,230,180,0.18)", "rgba(60,25,5,0.16)"], 1, 3, 40);
+  }
+  {
+    // A chocolate-chip cookie: golden, darker at the rim, cracked, studded with chips.
+    const [ox, oy] = fill(T.cookie, "#b87a35");
+    blob(x, ox + 64, oy + 64, 64, 64, [[0, "#e0b66e"], [0.55, "#d5a256"], [0.85, "#b97c36"], [1, "#8f5822"]]);
+    x.strokeStyle = "rgba(120,70,25,0.45)";
+    x.lineWidth = 1.2;
+    for (let i = 0; i < 9; i++) {
+      x.beginPath();
+      let px = ox + 64 + (r() - 0.5) * 60;
+      let py = oy + 64 + (r() - 0.5) * 60;
+      x.moveTo(px, py);
+      for (let k = 0; k < 3; k++) {
+        px += (r() - 0.5) * 22;
+        py += (r() - 0.5) * 22;
+        x.lineTo(px, py);
+      }
+      x.stroke();
+    }
+    speck(ox, oy, 16, ["#3a1e10", "#2a140a", "#4a2814"], 3.5, 6, 46);
+  }
+  {
+    // Roast chicken skin: mottled amber and brown, crisp patches, a few herb flecks.
+    const [ox, oy] = fill(T.skin, "#b8732e");
+    for (let i = 0; i < 70; i++) blob(x, ox + r() * TILE, oy + r() * TILE, 8 + r() * 18, 6 + r() * 14, [[0, r() < 0.5 ? "rgba(122,58,18,0.55)" : "rgba(230,170,90,0.5)"], [1, "rgba(0,0,0,0)"]]);
+    speck(ox, oy, 40, ["#2a1a0c", "#3a2412", "#1c120a"], 0.7, 1.4, 64);
+  }
+  {
+    // Proofing dough: pale and matt, a dusting of flour.
+    const [ox, oy] = fill(T.dough, "#e6d2aa");
+    blob(x, ox + 64, oy + 64, 64, 64, [[0, "#efdfbf"], [0.7, "#e8d4ae"], [1, "#dcc49a"]]);
+    speck(ox, oy, 90, ["rgba(255,255,255,0.5)"], 0.6, 1.4, 60);
+  }
+  {
+    // Chocolate frosting swirled on with a palette knife: overlapping arcs, glossy ridges and soft hollows.
+    const [ox, oy] = fill(T.frosting, "#4a2716");
+    x.save();
+    x.beginPath();
+    x.rect(ox, oy, TILE, TILE);
+    x.clip();
+    for (let i = 0; i < 46; i++) {
+      const cx = ox + r() * TILE;
+      const cy = oy + r() * TILE;
+      const rad = 8 + r() * 18;
+      const a0 = r() * Math.PI * 2;
+      x.lineWidth = 2 + r() * 3;
+      x.strokeStyle = r() < 0.5 ? "rgba(122,70,40,0.5)" : "rgba(34,15,6,0.45)";
+      x.beginPath();
+      x.arc(cx, cy, rad, a0, a0 + 1.2 + r() * 2);
+      x.stroke();
+    }
+    x.restore();
+  }
+  {
+    // Parchment: off-white, faint creases.
+    const [ox, oy] = fill(T.parchment, "#ece4d0");
+    x.strokeStyle = "rgba(150,130,100,0.18)";
+    for (let i = 0; i < 7; i++) {
+      x.beginPath();
+      x.moveTo(ox + r() * TILE, oy);
+      x.lineTo(ox + r() * TILE, oy + TILE);
+      x.stroke();
+    }
+  }
+  {
+    const [ox, oy] = fill(T.flourDust, "#f3ead8");
+    speck(ox, oy, 160, ["rgba(255,255,255,0.7)", "rgba(220,200,160,0.3)"], 0.6, 1.6, 64);
+  }
+  {
+    const [ox, oy] = fill(T.glaze, "#c88a3a");
+    blob(x, ox + 64, oy + 64, 64, 64, [[0, "#f1d49a"], [0.7, "#d9a45a"], [1, "#b8782e"]]);
+  }
+  // Whole pans for the far view: 4 across, 6 along, on parchment.
+  const pan = (t: number, piece: (cx: number, cy: number, rx: number, ry: number) => void, nu = 4, nv = 6) => {
+    const [ox, oy] = fill(t, "#e8dfc9");
+    x.fillStyle = "#9da3a8";
+    x.fillRect(ox, oy, TILE, 3);
+    x.fillRect(ox, oy + TILE - 3, TILE, 3);
+    x.fillRect(ox, oy, 3, TILE);
+    x.fillRect(ox + TILE - 3, oy, 3, TILE);
+    for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) piece(ox + ((i + 0.5) / nu) * TILE, oy + ((j + 0.5) / nv) * TILE, (TILE / nu) * 0.42, (TILE / nv) * 0.42);
+  };
+  pan(T.panRolls, (cx, cy, rx, ry) => blob(x, cx, cy, rx, ry, [[0, "#7a3f16"], [0.5, "#a8662a"], [0.85, "#d9a75e"], [1, "rgba(230,200,150,0.6)"]]));
+  pan(T.panCookies, (cx, cy, rx, ry) => {
+    blob(x, cx, cy, rx, ry, [[0, "#e0b66e"], [0.8, "#c58c44"], [1, "#94602a"]]);
+    x.fillStyle = "#3a1e10";
+    for (let k = 0; k < 3; k++) x.fillRect(cx + (r() - 0.5) * rx, cy + (r() - 0.5) * ry, 2, 2);
+  });
+  pan(T.panChicken, (cx, cy, rx, ry) => blob(x, cx + (r() - 0.5) * 3, cy, rx * 1.05, ry * 0.95, [[0, "#9a5220"], [0.6, "#b8732e"], [1, "#d9a060"]]), 3, 5);
+  pan(T.panDough, (cx, cy, rx, ry) => blob(x, cx, cy, rx, ry, [[0, "#f7efdc"], [0.8, "#ecdcbc"], [1, "#d8c49c"]]));
+  {
+    const [ox, oy] = tileAt(T.panCake);
+    x.drawImage(x.canvas, ...tileAt(T.frosting), TILE, TILE, ox, oy, TILE, TILE);
+  }
+  {
+    // A white HDPE tub's wall: faint mould lines and the graduations moulded in.
+    const [ox, oy] = fill(T.tubWhite, "#eeede7");
+    x.fillStyle = "rgba(0,0,0,0.06)";
+    for (let i = 0; i < 8; i++) x.fillRect(ox + 10, oy + 16 + i * 12, 14, 1.5);
+    x.fillStyle = "rgba(0,0,0,0.035)";
+    x.fillRect(ox + 60, oy, 1, TILE);
+  }
+  {
+    // A can's lid: tinplate rings pressed in.
+    const [ox, oy] = fill(T.canLid, "#b9bcbf");
+    for (let i = 0; i < 6; i++) {
+      x.strokeStyle = i % 2 ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.22)";
+      x.lineWidth = 2;
+      x.beginPath();
+      x.arc(ox + 64, oy + 64, 60 - i * 7, 0, Math.PI * 2);
+      x.stroke();
+    }
+  }
+  fill(T.spare, "#808080");
 }
 
 let goodsCache: THREE.MeshStandardMaterial | null = null;
@@ -166,6 +341,7 @@ export function goodsMaterial(): THREE.MeshStandardMaterial {
     x.fillStyle = col;
     x.fillRect((t % AT_COLS) * TILE, Math.floor(t / AT_COLS) * TILE, TILE, TILE);
   }
+  drawBakery(x);
   const map = new THREE.CanvasTexture(c);
   map.colorSpace = THREE.SRGBColorSpace;
   map.anisotropy = 8;
@@ -279,8 +455,67 @@ function decal(w: number, h: number, tile: number, cols: number): THREE.BufferGe
   return intoTile(g, r);
 }
 
-/** Translucent PVC strip, the clear blue-tinged 2 mm film of a doorway curtain. */
+/**
+ * A cutting board's HDPE: off-white, satin, crossed by fine knife scores that roughen it where they run and catch
+ * a little grey, a faint stain or two. UVs in metres (a tile is 0.3 m).
+ */
+let boardCache: THREE.MeshStandardMaterial | null = null;
+function boardMaterial(): THREE.MeshStandardMaterial {
+  if (boardCache) return boardCache;
+  const N = 512;
+  const c = document.createElement("canvas");
+  c.width = c.height = N;
+  const x = c.getContext("2d")!;
+  const r = rng(91);
+  x.fillStyle = "#d6d2c6";
+  x.fillRect(0, 0, N, N);
+  for (let i = 0; i < 6; i++) {
+    const g = x.createRadialGradient(r() * N, r() * N, 0, r() * N, r() * N, 60 + r() * 120);
+    g.addColorStop(0, "rgba(196,188,170,0.10)");
+    g.addColorStop(1, "rgba(196,188,170,0)");
+    x.fillStyle = g;
+    x.fillRect(0, 0, N, N);
+  }
+  const rough = document.createElement("canvas");
+  rough.width = rough.height = N;
+  const y = rough.getContext("2d")!;
+  y.fillStyle = "#8a8a8a";
+  y.fillRect(0, 0, N, N);
+  for (let i = 0; i < 900; i++) {
+    const a = (r() < 0.6 ? 0 : Math.PI / 2) + (r() - 0.5) * 0.7;
+    const len = 10 + r() * 70;
+    const px = r() * N;
+    const py = r() * N;
+    for (const [ctx, col, lw] of [[x, `rgba(112,106,94,${0.08 + r() * 0.16})`, 0.8], [y, "rgba(235,235,235,0.5)", 1.2]] as const) {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len);
+      ctx.stroke();
+    }
+  }
+  const map = new THREE.CanvasTexture(c);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const rmap = new THREE.CanvasTexture(rough);
+  for (const t of [map, rmap]) {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(1 / 0.3, 1 / 0.3);
+    t.anisotropy = 8;
+  }
+  const m = new THREE.MeshStandardMaterial({ map, roughnessMap: rmap, roughness: 0.72, metalness: 0, color: 0xffffff });
+  m.userData.uv = "own";
+  return (boardCache = m);
+}
+
+/** The photoluminescent plastic of a walk-in's inside safety release: pale green, faintly aglow. */
+let glowCache: THREE.MeshStandardMaterial | null = null;
+function glowMaterial(): THREE.MeshStandardMaterial {
+  return (glowCache ??= new THREE.MeshStandardMaterial({ color: 0xd4ecbd, emissive: 0x5d9a46, emissiveIntensity: 0.3, roughness: 0.42 }));
+}
+
 let pvcCache: THREE.MeshPhysicalMaterial | null = null;
+/** Translucent PVC strip, the clear blue-tinged 2 mm film of a doorway curtain. */
 function pvcMaterial(): THREE.MeshPhysicalMaterial {
   if (pvcCache) return pvcCache;
   const m = new THREE.MeshPhysicalMaterial({ color: 0xb8d4dc, metalness: 0, roughness: 0.18, transparent: true, opacity: 0.38, side: THREE.DoubleSide, depthWrite: false, clearcoat: 0.6 });
@@ -378,7 +613,7 @@ function finCoil(s: Shop, fin: THREE.Material, len: number, hgt: number, dep: nu
     }
   }
   // Tube sheets, and the U-bends outside them that join each tube to the next in its circuit.
-  for (const x of [-0.006, len + 0.006]) s.add(p.ssDull, bx(s, 0.0016, hgt + 0.012, dep + 0.008, 0.0006), [x, hgt / 2, -dep / 2]);
+  for (const x of [-0.006, len + 0.006]) s.add(p.ssDull, bx(s, 0.0016, hgt + 0.003, dep + 0.003, 0.0006), [x, hgt / 2, -dep / 2]);
   if (bends && s.fine(1))
     for (const [x, side] of [[-0.012, -1], [len + 0.012, 1]] as const)
       for (let k = 0; k < ranks; k++) {
@@ -431,13 +666,14 @@ function axialFan(s: Shop, blade: THREE.Material, hub: THREE.Material, r: number
     g.computeVertexNormals();
     s.add(blade, g);
   }
+  // The profile runs bottom to top, so the lathe winds outward and reads from outside.
   const hg = lathe(s, [
-    [0, 0.018],
-    [rh * 0.5, 0.017],
-    [rh * 0.95, 0.008],
-    [rh, -0.006],
-    [rh * 0.9, -0.01],
     [0, -0.01],
+    [rh * 0.9, -0.01],
+    [rh, -0.006],
+    [rh * 0.95, 0.008],
+    [rh * 0.5, 0.017],
+    [0, 0.018],
   ], s.fine(2) ? (r < 0.07 ? 18 : 28) : 10);
   hg.rotateX(Math.PI / 2);
   s.add(hub, hg);
@@ -528,9 +764,10 @@ function compressor(s: Shop, r = 0.08, h = 0.24, n = 32): void {
 function dataPlate(s: Shop, w = 0.09, h = 0.09): void {
   const p = palette();
   if (!s.fine(1)) return;
-  s.add(plateMaterials().plate, decal(w, h, P.data, 4), [0, 0, 0.0006]);
-  s.add(p.ssDull, new THREE.BoxGeometry(w + 0.004, h + 0.004, 0.0005), [0, 0, 0.00025]);
-  if (s.fine(2)) for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) screwLite(s, p.ssBright, [(sx * (w - 0.006)) / 2, (sy * (h - 0.006)) / 2, 0.0008], 0.0018);
+  // The printed face stands half a millimetre proud of its backing plate, so the two never share a depth.
+  s.add(plateMaterials().plate, decal(w, h, P.data, 4), [0, 0, 0.0011]);
+  s.add(p.ssDull, new THREE.BoxGeometry(w + 0.004, h + 0.004, 0.0006), [0, 0, 0.0003]);
+  if (s.fine(2)) for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) screwLite(s, p.ssBright, [(sx * (w - 0.006)) / 2, (sy * (h - 0.006)) / 2, 0.0012], 0.0018);
 }
 
 /**
@@ -570,6 +807,154 @@ function openBox(w: number, h: number, d: number, drop: ("px" | "nx" | "py" | "n
   });
   g.setIndex(keep);
   g.clearGroups();
+  return g;
+}
+
+/** A shape through corners [x, y, r], each corner rounded by its own r (0 sharp), closed. */
+function roundedPoly(pts: readonly (readonly [number, number, number])[]): THREE.Shape {
+  const sh = new THREE.Shape();
+  const n = pts.length;
+  const along = (i: number, j: number, d: number): [number, number] => {
+    const a = pts[i]!;
+    const b = pts[j]!;
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return [a[0] + ((b[0] - a[0]) * d) / L, a[1] + ((b[1] - a[1]) * d) / L];
+  };
+  for (let i = 0; i < n; i++) {
+    const [x, y, r] = pts[i]!;
+    const prev = (i + n - 1) % n;
+    const next = (i + 1) % n;
+    if (r > 0) {
+      const a = along(i, prev, r);
+      const b = along(i, next, r);
+      if (i === 0) sh.moveTo(a[0], a[1]);
+      else sh.lineTo(a[0], a[1]);
+      sh.quadraticCurveTo(x, y, b[0], b[1]);
+    } else if (i === 0) sh.moveTo(x, y);
+    else sh.lineTo(x, y);
+  }
+  sh.closePath();
+  return sh;
+}
+
+/**
+ * A plate cut from `shape` (its own xy), `t` thick along +z from 0, its edges eased by `bev` without growing past the
+ * outline: a pressed or cast part whose edges catch the light.
+ */
+function bevelPlate(s: Shop, shape: THREE.Shape, t: number, bev: number, curve = 8): THREE.BufferGeometry {
+  const b = s.detail > 0 ? Math.min(bev, t / 2 - 1e-5) : 0;
+  const g = new THREE.ExtrudeGeometry(shape, {
+    depth: Math.max(1e-5, t - 2 * b),
+    bevelEnabled: b > 0,
+    bevelThickness: b,
+    bevelSize: b,
+    bevelOffset: -b,
+    bevelSegments: s.fine(2) ? 2 : 1,
+    curveSegments: s.seg(curve, 2),
+  });
+  if (b > 0) g.translate(0, 0, b);
+  return g;
+}
+
+/**
+ * A formed angle trimming an outside corner. In its own frame the corner runs along z from 0 to `len`; one face of
+ * the corner is the plane y = 0 reaching toward +x, the other the plane x = 0 reaching toward -y. The sheet, `t`
+ * thick, stands `gap` off both faces, `legA` along the first and `legB` down the second, its heel rounded to `R`.
+ */
+function angleBar(s: Shop, legA: number, legB: number, len: number, t = 0.0012, R = 0.005, gap = 0.0006): THREE.BufferGeometry {
+  const sh = new THREE.Shape();
+  const cx = -gap - t + R;
+  const cy = gap + t - R;
+  sh.moveTo(legA, gap);
+  sh.lineTo(legA, gap + t);
+  sh.lineTo(cx, gap + t);
+  sh.absarc(cx, cy, R, Math.PI / 2, Math.PI, false);
+  sh.lineTo(-gap - t, -legB);
+  sh.lineTo(-gap, -legB);
+  sh.lineTo(-gap, cy);
+  sh.absarc(cx, cy, R - t, Math.PI, Math.PI / 2, true);
+  sh.lineTo(legA, gap);
+  return new THREE.ExtrudeGeometry(sh, { depth: len, bevelEnabled: false, curveSegments: s.seg(6, 2) });
+}
+
+/** A polyline in a plane with each interior corner rounded to `r` by `k` segments. */
+function roundPath(pts: readonly (readonly [number, number])[], r: number, k: number): [number, number][] {
+  const out: [number, number][] = [[pts[0]![0], pts[0]![1]]];
+  for (let i = 1; i + 1 < pts.length; i++) {
+    const [ax, ay] = pts[i - 1]!;
+    const [px, py] = pts[i]!;
+    const [bx2, by2] = pts[i + 1]!;
+    const la = Math.hypot(px - ax, py - ay);
+    const lb = Math.hypot(bx2 - px, by2 - py);
+    const rr = Math.min(r, la * 0.45, lb * 0.45);
+    const a: [number, number] = [px + ((ax - px) * rr) / la, py + ((ay - py) * rr) / la];
+    const b: [number, number] = [px + ((bx2 - px) * rr) / lb, py + ((by2 - py) * rr) / lb];
+    for (let j = 0; j <= k; j++) {
+      const t = j / k;
+      const u = 1 - t;
+      out.push([u * u * a[0] + 2 * u * t * px + t * t * b[0], u * u * a[1] + 2 * u * t * py + t * t * b[1]]);
+    }
+  }
+  const last = pts[pts.length - 1]!;
+  out.push([last[0], last[1]]);
+  return out;
+}
+
+/**
+ * A closed section swept along a polyline lying in the plane z = z0 of the current frame: `prof` points are (u, v),
+ * u across the path in its plane, v out of the plane along `out`; mitred at each vertex, its ends left open (they
+ * always die into another part). Wound to face away from the section's centre. A gasket round a door, a bead.
+ */
+function sweepPath(path: readonly (readonly [number, number])[], prof: readonly (readonly [number, number])[], z0: number, out: 1 | -1): THREE.BufferGeometry {
+  const n = path.length;
+  const m = prof.length;
+  const pos: number[] = [];
+  const unit = (x: number, y: number): [number, number] => {
+    const L = Math.hypot(x, y) || 1;
+    return [x / L, y / L];
+  };
+  for (let i = 0; i < n; i++) {
+    const P = path[i]!;
+    const t0 = i > 0 ? unit(P[0] - path[i - 1]![0], P[1] - path[i - 1]![1]) : null;
+    const t1 = i + 1 < n ? unit(path[i + 1]![0] - P[0], path[i + 1]![1] - P[1]) : null;
+    const [tx, ty] = unit((t0?.[0] ?? 0) + (t1?.[0] ?? 0), (t0?.[1] ?? 0) + (t1?.[1] ?? 0));
+    const nx = -ty;
+    const ny = tx;
+    const sg = t1 ?? t0!;
+    const c = Math.max(0.35, nx * -sg[1] + ny * sg[0]);
+    for (const [u, v] of prof) pos.push(P[0] + (nx * u) / c, P[1] + (ny * u) / c, z0 + out * v);
+  }
+  const idx: number[] = [];
+  for (let i = 0; i + 1 < n; i++)
+    for (let k = 0; k < m; k++) {
+      const k2 = (k + 1) % m;
+      const a = i * m + k;
+      const b = i * m + k2;
+      const c = (i + 1) * m + k;
+      const d = (i + 1) * m + k2;
+      idx.push(a, c, b, b, c, d);
+    }
+  // Face outward: test the first quad against the direction from the section's centre to it.
+  const V = (q: number) => new THREE.Vector3(pos[q * 3]!, pos[q * 3 + 1]!, pos[q * 3 + 2]!);
+  const cu = prof.reduce((a, q) => a + q[0], 0) / m;
+  const cv = prof.reduce((a, q) => a + q[1], 0) / m;
+  void cu;
+  const A = V(0);
+  const C = V(m);
+  const B = V(1);
+  const nrm = new THREE.Vector3().subVectors(C, A).cross(new THREE.Vector3().subVectors(B, A));
+  const mid = A.clone().add(B).multiplyScalar(0.5);
+  const ctr = new THREE.Vector3(path[0]![0], path[0]![1], z0 + out * cv);
+  if (nrm.dot(mid.sub(ctr)) < 0)
+    for (let i = 0; i < idx.length; i += 3) {
+      const tmp = idx[i + 1]!;
+      idx[i + 1] = idx[i + 2]!;
+      idx[i + 2] = tmp;
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
   return g;
 }
 
@@ -702,17 +1087,75 @@ function loft(s: Shop, rings: Ring[], capFirst: -1 | 0 | 1, capLast: -1 | 0 | 1,
   return g;
 }
 
+/** Smooth value noise in the plane, about -1..1, a lattice of unit cells. */
+function vnoise(x: number, z: number, seed: number): number {
+  const h = (i: number, j: number) => {
+    let n = (i * 374761393 + j * 668265263 + seed * 982451653) | 0;
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 2147483648 - 1;
+  };
+  const i = Math.floor(x);
+  const j = Math.floor(z);
+  const fx = x - i;
+  const fz = z - j;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fz * fz * (3 - 2 * fz);
+  const a = h(i, j) + (h(i + 1, j) - h(i, j)) * u;
+  const b = h(i, j + 1) + (h(i + 1, j + 1) - h(i, j + 1)) * u;
+  return a + (b - a) * v;
+}
+
+/** How each food lies in a pan: the relief's height and the size of its lumps, in metres. */
+function foodRelief(tile: number): [number, number] {
+  switch (tile) {
+    case T.soup:
+    case T.sauce:
+      return [0.0008, 0.06];
+    case T.mash:
+      return [0.0055, 0.055];
+    case T.rice:
+    case T.corn:
+      return [0.003, 0.035];
+    case T.lettuce:
+    case T.spinach:
+    case T.redOnion:
+      return [0.007, 0.04];
+    case T.cheese:
+    case T.pepper:
+      return [0.005, 0.034];
+    case T.roastVeg:
+    case T.braise:
+      return [0.0065, 0.034];
+    case T.chili:
+    case T.mac:
+      return [0.004, 0.03];
+    case T.frosting:
+      return [0.0015, 0.05];
+    default:
+      return [0.0042, 0.03];
+  }
+}
+
 /**
- * A food surface filling a pan's inside at height y: a gently heaped grid trimmed to the pan's rounded corners, its
- * UVs on a food tile. `heap` is the crown in metres.
+ * A food surface filling a pan's inside at height y: heaped toward the middle as a ladle leaves it and lumped by the
+ * pieces it is made of (diced, shredded, spooned), trimmed to the pan's rounded corners and settling to the fill line
+ * at the wall; its UVs on a food tile. `heap` is the crown in metres.
  */
 function foodSurface(s: Shop, w: number, d: number, r: number, heap: number, tile: number, seed: number): THREE.BufferGeometry {
-  const nx = s.fine(2) ? Math.max(4, Math.min(10, Math.round(w / 0.03))) : s.fine(1) ? 4 : 1;
-  const nz = s.fine(2) ? Math.max(4, Math.min(8, Math.round(d / 0.03))) : s.fine(1) ? 3 : 1;
+  const [amp, lam] = foodRelief(tile);
+  // Fine enough to carry its lumps, no finer.
+  const step = Math.max(0.011, Math.min(0.02, lam * 0.4));
+  const nx = s.fine(2) ? Math.max(6, Math.min(44, Math.round(w / step))) : s.fine(1) ? 4 : 1;
+  const nz = s.fine(2) ? Math.max(6, Math.min(56, Math.round(d / step))) : s.fine(1) ? 3 : 1;
   const g = new THREE.PlaneGeometry(w, d, nx, nz);
   g.rotateX(-Math.PI / 2);
   const pos = g.attributes.position as THREE.BufferAttribute;
   const rnd = rng(seed);
+  const ox = rnd() * 50;
+  const oz = rnd() * 50;
+  // Where the ladle last dropped: the heap's peak sits off centre.
+  const px = (rnd() - 0.5) * w * 0.3;
+  const pz = (rnd() - 0.5) * d * 0.3;
   for (let i = 0; i < pos.count; i++) {
     let x = pos.getX(i);
     let z = pos.getZ(i);
@@ -723,10 +1166,21 @@ function foodSurface(s: Shop, w: number, d: number, r: number, heap: number, til
       x = cx + ((x - cx) * r) / dl;
       z = cz + ((z - cz) * r) / dl;
     }
-    const ex = 1 - Math.pow((2 * x) / w, 4);
-    const ez = 1 - Math.pow((2 * z) / d, 4);
     const edge = Math.abs(Math.abs(x) - w / 2) < 1e-4 || Math.abs(Math.abs(z) - d / 2) < 1e-4 || dl > r * 0.98;
-    const y = edge ? 0 : heap * ex * ez * (0.75 + 0.5 * rnd());
+    // Distance in from the wall, 0 at it: the food climbs the wall a little and is lumpiest well in from it.
+    const inX = w / 2 - Math.abs(x);
+    const inZ = d / 2 - Math.abs(z);
+    const wall = Math.min(1, Math.min(inX, inZ) / 0.025);
+    const qx = (x - px) / (w / 2 + Math.abs(px));
+    const qz = (z - pz) / (d / 2 + Math.abs(pz));
+    const crown = Math.max(0, 1 - (qx * qx + qz * qz) * 0.85);
+    let y = 0;
+    if (!edge && s.fine(1)) {
+      const n1 = vnoise((x + ox) / lam, (z + oz) / lam, seed);
+      const n2 = vnoise((x + ox) / (lam * 0.45), (z + oz) / (lam * 0.45), seed + 7);
+      const lumps = s.fine(2) ? amp * (0.65 * n1 + 0.35 * n2) : 0;
+      y = heap * crown * (0.85 + 0.3 * rnd()) * wall + lumps * wall + 0.0015 * (1 - wall);
+    }
     pos.setXYZ(i, x, y, z);
   }
   g.computeVertexNormals();
@@ -799,7 +1253,7 @@ export function hotelPan(s: Shop, w: number, d: number, h: number, tile: number,
     const k = fy / h;
     const fw = w - 2 * tap * (1 - k) - 2 * t - 0.0015;
     const fd = d - 2 * tap * (1 - k) - 2 * t - 0.0015;
-    s.add(goodsMaterial(), foodSurface(s, fw, fd, Math.max(0.004, r1 * 0.9 - t), Math.min(0.012, h * 0.15), tile, seed), [0, fy, 0]);
+    s.add(goodsMaterial(), foodSurface(s, fw, fd, Math.max(0.004, r1 * 0.9 - t), Math.min(0.016, h * 0.18), tile, seed), [0, fy, 0]);
   }
 }
 
@@ -870,7 +1324,7 @@ export function wireShelving(s: Shop, L: number, D: number, H: number, o: ShelfO
       }
       s.add(p.chrome, lathe(s, [[0.0142, y - 0.046], [0.0186, y - 0.046], [0.0208, y - 0.004], [0.0198, y - 0.001], [0.0142, y - 0.001]], cs), [x, 0, z]);
       s.add(p.poly, lathe(s, [[0.0128, y - 0.054], [0.0139, y - 0.054], [0.0151, y - 0.045], [0.0128, y - 0.045]], cs - 4), [x, 0, z]);
-      if (s.fine(2) && !lite) s.add(p.enamel, new THREE.BoxGeometry(0.0006, 0.009, 0.0012), [x + 0.0142, y - 0.0495, z]);
+      if (s.fine(2) && !lite) s.add(p.enamel, new THREE.BoxGeometry(0.0006, 0.007, 0.0012), [x + 0.0142, y - 0.0496, z]);
     }
     const xa = c + 0.019;
     const xb = L - c - 0.019;
@@ -919,7 +1373,8 @@ function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: 
   const r = rng(seed);
   let item = 0;
   let s = shops[0]!;
-  const cs = s.fine(2) ? 14 : 6;
+  const cs = s.fine(2) ? 28 : s.fine(1) ? 8 : 6;
+  const wallUV = (g: THREE.BufferGeometry, t: number) => intoTile(g, tileUV(t));
   const caseBox = (w: number, h: number, d: number, at: V3) => {
     const g = new THREE.BoxGeometry(w, h, d);
     const uv = g.attributes.uv as THREE.BufferAttribute;
@@ -958,8 +1413,16 @@ function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: 
         const lid = [T.lidRed, T.lidBlue, T.lidGreen][Math.floor(r() * 3)]!;
         for (const z of [-0.03 - rr, -0.03 - 3 * rr - 0.01]) {
           if (-z + rr > D - 0.02) continue;
-          s.add(p.hdpe, new THREE.CylinderGeometry(rr, rr * 0.92, h, cs, 1, true), [x + rr, y + h / 2 + 0.0005, z]);
-          s.add(gm, intoTile(new THREE.CylinderGeometry(rr + 0.004, rr + 0.004, 0.012, cs), tileUV(lid)), [x + rr, y + h + 0.006, z]);
+          if (!s.fine(2)) {
+            s.add(p.hdpe, new THREE.CylinderGeometry(rr, rr * 0.92, h, cs, 1, true), [x + rr, y + h / 2 + 0.0005, z]);
+            s.add(gm, intoTile(new THREE.CylinderGeometry(rr + 0.004, rr + 0.004, 0.012, cs), tileUV(lid)), [x + rr, y + h + 0.006, z]);
+            continue;
+          }
+          // A moulded tub: tapered wall, a stacking ring low down, the lip rolled out at the top; its lid's skirt
+          // snapped over the lip, the top recessed in a ring.
+          const b0 = rr * 0.9;
+          s.add(p.hdpe, lathe(s, [[0, 0.0005], [b0 - 0.006, 0.0005], [b0, 0.004], [b0 + 0.0012, 0.016], [b0 + 0.0028, 0.019], [b0 + 0.003, 0.024], [rr - 0.002, h - 0.016], [rr + 0.002, h - 0.012], [rr + 0.003, h - 0.008]], cs), [x + rr, y, z]);
+          s.add(gm, wallUV(lathe(s, [[rr + 0.0045, h - 0.0115], [rr + 0.005, h - 0.004], [rr + 0.004, h + 0.002], [rr - 0.004, h + 0.0028], [rr - 0.008, h + 0.0012], [rr - 0.014, h + 0.0012], [rr - 0.018, h + 0.003], [0, h + 0.003]], cs), lid), [x + rr, y, z]);
         }
         x += 2 * rr + 0.02;
       } else if (kind < 0.88) {
@@ -974,9 +1437,18 @@ function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: 
         for (let k = 0; k < 2; k++) {
           const z = -0.03 - rr - k * (2 * rr + 0.006);
           if (-z + rr > D - 0.02) continue;
-          s.add(gm, intoTile(new THREE.CylinderGeometry(rr, rr, h - (s.fine(2) ? 0.012 : 0), cs, 1, true), tileUV(label)), [x + rr, y + h / 2, z]);
-          if (s.fine(2)) for (const yy of [y + 0.004, y + h - 0.004]) s.add(p.alu, new THREE.CylinderGeometry(rr + 0.001, rr + 0.001, 0.008, cs), [x + rr, yy, z]);
-          else s.add(p.alu, new THREE.CircleGeometry(rr, cs).rotateX(-Math.PI / 2), [x + rr, y + h, z]);
+          if (!s.fine(2)) {
+            s.add(gm, intoTile(new THREE.CylinderGeometry(rr, rr, h, cs, 1, true), tileUV(label)), [x + rr, y + h / 2, z]);
+            s.add(p.alu, new THREE.CircleGeometry(rr, cs).rotateX(-Math.PI / 2), [x + rr, y + h, z]);
+            continue;
+          }
+          // A #10 can: the labelled body between beaded shoulders, double-seamed rims top and bottom, the ends
+          // dished inside the seams.
+          s.add(gm, intoTile(new THREE.CylinderGeometry(rr, rr, h - 0.03, cs, 1, true), tileUV(label)), [x + rr, y + h / 2, z]);
+          const seam: [number, number][] = [[rr - 0.0035, 0.0005], [rr + 0.0012, 0.0005], [rr + 0.0016, 0.002], [rr + 0.0016, 0.0045], [rr + 0.0006, 0.006], [rr, 0.0085], [rr - 0.0003, 0.011], [rr, 0.0135], [rr - 0.0003, 0.015]];
+          s.add(p.alu, lathe(s, seam, cs), [x + rr, y, z]);
+          s.add(p.alu, lathe(s, seam.map(([a, b]) => [a, h - b] as [number, number]).reverse(), cs), [x + rr, y, z]);
+          s.add(p.alu, lathe(s, [[rr - 0.0035, h - 0.0005], [rr - 0.0055, h - 0.003], [0, h - 0.0026]], cs), [x + rr, y, z]);
         }
         x += 2 * rr + 0.012;
       } else {
@@ -1023,15 +1495,25 @@ function swivelCaster(s: Shop, yPlate: number, r = 0.0635, brake = false, trail 
       s.add(p.ssBright, cyl(s, 0.0055, 0.004, "y", 6), [sx * 0.038, yPlate - 0.008, sz * 0.03]);
     }
   // The raceway: two pressed cups about the kingpin.
-  s.add(p.ssDull, lathe(s, [[0, 0], [0.036, 0], [0.04, -0.004], [0.037, -0.008], [0, -0.008]], s.fine(2) ? 16 : 8), [0, yPlate - 0.006, 0]);
+  s.add(p.ssDull, lathe(s, [[0, -0.008], [0.037, -0.008], [0.04, -0.004], [0.036, 0], [0, 0]], s.fine(2) ? 16 : 8), [0, yPlate - 0.006, 0]);
   s.add(p.ssBright, cyl(s, 0.009, 0.01, "y", 6), [0, yPlate - 0.017, 0]);
   // The yoke: a bridge under the raceway and two legs down to the axle behind it.
   const ya = r;
   const yb = yPlate - 0.02;
   s.add(p.ssDull, new THREE.BoxGeometry(ww + 0.02, 0.005, 0.07), [0, yb, -trail * 0.35]);
-  const legLen = Math.hypot(yb - ya, trail);
-  const tilt = Math.atan2(trail, yb - ya);
-  for (const sx of [-1, 1]) s.add(p.ssDull, new THREE.BoxGeometry(0.004, legLen + 0.02, 0.034), [sx * (ww / 2 + 0.006), (ya + yb) / 2, -trail / 2], [-tilt, 0, 0]);
+  // Each leg a pressed plate, broad under the bridge, tapering down and back to a round boss about the axle.
+  const leg = roundedPoly([
+    [0.022, yb + 0.0025, 0.003],
+    [-0.046, yb + 0.0025, 0.003],
+    [-trail - 0.016, ya + 0.006, 0.014],
+    [-trail - 0.004, ya - 0.016, 0.012],
+    [-trail + 0.016, ya - 0.002, 0.012],
+    [0.012, yb - 0.026, 0.012],
+  ]);
+  const lg = new THREE.ExtrudeGeometry(leg, { depth: 0.004, bevelEnabled: false, curveSegments: 4 });
+  lg.rotateY(-Math.PI / 2);
+  for (const sx of [-1, 1]) s.add(p.ssDull, lg.clone(), [sx * (ww / 2 + 0.006) + 0.002, 0, 0]);
+  lg.dispose();
   // Wheel: tread on a hub, the axle bolt through the yoke.
   const tread = lathe(s, [
     [r * 0.62, -ww / 2],
@@ -1052,55 +1534,120 @@ function swivelCaster(s: Shop, yPlate: number, r = 0.0635, brake = false, trail 
   }
 }
 
-/** The 20 slide heights of a 20-tier speed rack `h` tall, bottom first: the top of each angle, fixture frame y. */
+/**
+ * The 20 slide heights of a 20-tier speed rack `h` tall, bottom first: the height of the rim of a sheet pan resting
+ * on each slide, fixture frame y (the slide's tread runs 4.5 mm under it, where the rolled bead bears).
+ */
 export function speedRackSlides(h = 1.753, tiers = 20): number[] {
   const pitch = 0.076;
   const top = h - 0.09;
   return Array.from({ length: tiers }, (_, i) => top - (tiers - 1 - i) * pitch);
 }
 
+/** How far a slide's tread runs under its pan-rim height: the depth of the sheet pan's bead below its rim's top. */
+const BEAD_DROP = 0.0045;
+
 /**
- * The aluminium end-load speed rack: two welded side frames of 1 in tube uprights carrying 20 angle slides at 3 in,
- * tied by channel at the top and the base, on four 5 in swivel casters (the front pair braked). Sheet pans slide in
- * from the end and hang by their rolled rims; each loaded tier here carries a 2½ in hotel pan of hot food.
+ * The aluminium end-load speed rack: two welded side frames, each a pair of formed channel uprights (their open
+ * side out, the slides welded across their webs) capped by a tube rail top and bottom, tied front and back by cross
+ * tubes, on four 5 in swivel casters (the front pair braked). The 20 slides are formed runners: a web welded to the
+ * uprights, a narrow tread turned in on top and a stiffening lip turned down at its edge, at 3 in. Sheet pans slide
+ * in from the end and ride the treads by their rolled beads; each loaded tier carries a pan from the bake shop.
  */
 const speedRack: Builder = (s, e) => {
   const p = palette();
   const { w, d, h } = e;
   const yb = 0.147; // caster plates' underside: the frame's base
-  const tx = 0.0254;
-  const tz = 0.0318;
-  for (const x of [tx / 2, w - tx / 2])
-    for (const z of [-tz / 2, -d + tz / 2]) s.add(p.alu, bx(s, tx, h - yb - 0.006, tz, 0.002), [x, yb + 0.006 + (h - yb - 0.006) / 2, z]);
-  // Channel tying the frames at the top and the base, front and back and down the sides.
-  for (const y of [h - 0.0127, yb + 0.006 + 0.0127]) {
-    for (const z of [-tz / 2, -d + tz / 2]) s.add(p.alu, bx(s, w - 2 * tx + 0.002, 0.0254, 0.0254, 0.0015), [w / 2, y, z]);
-    for (const x of [tx / 2, w - tx / 2]) s.add(p.alu, bx(s, 0.0254, 0.0254, d - 2 * tz + 0.002, 0.0015), [x, y, -d / 2]);
+  const tx = 0.0222; // upright (and rail) width across the rack
+  const tz = 0.0318; // upright depth along it
+  const th = 0.0024; // the channel's gauge
+  const yBase = yb + 0.006;
+  const rail = 0.0254;
+  const y0 = yBase + rail; // uprights from the base rail
+  const y1 = h - rail; // to the top rail
+  // Uprights: formed channel, open to the outside.
+  const upright = (left: boolean, back: boolean) => {
+    const R = s.fine(2) ? 0.003 : 0;
+    const ri = s.fine(2) ? 0.0008 : 0;
+    const zz0 = back ? d - tz : 0;
+    const X = (x: number) => (left ? x : w - x);
+    const sh = roundedPoly([
+      [X(0), zz0, 0],
+      [X(tx), zz0, R],
+      [X(tx), zz0 + tz, R],
+      [X(0), zz0 + tz, 0],
+      [X(0), zz0 + tz - th, 0],
+      [X(tx - th), zz0 + tz - th, ri],
+      [X(tx - th), zz0 + th, ri],
+      [X(0), zz0 + th, 0],
+    ]);
+    if (s.detail === 0) {
+      s.add(p.alu, new THREE.BoxGeometry(tx, y1 - y0, tz), [X(tx / 2), (y0 + y1) / 2, -zz0 - tz / 2]);
+      return;
+    }
+    const g = new THREE.ExtrudeGeometry(sh, { depth: y1 - y0, bevelEnabled: false, curveSegments: s.seg(3, 1) });
+    g.rotateX(-Math.PI / 2);
+    s.add(p.alu, g, [0, y0, 0]);
+  };
+  for (const left of [true, false]) for (const back of [false, true]) upright(left, back);
+  // Rails: a tube along each side frame's top and foot, cross tubes front and back between them.
+  for (const [y, hh] of [[h - rail / 2, rail], [yBase + rail / 2, rail]] as const) {
+    for (const x of [tx / 2, w - tx / 2]) s.add(p.alu, bx(s, tx, hh, d, 0.002), [x, y, -d / 2]);
+    for (const z of [-0.0115, -d + 0.0115]) s.add(p.alu, bx(s, w - 2 * tx - 0.0008, 0.019, 0.019, 0.0018), [w / 2, y, z]);
   }
-  // Caster plates welded under the base corners.
+  // Caster plates welded under the frame's corners.
   for (const x of [0.065, w - 0.065])
     for (const z of [-0.075, -d + 0.075]) s.add(p.alu, bx(s, 0.13, 0.006, 0.15, 0.0015), [x, yb + 0.003, z]);
-  // The slides: angle with its upright leg against the frame and its tread turned in, welded at each end.
+  // The slides.
   const ys = speedRackSlides(h);
-  for (const y of ys)
-    for (const sx of [1, -1]) {
-      const x0 = sx > 0 ? tx : w - tx;
-      if (s.detail > 0) s.add(p.alu, new THREE.BoxGeometry(0.0016, 0.019, d - 0.004), [x0 + sx * 0.0008, y - 0.0095, -d / 2]);
-      s.add(p.alu, new THREE.BoxGeometry(0.022, 0.0016, d - 0.004), [x0 + sx * 0.011, y - 0.0008, -d / 2]);
-      if (s.fine(2)) for (const z of [-tz - 0.003, -d + tz + 0.003]) s.add(p.alu, new THREE.BoxGeometry(0.003, 0.016, 0.006), [x0 + sx * 0.0022, y - 0.0095, z]);
-    }
+  {
+    const tw = 0.0096; // tread
+    const st = 0.0016;
+    const lip = 0.005;
+    const web = 0.019;
+    const len = d - 0.001;
+    const prof = (sx: number) => {
+      const b = s.fine(2) ? 1 : 0;
+      return roundedPoly([
+        [sx * 0, 0, 0.0016 * b],
+        [sx * tw, 0, 0.0012 * b],
+        [sx * tw, -lip, 0],
+        [sx * (tw - st), -lip, 0],
+        [sx * (tw - st), -st, 0.0004 * b],
+        [sx * st, -st, 0.0004 * b],
+        [sx * st, -web, 0],
+        [sx * 0, -web, 0],
+      ]);
+    };
+    const runner = [1, -1].map((sx) => {
+      if (s.detail === 0) return null;
+      const g = new THREE.ExtrudeGeometry(prof(sx), { depth: len, bevelEnabled: false, curveSegments: s.seg(3, 1) });
+      g.translate(0, 0, -len - 0.0005);
+      return g;
+    });
+    for (const y of ys)
+      for (const [k, sx] of [[0, 1], [1, -1]] as const) {
+        const x0 = sx > 0 ? tx : w - tx;
+        const yt = y - BEAD_DROP;
+        const g = runner[k];
+        if (g) s.add(p.alu, g.clone(), [x0, yt, 0]);
+        else s.add(p.alu, new THREE.BoxGeometry(tw, 0.0016, d - 0.002), [x0 + (sx * tw) / 2, yt - 0.0008, -d / 2]);
+        // Weld beads where the web meets each upright.
+        if (s.fine(2)) for (const z of [-tz - 0.0012, -d + tz + 0.0012]) s.add(p.alu, new THREE.BoxGeometry(0.0026, web - 0.002, 0.0024), [x0 + sx * 0.0024, yt - web / 2, z]);
+      }
+    runner.forEach((g) => g?.dispose());
+  }
   // Casters, each a swivel joint.
   const casters: [number, number][] = [[0.065, -0.075], [w - 0.065, -0.075], [0.065, -d + 0.075], [w - 0.065, -d + 0.075]];
   casters.forEach(([x, z], i) => {
     const j = s.joint(`caster_swivel_${i}`, [x, 0, z]);
     swivelCaster(j, yb, 0.0635, i < 2);
   });
-  // Loads: a sheet pan hung by its rim on each tier, carrying a hotel pan of food, every third one lidded.
-  const foods = [T.chili, T.rice, T.braise, T.mac, T.roastVeg, T.mash, T.sauce, T.soup];
+  // Loads: a sheet pan on each tier from the bake shop, rolls, cookies, roast chicken, dough proofing, a sheet cake.
   ys.forEach((y, i) => {
     const j = s.joint(`pan_${i}`, [w / 2, y, -d / 2]);
-    sheetPan(j, 0.457, 0.655);
-    j.at([0, -0.0235, 0], [0, 0, 0], () => hotelPan(j, 0.325, 0.53, 0.065, foods[i % foods.length]!, 0.8, i % 3 === 2, 31 + i));
+    sheetPan(j, 0.457, 0.66);
+    bakeLoad(j, i % 5, 0.457, 0.66, 41 + i);
   });
   return (b) => {
     const show = (n: number) => ys.forEach((_, i) => {
@@ -1117,29 +1664,114 @@ const speedRack: Builder = (s, e) => {
   };
 };
 
-/** An 18 × 26 in aluminium sheet pan, its rolled rim at the current origin's height, hanging 25 mm below it. */
+/** The sheet pan's section, [inset from the outline, y] from the outer floor up over the bead and down to the inner. */
+const SHEET_PROFILE: readonly (readonly [number, number])[] = [
+  [0.006, -0.025],
+  [0.003, -0.0236],
+  [0.0012, -0.005],
+  [-0.0002, -0.0046],
+  [-0.0014, -0.0037],
+  [-0.0024, -0.0023],
+  [-0.0026, -0.0012],
+  [-0.0019, 0.0001],
+  [-0.0006, 0.0004],
+  [0.0008, -0.0002],
+  [0.0016, -0.0012],
+  [0.0026, -0.0022],
+  [0.0036, -0.0236],
+  [0.0066, -0.0246],
+];
+const SHEET_FAR: readonly (readonly [number, number])[] = [
+  [0.006, -0.025],
+  [0.0012, -0.005],
+  [-0.0026, -0.0018],
+  [0.0012, 0.0004],
+  [0.0036, -0.0236],
+  [0.0066, -0.0246],
+];
+/** The inner floor of a sheet pan, below its rim. */
+const SHEET_FLOOR = -0.0246;
+
+/**
+ * An 18 × 26 in aluminium sheet pan, its rolled bead's top at the current origin's height (the bead's underside
+ * 4.5 mm below, where it rides a rack's slides), its floor 25 mm below: drawn in one piece, the wall nearly upright.
+ */
 function sheetPan(s: Shop, w: number, d: number): void {
   const p = palette();
-  if (!s.fine(2)) {
-    if (s.detail === 0) return;
-    s.add(p.alu, loft(s, [
-      { w: w - 0.03, d: d - 0.03, r: 0.02, y: -0.025 },
-      { w: w + 0.002, d: d + 0.002, r: 0.03, y: 0 },
-      { w: w - 0.01, d: d - 0.01, r: 0.025, y: 0 },
-      { w: w - 0.032, d: d - 0.032, r: 0.02, y: -0.0235 },
-    ], -1, 1, 1));
+  if (s.detail === 0) {
+    s.add(p.alu, new THREE.BoxGeometry(w - 0.004, 0.022, d - 0.004), [0, -0.0136, 0]);
     return;
   }
-  s.add(p.alu, loft(s, [
-    { w: w - 0.03, d: d - 0.03, r: 0.02, y: -0.025 },
-    { w: w - 0.03, d: d - 0.03, r: 0.02, y: -0.025 },
-    { w: w - 0.008, d: d - 0.008, r: 0.025, y: -0.004 },
-    { w: w, d: d, r: 0.028, y: 0.0 },
-    { w: w + 0.002, d: d + 0.002, r: 0.03, y: -0.004 },
-    { w: w - 0.004, d: d - 0.004, r: 0.028, y: -0.007 },
-    { w: w - 0.01, d: d - 0.01, r: 0.025, y: -0.003 },
-    { w: w - 0.032, d: d - 0.032, r: 0.02, y: -0.0235 },
-  ], -1, 1, 3));
+  const prof = s.fine(2) ? SHEET_PROFILE : SHEET_FAR;
+  const R = 0.012;
+  s.add(p.alu, loft(s, prof.map(([i, y]) => ({ w: w - 2 * i, d: d - 2 * i, r: R - i, y })), -1, 1, s.fine(2) ? 4 : 1));
+}
+
+/**
+ * What a sheet pan carries off the bake shop's ovens: 0 dinner rolls, 1 cookies, 2 roast chicken thighs, 3 dough
+ * balls proofing, 4 a sheet cake. Close up each piece is shaped and baked; from across the room the pan is one
+ * picture of its load.
+ */
+function bakeLoad(s: Shop, kind: number, w: number, d: number, seed: number): void {
+  if (s.detail === 0) return;
+  const gm = goodsMaterial();
+  const fy = SHEET_FLOOR + 0.0008;
+  const iw = w - 0.016;
+  const id = d - 0.016;
+  if (!s.fine(2)) {
+    const t = [T.panRolls, T.panCookies, T.panChicken, T.panDough, T.panCake][kind]!;
+    // The picture lies just under the rim, where the tops of the pieces are.
+    const hgt = [0.021, 0.011, 0.021, 0.021, 0.02][kind]!;
+    const g = new THREE.PlaneGeometry(iw, id).rotateX(-Math.PI / 2);
+    s.add(gm, intoTile(g, tileUV(t)), [0, fy + hgt, 0]);
+    return;
+  }
+  const rnd = rng(seed);
+  // Parchment under everything but the cake.
+  if (kind !== 4) s.add(gm, intoTile(new THREE.PlaneGeometry(iw, id).rotateX(-Math.PI / 2), tileUV(T.parchment)), [0, fy, 0]);
+  /** A piece seen from above: a lathe dome `r` across and `hgt` tall, squashed and lumped, its UVs projected down. */
+  const piece = (tile: number, r: number, hgt: number, at: [number, number], sx: number, sz: number, lump: number, prof: [number, number][]) => {
+    const g = lathe(s, prof.map(([a, b]) => [a * r, b * hgt] as [number, number]), 12);
+    const pos = g.attributes.position as THREE.BufferAttribute;
+    const k = rnd() * 9;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const a = Math.atan2(z, x);
+      const f = 1 + lump * (Math.sin(a * 3 + k) * 0.6 + Math.sin(a * 5 + k * 2) * 0.4);
+      pos.setXYZ(i, x * sx * f, y * (1 + lump * 0.5 * Math.sin(a * 2 + k)), z * sz * f);
+    }
+    g.computeVertexNormals();
+    const uv = g.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, 0.5 + pos.getX(i) / (2 * r * sx * 1.1), 0.5 - pos.getZ(i) / (2 * r * sz * 1.1));
+    s.add(gm, intoTile(g, tileUV(tile)), [at[0], fy, at[1]], [0, rnd() * Math.PI * 2, 0]);
+  };
+  const grid = (nu: number, nv: number, fn: (x: number, z: number) => void) => {
+    for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) fn(-iw / 2 + ((i + 0.5) * iw) / nu, -id / 2 + ((j + 0.5) * id) / nv);
+  };
+  const dome: [number, number][] = [[0, 0], [0.93, 0], [1, 0.14], [0.96, 0.42], [0.82, 0.68], [0.58, 0.89], [0.28, 0.99], [0, 1]];
+  const disc: [number, number][] = [[0, 0], [0.97, 0], [1, 0.35], [0.9, 0.8], [0.55, 0.97], [0, 1]];
+  switch (kind) {
+    case 0:
+      grid(4, 6, (x, z) => piece(T.crust, 0.04, 0.042, [x + (rnd() - 0.5) * 0.006, z + (rnd() - 0.5) * 0.006], 1, 1.04, 0.035, dome));
+      break;
+    case 1:
+      grid(4, 6, (x, z) => piece(T.cookie, 0.036, 0.011, [x + (rnd() - 0.5) * 0.01, z + (rnd() - 0.5) * 0.01], 1, 1, 0.06, disc));
+      break;
+    case 2:
+      grid(3, 5, (x, z) => piece(T.skin, 0.052, 0.034, [x + (rnd() - 0.5) * 0.012, z + (rnd() - 0.5) * 0.012], 1.18, 0.86, 0.12, dome));
+      break;
+    case 3:
+      grid(4, 6, (x, z) => piece(T.dough, 0.034, 0.036, [x, z], 1, 1, 0.02, dome));
+      break;
+    default: {
+      // A sheet cake: baked to the pan's walls, its frosting combed.
+      const g = foodSurface(s, w - 0.012, d - 0.012, 0.009, 0.002, T.frosting, seed);
+      s.add(gm, g, [0, SHEET_FLOOR + 0.028, 0]);
+      break;
+    }
+  }
 }
 
 const shelving: Builder = (s, e) => {
@@ -1191,38 +1823,66 @@ interface WalkInSpec {
   fans: number;
 }
 
+/** A panel joint's groove: the width of the dark line it draws, its skins turned in either side. */
+const GROOVE = 0.004;
+
+interface WallOpts {
+  /** Run the outer skin on past the wall's left or right end, over a meeting wall's foam (negative: stop short). */
+  extL?: number;
+  extR?: number;
+  /** Draw the foam's end faces at the left and right ends (off where a meeting wall's skin covers them). */
+  ends?: [boolean, boolean];
+}
+
 /**
  * A wall of panels between (x0, y0) and (x1, y1) in a frame whose +z is the wall's outer face (at z = 0) and whose
- * x runs along it: a foam core, an outer and an inner skin split at every panel joint, a dark sealant line in each
- * joint, cam-lock plug buttons inside along the joints. `seams` are the joint positions along x.
+ * x runs along it: a foam core between an outer and an inner skin. At every panel joint (`seams`, along x) each skin's
+ * edge turns in to make a shallow V-groove with the joint's dark sealant at its root, the line a walk-in's panels
+ * read by from across a room; cam-lock plug buttons inside along the joints at the heights `plugs`.
  */
-function panelWall(s: Shop, x0: number, x1: number, y0: number, y1: number, outer: THREE.Material, inner: THREE.Material, seams: number[], plugs: number[]): void {
+function panelWall(s: Shop, x0: number, x1: number, y0: number, y1: number, outer: THREE.Material, inner: THREE.Material, seams: number[], plugs: number[], o: WallOpts = {}): void {
   const p = palette();
   const t = PANEL;
   const sk = 0.0008;
-  const w = x1 - x0;
   const h = y1 - y0;
-  s.add(p.ceramic, openBox(w, h, t - 0.003, ["pz", "nz"]), [x0 + w / 2, y0 + h / 2, -t / 2]);
-  const cuts = [x0, ...seams.filter((x) => x > x0 + 0.02 && x < x1 - 0.02), x1];
+  const [endL, endR] = o.ends ?? [true, true];
+  const drop: ("px" | "nx" | "py" | "ny" | "pz" | "nz")[] = ["pz", "nz"];
+  if (!endL) drop.push("nx");
+  if (!endR) drop.push("px");
+  // Where a meeting wall's skin covers an end, the foam stops clear of it.
+  const f0 = x0 + (endL ? 0 : 0.001);
+  const f1 = x1 - (endR ? 0 : 0.001);
+  s.add(p.ceramic, openBox(f1 - f0, h, t - 0.003, drop), [(f0 + f1) / 2, y0 + h / 2, -t / 2]);
+  // From across the room the skins run unbroken: a gap there would show through the wall.
+  const joints = s.fine(1) ? seams.filter((x) => x > x0 + 0.02 && x < x1 - 0.02) : [];
+  const g = GROOVE / 2;
+  const cuts = [x0 - (o.extL ?? 0), ...joints, x1 + (o.extR ?? 0)];
   for (let i = 0; i + 1 < cuts.length; i++) {
-    const a = cuts[i]! + (i > 0 ? 0.001 : 0);
-    const b = cuts[i + 1]! - (i + 2 < cuts.length ? 0.001 : 0);
+    const a = cuts[i]! + (i > 0 ? g : 0);
+    const b = cuts[i + 1]! - (i + 2 < cuts.length ? g : 0);
     s.add(outer, new THREE.BoxGeometry(b - a, h, sk), [(a + b) / 2, y0 + h / 2, -sk / 2]);
-    s.add(inner, new THREE.BoxGeometry(b - a, h, sk), [(a + b) / 2, y0 + h / 2, -t + sk / 2]);
+    const ai = Math.max(a, x0);
+    const bi = Math.min(b, x1);
+    if (bi > ai) s.add(inner, new THREE.BoxGeometry(bi - ai, h, sk), [(ai + bi) / 2, y0 + h / 2, -t + sk / 2]);
   }
-  if (s.fine(1))
-    for (const x of cuts.slice(1, -1)) {
-      s.add(p.rubber, openBox(0.0018, h - 0.002, 0.0012, ["py", "ny"]), [x, y0 + h / 2, -0.0016]);
-      s.add(p.rubber, openBox(0.0018, h - 0.002, 0.0012, ["py", "ny"]), [x, y0 + h / 2, -t + 0.0016]);
-    }
+  for (const x of joints) {
+    if (s.fine(2))
+      for (const sx of [-1, 1]) {
+        s.add(outer, new THREE.BoxGeometry(sk, h - 0.002, 0.0022), [x + sx * (g + sk / 2), y0 + h / 2, -sk - 0.0011]);
+        s.add(inner, new THREE.BoxGeometry(sk, h - 0.002, 0.0022), [x + sx * (g + sk / 2), y0 + h / 2, -t + sk + 0.0011]);
+      }
+    const dz = s.fine(2) ? 0.003 : 0.0016;
+    s.add(p.rubber, new THREE.PlaneGeometry(GROOVE + 0.0012, h - 0.002), [x, y0 + h / 2, -dz]);
+    s.add(p.rubber, new THREE.PlaneGeometry(GROOVE + 0.0012, h - 0.002), [x, y0 + h / 2, -t + dz], [0, Math.PI, 0]);
+  }
   if (s.fine(2))
-    for (const x of cuts.slice(1, -1))
+    for (const x of joints)
       for (const y of plugs) if (y > y0 + 0.05 && y < y1 - 0.05) camPlug(s, [x - 0.045, y, -t]);
 }
 
 /** A cam-lock access hole's snap-in plug button on an inner skin, facing -z (into the room). */
 function camPlug(s: Shop, at: V3, rot: V3 = [0, 0, 0]): void {
-  const g = lathe(s, [[0, 0.0032], [0.007, 0.0028], [0.0105, 0.0012], [0.0115, 0], [0, 0]], 10);
+  const g = lathe(s, [[0, 0.0004], [0.0115, 0.0004], [0.0105, 0.0016], [0.007, 0.0032], [0, 0.0036]], 10);
   g.rotateX(-Math.PI / 2);
   s.at(at, rot, () => s.add(palette().hdpe, g, [0, 0, 0]));
 }
@@ -1274,7 +1934,7 @@ function camBarrel(s: Shop, mat: THREE.Material, r: number, y: number, len: numb
   g.setIndex(idx);
   g.computeVertexNormals();
   s.add(mat, g);
-  if (!lower) s.add(mat, lathe(s, [[0, 0.007], [r * 0.6, 0.006], [r * 0.95, 0.002], [r, 0], [0, 0]], 18), [0, yEnd, 0]);
+  if (!lower) s.add(mat, lathe(s, [[0, 0], [r, 0], [r * 0.95, 0.002], [r * 0.6, 0.006], [0, 0.007]], 18), [0, yEnd, 0]);
 }
 
 /** Diamond tread plate: raised lozenges in a herringbone on a sheet `w` by `h`, facing +z at z = 0. */
@@ -1338,43 +1998,83 @@ interface DoorRig {
 }
 
 /**
- * The walk-in's door: an insulated 4 in leaf whose outer slab laps the frame on a magnetic gasket and whose plug fills
- * the opening, on three cam-lift hinges; a latch with a pull handle and a key cylinder, its strike on the frame and
- * the inside safety release through the door; a hydraulic closer across the head; a diamond-plate kick plate; a
- * drag sweep (cooler) or heated threshold (freezer) at the foot. Everything that swings is under `cam_lift_door`.
+ * The walk-in's door and its frame. The frame: a stainless casing round the opening, standing 3 mm proud of the
+ * panel with its edges eased, the anti-sweat heater wire under it (its junction box and pilot over the head), the
+ * jambs and head lined in stainless through the wall, a lighter casing inside, a bevelled threshold across the foot
+ * (heated in a freezer). The leaf: a stainless slab with rolled edges lapping the casing, the liner's plug filling the
+ * opening behind it with a black breaker strip round its root, a magnetic gasket on three sides of the slab's back
+ * sealing on the casing, a neoprene sweep on an aluminium retainer down to the threshold, diamond tread kick plates
+ * outside and in; three cam-lift hinges; a cast latch with its key cylinder and a pull grip, its bolt into a roller
+ * strike on the frame; the glow-in-the-dark safety release through the leaf inside; a hydraulic closer across the
+ * head. Everything that swings is under `cam_lift_door`.
  */
 function walkinDoor(s: Shop, k: WalkInSpec, floorY: number, doorH: number, skinOut: THREE.Material, skinIn: THREE.Material): DoorRig {
   const p = palette();
   const zf = WALL_FRONT;
+  const zi = zf - PANEL;
   const lap = 0.045;
-  const sl = k.door0 - lap;
-  const sr = k.door0 + k.doorW + lap;
-  const sy0 = floorY + 0.008;
-  const sy1 = floorY + doorH + lap;
+  const x0 = k.door0;
+  const x1 = k.door0 + k.doorW;
+  const dTop = floorY + doorH;
+  const sl = x0 - lap;
+  const sr = x1 + lap;
+  const sy0 = floorY + 0.02;
+  const sy1 = dTop + lap;
+  const st = 0.0272;
   const zs = zf + 0.035; // the slab's outer face
+  const zB = zs - st; // and its back, 7.8 mm off the wall: the casing and the gasket between
   const hx = sl - 0.004;
   const hz = zs + 0.013;
   const lift = 0.012;
-  // The frame: a stainless face band round the opening where the gasket seals, the reveal lined in stainless.
   const band = 0.058;
-  for (const [x, wdt] of [[k.door0 - band / 2, band], [k.door0 + k.doorW + band / 2, band]] as const) s.add(p.ss, bx(s, wdt, doorH + band, 0.0012, 0.0004), [x, floorY + (doorH + band) / 2, zf + 0.0006]);
-  s.add(p.ss, bx(s, k.doorW, band, 0.0012, 0.0004), [k.door0 + k.doorW / 2, floorY + doorH + band / 2, zf + 0.0006]);
-  for (const x of [k.door0 + 0.0006, k.door0 + k.doorW - 0.0006]) s.add(p.ss, new THREE.BoxGeometry(0.0012, doorH, PANEL), [x, floorY + doorH / 2, zf - PANEL / 2]);
-  s.add(p.ss, new THREE.BoxGeometry(k.doorW, 0.0012, PANEL), [k.door0 + k.doorW / 2, floorY + doorH - 0.0006, zf - PANEL / 2]);
-  if (k.freezer) {
-    // The heated threshold, a stainless plate over its heater wire, bevelled both edges.
-    s.add(p.ss, bx(s, k.doorW + 0.04, 0.006, PANEL + 0.03, 0.002), [k.door0 + k.doorW / 2, floorY + 0.003, zf - PANEL / 2 + 0.01]);
+  const cz = 0.003;
+  // The frame: casing outside and in, jamb and head liners through the wall.
+  const casing = (b: number, r: number) =>
+    roundedPoly([
+      [x0 - b, floorY, 0],
+      [x0, floorY, 0],
+      [x0, dTop, r * 0.4],
+      [x1, dTop, r * 0.4],
+      [x1, floorY, 0],
+      [x1 + b, floorY, 0],
+      [x1 + b, dTop + b, r],
+      [x0 - b, dTop + b, r],
+    ]);
+  s.add(p.ss, bevelPlate(s, casing(band, 0.01), cz, 0.0012), [0, 0, zf + 0.0003]);
+  if (s.detail > 0) s.add(p.ss, bevelPlate(s, casing(0.04, 0.006), 0.0025, 0.0008), [0, 0, zi - 0.0028]);
+  for (const x of [x0 + 0.0006, x1 - 0.0006]) s.add(p.ss, new THREE.BoxGeometry(0.0012, doorH, PANEL), [x, floorY + doorH / 2, zf - PANEL / 2]);
+  s.add(p.ss, new THREE.BoxGeometry(k.doorW, 0.0012, PANEL), [x0 + k.doorW / 2, dTop - 0.0006, zf - PANEL / 2]);
+  // The threshold: a stainless plate bevelled both edges, across the foot of the opening and over the wall's depth.
+  const thTop = floorY + (k.freezer ? 0.006 : 0.005);
+  {
+    const za = zi - 0.012;
+    const zb = zf + 0.03;
+    const y0 = floorY + 0.0004;
+    const prof: [number, number][] = [[za, y0], [za + 0.014, thTop], [zb - 0.014, thTop], [zb, y0]];
+    const len = k.doorW + 0.03;
+    s.add(p.ss, sweepX(prof, len), [x0 + k.doorW / 2, 0, 0]);
+    if (s.fine(1)) {
+      s.add(p.ss, capX(prof, -1), [x0 + k.doorW / 2 - len / 2, 0, 0]);
+      s.add(p.ss, capX(prof, 1), [x0 + k.doorW / 2 + len / 2, 0, 0]);
+    }
+    if (s.fine(2)) for (const f of [0.08, 0.5, 0.92]) screwLite(s, p.ssBright, [x0 - 0.015 + len * f, thTop, (za + zb) / 2], 0.0028, [-Math.PI / 2, 0, 0]);
   }
-  // The strike on the frame face beside the latch, and the heater's junction box and pilot lamp over the head.
-  s.add(p.ssBright, bx(s, 0.03, 0.12, 0.033, 0.004), [sr + 0.02, floorY + 1.08, zf + 0.0165]);
-  if (s.fine(2)) for (const y of [-0.04, 0.04]) screwLite(s, p.ssBright, [sr + 0.02, floorY + 1.08 + y, zf + 0.033], 0.0025);
+  // The roller strike on the frame beside the latch, the heater's junction box and pilot lamp over the head.
+  const ly = floorY + 1.08;
+  {
+    const zb = zf + cz + 0.0003;
+    const dz = zs + 0.024 - zb;
+    s.add(p.ssBright, bx(s, 0.03, 0.12, dz, 0.004), [sr + 0.021, ly, zb + dz / 2]);
+    if (s.detail > 0) s.add(p.chrome, cyl(s, 0.008, 0.05, "y", 16), [sr + 0.009, ly, zs + 0.012]);
+    if (s.fine(2)) for (const y of [-0.045, 0.045]) screwLite(s, p.ssBright, [sr + 0.021, ly + y, zb + dz], 0.0025);
+  }
   s.add(p.ssDull, bx(s, 0.1, 0.1, 0.045, 0.003), [sl + 0.16, sy1 + 0.13, zf + 0.0225]);
-  s.add(p.ledAmber, cyl(s, 0.006, 0.004, "z", 12), [sl + 0.16, sy1 + 0.13, zf + 0.046]);
-  s.add(p.ssBright, cyl(s, 0.0095, 0.003, "z", 16), [sl + 0.16, sy1 + 0.13, zf + 0.0445]);
-  if (s.fine(1)) s.at([sl + 0.33, sy1 + 0.13, zf + 0.001], [0, 0, 0], () => dataPlate(s, 0.1, 0.07));
+  s.add(p.ledAmber, cyl(s, 0.006, 0.004, "z", 12), [sl + 0.16, sy1 + 0.13, zf + 0.0468]);
+  s.add(p.ssBright, cyl(s, 0.0095, 0.003, "z", 16), [sl + 0.16, sy1 + 0.13, zf + 0.0459]);
+  if (s.fine(1)) s.at([sl + 0.33, sy1 + 0.13, zf + 0.0002], [0, 0, 0], () => dataPlate(s, 0.1, 0.07));
 
   // Hinges: the frame leaf, offset to the slab's face by its block, and the lower barrel half.
-  const hys = [sy0 + 0.28, (sy0 + sy1) / 2 + 0.05, sy1 - 0.24];
+  const hys = [sy0 + 0.36, (sy0 + sy1) / 2 + 0.05, sy1 - 0.24];
   for (const y of hys) {
     s.add(p.chrome, bx(s, 0.05, 0.17, zs + 0.004 - zf, 0.005), [hx - 0.03, y, (zf + zs + 0.004) / 2]);
     if (s.detail === 0) s.add(p.chrome, new THREE.CylinderGeometry(0.016, 0.016, 0.17, 6), [hx, y, hz]);
@@ -1385,47 +2085,67 @@ function walkinDoor(s: Shop, k: WalkInSpec, floorY: number, doorH: number, skinO
   const j = s.joint("cam_lift_door", [hx, 0, hz]);
   const X = (x: number) => x - hx;
   const Z = (z: number) => z - hz;
-  // The slab and the plug: stainless outside, the room's skin inside, a foam edge between.
   const sw = sr - sl;
+  const cx = X(sl + sw / 2);
   const kick = 0.31;
-  j.add(skinOut, bx(j, sw, sy1 - sy0 - kick, 0.0272, 0.004), [X(sl + sw / 2), (sy0 + kick + sy1) / 2, Z(zs - 0.0136)]);
-  j.add(skinOut, openBox(sw, kick, 0.0272, ["pz", "py"]), [X(sl + sw / 2), sy0 + kick / 2, Z(zs - 0.0136)]);
-  const px0 = k.door0 + 0.007;
-  const px1 = k.door0 + k.doorW - 0.007;
-  const py1 = floorY + doorH - 0.007;
-  j.add(p.ceramic, openBox(px1 - px0, py1 - sy0, PANEL - 0.03, ["pz", "nz"]), [X((px0 + px1) / 2), (sy0 + py1) / 2, Z(zf - (PANEL - 0.03) / 2 + 0.0035)]);
-  j.add(skinIn, bx(j, px1 - px0 + 0.002, py1 - sy0 + 0.002, 0.0012, 0.0005), [X((px0 + px1) / 2), (sy0 + py1) / 2, Z(zf - PANEL + 0.0335)]);
-  // The magnetic gasket round the slab's back: a bellows of grey PVC with a magnet strip, three sides.
-  const gk = 0.014;
-  const gz = Z(zf + 0.0042);
-  j.add(p.gasket, bx(j, gk, sy1 - sy0 - 0.01, 0.0072, 0.002), [X(sl + 0.022), (sy0 + sy1) / 2, gz]);
-  j.add(p.gasket, bx(j, gk, sy1 - sy0 - 0.01, 0.0072, 0.002), [X(sr - 0.022), (sy0 + sy1) / 2, gz]);
-  j.add(p.gasket, bx(j, sw - 0.03, gk, 0.0072, 0.002), [X(sl + sw / 2), sy1 - 0.022, gz]);
-  // The sweep at the foot (a cooler), or the plug's heated bottom rail (a freezer).
-  j.add(k.freezer ? p.ssDull : p.rubber, bx(j, px1 - px0, 0.012, PANEL - 0.03, 0.002), [X((px0 + px1) / 2), sy0 + 0.002, Z(zf - (PANEL - 0.03) / 2 + 0.0035)]);
-  // Kick plate.
-  j.at([X(sl + sw / 2), sy0 + kick / 2, Z(zs)], [0, 0, 0], () => diamondPlate(j, sw, kick));
-  if (j.fine(2)) for (const x of [-1, 1]) for (const y of [-0.13, 0.13]) screwLite(j, p.ssBright, [X(sl + sw / 2) + x * (sw / 2 - 0.02), sy0 + kick / 2 + y, Z(zs + 0.0016)], 0.0025);
+  // The slab: stainless wrapped round its foam, the edges rolled.
+  j.add(skinOut, bx(j, sw, sy1 - sy0, st, 0.006), [cx, (sy0 + sy1) / 2, Z(zs - st / 2)]);
+  // The plug: the liner's pan filling the opening, its face just shy of the wall's inner face.
+  const px0 = x0 + 0.007;
+  const px1 = x1 - 0.007;
+  const py1 = dTop - 0.007;
+  const zP = zi + 0.012;
+  const pcx = X((px0 + px1) / 2);
+  const pw = px1 - px0;
+  j.add(skinIn, bx(j, pw, py1 - sy0, zB + 0.002 - zP, 0.004), [pcx, (sy0 + py1) / 2, Z((zB + 0.002 + zP) / 2)]);
+  if (j.detail > 0) {
+    // The black ABS breaker round the plug's root, where the cold liner meets the warm slab.
+    const bw = 0.009;
+    const bz = Z(zB - 0.0006);
+    j.add(p.plastic, bx(j, bw, py1 - sy0, 0.0022, 0.0008), [X(px0 - bw / 2), (sy0 + py1) / 2, bz]);
+    j.add(p.plastic, bx(j, bw, py1 - sy0, 0.0022, 0.0008), [X(px1 + bw / 2), (sy0 + py1) / 2, bz]);
+    j.add(p.plastic, bx(j, pw + 2 * bw, bw, 0.0022, 0.0008), [pcx, py1 + bw / 2, bz]);
+    // The magnetic gasket: a grey PVC bulb over its magnet, up the hinge side, across the head, down the latch side.
+    const gi = 0.022;
+    const path = roundPath([[X(sl + gi), sy0 + 0.004], [X(sl + gi), sy1 - gi], [X(sr - gi), sy1 - gi], [X(sr - gi), sy0 + 0.004]], 0.014, j.fine(2) ? 4 : 1);
+    const prof: [number, number][] = j.fine(2)
+      ? [[-0.006, 0], [0.006, 0], [0.0075, 0.0012], [0.0058, 0.0021], [0.0082, 0.003], [0.0068, 0.004], [-0.0068, 0.004], [-0.0082, 0.003], [-0.0058, 0.0021], [-0.0075, 0.0012]]
+      : [[-0.007, 0], [0.007, 0], [0.0075, 0.004], [-0.0075, 0.004]];
+    j.add(p.gasket, sweepPath(path, prof, Z(zB) + 0.0003, -1));
+    // The sweep: an aluminium retainer across the foot of the plug's face, its neoprene blade down to the threshold.
+    j.add(p.ssDull, bx(j, pw - 0.012, 0.05, 0.005, 0.0015), [pcx, sy0 + 0.019, Z(zP - 0.0024)]);
+    j.add(p.rubber, bx(j, pw - 0.016, sy0 - 0.003 - (thTop + 0.0008), 0.0026, 0.0008), [pcx, (sy0 - 0.003 + thTop + 0.0008) / 2, Z(zP - 0.0024)]);
+    if (j.fine(2)) for (let i = 0; i < 6; i++) screwLite(j, p.ssBright, [pcx - pw / 2 + 0.04 + (i * (pw - 0.08)) / 5, sy0 + 0.03, Z(zP - 0.0049)], 0.0022, [0, Math.PI, 0]);
+    // Kick plate inside.
+    j.at([pcx, sy0 + 0.05 + 0.125, Z(zP - 0.0019)], [0, Math.PI, 0], () => diamondPlate(j, pw - 0.03, 0.25));
+  }
+  // Kick plate outside, set in from the slab's rolled edges, screwed at its corners.
+  j.at([cx, sy0 + 0.008 + kick / 2, Z(zs + 0.0019)], [0, 0, 0], () => diamondPlate(j, sw - 0.016, kick));
+  if (j.fine(2)) for (const x of [-1, 1]) for (const y of [-0.13, 0.13]) screwLite(j, p.ssBright, [cx + x * (sw / 2 - 0.022), sy0 + 0.008 + kick / 2 + y, Z(zs + 0.0019)], 0.0025);
   // Hinge straps on the door, and the upper barrel halves riding the cam.
   for (const y of hys) {
-    j.add(p.chrome, bx(j, 0.15, 0.09, 0.009, 0.004), [X(sl + 0.07), y + 0.02, Z(zs + 0.0045)]);
+    j.add(p.chrome, bx(j, 0.15, 0.09, 0.009, 0.004), [X(sl + 0.07), y + 0.02, Z(zs + 0.0047)]);
     j.add(p.chrome, bx(j, 0.03, 0.09, 0.02, 0.006), [0.012, y + 0.02, -0.002]);
     if (j.detail > 0) camBarrel(j, p.chrome, 0.016, y, 0.17, false, lift);
-    if (j.fine(2)) for (const x of [0.04, 0.08, 0.12]) screwLite(j, p.ssBright, [X(sl + x), y + 0.02, Z(zs + 0.009)], 0.003);
+    if (j.fine(2)) for (const x of [0.04, 0.08, 0.12]) screwLite(j, p.ssBright, [X(sl + x), y + 0.02, Z(zs + 0.0092)], 0.003);
   }
-  // The latch: a cast housing on the slab with its key cylinder, the pull handle hung from it on two lugs.
+  // The latch: a die-cast body near the free edge with its key cylinder, the pull grip held off it on two arms
+  // where the hand closes, the bolt out of the edge into the strike.
   const lx = sr - 0.06;
-  const ly = floorY + 1.08;
-  j.add(p.chrome, bx(j, 0.06, 0.24, 0.026, 0.008), [X(lx), ly, Z(zs + 0.013)]);
-  j.add(p.chrome, cyl(j, 0.012, 0.012, "z", 20), [X(lx), ly + 0.085, Z(zs + 0.03)]);
-  if (j.fine(2)) j.add(p.enamel, bx(j, 0.0022, 0.012, 0.002, 0.0006), [X(lx), ly + 0.085, Z(zs + 0.036)]);
-  j.add(p.chrome, bar(j, [[X(lx - 0.012), ly + 0.06, Z(zs + 0.026)], [X(lx - 0.02), ly + 0.05, Z(zs + 0.05)], [X(lx - 0.02), ly - 0.12, Z(zs + 0.05)], [X(lx - 0.012), ly - 0.13, Z(zs + 0.026)]], 0.011, 0.025, 14));
-  // The tongue across to the strike.
-  j.add(p.ssBright, bx(j, 0.05, 0.03, 0.012, 0.003), [X(sr + 0.004), ly, Z(zs + 0.02)]);
-  // Inside: the safety release, a glow-in-the-dark plunger anyone shut in can push.
-  j.add(p.ssBright, cyl(j, 0.03, 0.01, "z", 24), [X(lx), ly, Z(zf - PANEL + 0.028)]);
-  j.add(p.ledGreen, lathe(j, [[0, 0], [0.022, 0], [0.024, 0.02], [0.018, 0.04], [0, 0.042]], 20), [X(lx), ly, Z(zf - PANEL + 0.024)], [-Math.PI / 2, 0, 0]);
-  if (j.fine(2)) for (const dy of [-0.09, 0.09]) screwLite(j, p.ssBright, [X(lx), ly + dy, Z(zs + 0.026)], 0.0026);
+  const gx = lx - 0.075;
+  const gz = zs + 0.047;
+  j.add(p.chrome, bevelPlate(j, roundRect(0.058, 0.25, 0.022), 0.024, j.fine(2) ? 0.006 : 0.003, 10), [X(lx), ly, Z(zs + 0.0002)]);
+  j.add(p.chrome, cyl(j, 0.012, 0.012, "z", 20), [X(lx), ly + 0.085, Z(zs + 0.029)]);
+  if (j.fine(2)) {
+    j.add(p.enamel, bx(j, 0.0022, 0.012, 0.002, 0.0006), [X(lx), ly + 0.085, Z(zs + 0.0352)]);
+    j.add(p.chrome, torus(j, 0.009, 0.0026, "x", Math.PI * 2, 18, 8), [X(lx), ly - 0.112, Z(zs + 0.018)]);
+  }
+  j.add(p.chrome, bar(j, [[X(lx - 0.016), ly + 0.07, Z(zs + 0.02)], [X(gx), ly + 0.07, Z(gz)], [X(gx), ly - 0.07, Z(gz)], [X(lx - 0.016), ly - 0.07, Z(zs + 0.02)]], 0.011, 0.022, 14));
+  j.add(p.ssBright, bx(j, 0.05, 0.03, 0.012, 0.003), [X(sr + 0.004), ly, Z(zs - 0.012)]);
+  // Inside: the safety release, a glow-in-the-dark knob on a stainless rose that anyone shut in can push.
+  j.add(p.ssBright, cyl(j, 0.03, 0.006, "z", 24), [X(lx), ly, Z(zP - 0.0028)]);
+  j.add(glowMaterial(), lathe(j, [[0, 0], [0.011, 0], [0.011, 0.014], [0.022, 0.017], [0.026, 0.024], [0.024, 0.031], [0.016, 0.037], [0, 0.039]], j.fine(2) ? 28 : 12), [X(lx), ly, Z(zP - 0.0058)], [-Math.PI / 2, 0, 0]);
+  if (j.fine(2)) for (const dy of [-0.09, 0.09]) screwLite(j, p.ssBright, [X(lx), ly + dy, Z(zs + 0.0242)], 0.0026);
 
   // The closer: body on a bracket on the head, its rod to a bracket on the door's top rail.
   const yc = sy1 + 0.035;
@@ -1434,7 +2154,7 @@ function walkinDoor(s: Shop, k: WalkInSpec, floorY: number, doorH: number, skinO
   const cbx = 0.13;
   const bz = zc - hz;
   s.add(p.ssDull, bx(s, 0.05, 0.07, zc - zf + 0.01, 0.003), [ax + 0.02, yc, (zf + zc) / 2]);
-  j.add(p.ssDull, bx(j, 0.035, 0.08, 0.006, 0.002), [cbx, yc - 0.03, Z(zs + 0.003)]);
+  j.add(p.ssDull, bx(j, 0.035, 0.08, 0.0045, 0.002), [cbx, yc - 0.03, Z(zs + 0.00225)]);
   j.add(p.ssDull, bx(j, 0.035, 0.02, zc - zs + 0.01, 0.002), [cbx, yc, (bz + Z(zs)) / 2]);
   const body = s.joint("closer_body", [ax, yc, zc]);
   body.add(p.charcoal, cyl(body, 0.019, 0.23, "x", 24), [-0.125, 0, 0]);
@@ -1609,56 +2329,94 @@ function walkIn(k: WalkInSpec): Builder {
     const wallR = s.joint("part_wall_right", [0, 0, 0]);
     const frontR = s.joint("part_front_right", [0, 0, 0]);
 
-    // Side and back walls.
+    // Side and back walls. The side walls run the box's full depth; the front and back walls' outer skins wrap over
+    // their foam ends, and a formed angle trims each outside corner.
     const sideLen = d + zf;
+    const sk = 0.0008;
     s.at([0, 0, -d], [0, -Math.PI / 2, 0], () => {
-      panelWall(s, 0, sideLen, 0, top, p.panel, p.panel, seamsFrom(0, sideLen), plugs);
+      panelWall(s, 0, sideLen, 0, top, p.panel, p.panel, seamsFrom(0, sideLen), plugs, { extL: -sk, extR: -sk, ends: [false, false] });
       wallBase(s, T, sideLen - T, floorY);
     });
     wallR.at([w, 0, zf], [0, Math.PI / 2, 0], () => {
-      panelWall(wallR, 0, sideLen, 0, top, p.panel, p.panel, seamsFrom(0, sideLen), plugs);
+      panelWall(wallR, 0, sideLen, 0, top, p.panel, p.panel, seamsFrom(0, sideLen), plugs, { extL: -sk, extR: -sk, ends: [false, false] });
       wallBase(wallR, T, sideLen - T, floorY);
     });
+    // The back wall's frame runs from x = w (its 0) to x = 0: its skin's run over the left wall's end is its right.
     s.at([w, 0, -d], [0, Math.PI, 0], () => {
-      panelWall(s, T, w - T, 0, top, p.panel, p.panel, seamsFrom(T, w - T), plugs);
+      panelWall(s, T, w - T, 0, top, p.panel, p.panel, seamsFrom(T, w - T), plugs, { extR: T });
       wallBase(s, T, w - T, floorY);
     });
+    wallR.at([w, 0, -d], [0, Math.PI, 0], () => wallR.add(p.panel, new THREE.BoxGeometry(T, top, sk), [T / 2, top / 2, -sk / 2]));
     // The front wall: the door section (jambs and head), the panel left of it, and right of the latch-side jamb.
     const xr = k.door0 + k.doorW + 0.34;
     const dTop = floorY + doorH;
     const frontSeams = [k.door0 - 0.16, xr];
     s.at([0, 0, zf], [0, 0, 0], () => {
-      panelWall(s, T, k.door0, 0, top, p.ss, p.panel, frontSeams, plugs);
+      panelWall(s, T, k.door0, 0, top, p.ss, p.panel, frontSeams, plugs, { extL: T });
       panelWall(s, k.door0, k.door0 + k.doorW, dTop, top, p.ss, p.panel, [], plugs);
       if (floorY > 0) panelWall(s, k.door0, k.door0 + k.doorW, 0, floorY, p.ss, p.panel, [], []);
       panelWall(s, k.door0 + k.doorW, xr, 0, top, p.ss, p.panel, [], plugs);
-      wallBase(s, T, k.door0, floorY);
-      wallBase(s, k.door0 + k.doorW, xr, floorY);
+      wallBase(s, T, k.door0 - 0.045, floorY);
+      wallBase(s, k.door0 + k.doorW + 0.045, xr, floorY);
     });
     frontR.at([0, 0, zf], [0, 0, 0], () => {
-      panelWall(frontR, xr, w - T, 0, top, p.ss, p.panel, seamsFrom(xr, w - T), plugs);
+      panelWall(frontR, xr, w - T, 0, top, p.ss, p.panel, seamsFrom(xr, w - T), plugs, { extR: T });
       wallBase(frontR, xr, w - T, floorY);
     });
-    // The ceiling: panels spanning side to side, cam-locked, cream both faces; flashing angle round the top edge.
+    // Corner trims: a 2 in formed angle up each outside corner, stainless on the front, painted at the back; they
+    // stop under the roof's flashing, which laps over their heads.
+    {
+      const trim = (sh: Shop, x: number, z: number, rot: number, mat: THREE.Material) =>
+        sh.at([x, 0, z], [0, rot, 0], () => {
+          const g = angleBar(sh, 0.05, 0.05, top - 0.005, 0.0012, 0.005, 0.0006);
+          g.rotateX(Math.PI / 2);
+          g.translate(0, top - 0.002, 0);
+          sh.add(mat, g);
+          if (sh.fine(2)) for (const y of [0.15, top / 2, top - 0.15]) for (const [a, b] of [[0.032, 0.0018], [-0.0018, -0.032]] as const) screwLite(sh, p.ssBright, a > 0 ? [a, y, b] : [a, y, b], 0.0024, a > 0 ? [0, 0, 0] : [0, -Math.PI / 2, 0]);
+        });
+      trim(s, 0, zf, 0, p.ss);
+      trim(s, 0, -d, -Math.PI / 2, p.panel);
+      trim(wallR, w, -d, Math.PI, p.panel);
+      trim(wallR, w, zf, Math.PI / 2, p.ss);
+    }
+    // The ceiling: panels spanning side to side, cam-locked and grooved at their joints like the walls, cream both
+    // faces; a formed flashing angle round the top edge covering the panels' edges and lapping over the walls' heads,
+    // stainless on the front and painted elsewhere, the side runs lapped over the front and back ones.
     {
       const cz = (zf - d) / 2;
       const cd = zf + d;
       roof.add(p.ceramic, openBox(w, T - 0.003, cd, ["py", "ny"]), [w / 2, top + T / 2, cz]);
-      const seams = seamsFrom(0, cd).map((v) => zf - v);
+      const seams = roof.fine(1) ? seamsFrom(0, cd).map((v) => zf - v) : [];
       const cuts = [zf, ...seams, -d];
+      const g = GROOVE / 2;
       for (let i = 0; i + 1 < cuts.length; i++) {
-        const a = cuts[i]! - (i > 0 ? 0.001 : 0);
-        const b = cuts[i + 1]! + (i + 2 < cuts.length ? 0.001 : 0);
-        roof.add(p.panel, new THREE.BoxGeometry(w, 0.0008, a - b), [w / 2, h - 0.0004, (a + b) / 2]);
-        roof.add(p.panel, new THREE.BoxGeometry(w, 0.0008, a - b), [w / 2, top + 0.0004, (a + b) / 2]);
+        const a = cuts[i]! - (i > 0 ? g : 0);
+        const b = cuts[i + 1]! + (i + 2 < cuts.length ? g : 0);
+        roof.add(p.panel, new THREE.BoxGeometry(w, sk, a - b), [w / 2, h - sk / 2, (a + b) / 2]);
+        roof.add(p.panel, new THREE.BoxGeometry(w, sk, a - b), [w / 2, top + sk / 2, (a + b) / 2]);
       }
-      if (roof.fine(1)) for (const z of seams) roof.add(p.rubber, openBox(w - 0.002, 0.0012, 0.0018, ["px", "nx"]), [w / 2, h - 0.0016, z]);
-      if (roof.fine(2))
-        for (const z of seams) for (let x = T + 0.3; x < w - T - 0.1; x += 0.6) camPlug(roof, [x, top, z + 0.045], [Math.PI / 2, 0, 0]);
-      // Flashing: stainless on the front, painted elsewhere, 50 mm angle over the roof edge.
-      roof.add(p.ss, bx(roof, w + 0.002, 0.05, 0.0012, 0.0005), [w / 2, h - 0.024, zf + 0.0012]);
-      roof.add(p.ss, bx(roof, w + 0.002, 0.0012, 0.05, 0.0005), [w / 2, h + 0.0006, zf - 0.024]);
-      for (const x of [-0.0012, w + 0.0012]) roof.add(p.panel, bx(roof, 0.0012, 0.05, cd, 0.0005), [x, h - 0.024, cz]);
+      for (const z of seams) {
+        if (roof.fine(2))
+          for (const sz of [-1, 1]) {
+            roof.add(p.panel, new THREE.BoxGeometry(w - 0.002, 0.0022, sk), [w / 2, h - sk - 0.0011, z + sz * (g + sk / 2)]);
+            roof.add(p.panel, new THREE.BoxGeometry(w - 0.002, 0.0022, sk), [w / 2, top + sk + 0.0011, z + sz * (g + sk / 2)]);
+          }
+        const dy = roof.fine(2) ? 0.003 : 0.0016;
+        roof.add(p.rubber, new THREE.PlaneGeometry(w - 0.002, GROOVE + 0.0012).rotateX(-Math.PI / 2), [w / 2, h - dy, z]);
+        roof.add(p.rubber, new THREE.PlaneGeometry(w - 0.002, GROOVE + 0.0012).rotateX(Math.PI / 2), [w / 2, top + dy, z]);
+        if (roof.fine(2)) for (let x = T + 0.3; x < w - T - 0.1; x += 0.6) camPlug(roof, [x, top, z + 0.045], [-Math.PI / 2, 0, 0]);
+      }
+      const leg = T + 0.03;
+      const ft = 0.0012;
+      const gF = 0.0024;
+      const gS = 0.004;
+      const eF = gF + ft;
+      const eS = eF + 0.001;
+      // The front and back runs lap over the sides' ends, so the stainless runs unbroken round the front corners.
+      roof.at([-eS, h, zf], [0, Math.PI / 2, 0], () => roof.add(p.ss, angleBar(roof, 0.05, leg, w + 2 * eS, ft, 0.004, gS)));
+      roof.at([w + eS, h, -d], [0, -Math.PI / 2, 0], () => roof.add(p.panel, angleBar(roof, 0.05, leg, w + 2 * eS, ft, 0.004, gS)));
+      roof.at([0, h, -d - eF], [0, 0, 0], () => roof.add(p.panel, angleBar(roof, 0.05, leg, cd + 2 * eF, ft, 0.004, gF)));
+      roof.at([w, h, zf + eF], [0, Math.PI, 0], () => roof.add(p.panel, angleBar(roof, 0.05, leg, cd + 2 * eF, ft, 0.004, gF)));
     }
     if (k.freezer) {
       // The insulated floor: 4 in panel, its wear skin of aluminium.
@@ -1687,7 +2445,7 @@ function walkIn(k: WalkInSpec): Builder {
     });
     const vent = (zz: number, out: boolean) =>
       s.at([sideX, floorY + 1.92, zz], [0, out ? 0 : Math.PI, 0], () => {
-        s.add(p.hdpe, lathe(s, [[0, 0.03], [0.05, 0.028], [0.058, 0.012], [0.06, 0], [0, 0]], 32), [0, 0, 0], [Math.PI / 2, 0, 0]);
+        s.add(p.hdpe, lathe(s, [[0, 0.0005], [0.06, 0.0005], [0.058, 0.012], [0.05, 0.028], [0, 0.03]], 32), [0, 0, 0], [Math.PI / 2, 0, 0]);
         if (s.fine(1)) for (let i = -2; i <= 2; i++) s.add(p.charcoal, bx(s, 0.07 - Math.abs(i) * 0.012, 0.005, 0.004, 0.0015), [0, i * 0.011, 0.029]);
         if (k.freezer && out) s.add(p.ledAmber, cyl(s, 0.004, 0.003, "z", 10), [0.04, -0.035, 0.016]);
       });
@@ -1698,10 +2456,10 @@ function walkIn(k: WalkInSpec): Builder {
     const strips: string[] = [];
     {
       const rail = k.doorW + 0.08;
-      const ry = dTop + 0.045;
+      const ry = dTop + 0.07;
       const rz = zi - 0.022;
-      s.add(p.ssDull, bx(s, rail, 0.04, 0.012, 0.002), [k.door0 + k.doorW / 2, ry, zi - 0.006]);
-      s.add(p.ssBright, bx(s, rail, 0.012, 0.03, 0.003), [k.door0 + k.doorW / 2, ry - 0.012, rz + 0.004]);
+      s.add(p.ssDull, bx(s, rail, 0.04, 0.012, 0.002), [k.door0 + k.doorW / 2, ry, zi - 0.0064]);
+      s.add(p.ssBright, bx(s, rail - 0.012, 0.012, 0.03, 0.003), [k.door0 + k.doorW / 2, ry - 0.012, rz + 0.004]);
       if (s.fine(2)) for (const f of [0.08, 0.5, 0.92]) screwLite(s, p.ssBright, [k.door0 - 0.04 + rail * f, ry + 0.008, zi - 0.012], 0.003, [Math.PI, 0, 0]);
       const sw = 0.203;
       const n = Math.max(5, Math.round((k.doorW + 0.06) / 0.16));
@@ -1715,7 +2473,7 @@ function walkIn(k: WalkInSpec): Builder {
         const j = s.joint(name, [x, ry - 0.02, z]);
         j.add(pvc, bx(j, sw, len, 0.002, 0.0008), [0, -len / 2, 0]);
         // The strip folds over a hanger plate: a stainless clamp across its top with two bolts.
-        j.add(p.ssBright, bx(j, sw - 0.01, 0.03, 0.005, 0.0015), [0, -0.008, 0.0035 - (i % 2 ? 0 : 0.007)]);
+        j.add(p.ssBright, bx(j, sw - 0.01, 0.03, 0.005, 0.0015), [0, -0.008, i % 2 ? -0.0042 : 0.0042]);
         if (j.fine(2)) for (const sx of [-0.06, 0.06]) j.add(p.ssBright, cyl(j, 0.004, 0.012, "z", 8), [sx, -0.008, 0.001]);
         strips.push(name);
       }
@@ -2281,7 +3039,8 @@ function kickCondenser(s: Shop, w: number, d: number, y0: number, y1: number, zg
   const L = d + zg;
   const zc = -d + L / 2;
   for (const x of [t / 2, w - t / 2]) s.add(p.ss, bx(s, t, H, L, 0.0005), [x, y0 + H / 2, zc]);
-  s.add(p.ssDull, new THREE.BoxGeometry(w - 2 * t, t, L), [w / 2, y0 + t / 2, zc]);
+  // The floor pan stops behind the bezel and grille.
+  s.add(p.ssDull, new THREE.BoxGeometry(w - 2 * t, t, L - 0.0014), [w / 2, y0 + t / 2, zc - 0.0007]);
   s.add(p.alu, new THREE.BoxGeometry(w - 2 * t, H - t, t), [w / 2, y0 + (H + t) / 2, -d + t / 2]);
   s.add(p.ss, bx(s, gx - t, H, 0.0012, 0.0005), [t + (gx - t) / 2, y0 + H / 2, zg - 0.0006]);
   s.at([gx / 2, y0 + H / 2, zg], [0, 0, 0], bezel);
@@ -2398,7 +3157,7 @@ function capX(pts: readonly (readonly [number, number])[], face: 1 | -1): THREE.
 /* ------------------------------------------------------------------------------------------------------------ */
 
 /**
- * A top-mount reach-in on 6 in legs with one or two solid doors: the foamed stainless body, the doors on their pins
+ * A top-mount reach-in on 5 in casters with one or two solid doors: the foamed stainless body, the doors on their pins
  * with bar pulls and locks, epoxy shelves on pilasters, the evaporator housing under the ceiling at the back, an LED
  * light, the data plate; on the roof the condensing unit behind its louvred grille and the controller.
  */
@@ -2416,7 +3175,9 @@ function reachIn(doorsN: 1 | 2, freezer: boolean): Builder {
     const inset = 0.012;
     const doors = planDoors(w, doorsN === 1 ? ["front_door"] : ["door_left", "door_right"], 0.035, inset);
     const cav = cabBody(s, { w, d, y0: yb, y1: yt, zf, openings: doors.map((o) => openingOf(o, dy0, dy1)) });
-    for (const x of [0.05, w - 0.05]) for (const z of [zf - 0.05, -d + 0.05]) leg6(s, x, z, yb);
+    // Plate casters, 5 in, the front pair with toe brakes.
+    for (const x of [0.065, w - 0.065])
+      for (const [z, brake] of [[zf - 0.065, true], [-d + 0.065, false]] as const) s.at([x, 0, z], [0, 0, 0], () => swivelCaster(s, yb, 0.0635, brake, 0.036));
     for (const o of doors) {
       const j = s.joint(o.name, [o.px, (dy0 + dy1) / 2, pinZ]);
       cabDoor(j, { w: o.w, h: dy1 - dy0, t, side: o.side, inset, handle: "bar", hl: 0.34, hx: 0.032, lock: true });
@@ -2551,7 +3312,23 @@ const makeline: Builder = (s, e) => {
   s.add(p.ss, bx(s, w, yt - yn, t1, 0.0005), [w / 2, (yt + yn) / 2, -0.0126]);
   s.add(p.ss, new THREE.BoxGeometry(w, t1, -0.012 - zf), [w / 2, yn + t1 / 2, (zf - 0.012) / 2]);
   for (const x of [t1 / 2, w - t1 / 2]) s.add(p.ss, new THREE.BoxGeometry(t1, yt - yn, -0.012 - zf), [x, (yt + yn) / 2, (zf - 0.012) / 2]);
-  s.add(p.hdpe, bx(s, w - 0.024, 0.019, 0.3, 0.003), [w / 2, yt + 0.0005 + 0.0095, -0.016 - 0.15]);
+  {
+    // The cutting board: 3/4 in HDPE, its edges chamfered, lying on the deck.
+    const bw = w - 0.024;
+    const bd = 0.3;
+    const ch = s.detail > 0 ? 0.003 : 0;
+    const g = new THREE.ExtrudeGeometry(roundRect(bw - 2 * ch, bd - 2 * ch, 0.006), {
+      depth: 0.019 - 2 * ch,
+      bevelEnabled: ch > 0,
+      bevelThickness: ch,
+      bevelSize: ch,
+      bevelSegments: 1,
+      curveSegments: s.seg(3, 1),
+    });
+    g.translate(0, 0, ch);
+    g.rotateX(-Math.PI / 2);
+    s.add(boardMaterial(), g, [w / 2, yt + 0.0005, -0.016 - bd / 2]);
+  }
   // The rail: the dam in front, the riser behind with the hinge, the ends, the strips round the well, the well.
   const n = 9;
   const pw = 0.176;
@@ -2600,7 +3377,7 @@ const makeline: Builder = (s, e) => {
     lid.add(p.ssBright, bx(lid, lw * 0.45, 0.012, 0.018, 0.004), [0, 0.027, 0.5]);
     for (const x of [-0.6, 0, 0.6]) {
       lid.add(p.ssBright, cyl(lid, 0.006, 0.09, "x", 14), [x, 0, 0]);
-      lid.add(p.ssBright, new THREE.BoxGeometry(0.09, 0.0025, 0.03), [x, 0.0035, 0.012]);
+      lid.add(p.ssBright, new THREE.BoxGeometry(0.09, 0.0025, 0.03), [x, 0.0045, 0.012]);
     }
   }
   for (const x of [-0.65, -0.55, 0.55, 0.65, -0.05, 0.05]) s.add(p.ssBright, bx(s, 0.01, 0.006, 0.02, 0.001), [w / 2 + x, yd - 0.004, -0.824 - 0.004]);
@@ -2678,10 +3455,17 @@ function blastChiller(levels: number): Builder {
       sh.holes.push(circleHoleCW(fx, fy, fr + 0.006));
       s.add(p.ss, plate(s, sh, 0.0012), [0, 0, ze - 0.0012]);
     } else s.add(p.ss, new THREE.BoxGeometry(ew, eh, 0.002), [fx, cav.y0 + eh / 2, ze - 0.001]);
+    // Behind the fan its motor on three struts from the shroud, and behind the motor the coil, clear of the back.
     if (s.fine(2)) {
-      s.at([fx - 0.2, fy - 0.2, ze - 0.03], [0, 0, 0], () => finCoil(s, p.alu, 0.4, 0.4, 0.09, 4, false));
-      s.add(p.charcoal, cyl(s, 0.05, 0.08, "z", 24), [fx, fy, ze - 0.09]);
-    } else if (s.fine(1)) s.add(p.alu, new THREE.BoxGeometry(0.4, 0.4, 0.09), [fx, fy, ze - 0.075]);
+      s.at([fx - 0.2, fy - 0.2, ze - 0.105], [0, 0, 0], () => finCoil(s, p.alu, 0.4, 0.4, 0.06, 4, false));
+      s.add(p.charcoal, cyl(s, 0.05, 0.06, "z", 24), [fx, fy, ze - 0.065]);
+      s.add(p.ssBright, cyl(s, 0.008, 0.008, "z", 12), [fx, fy, ze - 0.031]);
+      for (let k = 0; k < 3; k++) {
+        const a = Math.PI / 2 + (k * Math.PI * 2) / 3;
+        const [c, sn] = [Math.cos(a), Math.sin(a)];
+        s.add(p.ssDull, bar(s, [[fx + c * 0.049, fy + sn * 0.049, ze - 0.065], [fx + c * (fr + 0.03), fy + sn * (fr + 0.03), ze - 0.065], [fx + c * (fr + 0.03), fy + sn * (fr + 0.03), ze - 0.0016]], 0.004, 0.012, 8));
+      }
+    } else if (s.fine(1)) s.add(p.alu, new THREE.BoxGeometry(0.4, 0.4, 0.06), [fx, fy, ze - 0.135]);
     const ej = s.joint("evap_fan", [fx, fy, ze - 0.02]);
     axialFan(ej, p.alu, p.ssDull, fr - 0.008, 5);
     s.at([fx, fy, ze + 0.002], [0, 0, 0], () => fanGuard(s, p.chrome, fr + 0.006, 0.014, 0.0013));
@@ -2713,14 +3497,14 @@ function blastChiller(levels: number): Builder {
     const pm = plateMaterials();
     topCondenser(s, w, d, yt, h, pinZ + t / 2 - 0.001, zf, 0.36, "cond_fan", () => {
       s.add(p.bakelite, bx(s, 0.32, 0.105, 0.004, 0.003), [0, 0.035, 0.002]);
-      if (readout) s.add(readout.mat, decalFull(0.11, 0.041), [-0.085, 0.058, 0.0042]);
+      if (readout) s.add(readout.mat, decalFull(0.11, 0.041), [-0.085, 0.058, 0.0047]);
       else s.add(p.screen, new THREE.BoxGeometry(0.11, 0.041, 0.001), [-0.085, 0.058, 0.0045]);
       if (s.fine(1)) {
-        s.add(pm.plate, decal(0.08, 0.08, P.chill, 4), [0.055, 0.035, 0.0042]);
-        s.add(pm.led, decal(0.05, 0.02, L.chill, 8), [-0.085, 0.012, 0.0042]);
+        s.add(pm.plate, decal(0.08, 0.08, P.chill, 4), [0.055, 0.035, 0.0047]);
+        s.add(pm.led, decal(0.05, 0.02, L.chill, 8), [-0.085, 0.012, 0.0047]);
       }
       for (const [kx, ky] of [[0.115, 0.06], [0.145, 0.06], [0.115, 0.02], [0.145, 0.02]] as const) s.add(p.charcoal, cyl(s, 0.009, 0.004, "z", 16), [kx, ky, 0.006]);
-      if (s.fine(2)) for (let i = 0; i < 5; i++) s.add(p.ledAmber, new THREE.CircleGeometry(0.0016, 8), [0.017, 0.0644 - i * 0.0125, 0.0043]);
+      if (s.fine(2)) for (let i = 0; i < 5; i++) s.add(p.ledAmber, new THREE.CircleGeometry(0.0016, 8), [0.017, 0.0644 - i * 0.0125, 0.0053]);
       // The core probe in its two clips, its lead coiled back to the gland.
       const py = -0.06;
       const pz = 0.012;
@@ -2814,7 +3598,8 @@ const iceMachine: Builder = (s, e) => {
     s.add(p.hdpe, plate(s, sh, t), [0, 0, lz1]);
     s.add(p.hdpe, new THREE.BoxGeometry(ow, t, zAt(yo0) - lz1), [w / 2, yo0 - t / 2, (zAt(yo0) + lz1) / 2]);
     s.add(p.hdpe, new THREE.BoxGeometry(ow, t, zAt(yo1) - lz1), [w / 2, yo1 + t / 2, (zAt(yo1) + lz1) / 2]);
-    const side = new THREE.Shape([new THREE.Vector2(lz1, yo0), new THREE.Vector2(zAt(yo0), yo0), new THREE.Vector2(zAt(yo1), yo1), new THREE.Vector2(lz1, yo1)]);
+    // The throat's sides stop a millimetre behind the slope's face, under the opening's edge.
+    const side = new THREE.Shape([new THREE.Vector2(lz1, yo0), new THREE.Vector2(zAt(yo0) - 0.001, yo0), new THREE.Vector2(zAt(yo1) - 0.001, yo1), new THREE.Vector2(lz1, yo1)]);
     for (const x of [w / 2 - ow / 2 + t, w / 2 + ow / 2]) s.add(p.hdpe, plate(s, side, t), [x, 0, 0], [0, -Math.PI / 2, 0]);
   } else s.add(p.hdpe, new THREE.BoxGeometry(lw, lh, t), [w / 2, ly0 + lh / 2, lz1 + t / 2]);
   // The ice: three heaps (one shown, by how full), each piled under the drop at the back and slumping forward at
@@ -2844,21 +3629,77 @@ const iceMachine: Builder = (s, e) => {
       ij.add(p.glass, cube.clone(), [x, heap(x, z) + 0.004, z], [rnd() * 0.8 - 0.4, rnd() * Math.PI, rnd() * 0.8 - 0.4]);
     }
   });
-  // The door: a foamed stainless panel on the slope, hinged along its top edge, its liner behind, the pull below.
+  // The door: a foamed stainless panel on the slope hung from a piano hinge along its top edge, its knuckles proud
+  // of its face; the liner behind; a black moulded pocket let into its face along the bottom edge for the fingers.
   const pinY = 1.08;
-  const dj = s.joint("bin_flip_door", [w / 2, pinY, zAt(pinY)], [-alpha, 0, 0]);
+  const zH = 0.0225; // the hinge's knuckles stand this far off the slope, on the door's face
+  const pv: V3 = [w / 2, pinY + zH * Math.sin(alpha), zAt(pinY) + zH * Math.cos(alpha)];
+  const dj = s.joint("bin_flip_door", pv, [-alpha, 0, 0]);
   {
     const Ld = (pinY - (yL + 0.012)) / Math.cos(alpha);
     const dw = ow + 0.04;
-    dj.add(p.ss, bx(dj, dw, Ld + 0.004, 0.02, 0.004), [0, -Ld / 2 + 0.002, 0.0142]);
-    if (dj.detail > 0) dj.add(p.hdpe, bx(dj, dw - 0.06, Ld - 0.05, 0.004, 0.0015), [0, -Ld / 2, 0.0036]);
-    dj.add(p.plastic, bx(dj, 0.34, 0.026, 0.014, 0.005), [0, -Ld + 0.016, 0.031]);
-    if (dj.fine(1)) dj.add(p.plastic, bx(dj, 0.3, 0.006, 0.014, 0.002), [0, -Ld + 0.002, 0.026]);
-    for (const x of [-0.22, 0.22]) dj.add(p.ssBright, cyl(dj, 0.005, 0.05, "x", 12), [x, 0, 0.004]);
+    const Z = (z: number) => z - zH; // the door's depths measured off the slope
+    const yTop = -0.007;
+    const zf = 0.0242; // its face
+    const zc = 0.0058; // its core's back
+    const sk = 0.0012;
+    // The pull pocket, centred where a hand (or a claw) finds it.
+    const pkW = 0.3;
+    const pkH = 0.032;
+    const yP = (0.82 - pv[1] - Z(zf) * Math.sin(alpha)) / Math.cos(alpha);
+    const bot = -Ld;
+    if (dj.detail === 0) dj.add(p.ss, new THREE.BoxGeometry(dw, yTop - bot, zf - zc), [0, (yTop + bot) / 2, Z((zf + zc) / 2)]);
+    else {
+      // Its face: a skin with the pocket's mouth cut in it, edges eased.
+      const face = roundRect(dw, yTop - bot, 0.004, 0, (yTop + bot) / 2);
+      face.holes.push(rectPath(new THREE.Path(), pkW, pkH, 0.012, 0, yP, true));
+      dj.add(p.ss, bevelPlate(dj, face, sk, 0.0005), [0, 0, Z(zf - sk)]);
+      // The core, wrapped at its edges, built round the pocket.
+      const cz = zf - sk - zc;
+      const czm = Z(zc + cz / 2);
+      const sideW = (dw - pkW) / 2 - 0.001;
+      for (const sx of [-1, 1]) dj.add(p.ss, new THREE.BoxGeometry(sideW, yTop - bot, cz), [sx * (dw / 2 - sideW / 2), (yTop + bot) / 2, czm]);
+      const iw = dw - 2 * sideW;
+      const pTop = yP + pkH / 2 + 0.001;
+      const pBot = yP - pkH / 2 - 0.001;
+      dj.add(p.ss, new THREE.BoxGeometry(iw, yTop - pTop, cz), [0, (yTop + pTop) / 2, czm]);
+      if (pBot - bot > 0.0005) dj.add(p.ss, new THREE.BoxGeometry(iw, pBot - bot, cz), [0, (pBot + bot) / 2, czm]);
+      const pd = 0.0135; // the pocket's depth
+      dj.add(p.ss, new THREE.BoxGeometry(iw, pTop - pBot, zf - sk - pd - 0.0004 - zc), [0, yP, Z((zc + zf - sk - pd - 0.0004) / 2)]);
+      // The pocket: a moulded cup, narrowing to its floor.
+      const cup = loft(dj, [
+        { w: pkW + 0.002, d: pkH + 0.002, r: 0.013, y: zf - sk * 0.5 },
+        { w: pkW - 0.004, d: pkH - 0.004, r: 0.011, y: zf - sk - 0.003 },
+        { w: pkW - 0.012, d: pkH - 0.01, r: 0.008, y: zf - sk - pd },
+      ], 0, 1, dj.fine(2) ? 3 : 1);
+      cup.rotateX(Math.PI / 2);
+      dj.add(p.plastic, cup, [0, yP, -zH]);
+    }
+    if (dj.detail > 0) dj.add(p.hdpe, bx(dj, dw - 0.06, Ld - 0.05, 0.004, 0.0015), [0, -Ld / 2, Z(0.0036)]);
+    // The piano hinge: knuckles alternating between the door's leaf and the bin's.
+    const kr = 0.0045;
+    const nk = dj.fine(2) ? 15 : 3;
+    const kl = (dw - 0.02) / nk;
+    const leafT = 0.001;
+    const zl = Z(zf);
+    const bin = (fn: () => void) => s.at(pv, [-alpha, 0, 0], fn);
+    for (let i = 0; i < nk; i++) {
+      const x = -dw / 2 + 0.01 + (i + 0.5) * kl;
+      if (i % 2 === 0) dj.add(p.ss, cyl(dj, kr, kl - 0.0008, "x", dj.fine(2) ? 14 : 8), [x, 0, 0]);
+      else bin(() => s.add(p.ss, cyl(s, kr, kl - 0.0008, "x", s.fine(2) ? 14 : 8), [x, 0, 0]));
+    }
+    dj.add(p.ss, new THREE.BoxGeometry(dw - 0.02, 0.018, leafT), [0, -0.004 - 0.009, zl + leafT / 2]);
+    bin(() => {
+      // The bin's leaf on a stand-off rail across the slope above the door.
+      s.add(p.ss, new THREE.BoxGeometry(dw - 0.02, 0.018, leafT), [0, 0.004 + 0.009, zl + leafT / 2]);
+      s.add(p.ss, bx(s, dw + 0.02, 0.02, zl + zH - 0.0004, 0.002), [0, 0.005 + 0.01, (zl - zH) / 2 + 0.0002]);
+      if (s.fine(2)) for (let i = 0; i < 6; i++) screwLite(s, p.ssBright, [-dw / 2 + 0.04 + (i * (dw - 0.08)) / 5, 0.014, zl + leafT], 0.0022);
+    });
+    if (dj.fine(2)) for (let i = 0; i < 6; i++) screwLite(dj, p.ssBright, [-dw / 2 + 0.04 + (i * (dw - 0.08)) / 5, -0.014, zl + leafT], 0.0022);
   }
   // The head: bottom pan, ends, top, the louvred intake and the condenser behind it, the panel above.
   const H = h - yh;
-  s.add(p.gasket, new THREE.BoxGeometry(w + 0.002, 0.004, d - 0.002), [w / 2, yh + 0.001, -d / 2 - 0.001]);
+  s.add(p.gasket, new THREE.BoxGeometry(w - 0.004, 0.0018, d - 0.008), [w / 2, yh + 0.001, -d / 2]);
   s.add(p.ssDull, new THREE.BoxGeometry(w - 2 * t, t, d), [w / 2, yh + 0.002 + t / 2, -d / 2]);
   for (const x of [t / 2, w - t / 2]) s.add(p.ss, bx(s, t, H - 0.002 - t, d, 0.0005), [x, yh + 0.002 + (H - 0.002 - t) / 2, -d / 2]);
   s.add(p.ss, bx(s, w, t, d, 0.0005), [w / 2, h - t / 2, -d / 2]);

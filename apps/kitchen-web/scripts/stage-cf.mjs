@@ -3,8 +3,9 @@
  * Stage Cloudflare Workers Assets bundle for frankensim.org/kitchen-lab:
  *   1. Run `tsc --noEmit`
  *   2. Run `vite build --base /kitchen-lab/ --outDir dist-cf/kitchen-lab --emptyOutDir`
- *   3. Copy lean real Blender `.glb` + `.json` manifests from `../../assets/kitchens/`
- *      into `dist-cf/kitchen-lab/kitchen-assets/` (no unnecessary PNG bloat!)
+ *   3. Copy the five kitchens' build manifests (`.scene3d.v1.json`, `.site_metadata.json`) and the hero's loading
+ *      posters from `../../assets/kitchens/` into `dist-cf/kitchen-lab/kitchen-assets/`. The page builds every room,
+ *      fixture and cook in code from those manifests, so no Blender `.glb` is staged.
  *   4. Copy `cloudflare/_headers` into `dist-cf/_headers`
  *   5. Run Law V-L16 zero-OEM-brand audit across staged HTML/JS/CSS
  */
@@ -53,14 +54,14 @@ run("bunx", [
   "--emptyOutDir",
 ]);
 
-console.log("[stage-cf] 3/5 Staging real Blender .glb & manifest assets into dist-cf/kitchen-lab/kitchen-assets/...");
+console.log("[stage-cf] 3/5 Staging the kitchens' build manifests and the hero posters into dist-cf/kitchen-lab/kitchen-assets/...");
 let copiedFiles = 0;
 let copiedBytes = 0;
 
-// 5 canonical exemplar kitchens (.glb + .scene3d.v1.json + .site_metadata.json — skip large preview PNGs)
+// The 5 kitchens' manifests: the hero builds each room from these (heroKitchen.ts fetches nothing else).
 for (const dir of EXEMPLAR_DIRS) {
   const srcDir = path.join(REPO_ASSETS, "exemplars", dir);
-  for (const suffix of [".glb", ".scene3d.v1.json", ".site_metadata.json"]) {
+  for (const suffix of [".scene3d.v1.json", ".site_metadata.json"]) {
     const fname = `${dir}${suffix}`;
     copiedBytes += copyFileEnsured(
       path.join(srcDir, fname),
@@ -70,40 +71,18 @@ for (const dir of EXEMPLAR_DIRS) {
   }
 }
 
-// All 67 equipment/cookware/food `.glb`s + `catalog_index.json`
-const eqSrcDir = path.join(REPO_ASSETS, "equipment");
-for (const entry of fs.readdirSync(eqSrcDir)) {
-  if (entry.endsWith(".glb") || entry === "catalog_index.json") {
-    copiedBytes += copyFileEnsured(
-      path.join(eqSrcDir, entry),
-      path.join(DIST_ASSETS, "equipment", entry),
-    );
-    copiedFiles += 1;
-  }
-}
-
-// All 3 anthropometric 29-bone SkinnedMesh staff rigs + manifest
-const staffSrcDir = path.join(REPO_ASSETS, "staff");
-for (const entry of fs.readdirSync(staffSrcDir)) {
-  if (entry.endsWith(".glb") || entry === "staff_rig_manifest.json") {
-    copiedBytes += copyFileEnsured(
-      path.join(staffSrcDir, entry),
-      path.join(DIST_ASSETS, "staff", entry),
-    );
-    copiedFiles += 1;
-  }
-}
-
-// Instant-paint dark-studio Blender hero posters (desktop 1920x1100 + mobile 1080x1180)
+// The hero's loading posters, rendered from the live 3D kitchen by scripts/render-posters.mjs (which needs a staged
+// build to render from, so a first build may have none yet). index.html references both; `bun run verify` fails on
+// the 404 if one is missing.
 const posterSrcDir = path.join(REPO_ASSETS, "web_posters");
-if (fs.existsSync(posterSrcDir)) {
-  for (const entry of ["hero-desktop.png", "hero-mobile.png"]) {
-    const src = path.join(posterSrcDir, entry);
-    if (fs.existsSync(src)) {
-      copiedBytes += copyFileEnsured(src, path.join(DIST_ASSETS, "web_posters", entry));
-      copiedFiles += 1;
-    }
+for (const entry of ["hero-desktop.webp", "hero-mobile.webp"]) {
+  const src = path.join(posterSrcDir, entry);
+  if (!fs.existsSync(src)) {
+    console.warn(`[stage-cf] WARNING: missing hero poster ${src}; run node scripts/render-posters.mjs, then build again.`);
+    continue;
   }
+  copiedBytes += copyFileEnsured(src, path.join(DIST_ASSETS, "web_posters", entry));
+  copiedFiles += 1;
 }
 
 console.log(

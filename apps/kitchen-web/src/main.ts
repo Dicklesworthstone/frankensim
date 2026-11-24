@@ -13,7 +13,7 @@ import { mountStoveLab } from "./three/stoveLab";
 declare global {
   interface Window {
     __KITCHEN_LAB__?: {
-      hero: HeroController;
+      hero: HeroController | null;
       mountedChapters: string[];
       forceMountAll: () => void;
     };
@@ -24,47 +24,75 @@ type FleetScenario = "gas" | "electric" | "summer";
 
 function initScrollChrome(): void {
   const progressBar = document.querySelector<HTMLElement>("[data-progress-bar]");
-  const navLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>(".chapter-nav a[data-spy]"));
+  const navLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>(".chapters a[data-spy]"));
   const sections = navLinks
     .map((a) => ({ link: a, el: document.getElementById(a.dataset.spy ?? "") }))
     .filter((x): x is { link: HTMLAnchorElement; el: HTMLElement } => x.el !== null);
 
-  const onScroll = () => {
+  // Once per frame at most, and every layout read before any write, so scrolling never forces a synchronous
+  // layout of the whole page.
+  let queued = false;
+  let current: (typeof sections)[number] | undefined;
+  const update = () => {
+    queued = false;
     const y = window.scrollY;
+    const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    // The chapter being read: the last one whose top has passed a third of the way down the screen.
+    // Above the first chapter (the hero and the "why" band) no link is lit.
+    const probe = window.innerHeight * 0.34;
+    let next: (typeof sections)[number] | undefined;
+    for (const s of sections) {
+      if (s.el.getBoundingClientRect().top <= probe) next = s;
+    }
+
     document.documentElement.classList.toggle("scrolled", y > 24);
-
-    if (progressBar) {
-      const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-      const frac = Math.max(0, Math.min(1, y / maxScroll));
-      progressBar.style.transform = `scaleX(${frac.toFixed(4)})`;
+    if (progressBar) progressBar.style.transform = `scaleX(${Math.max(0, Math.min(1, y / maxScroll)).toFixed(4)})`;
+    if (next !== current) {
+      current?.link.removeAttribute("aria-current");
+      next?.link.setAttribute("aria-current", "location");
+      current = next;
     }
-
-    // Active scroll-spy chapter
-    let current = sections[0];
-    const probeY = y + window.innerHeight * 0.34;
-    for (const s of sections) {
-      if (s.el.offsetTop <= probeY) current = s;
-    }
-    for (const s of sections) {
-      if (s === current) s.link.setAttribute("aria-current", "location");
-      else s.link.removeAttribute("aria-current");
-    }
+  };
+  const onScroll = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(update);
   };
 
   window.addEventListener("scroll", onScroll, { passive: true });
   window.addEventListener("resize", onScroll, { passive: true });
-  onScroll();
+  update();
 
-  // Close mobile menu drawer cleanly when any link inside it is tapped
-  const mobileMenu = document.querySelector<HTMLDetailsElement>(".mobile-menu");
-  mobileMenu?.querySelectorAll("a").forEach((a) => {
+  // Close the phone menu when one of its links is tapped.
+  const menu = document.querySelector<HTMLDetailsElement>(".menu");
+  menu?.querySelectorAll("a").forEach((a) => {
     a.addEventListener("click", () => {
-      mobileMenu.open = false;
+      menu.open = false;
     });
   });
 }
 
-function initFleetMatrix(hero: HeroController): void {
+/** Headings, panels and cards fade up once as they come into view. Without the observer they are simply shown. */
+function initReveal(): void {
+  const items = Array.from(document.querySelectorAll<HTMLElement>(".reveal"));
+  if (!("IntersectionObserver" in window)) {
+    for (const el of items) el.classList.add("seen");
+    return;
+  }
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        e.target.classList.add("seen");
+        io.unobserve(e.target);
+      }
+    },
+    { rootMargin: "0px 0px -8% 0px", threshold: 0.04 },
+  );
+  for (const el of items) io.observe(el);
+}
+
+function initFleetMatrix(hero: HeroController | null): void {
   const tbody = document.querySelector<HTMLElement>("[data-fleet-body]");
   const scenarioBtns = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-fleet-scenario]"));
   if (!tbody) return;
@@ -79,17 +107,18 @@ function initFleetMatrix(hero: HeroController): void {
     tbody.innerHTML = "";
     for (const spec of EXEMPLARS) {
       const m = computeKitchenTelemetry(spec, spec.nominalOrdersPerHr * loadMult, elecPct, ambC);
+      const amps = spec.electricalService.split(" ")[0] ?? spec.electricalService;
       const tr = document.createElement("tr");
+      // data-label names each cell for the phone layout, where every kitchen becomes a card.
       tr.innerHTML = `
-        <td><strong>${spec.shortName}</strong></td>
-        <td class="num">${spec.areaSqFt.toLocaleString()} ft²</td>
-        <td class="num">${spec.fixtures} · ${spec.electricalService}</td>
-        <td class="num">${m.thermalKw.toFixed(1)} kW</td>
-        <td class="num">${Math.round(m.exhaustCfm).toLocaleString()} CFM</td>
-        <td class="num">${m.hvacCoolingKw.toFixed(1)} kW</td>
-        <td class="num">${m.thermalComfortC.toFixed(1)} °C</td>
-        <td class="num">${m.minAisleIn.toFixed(0)}" (${m.minAisleM.toFixed(2)} m)</td>
-        <td><button type="button" class="chip-btn chip-subtle" data-load-hero="${spec.id}">Load in 3D ↑</button></td>
+        <td class="name"><b>${spec.shortName}</b><small>${spec.areaSqFt.toLocaleString()} ft² · ${amps} service</small></td>
+        <td class="num" data-label="Equipment">${spec.fixtures} pieces</td>
+        <td class="num" data-label="Cooking load">${m.thermalKw.toFixed(1)} kW</td>
+        <td class="num" data-label="Exhaust">${Math.round(m.exhaustCfm).toLocaleString()} cfm</td>
+        <td class="num" data-label="Cooling">${m.hvacCoolingKw.toFixed(1)} kW</td>
+        <td class="num" data-label="At the line">${m.thermalComfortC.toFixed(1)} °C</td>
+        <td class="num" data-label="Tightest aisle">${m.minAisleIn.toFixed(0)} in · ${m.minAisleM.toFixed(2)} m</td>
+        <td class="act"><button type="button" class="btn sm" data-load-hero="${spec.id}">View in 3D<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></td>
       `;
       tbody.appendChild(tr);
     }
@@ -97,7 +126,7 @@ function initFleetMatrix(hero: HeroController): void {
     tbody.querySelectorAll<HTMLButtonElement>("[data-load-hero]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = btn.dataset.loadHero as ExemplarId;
-        void hero.setExemplar(id);
+        if (hero) void hero.setExemplar(id);
         document.getElementById("hero")?.scrollIntoView({ behavior: "smooth" });
       });
     });
@@ -114,30 +143,56 @@ function initFleetMatrix(hero: HeroController): void {
 }
 
 function initRangeTrackFills(): void {
+  const sliders = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="range"]'));
   const syncSlider = (el: HTMLInputElement) => {
     const min = Number(el.min || 0);
     const max = Number(el.max || 100);
     const val = Number(el.value || 0);
     const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
-    el.style.setProperty("--pct", `${Math.max(0, Math.min(100, pct)).toFixed(2)}%`);
+    el.style.setProperty("--p", `${Math.max(0, Math.min(100, pct)).toFixed(2)}%`);
   };
-  document.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach((el) => {
+  for (const el of sliders) {
     syncSlider(el);
     el.addEventListener("input", () => syncSlider(el));
     el.addEventListener("change", () => syncSlider(el));
-  });
+  }
+  // Presets and reset buttons set slider values without an input event; catch up after any click.
+  document.addEventListener("click", () => requestAnimationFrame(() => sliders.forEach(syncSlider)));
+}
+
+/** Mount one 3D chapter. A chapter that fails (no WebGL, a lost context) leaves its section's text and controls in
+ * place and never stops the rest of the page from starting. */
+function tryMount<T>(id: string, mount: () => T): T | null {
+  try {
+    return mount();
+  } catch (err) {
+    console.error(`[kitchen-lab] the ${id} 3D view could not start`, err);
+    const section = document.getElementById(id);
+    section?.classList.add("no-3d");
+    // Status lines are written by the chapter's loop, which never started.
+    section?.querySelectorAll<HTMLElement>(".status").forEach((s) => {
+      s.dataset.state = "warn";
+      s.textContent = "This model runs with its 3D view, which could not start.";
+    });
+    const hud = section?.querySelector<HTMLElement>("[data-hero-status]");
+    if (hud) hud.textContent = "A still: the live kitchen could not start";
+    return null;
+  }
 }
 
 function bootstrap(): void {
+  // The inline script in index.html hides .reveal blocks until they scroll in; it shows them again if this module
+  // never runs.
+  document.documentElement.classList.add("booted");
   initScrollChrome();
+  initReveal();
   initRangeTrackFills();
 
   const heroRoot = document.getElementById("hero");
-  if (!heroRoot) return;
-  const hero = mountHeroKitchen(heroRoot);
+  const hero = heroRoot ? tryMount("hero", () => mountHeroKitchen(heroRoot)) : null;
   initFleetMatrix(hero);
 
-  const mountedChapters: string[] = ["hero"];
+  const mountedChapters: string[] = hero ? ["hero"] : [];
   const pendingMounts: Array<{ id: string; el: HTMLElement; mount: (el: HTMLElement) => void; done: boolean }> = [
     { id: "equipment", el: document.getElementById("equipment")!, mount: mountEquipmentTurntable, done: false },
     { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false },
@@ -149,8 +204,7 @@ function bootstrap(): void {
   const mountOne = (entry: (typeof pendingMounts)[number]) => {
     if (entry.done) return;
     entry.done = true;
-    mountedChapters.push(entry.id);
-    entry.mount(entry.el);
+    if (tryMount(entry.id, () => (entry.mount(entry.el), true))) mountedChapters.push(entry.id);
   };
 
   const lazyObserver = new IntersectionObserver(

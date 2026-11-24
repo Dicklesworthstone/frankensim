@@ -468,12 +468,158 @@ function crossRail(s: Shop, a: V3, b: V3, r = 0.0127): void {
  * keeps spills on the top, then down and under).
  */
 function bullNose(s: Shop, back = 0.02): P2[] {
-  const n = s.seg(8, 3);
+  const n = s.fine(2) ? s.seg(8, 3) : 2;
   return [[-back, 0], ...arc(-0.01, -0.01, 0.01, Math.PI / 2, 0, n), ...arc(-0.01, -0.031, 0.01, 0, -Math.PI / 2, n), [-0.03, -0.041], [-0.034, -0.037]];
 }
 function marineEdge(s: Shop, back = 0.03): P2[] {
-  const n = s.seg(10, 3);
+  const n = s.fine(2) ? s.seg(10, 3) : 2;
   return [[-back, 0], [-0.022, 0], ...arc(-0.022, 0.012, 0.012, -Math.PI / 2, -0.25, n).slice(1), ...arc(-0.006, 0.006, 0.006, Math.PI * 0.72, 0, n), [0, -0.034], ...arc(-0.006, -0.034, 0.006, 0, -Math.PI / 2, 3), [-0.026, -0.04]];
+}
+
+/* ------------------------------------------------------------------------------------------------------------ */
+/* Formed sections swept round a plan                                                                             */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * A plan path of (x, z) points with each corner rounded on a true arc of radius `r` (one for all, or one per point) in
+ * `n` steps; an open path keeps its two ends.
+ */
+export function filletPath(pts: readonly P2[], r: number | readonly number[], n: number, closed = false): P2[] {
+  const m = pts.length;
+  const out: P2[] = [];
+  for (let i = 0; i < m; i++) {
+    const q = pts[i]!;
+    const ri = typeof r === "number" ? r : (r[i] ?? 0);
+    if (ri <= 0 || n < 1 || (!closed && (i === 0 || i === m - 1))) {
+      out.push(q);
+      continue;
+    }
+    const a = pts[(i - 1 + m) % m]!;
+    const b = pts[(i + 1) % m]!;
+    const la = Math.hypot(q[0] - a[0], q[1] - a[1]);
+    const lb = Math.hypot(b[0] - q[0], b[1] - q[1]);
+    const da: P2 = [(q[0] - a[0]) / la, (q[1] - a[1]) / la];
+    const db: P2 = [(b[0] - q[0]) / lb, (b[1] - q[1]) / lb];
+    const cos = Math.max(-1, Math.min(1, da[0] * db[0] + da[1] * db[1]));
+    const th = Math.acos(cos);
+    if (th < 1e-4) {
+      out.push(q);
+      continue;
+    }
+    let rr = ri;
+    let tl = rr * Math.tan(th / 2);
+    const lim = Math.min(la, lb) * 0.49;
+    if (tl > lim) {
+      tl = lim;
+      rr = tl / Math.tan(th / 2);
+    }
+    const s0: P2 = [q[0] - da[0] * tl, q[1] - da[1] * tl];
+    const s1: P2 = [q[0] + db[0] * tl, q[1] + db[1] * tl];
+    // The centre lies off s0 toward the turn.
+    let [px, pz] = [db[0] - da[0] * cos, db[1] - da[1] * cos];
+    const pl = Math.hypot(px, pz) || 1;
+    px /= pl;
+    pz /= pl;
+    const c: P2 = [s0[0] + px * rr, s0[1] + pz * rr];
+    const a0 = Math.atan2(s0[1] - c[1], s0[0] - c[0]);
+    let a1 = Math.atan2(s1[1] - c[1], s1[0] - c[0]);
+    while (a1 - a0 > Math.PI) a1 -= 2 * Math.PI;
+    while (a1 - a0 < -Math.PI) a1 += 2 * Math.PI;
+    for (let k = 0; k <= n; k++) {
+      const t = a0 + ((a1 - a0) * k) / n;
+      out.push([c[0] + rr * Math.cos(t), c[1] + rr * Math.sin(t)]);
+    }
+  }
+  return out;
+}
+
+/** The closed outline of a sheet `t` thick drawn along a centreline, as (u, v) points for `pathSweep`. */
+export function sheetOutline(pts: readonly P2[], t: number): P2[] {
+  return sheetProfile(pts, t)
+    .getPoints()
+    .map((q) => [q.x, q.y] as P2);
+}
+
+/** Each point of a plan path with its mitred inward offset direction, scaled so that offsets stay parallel. */
+function pathFrames(path: readonly P2[], closed: boolean): [number, number, number, number][] {
+  const m = path.length;
+  const segN = (i: number): P2 => {
+    const a = path[i]!;
+    const b = path[(i + 1) % m]!;
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return [(b[1] - a[1]) / l, -(b[0] - a[0]) / l];
+  };
+  const out: [number, number, number, number][] = [];
+  for (let i = 0; i < m; i++) {
+    const n1 = closed || i > 0 ? segN((i - 1 + m) % m) : segN(i);
+    const n2 = closed || i < m - 1 ? segN(i) : n1;
+    let [nx, nz] = [n1[0] + n2[0], n1[1] + n2[1]];
+    const l = Math.hypot(nx, nz) || 1;
+    nx /= l;
+    nz /= l;
+    const sc = 1 / Math.max(0.3, nx * n1[0] + nz * n1[1]);
+    out.push([path[i]![0], path[i]![1], nx * sc, nz * sc]);
+  }
+  return out;
+}
+
+/** A plan path moved `u` across itself, the way `pathSweep` carries its section. */
+export function offsetPath(path: readonly P2[], u: number, closed = false): P2[] {
+  return pathFrames(path, closed).map(([x, z, nx, nz]) => [x + nx * u, z + nz * u] as P2);
+}
+
+/**
+ * A section swept along a plan path: the closed `outline` is (u, v), u measured across the path toward (t.z, -t.x)
+ * of its direction of travel t, v up from `y0`. Corners are mitred, so a filleted path gives a formed corner and a sharp
+ * one a welded mitre, with nothing lapped or doubled; an open path is capped at both ends. Normals are smoothed across
+ * shallow bends only.
+ */
+export function pathSweep(outline: readonly P2[], path: readonly P2[], y0: number, closed = false): THREE.BufferGeometry {
+  const m = path.length;
+  const k = outline.length;
+  const pos: number[] = [];
+  for (const [x, z, nx, nz] of pathFrames(path, closed)) for (const [u, v] of outline) pos.push(x + nx * u, y0 + v, z + nz * u);
+  let area = 0;
+  for (let j = 0; j < k; j++) {
+    const a = outline[j]!;
+    const b = outline[(j + 1) % k]!;
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  const ccw = area > 0;
+  const idx: number[] = [];
+  const rings = closed ? m : m - 1;
+  for (let i = 0; i < rings; i++) {
+    const i1 = (i + 1) % m;
+    for (let j = 0; j < k; j++) {
+      const j1 = (j + 1) % k;
+      const [a0, b0, a1, b1] = [i * k + j, i * k + j1, i1 * k + j, i1 * k + j1];
+      if (ccw) idx.push(a0, b0, b1, a0, b1, a1);
+      else idx.push(a0, b1, b0, a0, a1, b1);
+    }
+  }
+  if (!closed) {
+    const tri = THREE.ShapeUtils.triangulateShape(outline.map(([u, v]) => new THREE.Vector2(u, v)), []);
+    for (const [ring, facing] of [
+      [0, -1],
+      [m - 1, 1],
+    ] as const)
+      for (const [a, b, c] of tri) {
+        const [pa, pb, pc] = [outline[a]!, outline[b]!, outline[c]!];
+        const sgn = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
+        // Counter-clockwise in (u, v) faces along the travel.
+        if (sgn * facing > 0) idx.push(ring * k + a, ring * k + b, ring * k + c);
+        else idx.push(ring * k + a, ring * k + c, ring * k + b);
+      }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return creased(g);
+}
+
+/** A plan outline (x, z) as a shape for `plate` laid flat by rotateX(-π/2): shape y is -z. */
+function planShape(pts: readonly P2[]): THREE.Shape {
+  return new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z)));
 }
 
 /* ------------------------------------------------------------------------------------------------------------ */
@@ -489,9 +635,10 @@ const FT = 0.048;
 
 /**
  * One baffle grease filter, built once in its own frame and stamped along the bank: x across (centred), y up its face
- * from the bottom edge, z out of the face (its back at -FT). A U-channel frame holds two interlocking rows of S-baffles,
- * front arches opening back and rear arches opening forward, so the air turns twice through every gap and throws its
- * grease out on the walls; it runs down the channels to weep holes in the bottom rail. Two wire handles lift it out.
+ * from the bottom edge, z out of the face (its back at -FT). A U-channel frame, its stiles butted between the rails,
+ * holds two interlocking rows of chevron baffles: the front row's ridges toward the room, the rear row's toward the
+ * plenum, each with its edges turned back into hooks, so the air turns twice through every gap and throws its grease
+ * on the walls; it runs down the channels to weep holes in the bottom rail. Two wire handles lift it out.
  */
 function baffleFilter(s: Shop): Part[] {
   const p = palette();
@@ -499,36 +646,36 @@ function baffleFilter(s: Shop): Part[] {
   const fw = FW - 0.003;
   const hw = fw / 2;
   const fr = 0.025;
+  const ft = -0.0012;
   if (s.detail === 0) {
     parts.push({ m: p.ss, g: new THREE.BoxGeometry(fw, FH - 0.004, FT * 0.6), at: [0, FH / 2, -FT * 0.3] });
     return parts;
   }
   const fine = s.fine(2);
-  // Frame: side stiles and top and bottom rails, U-channels opening inward.
   const rc = fine ? 0.003 : 0;
-  const stile: P2[] = fine ? [[fr, -0.0012], [rc, -0.0012], [0, -0.0012 - rc], [0, -FT + rc], [rc, -FT], [fr, -FT]] : [[fr, 0], [0, 0], [0, -FT], [fr, -FT]];
+  // Frame: the rails run the full width, the stiles between them; flanges flush, nothing lapped at the corners.
+  const stile: P2[] = fine ? [[fr, ft], [rc, ft], [0, ft - rc], [0, -FT + rc], [rc, -FT], [fr, -FT]] : [[fr, ft], [0, ft], [0, -FT], [fr, -FT]];
   for (const sx of [-1, 1]) {
-    const g = sweep(s, stile.map(([x, z]) => [x * sx, z] as P2), 0.0012, FH, "y");
-    parts.push({ m: p.ss, g, at: [-sx * hw, 0, 0] });
+    const g = sweep(s, stile.map(([x, z]) => [x * sx, z] as P2), 0.0012, FH - 2 * fr, "y");
+    parts.push({ m: p.ss, g, at: [-sx * hw, fr, 0] });
   }
-  const rail = (y0: number, dir: number): P2[] => (fine ? [[-0.0012, y0 + dir * fr], [-0.0012, y0 + dir * rc], [-0.0012 - rc, y0], [-FT + rc, y0], [-FT, y0 + dir * rc], [-FT, y0 + dir * fr]] : [[0, y0 + dir * fr], [0, y0], [-FT, y0], [-FT, y0 + dir * fr]]);
+  const rail = (y0: number, dir: number): P2[] => (fine ? [[ft, y0 + dir * fr], [ft, y0 + dir * rc], [ft - rc, y0], [-FT + rc, y0], [-FT, y0 + dir * rc], [-FT, y0 + dir * fr]] : [[ft, y0 + dir * fr], [ft, y0], [-FT, y0], [-FT, y0 + dir * fr]]);
   for (const [y0, dir] of [
     [0, 1],
     [FH, -1],
   ] as const) {
-    const g = sweep(s, rail(y0, dir), 0.0012, fw - 0.004, "x");
-    parts.push({ m: p.ss, g, at: [-hw + 0.002, 0, 0] });
+    const g = sweep(s, rail(y0, dir), 0.0012, fw, "x");
+    parts.push({ m: p.ss, g, at: [-hw, 0, 0] });
   }
-  // The baffles, between the rails.
+  // The baffles, their ends in the rails' channels.
   const inner = fw - 2 * fr;
   const nf = 9;
   const pitch = inner / nf;
   const bl = FH - 2 * fr + 0.01;
   const by = fr - 0.005;
   if (fine) {
-    const rw = pitch * 0.4;
-    const n = s.seg(8, 4);
-    const front: P2[] = [[-rw + 0.003, -0.038], [-rw, -0.035], [-rw, -0.0215], ...arc(0, -0.0215, rw, Math.PI, 0, n).slice(1, -1), [rw, -0.0215], [rw, -0.035], [rw - 0.003, -0.038]];
+    const rw = pitch * 0.42;
+    const front: P2[] = [[-rw + 0.0035, -0.031], [-rw, -0.0285], [-rw, -0.0135], [-0.0024, -0.0049], [0, -0.0042], [0.0024, -0.0049], [rw, -0.0135], [rw, -0.0285], [rw - 0.0035, -0.031]];
     const back: P2[] = front.map(([x, z]) => [x, -FT - z] as P2);
     const fg = sweep(s, front, 0.0008, bl, "y");
     const bg = sweep(s, back, 0.0008, bl, "y");
@@ -547,60 +694,162 @@ function baffleFilter(s: Shop): Part[] {
       parts.push({ m: p.ssBright, g: hg, at: [sx * fw * 0.26, 0, 0] });
       for (const ex of [-0.035, 0.035]) parts.push({ m: p.ssBright, g: new THREE.CylinderGeometry(0.0055, 0.0055, 0.002, 12).rotateX(Math.PI / 2), at: [sx * fw * 0.26 + ex, 0.013, -0.0002] });
     }
-    const weep = new THREE.CylinderGeometry(0.0028, 0.0028, 0.0016, 10);
-    for (let i = 0; i < 6; i++) parts.push({ m: p.enamel, g: weep, at: [-inner / 2 + inner * ((i + 0.5) / 6), 0.0003, -FT * 0.5] });
+    const weep = new THREE.CylinderGeometry(0.0028, 0.0028, 0.0024, 10);
+    for (let i = 0; i < 6; i++) parts.push({ m: p.enamel, g: weep, at: [-inner / 2 + inner * ((i + 0.5) / 6), 0, -FT * 0.5] });
     const rivet = ball(s, 0.0022, 8, Math.PI / 2);
     rivet.rotateX(Math.PI / 2);
-    for (const sx of [-1, 1]) for (const y of [0.011, FH - 0.011]) parts.push({ m: p.ssBright, g: rivet, at: [sx * (hw - 0.011), y, -0.0012] });
+    for (const sx of [-1, 1]) for (const y of [0.011, FH - 0.011]) parts.push({ m: p.ssBright, g: rivet, at: [sx * (hw - 0.011), y, ft] });
   }
   return parts;
 }
 
-/** The lamps in a hood's globes: a live material, so that the lights can be dimmed. */
-function lampMaterial(): THREE.MeshStandardMaterial {
-  const m = new THREE.MeshStandardMaterial({ color: 0xfffaf2, roughness: 0.6, metalness: 0, emissive: 0xffeed2, emissiveIntensity: 1.6 });
-  m.userData.uv = "own";
-  return m;
+/** A soft radial falloff, full at the centre and clear at the rim: the pool a lamp throws on the faces round it. */
+let poolTex: THREE.Texture | null = null;
+function poolTexture(): THREE.Texture {
+  if (poolTex) return poolTex;
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const x = c.getContext("2d")!;
+  const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  for (const [t, a] of [
+    [0, 1],
+    [0.16, 0.8],
+    [0.38, 0.4],
+    [0.62, 0.13],
+    [0.84, 0.03],
+    [1, 0],
+  ] as const)
+    g.addColorStop(t, `rgba(255,255,255,${a})`);
+  x.fillStyle = g;
+  x.fillRect(0, 0, 128, 128);
+  poolTex = new THREE.CanvasTexture(c);
+  return poolTex;
 }
-const setLamp = (m: THREE.MeshStandardMaterial, v: number) => {
-  m.emissiveIntensity = 1.6 * Math.max(0, Math.min(1, v));
-};
 
-/** A vapour-proof hood light hung from a ceiling whose underside is at y: cast base, threaded collar, globe, guard, lamp. */
-function hoodLight(s: Shop, lamp: Mat, x: number, y: number, z: number): void {
+interface Lamps {
+  lamp: THREE.MeshStandardMaterial;
+  globe: THREE.MeshStandardMaterial;
+  pool: THREE.MeshBasicMaterial;
+  set(v: number): void;
+}
+/**
+ * A hood's lights: the lamps; the frosted globes, lit from within and brightest where they face the eye, as frosted
+ * glass is; and the warm pools they throw on the faces round them. Every hood builds with the one lit set, so a kitchen
+ * of hoods draws its lights in three calls; `lampHooks` gives a hood a set of its own only when it is dimmed.
+ */
+let litLamps: Lamps | null = null;
+function hoodLamps(): Lamps {
+  return (litLamps ??= makeLamps());
+}
+
+/** The "lights" hook: lit (1) keeps the shared set; anything else moves this hood onto its own set and dims that. */
+function lampHooks(b: Built): Hooks {
+  let own: Lamps | null = null;
+  return {
+    set: (name, v) => {
+      if (name !== "lights") return;
+      if (!own) {
+        if (v >= 0.999) return;
+        const shared = hoodLamps();
+        const mine = makeLamps();
+        const swap = new Map<THREE.Material, THREE.Material>([
+          [shared.lamp, mine.lamp],
+          [shared.globe, mine.globe],
+          [shared.pool, mine.pool],
+        ]);
+        b.group.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (!m.isMesh) return;
+          const to = swap.get(m.material as THREE.Material);
+          if (to) m.material = to;
+        });
+        own = mine;
+      }
+      own.set(v);
+    },
+  };
+}
+
+function makeLamps(): Lamps {
+  const lamp = new THREE.MeshStandardMaterial({ color: 0xfff6ea, roughness: 0.5, metalness: 0, emissive: 0xffe8c4, emissiveIntensity: 3.2 });
+  lamp.userData.uv = "own";
+  const globe = new THREE.MeshStandardMaterial({ color: 0xe6e3dc, roughness: 0.34, metalness: 0, emissive: 0xffd8a4, emissiveIntensity: 1.15, transparent: true, opacity: 0.86 });
+  globe.userData.uv = "own";
+  globe.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n\ttotalEmissiveRadiance *= 0.28 + 0.72 * pow(abs(dot(normal, normalize(vViewPosition))), 1.6);");
+  };
+  globe.customProgramCacheKey = () => "hood-globe-frost";
+  const pool = new THREE.MeshBasicMaterial({ color: 0xffd09a, map: poolTexture(), transparent: true, opacity: 0.42, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
+  pool.userData.uv = "own";
+  const set = (v: number) => {
+    const k = Math.max(0, Math.min(1, v));
+    lamp.emissiveIntensity = 3.2 * k;
+    globe.emissiveIntensity = 1.15 * k;
+    pool.opacity = 0.42 * k;
+    pool.visible = k > 0.01;
+  };
+  return { lamp, globe, pool, set };
+}
+
+/** A pool of lamplight on a face: a quad `w` by `h` centred at `at`, its front toward `rot` turned +z. */
+function lightPool(s: Shop, L: Lamps, at: V3, w: number, h: number, rot: V3): void {
+  if (!s.fine(1) || w <= 0.02 || h <= 0.02) return;
+  s.add(L.pool, new THREE.PlaneGeometry(w, h), at, rot);
+}
+
+/**
+ * A vapour-proof hood light hung from a ceiling whose underside is at y: the cast housing on its flange, the threaded
+ * collar, a frosted jelly-jar globe with the lamp glowing in it, and the cast guard round the globe.
+ */
+function hoodLight(s: Shop, L: Lamps, x: number, y: number, z: number): void {
   const p = palette();
   s.add(p.alu, hang(s, [
     [0, 0],
     [0.064, 0],
-    [0.064, -0.006],
+    [0.064, -0.005],
+    [0.061, -0.007],
     [0.058, -0.02],
     [0.047, -0.026],
     [0, -0.026],
-  ], 40), [x, y - 0.0005, z]);
+  ], s.fine(2) ? 40 : 32), [x, y - 0.0005, z]);
   if (s.detail === 0) {
-    s.add(lamp, cyl(s, 0.04, 0.09, "y", 16), [x, y - 0.07, z]);
+    s.add(L.lamp, cyl(s, 0.04, 0.09, "y", 16), [x, y - 0.07, z]);
     return;
+  }
+  if (s.fine(2)) {
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2 + Math.PI / 4;
+      screw(s, p.ssBright, [x + Math.cos(a) * 0.057, y - 0.0055, z + Math.sin(a) * 0.057], 0.0028, [Math.PI / 2, 0, 0]);
+    }
+    // The conduit hub on the housing's side.
+    s.add(p.alu, cyl(s, 0.011, 0.02, "x", 16), [x + 0.06, y - 0.014, z]);
   }
   // The threaded collar the globe screws into, ribbed close up.
   s.add(p.alu, cyl(s, 0.045, 0.012, "y", 32), [x, y - 0.031, z]);
   if (s.fine(2)) for (let i = 0; i < 3; i++) s.add(p.alu, torus(s, 0.0452, 0.0012, "y", Math.PI * 2, 32, 4), [x, y - 0.027 - i * 0.004, z]);
-  // The globe: a heavy jelly-jar of heat-resistant glass, and the frosted lamp inside it.
-  s.add(p.glass, hang(s, [
+  // The globe: a heavy jelly jar of frosted heat-resistant glass, and the lamp inside it.
+  s.add(L.globe, hang(s, [
     [0.04, 0],
     [0.043, -0.008],
+    [0.0455, -0.03],
     [0.046, -0.05],
+    [0.0445, -0.075],
     [0.042, -0.092],
+    [0.036, -0.103],
     [0.03, -0.108],
+    [0.016, -0.1105],
     [0, -0.111],
-  ], 32), [x, y - 0.037, z]);
-  s.add(lamp, hang(s, [
+  ], s.fine(2) ? 40 : 28), [x, y - 0.037, z]);
+  s.add(L.lamp, hang(s, [
     [0.008, 0],
     [0.011, -0.012],
+    [0.018, -0.026],
     [0.022, -0.035],
     [0.024, -0.05],
-    [0.017, -0.066],
+    [0.021, -0.062],
+    [0.012, -0.069],
     [0, -0.07],
-  ], 20), [x, y - 0.04, z]);
+  ], s.fine(2) ? 24 : 16), [x, y - 0.04, z]);
   // The cast guard: four bent wires from the collar to a cap under the globe, and a ring at the globe's waist.
   for (let i = 0; i < 4; i++) {
     const a = (i * Math.PI) / 2 + Math.PI / 4;
@@ -637,9 +886,9 @@ function linkDetector(s: Shop, x: number, y: number, z: number): void {
   const L = 0.13;
   // The bracket: a U channel open below.
   blk(s, p.ssBright, [x - L / 2, y + 0.008, z - 0.013], [x + L / 2, y + 0.0105, z + 0.013], 0.0004);
-  for (const sz of [-1, 1]) blk(s, p.ssBright, [x - L / 2, y - 0.02, z + sz * 0.0118], [x + L / 2, y + 0.0105, z + sz * 0.0131], 0.0004);
+  for (const sz of [-1, 1]) blk(s, p.ssBright, [x - L / 2 + 0.0013, y - 0.02, z + sz * 0.0118], [x + L / 2 - 0.0013, y + 0.008, z + sz * 0.0131], 0.0004);
   for (const sx of [-1, 1]) {
-    blk(s, p.ssBright, [x + sx * (L / 2 - 0.0013), y - 0.02, z - 0.013], [x + sx * (L / 2 + 0.0002), y + 0.0105, z + 0.013], 0.0004);
+    blk(s, p.ssBright, [x + sx * (L / 2 - 0.0013), y - 0.02, z - 0.013], [x + sx * (L / 2 + 0.0002), y + 0.008, z + 0.013], 0.0004);
     // Compression connectors where the conduit joins.
     s.add(p.ssDull, cyl(s, 0.0115, 0.014, "x", 16), [x + sx * (L / 2 + 0.007), y, z]);
     if (s.fine(2)) s.add(p.ssDull, hex(0.0125, 0.006, "x"), [x + sx * (L / 2 + 0.003), y, z]);
@@ -652,15 +901,65 @@ function linkDetector(s: Shop, x: number, y: number, z: number): void {
   if (s.fine(2)) for (const sx of [-1, 1]) s.add(p.ssBright, torus(s, 0.003, 0.0007, "z", Math.PI * 2, 12, 4), [x + sx * 0.019, y - 0.004, z]);
 }
 
-/** A hanger bracket on a hood top at height y: a welded angle clip with a hole for the threaded rod. Upright along x. */
-function hangerClip(s: Shop, x: number, y: number, z: number): void {
+let rodMat: THREE.MeshStandardMaterial | null = null;
+/** Zinc-plated all-thread: its 13-to-the-inch thread in the bump and a little in the colour. UVs: v in threads/16. */
+function allThread(): THREE.MeshStandardMaterial {
+  if (rodMat) return rodMat;
+  const c = document.createElement("canvas");
+  c.width = 8;
+  c.height = 128;
+  const x = c.getContext("2d")!;
+  for (let i = 0; i < 16; i++) {
+    const g = x.createLinearGradient(0, i * 8, 0, i * 8 + 8);
+    g.addColorStop(0, "#202020");
+    g.addColorStop(0.5, "#f0f0f0");
+    g.addColorStop(1, "#202020");
+    x.fillStyle = g;
+    x.fillRect(0, i * 8, 8, 8);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  rodMat = new THREE.MeshStandardMaterial({ color: 0xb9bec4, metalness: 0.85, roughness: 0.42, bumpMap: t, bumpScale: 1.6, roughnessMap: t });
+  rodMat.userData.uv = "own";
+  return rodMat;
+}
+/** A length of 1/2 in all-thread up y from `y0` to `y1` at (x, z), its thread drawn close up. */
+function threadedRod(s: Shop, x: number, z: number, y0: number, y1: number): void {
+  const len = y1 - y0;
+  if (len <= 0) return;
+  if (!s.fine(1)) return rod(s, palette().ssDull, 0.0064, len, "y", [x, (y0 + y1) / 2, z]);
+  const g = cyl(s, 0.0064, len, "y", 12, 0.0064, true);
+  if (!s.fine(2)) return void s.add(palette().ssDull, g, [x, (y0 + y1) / 2, z]);
+  const uv = g.attributes.uv as THREE.BufferAttribute;
+  for (let i = 0; i < uv.count; i++) uv.setY(i, (uv.getY(i) * len) / (16 * 0.00195));
+  s.add(allThread(), g, [x, (y0 + y1) / 2, z]);
+}
+
+/**
+ * A hanger lug on a hood top at height y, upright along x, and the hanger on it: a forged eye nut on a bolt through
+ * the lug, the 1/2 in all-thread rising from it to `rodTop`, locked by a jam nut, and a coupling nut where the
+ * building's rod joins it.
+ */
+function hangerClip(s: Shop, x: number, y: number, z: number, rodTop: number): void {
   const p = palette();
   blk(s, p.ss, [x - 0.04, y, z - 0.028], [x + 0.04, y + 0.003, z + 0.028], 0.0006);
   const sh = roundRect(0.056, 0.07, 0.012, 0, 0.035);
-  if (s.fine(1)) sh.holes.push(new THREE.Path().absarc(0, 0.045, 0.009, 0, Math.PI * 2, true));
+  if (s.fine(2)) sh.holes.push(new THREE.Path().absarc(0, 0.045, 0.009, 0, Math.PI * 2, true));
   const g = plate(s, sh, 0.003);
   s.add(p.ss, g, [x - 0.0015, y, z], [0, Math.PI / 2, 0]);
   if (s.fine(2)) for (const sz of [-1, 1]) screw(s, p.ssBright, [x + 0.025, y + 0.003, z + sz * 0.017], 0.003, [-Math.PI / 2, 0, 0]);
+  const ex = x + 0.0068;
+  const ye = y + 0.045;
+  if (s.fine(2)) {
+    s.add(p.ssDull, torus(s, 0.0125, 0.0045, "x", Math.PI * 2, 24, 8), [ex, ye, z]);
+    s.add(p.ssDull, cyl(s, 0.0085, 0.024, "y", 16), [ex, ye + 0.028, z]);
+    s.add(p.ssDull, cyl(s, 0.0062, 0.026, "x", 12), [x + 0.004, ye, z]);
+    s.add(p.ssDull, hex(0.0105, 0.006, "x"), [x - 0.0045, ye, z]);
+    s.add(p.ssDull, hex(0.0105, 0.007, "x"), [ex + 0.008, ye, z]);
+    s.add(p.ssDull, hex(0.011, 0.008), [ex, ye + 0.044, z]);
+    s.add(p.ssDull, hex(0.011, 0.04), [ex, rodTop - 0.02, z]);
+  }
+  threadedRod(s, ex, z, s.fine(2) ? ye + 0.04 : ye + 0.012, s.fine(2) ? rodTop - 0.035 : rodTop);
 }
 
 /**
@@ -670,7 +969,6 @@ function hangerClip(s: Shop, x: number, y: number, z: number): void {
 function ductCollar(s: Shop, x0: number, x1: number, z0: number, z1: number, y0: number, y1: number): void {
   const p = palette();
   const t = 0.0016;
-  const hgt = y1 - y0;
   blk(s, p.ss, [x0, y0, z0], [x1, y1, z0 + t], 0.0005);
   blk(s, p.ss, [x0, y0, z1 - t], [x1, y1, z1], 0.0005);
   blk(s, p.ss, [x0, y0, z0 + t], [x0 + t, y1, z1 - t], 0.0005);
@@ -694,18 +992,67 @@ function ductCollar(s: Shop, x0: number, x1: number, z0: number, z1: number, y0:
       [z0 - 0.0025, z0],
       [z1, z1 + 0.0025],
     ] as const) blk(s, p.ssDull, [x0 - 0.002, y0 + 0.002, a], [x1 + 0.002, y0 + 0.0045, b], 0.001);
+    for (const [a, b] of [
+      [x0 - 0.0025, x0],
+      [x1, x1 + 0.0025],
+    ] as const) blk(s, p.ssDull, [a, y0 + 0.002, z0], [b, y0 + 0.0045, z1], 0.001);
     const n = Math.max(2, Math.round((x1 - x0) / 0.15));
     for (let i = 0; i <= n; i++) for (const z of [z0 - f / 2, z1 + f / 2]) screw(s, p.ssBright, [x0 + ((x1 - x0) * i) / n, y0 + 0.002, z], 0.003, [-Math.PI / 2, 0, 0]);
   }
-  void hgt;
 }
 
 /**
- * A Type I wall canopy, or the double island when `island`: an 18-gauge box canopy, double-walled at the ends, with a
- * front make-up air plenum whose perforated face throws supply air forward, a lit capture reservoir, and a 55° bank of
- * baffle filters over a grease trough at the back (on the island, two banks in a V back to back), the exhaust plenum
- * behind them and its duct collars on top. The wet-chemical system's piping hangs in the reservoir, nozzles aimed down
- * at the line, and its detection line runs fusible links in front of the filters.
+ * A hood skin's lower edge, as (u, v) for `pathSweep` with u inward from the outer face: the skin creased out into a
+ * 3/4 in hem, turned under round a tight bend, the return across the double wall `wl` thick, its inner corner
+ * radiused up into the liner, closed at `top` where the panels stand on it.
+ */
+function hemSection(s: Shop, wl: number, top: number): P2[] {
+  if (s.detail === 0) return [[0, top], [0, 0], [wl, 0], [wl, top]];
+  if (s.detail === 1) return [[0, top], [0, 0.0055], [0.0016, 0.0016], [0.0055, 0], [wl, 0], [wl, top]];
+  const n = s.seg(6, 2);
+  return [[0, top], [0, 0.0205], [-0.0013, 0.019], [-0.0013, 0.0055], ...arc(0.0042, 0.0055, 0.0055, Math.PI, Math.PI * 1.5, n).slice(1), [wl - 0.003, 0], ...arc(wl - 0.003, 0.003, 0.003, -Math.PI / 2, 0, Math.max(2, n - 2)).slice(1), [wl, top]];
+}
+
+/**
+ * A formed outside corner of a hood, radius `r` about (x, z), from y0 to y1: the quarter round that shows, facing out
+ * of a w × d plan.
+ */
+function cornerPost(s: Shop, r: number, x: number, z: number, w: number, d: number, y0: number, y1: number): void {
+  if (r <= 0) return;
+  const t0 = Math.atan2(x < w / 2 ? -1 : 1, z > -d / 2 ? 1 : -1) - Math.PI / 4;
+  s.add(palette().ss, new THREE.CylinderGeometry(r, r, y1 - y0, s.seg(8, 4), 1, true, t0, Math.PI / 2), [x, (y0 + y1) / 2, z]);
+}
+
+/** A standing seam on a hood top, as an (x, y) centreline: both sheets turned up 22 mm and folded over together. */
+function standingSeam(s: Shop): P2[] {
+  return [[-0.013, 0.0006], [-0.0024, 0.0006], [-0.0024, 0.019], ...arc(0, 0.019, 0.0024, Math.PI, 0, s.seg(6, 3)).slice(1, -1), [0.0024, 0.019], [0.0024, 0.0006], [0.013, 0.0006]];
+}
+
+/** Positions along a hood top for its standing seams, about every `pitch`, moved off anything in their way. */
+function seamPositions(w: number, pitch: number, blocked: readonly [number, number][]): number[] {
+  const n = Math.round(w / pitch);
+  const out: number[] = [];
+  for (let i = 1; i < n; i++) {
+    let x = (w * i) / n;
+    for (let k = 0; k < 40; k++) {
+      const hit = blocked.find(([a, b]) => x > a && x < b);
+      if (!hit) break;
+      const want = (w * i) / n;
+      x = Math.abs(hit[0] - want) < Math.abs(hit[1] - want) ? hit[0] - 0.005 : hit[1] + 0.005;
+    }
+    if (x > 0.15 && x < w - 0.15 && !blocked.some(([a, b]) => x > a && x < b) && !out.some((q) => Math.abs(q - x) < 0.3)) out.push(x);
+  }
+  return out;
+}
+
+/**
+ * A Type I wall canopy, or the double island when `island`: an 18-gauge box canopy with formed corners and a hemmed
+ * drip edge, double-walled at the ends, standing seams across its top, hung on all-thread from welded lugs. A front
+ * make-up air plenum throws supply air forward through perforated panels; under it the capture reservoir, lit by
+ * vapour-proof globes, with a perimeter gutter at its foot. A 55° bank of baffle filters stands over a grease trough
+ * at the back that drains to a grease cup (on the island, a V of two banks back to back over one centre trough), the
+ * exhaust plenum behind them and its duct collars on top. The wet-chemical system's piping hangs in the reservoir,
+ * nozzles aimed down at the line, and its detection line runs fusible links in front of the filters.
  *
  * y = 0 is the hood's lower edge; the canopy is h - 0.07 tall and the collars stand on it to h.
  */
@@ -720,20 +1067,26 @@ function typeOneHood(island: boolean): Builder {
     const mua = 0.2;
     const perf = perforatedSheet(0.0065, 0.55);
     const r = s.fine(1) ? 0.0012 : 0;
-    const lamp = lampMaterial();
+    const L = hoodLamps();
+    const yH = 0.035;
+    const R = s.detail ? wall : 0;
+    const ceil = hb - T;
 
-    // The ends: double-wall panels, closed below by a return with a rolled safety hem.
+    // The hemmed lower edge round the outside, the formed corners, the skins between them.
+    const corners: P2[] = island ? [[0, 0], [w, 0], [w, -d], [0, -d]] : [[0, -d], [0, 0], [w, 0], [w, -d]];
+    s.add(p.ss, pathSweep(hemSection(s, wall, yH), filletPath(corners, R, s.seg(8, 2), island), 0, island));
+    const posts: P2[] = island ? [[R, -R], [w - R, -R], [w - R, -d + R], [R, -d + R]] : [[R, -R], [w - R, -R]];
+    for (const [x, z] of posts) cornerPost(s, R, x, z, w, d, yH, ceil);
     for (const [x0, sg] of [
       [0, 1],
       [w, -1],
     ] as const) {
-      blk(s, p.ss, [x0, 0, -d], [x0 + sg * T, hb, 0], r);
-      blk(s, p.ss, [x0 + sg * (wall - T), 0, -d + (island ? 0 : T)], [x0 + sg * wall, hb - T, 0], r);
-      blk(s, p.ss, [x0, 0, -d], [x0 + sg * wall, T, 0], 0);
-      if (s.fine(2)) s.add(p.ss, cyl(s, 0.0035, d, "z", 12), [x0 + sg * 0.0035, 0.0035, -d / 2]);
+      blk(s, p.ss, [x0, yH, island ? -d + R : -d + T], [x0 + sg * T, ceil, -R], r);
+      blk(s, p.ss, [x0 + sg * (wall - T), yH, island ? -d + mua : -d + T], [x0 + sg * wall, ceil, -mua], r);
+      if (!island) blk(s, p.ss, [x0, yH, -d], [x0 + sg * wall, ceil, -d + T], 0);
     }
     // The back panel against the wall.
-    if (!island) blk(s, p.ss, [wall, 0, -d], [w - wall, hb - T, -d + T], r);
+    if (!island) blk(s, p.ss, [wall, 0, -d], [w - wall, ceil, -d + T], r);
 
     // Collars: exhaust over the plenum, make-up air over the front plenum(s).
     const nEx = Math.max(1, Math.round(w / 3.6));
@@ -751,8 +1104,13 @@ function typeOneHood(island: boolean): Builder {
       muas.push([xc - 0.25, xc + 0.25, -mua + 0.04, -0.04]);
       if (island) muas.push([xc - 0.25, xc + 0.25, -d + 0.04, -d + mua - 0.04]);
     }
-    const holes = [...exhausts, ...muas];
-    sheetWithHoles(s, p.ss, 0, w, -d, 0, hb - T, hb, holes);
+    // The top: one sheet, its corners formed where the skins' are, cut for the collars.
+    const Rb = island ? R : 0;
+    const top = planShape(filletPath([[0, 0], [w, 0], [w, -d], [0, -d]], [R, R, Rb, Rb], s.seg(8, 2), true));
+    for (const [x0, x1, z0, z1] of [...exhausts, ...muas]) top.holes.push(rectPath(new THREE.Path(), x1 - x0, z1 - z0, 0, (x0 + x1) / 2, -(z0 + z1) / 2, true) as THREE.Path);
+    const tg = plate(s, top, T, 0, 8);
+    tg.rotateX(-Math.PI / 2);
+    s.add(p.ss, tg, [0, ceil, 0]);
     for (const [x0, x1, z0, z1] of exhausts) ductCollar(s, x0, x1, z0, z1, hb, h);
     for (const [x0, x1, z0, z1] of muas) {
       ductCollar(s, x0, x1, z0, z1, hb, h - 0.03);
@@ -764,122 +1122,95 @@ function typeOneHood(island: boolean): Builder {
       }
     }
 
-    // Hanger clips at the corners and every 2.4 m between.
+    // Hanger lugs at the corners and every 2.4 m between, each on its rod.
     const nh = Math.max(1, Math.round(w / 2.4));
-    for (let i = 0; i <= nh; i++) {
-      const x = 0.1 + ((w - 0.2) * i) / nh;
-      for (const z of [-0.09, -d + 0.09]) hangerClip(s, x, hb, z);
-    }
+    const lugX: number[] = [];
+    for (let i = 0; i <= nh; i++) lugX.push(0.1 + ((w - 0.2) * i) / nh);
+    for (const x of lugX) for (const z of [-0.09, -d + 0.09]) hangerClip(s, x, hb, z, h + 0.14);
 
-    // A field joint on hoods too long to ship in one piece: bolted flanges inside, cover strips outside.
-    if (w > 4.9) {
-      const xj = w / 2;
-      blk(s, p.ss, [xj - 0.02, 0.0, -0.0001], [xj + 0.02, hb, 0.0014], 0.0008);
-      blk(s, p.ss, [xj - 0.02, hb, -d], [xj + 0.02, hb + 0.0016, 0], 0.0006);
-      for (const sx of [-1, 1]) blk(s, p.ss, [xj + sx * 0.0015, hb - 0.03, -d + 0.002], [xj + sx * 0.0035, hb - T, -0.002], 0);
+    // A field joint on hoods too long to ship in one piece: bolted flanges inside, a cover strip on the face, and a
+    // standing seam over the top.
+    const xj = w > 4.9 ? w / 2 : -1;
+    if (xj > 0) {
+      blk(s, p.ss, [xj - 0.02, yH, 0], [xj + 0.02, ceil, 0.0022], 0.0008);
+      for (const sx of [-1, 1]) blk(s, p.ss, [xj + sx * 0.0015, ceil - 0.03, -d + 0.002], [xj + sx * 0.0035, ceil, -0.002], 0);
       if (s.fine(2))
         for (let z = -0.25; z > -d + 0.1; z -= 0.15) {
-          s.add(p.ssBright, hex(0.006, 0.012, "x"), [xj, hb - 0.015, z]);
+          s.add(p.ssBright, hex(0.006, 0.012, "x"), [xj, ceil - 0.015, z]);
         }
     }
-
-    // A plate on the left end's inner skin: the listing label, blank.
-    dataPlate(s, [wall + 0.0002, hb * 0.55, -mua - 0.12], [0, Math.PI / 2, 0], 0.1, 0.06);
 
     // One side of the hood in its own frame: front at z = 0, its "wall" (the back wall, or the island's centre) at -D.
     const filter = baffleFilter(s);
     const phi = Math.PI / 2 - SLOPE;
     const cphi = Math.cos(phi);
     const yb = 0.1;
-    const zb = -D + 0.08;
+    const zb = island ? -D + 0.062 : -D + 0.08;
     const zpf = zb + 0.302;
     const zl = -mua - 0.17;
     const zf = zpf + 0.1;
     const yf = hb - 0.06;
     const zc = zpf + 0.035;
     const yc = hb - 0.035;
-    const side = (k: number) => {
-      // The make-up air plenum: inner wall, floor, front face with its perforated supply panels and diffuser behind.
-      blk(s, p.ss, [wall, 0, -mua], [w - wall, hb - T, -mua + T], r);
-      blk(s, p.ss, [wall, 0, -mua], [w - wall, T, -T], 0);
-      blk(s, p.ss, [0, 0.305, -T], [w, hb, 0], r);
-      blk(s, p.ss, [0, 0, -T], [w, 0.035, 0], r);
-      if (s.fine(2)) s.add(p.ss, cyl(s, 0.0035, w, "x", 12), [w / 2, 0.0035, -0.0035]);
+    const nl = Math.max(1, Math.round((w - 2 * wall) / 1.2));
+    const lx: number[] = [];
+    for (let i = 0; i < nl; i++) lx.push(wall + ((w - 2 * wall) * (i + 0.5)) / nl);
+    const usable = w - 2 * wall - 0.01;
+    const nfl = Math.max(1, Math.floor(usable / FW));
+    const fx0 = (w - nfl * FW) / 2;
+    const cupX = w - wall - 0.08;
+    const side = () => {
+      // The make-up air plenum: inner wall, floor, the front face over its perforated supply panels and diffuser.
+      blk(s, p.ss, [wall, 0, -mua], [w - wall, ceil, -mua + T], r);
+      blk(s, p.ss, [wall, 0, -mua + T], [w - wall, T, -wall], 0);
+      blk(s, p.ss, [R, 0.305, -T], [w - R, ceil, 0], r);
       const nSec = Math.max(1, Math.round((w - 2 * wall) / 1.22));
       const secW = (w - 2 * wall - 0.03) / nSec;
-      const mull = (x: number, hw: number) => blk(s, p.ss, [x - hw, 0.034, -T], [x + hw, 0.306, 0], r);
-      mull(wall / 2 + 0.0075, wall / 2 + 0.0075);
-      mull(w - wall / 2 - 0.0075, wall / 2 + 0.0075);
-      for (let i = 1; i < nSec; i++) mull(wall + 0.015 + secW * i, 0.015);
+      const mull = (a: number, b: number) => blk(s, p.ss, [a, yH, -T], [b, 0.305, 0], r);
+      mull(R, wall + 0.03);
+      mull(w - wall - 0.03, w - R);
+      for (let i = 1; i < nSec; i++) mull(wall + secW * i, wall + 0.03 + secW * i);
       for (let i = 0; i < nSec; i++) {
         const xa = wall + 0.03 + secW * i;
         const xb = xa + secW - 0.03;
-        if (s.fine(1)) blk(s, perf, [xa - 0.006, 0.03, -0.0058], [xb + 0.006, 0.31, -0.0049], 0);
-        else blk(s, p.ssDull, [xa, 0.035, -0.003], [xb, 0.305, -0.002], 0);
+        if (s.fine(1)) blk(s, perf, [xa - 0.006, yH - 0.004, -0.0058], [xb + 0.006, 0.31, -0.0049], 0);
+        else blk(s, p.ssDull, [xa, yH, -0.003], [xb, 0.305, -0.002], 0);
       }
       blk(s, p.charcoal, [wall, 0.028, -0.075], [w - wall, 0.312, -0.074], 0);
-      if (s.fine(2)) for (let i = 0; i <= nSec; i++) for (const y of [0.018, 0.32]) screw(s, p.ssBright, [wall + 0.015 + secW * i, y, 0], 0.0028);
+      if (s.fine(2)) for (let i = 0; i <= nSec; i++) for (const y of [yH + 0.012, 0.32]) screw(s, p.ssBright, [wall + 0.015 + secW * i, y, 0], 0.0028);
 
-      // The capture reservoir's lights, wired through boxes on the top.
-      const nl = Math.max(1, Math.round((w - 2 * wall) / 1.2));
-      const lx: number[] = [];
-      for (let i = 0; i < nl; i++) lx.push(wall + ((w - 2 * wall) * (i + 0.5)) / nl);
+      // The capture reservoir's lights, wired through boxes on the top, and the pools they throw round them.
       for (const x of lx) {
-        hoodLight(s, lamp, x, hb - T, zl);
+        hoodLight(s, L, x, ceil, zl);
+        lightPool(s, L, [x, ceil - 0.003, zl], 1.15, 2 * Math.min(-mua - zl, zl - zpf) - 0.02, [Math.PI / 2, 0, 0]);
+        lightPool(s, L, [x, ceil / 2 + 0.03, -mua - 0.003], 1.05, ceil - 0.1, [0, Math.PI, 0]);
         if (s.fine(1)) {
           blk(s, p.ssDull, [x - 0.05, hb, zl - 0.05], [x + 0.05, hb + 0.045, zl + 0.05], 0.002);
           if (s.fine(2)) for (const sx of [-1, 1]) for (const sz of [-1, 1]) screw(s, p.ssBright, [x + sx * 0.04, hb + 0.045, zl + sz * 0.04], 0.0022, [-Math.PI / 2, 0, 0]);
         }
       }
       if (s.fine(1)) {
-        s.add(p.ssDull, cyl(s, 0.009, lx[lx.length - 1]! - 0.12, "x", 12), [(0.12 + lx[lx.length - 1]!) / 2, hb + 0.022, zl]);
+        s.add(p.ssDull, cyl(s, 0.009, lx[lx.length - 1]! - 0.12, "x", 12), [(0.12 + lx[lx.length - 1]!) / 2, hb + 0.034, zl]);
         blk(s, p.ssDull, [0.07, hb, zl - 0.055], [0.17, hb + 0.055, zl + 0.055], 0.002);
       }
 
       // The filter bank: filters stamped across, blank fillers at the ends, the top channel and the plenum's front.
-      const usable = w - 2 * wall - 0.01;
-      const nf = Math.max(1, Math.floor(usable / FW));
-      const x0 = (w - nf * FW) / 2;
       s.at([0, yb, zb], [phi, 0, 0], () => {
-        for (let i = 0; i < nf; i++) stamp(s, filter, [x0 + FW * (i + 0.5), 0, 0]);
+        for (let i = 0; i < nfl; i++) stamp(s, filter, [fx0 + FW * (i + 0.5), 0, 0]);
         for (const [a, b] of [
-          [wall, x0],
-          [x0 + nf * FW, w - wall],
+          [wall, fx0],
+          [fx0 + nfl * FW, w - wall],
         ] as const) {
           if (b - a < 0.005) continue;
-          blk(s, p.ss, [a, 0.004, -0.004], [b, FH - 0.004, -0.0028], 0);
-          blk(s, p.ss, [a, 0.004, -FT], [b, FH - 0.004, -0.004], 0);
+          blk(s, p.ss, [a, 0.004, -FT], [b, FH - 0.004, -0.0028], 0);
         }
         // The top channel the filters lift into.
         sweepX(s, p.ss, [[0.012, FH - 0.024], [0.012, FH + 0.006], [-FT - 0.004, FH + 0.006], [-FT - 0.004, FH - 0.012]], 0.0012, wall, w - wall);
+        for (const x of lx) lightPool(s, L, [x, FH * 0.5, 0.012], 1.3, FH * 0.96, [0, 0, 0]);
       });
-      blk(s, p.ss, [wall, yb + FH * cphi - 0.012, zpf], [w - wall, hb - T, zpf + T], r);
-
-      // The grease trough: a U channel under the bank, its front lip rolled in; a ledge inside the filters stand on.
-      const zt = -D + 0.004;
-      const nArc = s.seg(6, 2);
-      sweepX(s, p.ss, [[zt, 0.135], [zt, 0.075], ...arc(zt + 0.015, 0.075, 0.015, Math.PI, Math.PI * 1.5, nArc).slice(1), [zt + 0.08, 0.06], ...arc(zt + 0.08, 0.075, 0.015, -Math.PI / 2, 0, nArc).slice(1), [zt + 0.095, 0.11], [zt + 0.088, 0.116]], 0.0012, wall, w - wall);
+      blk(s, p.ss, [wall, yb + FH * cphi - 0.012, zpf], [w - wall, ceil, zpf + T], r);
+      // The ledge inside the trough that the filters stand on.
       blk(s, p.ss, [wall, yb - 0.006, zb - 0.045], [w - wall, yb - 0.003, zb + 0.004], 0);
-      // The drain at the low end and the grease cup on its bracket under it.
-      const xcup = w - wall - 0.08;
-      const zcup = zt + 0.0475;
-      s.add(p.ss, cyl(s, 0.011, 0.02, "y", 16), [xcup, 0.052, zcup]);
-      s.add(p.ss, lathe(s, [
-        [0, 0.004],
-        [0.034, 0.004],
-        [0.037, 0.008],
-        [0.039, 0.05],
-        [0.0405, 0.052],
-        [0.0395, 0.0535],
-        [0.0375, 0.05],
-        [0.0355, 0.0095],
-        [0, 0.0095],
-      ], 32), [xcup, 0, zcup]);
-      if (s.fine(1)) {
-        s.add(p.ssBright, torus(s, 0.0425, 0.002, "y", Math.PI * 2, 32, 5), [xcup, 0.04, zcup]);
-        for (const sz of [-1, 1]) s.add(p.ssBright, pipe(s, [[xcup, 0.04, zcup + sz * 0.0425], [xcup, 0.062, zcup + sz * 0.0425]], 0.0022, 0.004, 6));
-        if (s.fine(2)) s.add(p.ssBright, pipe(s, [[xcup - 0.04, 0.03, zcup], [xcup - 0.042, 0.06, zcup], [xcup, 0.075, zcup], [xcup + 0.042, 0.06, zcup], [xcup + 0.04, 0.03, zcup]], 0.0014, 0.01, 6));
-      }
 
       // Fire suppression: the 1/2 in branch line with its nozzles aimed down at the line, hung from the ceiling.
       const xa = 0.16;
@@ -888,7 +1219,7 @@ function typeOneHood(island: boolean): Builder {
       if (s.fine(1)) {
         s.add(p.ssBright, hex(0.017, 0.024), [xa, h - 0.034, zf]);
         s.add(p.ssBright, hex(0.02, 0.012), [xa, hb + 0.006, zf]);
-        if (s.fine(2)) s.add(p.ssBright, hex(0.02, 0.01), [xa, hb - T - 0.005, zf]);
+        if (s.fine(2)) s.add(p.ssBright, hex(0.02, 0.01), [xa, ceil - 0.005, zf]);
         s.add(p.chrome, cyl(s, 0.0118, 0.012, "x", 12), [xb + 0.006, yf, zf]);
       }
       const nn = Math.max(2, Math.round((w - 0.4) / 0.6));
@@ -920,10 +1251,55 @@ function typeOneHood(island: boolean): Builder {
       if (s.fine(1)) s.add(p.alu, cyl(s, 0.022, 0.004, "z", 24), [0.1, yc + 0.012, zc + 0.013]);
       s.add(p.ssDull, cyl(s, 0.0089, h - 0.004 - yc - 0.03, "y", 12), [0.1, (h - 0.004 + yc + 0.03) / 2, zc]);
       if (s.fine(1)) s.add(p.ssDull, hex(0.016, 0.014), [0.1, hb + 0.007, zc]);
-      void k;
     };
-    side(0);
-    if (island) s.at([w, 0, -d], [0, Math.PI, 0], () => side(1));
+    side();
+    if (island) s.at([w, 0, -d], [0, Math.PI, 0], side);
+
+    // The reservoir's perimeter gutter round the foot of its walls: a turned-up lip, its top rolled.
+    const gut = sheetOutline([[0, 0.0006], [0.018, 0.0006], [0.0194, 0.002], [0.0194, 0.014], ...arc(0.0172, 0.014, 0.0022, 0, Math.PI, s.seg(5, 2)).slice(1)], 0.0012);
+    const gPath: P2[] = island ? [[wall, -mua], [w - wall, -mua], [w - wall, -d + mua], [wall, -d + mua]] : [[wall, -d + T], [wall, -mua], [w - wall, -mua], [w - wall, -d + T]];
+    if (s.detail) s.add(p.ss, pathSweep(gut, gPath, 0, island));
+
+    // The grease trough: on a wall canopy a U against the wall, its front lip rolled in; on the island one trough on
+    // the centreline under both banks. It falls to the drain at its right end over the grease cup.
+    const nArc = s.seg(6, 2);
+    let zcup: number;
+    if (island) {
+      const zm = -d / 2;
+      const b = 0.082;
+      sweepX(s, p.ss, [[zm - b + 0.007, 0.116], [zm - b, 0.11], [zm - b, 0.075], ...arc(zm - b + 0.015, 0.075, 0.015, Math.PI, Math.PI * 1.5, nArc).slice(1), [zm + b - 0.015, 0.06], ...arc(zm + b - 0.015, 0.075, 0.015, -Math.PI / 2, 0, nArc).slice(1), [zm + b, 0.11], [zm + b - 0.007, 0.116]], 0.0012, wall, w - wall);
+      zcup = zm;
+    } else {
+      const zt = -D + 0.004;
+      sweepX(s, p.ss, [[zt, 0.135], [zt, 0.075], ...arc(zt + 0.015, 0.075, 0.015, Math.PI, Math.PI * 1.5, nArc).slice(1), [zt + 0.08, 0.06], ...arc(zt + 0.08, 0.075, 0.015, -Math.PI / 2, 0, nArc).slice(1), [zt + 0.095, 0.11], [zt + 0.088, 0.116]], 0.0012, wall, w - wall);
+      zcup = zt + 0.0475;
+    }
+    // End caps closing the trough, and the drain spud into the cup.
+    if (s.fine(1)) for (const x of [wall + 0.0008, w - wall - 0.0008]) blk(s, p.ss, [x - 0.0006, 0.062, zcup - (island ? 0.08 : 0.045)], [x + 0.0006, 0.108, zcup + (island ? 0.08 : 0.045)], 0);
+    s.add(p.ss, cyl(s, 0.011, 0.02, "y", 16), [cupX, 0.052, zcup]);
+    // The grease cup: a drawn cup with a rolled rim on its bail, hooked under the drain, part full of old grease.
+    s.add(p.ss, lathe(s, [
+      [0, 0.004],
+      [0.032, 0.004],
+      [0.036, 0.0065],
+      [0.0385, 0.012],
+      [0.0395, 0.05],
+      [0.0412, 0.0515],
+      [0.0412, 0.0535],
+      [0.0392, 0.0535],
+      [0.0375, 0.05],
+      [0.0365, 0.0125],
+      [0.0345, 0.0095],
+      [0, 0.0095],
+    ], 32), [cupX, 0, zcup]);
+    if (s.fine(1)) {
+      s.add(p.ssBright, torus(s, 0.0425, 0.002, "y", Math.PI * 2, 32, 5), [cupX, 0.04, zcup]);
+      for (const sz of [-1, 1]) s.add(p.ssBright, pipe(s, [[cupX, 0.04, zcup + sz * 0.0425], [cupX, 0.062, zcup + sz * 0.0425]], 0.0022, 0.004, 6));
+      if (s.fine(2)) {
+        s.add(p.ssBright, pipe(s, [[cupX - 0.04, 0.03, zcup], [cupX - 0.042, 0.06, zcup], [cupX, 0.075, zcup], [cupX + 0.042, 0.06, zcup], [cupX + 0.04, 0.03, zcup]], 0.0014, 0.01, 6));
+        s.add(greaseMat(), cyl(s, 0.0368, 0.002, "y", 28), [cupX, 0.034, zcup]);
+      }
+    }
 
     // The duct nozzle in each exhaust collar, fed down through the top: the pipe drops into the plenum, turns under the
     // collar's opening and points up the duct.
@@ -939,16 +1315,44 @@ function typeOneHood(island: boolean): Builder {
       }
     }
 
-    return (): Hooks => ({ set: (name, v) => name === "lights" && setLamp(lamp, v) });
+    // Standing seams across the top where its sheets join, clear of the collars, boxes and lugs.
+    if (s.fine(1)) {
+      const blocked: [number, number][] = [
+        ...muas.map(([x0, x1]) => [x0 - 0.045, x1 + 0.045] as [number, number]),
+        ...exhausts.map(([x0, x1]) => [x0 - 0.045, x1 + 0.095] as [number, number]),
+        ...lx.map((x) => [x - 0.065, x + 0.065] as [number, number]),
+        ...lugX.map((x) => [x - 0.05, x + 0.05] as [number, number]),
+        [0.05, 0.19],
+        [w - 0.19, w - 0.05],
+      ];
+      if (xj > 0) blocked.push([xj - 0.3, xj + 0.3]);
+      const seams = seamPositions(w, 1.22, blocked);
+      if (xj > 0) seams.push(xj);
+      for (const x of seams) sweepZ(s, p.ss, standingSeam(s), 0.0012, -d + 0.004, -0.004, x, hb);
+    }
+
+    // A plate on the left end's inner skin: the listing label, blank.
+    dataPlate(s, [wall + 0.0002, hb * 0.55, -mua - 0.12], [0, Math.PI / 2, 0], 0.1, 0.06);
+
+    return lampHooks;
   };
 }
 
+let greaseM: THREE.MeshStandardMaterial | null = null;
+/** Old fryer grease in a cup: dark amber, glossy, opaque at any depth that matters. */
+function greaseMat(): THREE.MeshStandardMaterial {
+  if (!greaseM) {
+    greaseM = new THREE.MeshStandardMaterial({ color: 0x4a2c0c, roughness: 0.18, metalness: 0 });
+    greaseM.userData.uv = "own";
+  }
+  return greaseM;
+}
 
 /**
  * A Type II condensate hood, over a dishmachine or steamer: no grease filters, a smooth welded liner, and a perimeter
  * gutter inside the skirts that catches what condenses on the liner and drains it from one corner. An internal baffle
  * under the collar makes the vapour turn and shed its water; its low edge drips into the back gutter. One light, and
- * the exhaust collar on top. y = 0 is the skirts' lower edge.
+ * the exhaust collar on top. The skirts have formed corners and a hemmed drip edge. y = 0 is the skirts' lower edge.
  */
 const condensateHood: Builder = (s, e) => {
   const p = palette();
@@ -957,40 +1361,40 @@ const condensateHood: Builder = (s, e) => {
   const T = 0.0012;
   const wall = 0.035;
   const gy = 0.02;
+  const yH = 0.035;
+  const ceil = hb - T;
   const r = s.fine(1) ? 0.0012 : 0;
-  const lamp = lampMaterial();
-  // The skins: outer, the inner liner, and the return closing the double wall, hemmed below.
-  blk(s, p.ss, [0, 0, -T], [w, hb, 0], r);
-  blk(s, p.ss, [0, 0, -d], [w, hb, -d + T], r);
-  for (const x of [0, w - T]) blk(s, p.ss, [x, 0, -d + T], [x + T, hb, -T], r);
-  blk(s, p.ss, [wall, 0, -wall], [w - wall, hb - T, -wall + T], r);
-  blk(s, p.ss, [wall, 0, -d + wall - T], [w - wall, hb - T, -d + wall], r);
-  for (const x of [wall - T, w - wall]) blk(s, p.ss, [x, 0, -d + wall], [x + T, hb - T, -wall], r);
-  sheetWithHoles(s, p.ss, 0, w, -d, 0, 0, T, [[wall, w - wall, -d + wall, -wall]]);
-  if (s.fine(2)) {
-    for (const z of [-0.0035, -d + 0.0035]) s.add(p.ss, cyl(s, 0.0035, w, "x", 12), [w / 2, 0.0035, z]);
-    for (const x of [0.0035, w - 0.0035]) s.add(p.ss, cyl(s, 0.0035, d, "z", 12), [x, 0.0035, -d / 2]);
-  }
-  // The top, cut for the collar.
+  const R = s.detail ? wall : 0;
+  const L = hoodLamps();
+  // The hemmed edge all round, the formed corners and the skins between them; the liner inside.
+  s.add(p.ss, pathSweep(hemSection(s, wall, yH), filletPath([[0, 0], [w, 0], [w, -d], [0, -d]], R, s.seg(8, 2), true), 0, true));
+  for (const [x, z] of [[R, -R], [w - R, -R], [w - R, -d + R], [R, -d + R]] as const) cornerPost(s, R, x, z, w, d, yH, ceil);
+  blk(s, p.ss, [R, yH, -T], [w - R, ceil, 0], r);
+  blk(s, p.ss, [R, yH, -d], [w - R, ceil, -d + T], r);
+  for (const x of [0, w - T]) blk(s, p.ss, [x, yH, -d + R], [x + T, ceil, -R], r);
+  blk(s, p.ss, [wall, yH, -wall], [w - wall, ceil, -wall + T], r);
+  blk(s, p.ss, [wall, yH, -d + wall - T], [w - wall, ceil, -d + wall], r);
+  for (const x of [wall - T, w - wall]) blk(s, p.ss, [x, yH, -d + wall], [x + T, ceil, -wall], r);
+  // The top, its corners formed, cut for the collar.
   const cx0 = w / 2 - 0.225;
   const cx1 = w / 2 + 0.225;
   const cz0 = -d + 0.06;
   const cz1 = -d + 0.34;
-  sheetWithHoles(s, p.ss, 0, w, -d, 0, hb - T, hb, [[cx0, cx1, cz0, cz1]]);
+  const top = planShape(filletPath([[0, 0], [w, 0], [w, -d], [0, -d]], R, s.seg(8, 2), true));
+  top.holes.push(rectPath(new THREE.Path(), cx1 - cx0, cz1 - cz0, 0, (cx0 + cx1) / 2, -(cz0 + cz1) / 2, true) as THREE.Path);
+  const tg = plate(s, top, T, 0, 8);
+  tg.rotateX(-Math.PI / 2);
+  s.add(p.ss, tg, [0, ceil, 0]);
   ductCollar(s, cx0, cx1, cz0, cz1, hb, h);
 
-  // The perimeter gutter round the liner's foot: a U with a rolled lip, its floor 20 mm above the skirt hem.
-  const n = s.seg(6, 2);
-  const gut = (o: number): P2[] => [[o, 0.065], [o, gy + 0.008], ...arc(o - 0.008, gy + 0.008, 0.008, 0, -Math.PI / 2, n).slice(1), [o - 0.037, gy], ...arc(o - 0.037, gy + 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [o - 0.045, gy + 0.035], ...arc(o - 0.041, gy + 0.035, 0.004, Math.PI, 0, 3).slice(1)];
-  // Profiles are (z, y) for the front and back runs, (x, y) for the ends; each runs inward from its liner.
-  sweepX(s, p.ss, gut(-wall), 0.0012, wall, w - wall);
-  sweepX(s, p.ss, gut(-wall).map(([z, y]) => [-d - z, y] as P2), 0.0012, wall, w - wall);
-  sweepZ(s, p.ss, gut(0).map(([x, y]) => [wall - x, y] as P2), 0.0012, -d + wall, -wall);
-  sweepZ(s, p.ss, gut(0).map(([x, y]) => [w - wall + x, y] as P2), 0.0012, -d + wall, -wall);
+  // The perimeter gutter round the liner's foot, one welded piece: a U with a rolled lip, its floor 20 mm up.
+  const n = s.fine(2) ? 6 : 2;
+  const gut: P2[] = [[0.0006, 0.065], [0.0006, gy + 0.008], ...arc(0.0086, gy + 0.008, 0.008, Math.PI, Math.PI * 1.5, n).slice(1), [0.037, gy], ...arc(0.037, gy + 0.008, 0.008, -Math.PI / 2, 0, n).slice(1), [0.045, gy + 0.035], ...arc(0.041, gy + 0.035, 0.004, 0, Math.PI, 3).slice(1)];
+  s.add(p.ss, pathSweep(sheetOutline(gut, 0.0012), [[wall, -wall], [w - wall, -wall], [w - wall, -d + wall], [wall, -d + wall]], 0, true));
   // The drain: a 1 in half coupling under the low corner, a close nipple and its cap.
   const dx = w - wall - 0.022;
   const dz = -wall - 0.022;
-  s.add(p.ss, cyl(s, 0.017, 0.012, "y", 20), [dx, gy - 0.006, dz]);
+  s.add(p.ss, cyl(s, 0.017, 0.012, "y", 20), [dx, gy - 0.0066, dz]);
   s.add(p.ssDull, cyl(s, 0.0167, 0.008, "y", 20), [dx, 0.006, dz]);
   if (s.fine(1)) s.add(p.ssDull, hex(0.02, 0.006), [dx, 0.0035, dz]);
 
@@ -998,24 +1402,26 @@ const condensateHood: Builder = (s, e) => {
   // the back gutter; hung from the top by straps at each end.
   const [za, ya] = [-d + 0.55, hb - 0.095];
   const [zb, yb] = [-d + 0.058, 0.16];
-  const L = Math.hypot(za - zb, ya - yb);
+  const Lb = Math.hypot(za - zb, ya - yb);
   const ang = Math.atan2(ya - yb, za - zb);
   s.at([w / 2, yb, zb], [-ang, 0, 0], () => {
-    blk(s, p.ss, [-w / 2 + wall + 0.05, -0.0008, 0], [w / 2 - wall - 0.05, 0.0008, L], r);
-    s.add(p.ss, cyl(s, 0.004, w - 2 * wall - 0.1, "x", 12), [0, 0.003, L]);
-    blk(s, p.ss, [-w / 2 + wall + 0.05, -0.018, -0.0008], [w / 2 - wall - 0.05, 0, 0.0008], 0.0004);
+    blk(s, p.ss, [-w / 2 + wall + 0.05, -0.0008, 0], [w / 2 - wall - 0.05, 0.0008, Lb], r);
+    s.add(p.ss, cyl(s, 0.004, w - 2 * wall - 0.1, "x", 12), [0, 0.003, Lb]);
+    blk(s, p.ss, [-w / 2 + wall + 0.05, -0.018, -0.0008], [w / 2 - wall - 0.05, -0.0008, 0.0008], 0.0004);
   });
   for (const x of [wall + 0.08, w - wall - 0.08]) {
-    s.add(p.ss, pipe(s, [[x, hb - T, za - 0.03], [x, ya + 0.004, za - 0.03]], 0.0025, 0.01, 8));
-    s.add(p.ss, pipe(s, [[x, hb - T, zb + 0.12], [x, yb + 0.12 * Math.tan(ang) + 0.004, zb + 0.12]], 0.0025, 0.01, 8));
+    s.add(p.ss, pipe(s, [[x, ceil, za - 0.03], [x, ya + 0.004, za - 0.03]], 0.0025, 0.01, 8));
+    s.add(p.ss, pipe(s, [[x, ceil, zb + 0.12], [x, yb + 0.12 * Math.tan(ang) + 0.004, zb + 0.12]], 0.0025, 0.01, 8));
   }
 
-  // The light, its box on top, hanger clips, the label.
-  hoodLight(s, lamp, w / 2, hb - T, -0.3);
+  // The light and the pools it throws, its box on top, hanger lugs and rods, the label.
+  hoodLight(s, L, w / 2, ceil, -0.3);
+  lightPool(s, L, [w / 2, ceil - 0.003, -0.3], Math.min(1.1, w - 2 * wall - 0.1), 0.5, [Math.PI / 2, 0, 0]);
+  lightPool(s, L, [w / 2, (ceil + 0.07) / 2, -wall - 0.003], Math.min(1.0, w - 2 * wall - 0.1), ceil - 0.1, [0, Math.PI, 0]);
   if (s.fine(1)) blk(s, p.ssDull, [w / 2 - 0.05, hb, -0.35], [w / 2 + 0.05, hb + 0.045, -0.25], 0.002);
-  for (const x of [0.1, w - 0.1]) for (const z of [-0.09, -d + 0.09]) hangerClip(s, x, hb, z);
+  for (const x of [0.1, w - 0.1]) for (const z of [-0.09, -d + 0.09]) hangerClip(s, x, hb, z, h + 0.14);
   dataPlate(s, [wall + 0.0002, hb * 0.55, -0.25], [0, Math.PI / 2, 0], 0.09, 0.055);
-  return () => ({ set: (name, v) => name === "lights" && setLamp(lamp, v) });
+  return lampHooks;
 };
 
 register({
@@ -1034,10 +1440,14 @@ register({
 /* Sinks                                                                                                          */
 /* ------------------------------------------------------------------------------------------------------------ */
 
-/** The raised rolled rim along a sink's front, as (z, y) from the deck's front edge: up into a bead, down an apron. */
+/**
+ * The raised rolled rim round a sink top's front and ends, as a (u, v) centreline for `pathSweep`, u in from its outer
+ * face and v up from the deck: an upstand rising out of the deck (and out of the drainboards, which pitch up toward it
+ * under a rim that stays level), rolled over into a bead, down the apron and hemmed back under.
+ */
 function sinkRim(s: Shop): P2[] {
-  const n = s.seg(10, 3);
-  return [[-0.034, 0], [-0.018, 0], [-0.018, 0.012], ...arc(-0.009, 0.012, 0.009, Math.PI, 0, n).slice(1), [0, -0.04], ...arc(-0.006, -0.04, 0.006, 0, -Math.PI / 2, 3).slice(1), [-0.018, -0.046]];
+  const n = s.fine(2) ? s.seg(10, 3) : 3;
+  return [[0.018, -0.012], [0.018, 0.02], ...arc(0.009, 0.02, 0.009, 0, Math.PI, n).slice(1), [0, -0.04], ...arc(0.006, -0.04, 0.006, Math.PI, Math.PI * 1.5, s.fine(2) ? 3 : 1).slice(1), [0.018, -0.046]];
 }
 
 /**
@@ -1184,12 +1594,16 @@ function leverWaste(s: Shop, x: number, y: number, z: number, zBack: number, zFr
   const p = palette();
   if (s.detail === 0) return;
   const f2 = s.fine(2);
-  // The strainer in the bowl floor.
-  s.add(p.ssBright, cyl(s, 0.05, 0.0025, "y", f2 ? 32 : 20), [x, y + 0.0013, z]);
-  s.add(p.enamel, cyl(s, 0.036, 0.001, "y", f2 ? 28 : 20), [x, y + 0.003, z]);
+  // The strainer in the bowl floor: a drawn flange round the outlet, a perforated basket down in it over the dark of
+  // the valve, its lift knob in the middle.
   if (f2) {
-    for (const a of [0, Math.PI / 2]) s.add(p.ssBright, rbox(s, 0.072, 0.003, 0.006, 0.001), [x, y + 0.0035, z], [0, a, 0]);
-    s.add(p.ssBright, cyl(s, 0.009, 0.006, "y", 16), [x, y + 0.005, z]);
+    s.add(p.ss, lathe(s, [[0.0508, 0.0001], [0.0503, 0.0008], [0.047, 0.0024], [0.0385, 0.0024], [0.0356, 0.0012], [0.0352, -0.006], [0.033, -0.0075]], 40), [x, y, z]);
+    s.add(perforatedSheet(0.0042, 0.5), new THREE.CircleGeometry(0.0335, 32).rotateX(-Math.PI / 2), [x, y - 0.0068, z]);
+    s.add(p.enamel, new THREE.CircleGeometry(0.034, 24).rotateX(-Math.PI / 2), [x, y - 0.018, z]);
+    s.add(p.ss, lathe(s, [[0.0065, -0.007], [0.0068, -0.002], [0.0058, 0.0042], [0.0035, 0.0058], [0, 0.006]], 16), [x, y, z]);
+  } else {
+    s.add(p.ss, cyl(s, 0.05, 0.0025, "y", 20), [x, y + 0.0013, z]);
+    s.add(p.enamel, cyl(s, 0.036, 0.001, "y", 16), [x, y + 0.003, z]);
   }
   // The valve body under it: cast, chrome-plated, a 2 in tailpiece below.
   const yv = y - 0.045;
@@ -1199,7 +1613,12 @@ function leverWaste(s: Shop, x: number, y: number, z: number, zBack: number, zFr
   // The overflow, from a slotted cover high on the bowl's back wall down into the body (behind the bowl: close views).
   const yo = y + 0.2;
   if (f2) {
-    s.add(p.ssBright, rbox(s, 0.05, 0.03, 0.004, 0.003), [x, yo, zBack + 0.002]);
+    // The overflow's cover: a domed stadium plate with slots, standing off the dark opening behind it.
+    const cover = roundRect(0.058, 0.03, 0.015);
+    for (let i = -2; i <= 2; i++) cover.holes.push(rectPath(new THREE.Path(), 0.0042, i % 2 ? 0.016 : 0.019, 0.0021, i * 0.0085, 0, true) as THREE.Path);
+    s.add(p.enamel, rbox(s, 0.05, 0.024, 0.0012, 0.0006), [x, yo, zBack + 0.0006]);
+    s.add(p.ss, plate(s, cover, 0.0014, 0.0006, 6), [x, yo, zBack + 0.0016]);
+    for (const sx of [-1, 1]) screw(s, p.ssBright, [x + sx * 0.022, yo, zBack + 0.0036], 0.0022);
     s.add(p.chrome, pipe(s, [[x, yo, zBack - 0.012], [x, yo, zBack - 0.03], [x, yv + 0.02, zBack - 0.03], [x, yv + 0.02, z - 0.03]], 0.0125, 0.03, 12));
   }
   // The lever's rod forward to just under the rim, and the turn handle on its own joint.
@@ -1287,39 +1706,51 @@ function sinkTop(sp: (e: { w: number; d: number; h: number }) => SinkSpec): Buil
     }
     // Bowls.
     for (const x of S.bowls) basin(s, p.ss, x, (zb0 + zb1) / 2, S.bw, S.bdz, S.depth, Y - t, r);
-    // The deck over the bowl block, cut for the bowls.
+    // The rim: one formed piece along the front and both ends, its corners radiused, level all round.
+    const zr = -0.001;
+    const zu = zr - 0.018;
+    const R = 0.025;
+    s.add(p.ss, pathSweep(sheetOutline(sinkRim(s), t), filletPath([[x0, zs], [x0, zr], [x1, zr], [x1, zs]], R, s.fine(2) ? 7 : 2), Y - t / 2));
+    // The deck over the bowl block, cut for the bowls, run into the rim's upstand and back to the splash's cove.
+    const boardAt = (x: number) => S.boards.some(([a, b]) => Math.abs(a - x) < 1e-3 || Math.abs(b - x) < 1e-3);
+    const dx0 = bx0 + (boardAt(bx0) ? 0 : 0.008);
+    const dx1 = bx1 - (boardAt(bx1) ? 0 : 0.008);
     const deck = new THREE.Shape();
-    rectPath(deck, bx1 - bx0, -0.03 - zs, 0, (bx0 + bx1) / 2, -(-0.03 + zs) / 2);
+    rectPath(deck, dx1 - dx0, zu - (zs + 0.008), 0, (dx0 + dx1) / 2, -(zu + zs + 0.008) / 2);
     for (const x of S.bowls) deck.holes.push(rectPath(new THREE.Path(), S.bw, S.bdz, r, x, -(zb0 + zb1) / 2, true) as THREE.Path);
     const dg = plate(s, deck, t, 0, s.fine(2) ? 16 : 8);
     dg.rotateX(-Math.PI / 2);
     s.add(p.ss, dg, [0, Y - t, 0]);
-    // Drainboards: pitched 15 mm toward the bowls, their outer ends turned up into rolled rims.
+    // Drainboards: pitched 15 mm up toward their outer ends, butted to the deck, run under the rim and into the splash.
+    const rise = 0.015;
+    const boardTop = (x: number): number | null => {
+      for (const [a, b] of S.boards) {
+        if (x < Math.min(a, b) || x > Math.max(a, b)) continue;
+        const outer = Math.abs(a - bx0) < Math.abs(b - bx1) && b <= bx0 + 1e-6 ? a : b;
+        const inner = outer === a ? b : a;
+        return Y + (rise * Math.abs(x - inner)) / Math.abs(b - a);
+      }
+      return null;
+    };
     for (const [a, b] of S.boards) {
       const outer = Math.abs(a - bx0) < Math.abs(b - bx1) && b <= bx0 + 1e-6 ? a : b;
       const inner = outer === a ? b : a;
-      const len = Math.abs(b - a);
-      const rise = 0.015;
-      const ang = Math.atan2(rise, len) * (outer > inner ? 1 : -1);
-      const cz = (zs - 0.03) / 2;
-      s.at([(a + b) / 2, Y + rise / 2 - t / 2, cz], [0, 0, ang], () => blk(s, p.ss, [-len / 2 - 0.002, -t / 2, zs - cz], [len / 2 + 0.002, t / 2, -0.03 - cz], 0));
       const sx = outer > inner ? 1 : -1;
-      sweepZ(s, p.ss, sinkRim(s).map(([z, y]) => [sx * z, y + rise] as P2), t, zs, -0.03, outer, Y - t / 2);
-      // A hat channel under the board, front to back, the gussets of its legs welded to it.
-      if (s.fine(2)) sweepZ(s, p.ss, [[-0.035, 0], [-0.018, 0], [-0.018, -0.026], [0.018, -0.026], [0.018, 0], [0.035, 0]], 0.0012, zs + 0.01, -0.05, outer - sx * 0.06, Y - 0.004);
+      const L0 = Math.abs(b - a);
+      const xo = outer - sx * 0.008;
+      const len = Math.abs(xo - inner);
+      const xm = (xo + inner) / 2;
+      const ang = Math.atan2(rise, L0) * sx;
+      const cz = (zs + zu) / 2;
+      s.at([xm, Y - t / 2 + (rise * Math.abs(xm - inner)) / L0, cz], [0, 0, ang], () => blk(s, p.ss, [-len / 2, -t / 2, zs - cz], [len / 2, t / 2, zu - cz], 0));
+      // A hat channel welded under the board, front to back, the gussets of its legs welded to it.
+      const xh = outer - sx * 0.06;
+      sweepZ(s, p.ss, [[-0.035, 0], [-0.018, 0], [-0.018, -0.026], [0.018, -0.026], [0.018, 0], [0.035, 0]], 0.0012, zs + 0.01, -0.05, xh, boardTop(xh)! - t - 0.0006);
     }
-    // The ends of the bowl block where no board continues it.
-    for (const [x, sx] of [
-      [bx0, -1],
-      [bx1, 1],
-    ] as const)
-      if (!S.boards.some(([a, b]) => Math.abs((sx < 0 ? b : a) - x) < 1e-3)) sweepZ(s, p.ss, sinkRim(s).map(([z, y]) => [sx * z, y] as P2), t, zs, -0.03, x, Y - t / 2);
-    // The front rim, full length.
-    sweepX(s, p.ss, sinkRim(s), t, x0, x1, Y - t / 2, -0.001);
-    // The backsplash: coved up from the deck, a 45° return to the wall at its top, its ends closed.
+    // The backsplash: coved up from the deck, a 45° return to the wall at its top, its ends closed by welded caps.
     const n = s.seg(6, 2);
-    const splash: P2[] = [[zs + 0.03, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.03], [zs - 0.026, sh], [-d + 0.0008, sh], [-d + 0.0008, sh - 0.03]];
-    sweepX(s, p.ss, splash, t, x0, x1, Y - t / 2);
+    const splash: P2[] = [[zs + 0.008, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.03], [zs - 0.026, sh], [-d + 0.0008, sh], [-d + 0.0008, sh - 0.03]];
+    sweepX(s, p.ss, splash, t, x0 + t, x1 - t, Y - t / 2);
     for (const x of [x0, x1]) {
       const cap = new THREE.Shape([new THREE.Vector2(-zs, 0), new THREE.Vector2(-zs, sh - 0.03), new THREE.Vector2(d - 0.004, sh), new THREE.Vector2(d, sh), new THREE.Vector2(d, 0)]);
       const g = plate(s, cap, t);
@@ -1340,10 +1771,12 @@ function sinkTop(sp: (e: { w: number; d: number; h: number }) => SinkSpec): Buil
 
     // Legs: under the bowls' floors and under the boards' hat channels, rails between front and back.
     for (const L of S.legs) {
-      for (const z of [L.z0, L.z1]) gussetLeg(s, L.x, z, L.top);
+      const bt = boardTop(L.x);
+      const top = bt === null ? L.top : bt - t - 0.0012 - 0.026 - 0.0002;
+      for (const z of [L.z0, L.z1]) gussetLeg(s, L.x, z, top);
       crossRail(s, [L.x, 0.2, L.z1], [L.x, 0.2, L.z0]);
     }
-    dataPlate(s, [x1 - 0.09, Y - 0.021, -0.0001], [0, 0, 0], 0.06, 0.022);
+    dataPlate(s, [x1 - 0.09, Y - 0.021, zr + 0.0008 + 0.0002], [0, 0, 0], 0.06, 0.022);
     return finish();
   };
 }
@@ -1397,9 +1830,10 @@ const vegPrepSink = sinkTop((e) => {
 /* ------------------------------------------------------------------------------------------------------------ */
 
 /**
- * A 16-gauge 304 work table: the top, its front edge a boxed bull-nose or a marine lip, sides and back turned down (or a
- * coved backsplash with a 45° return), hat channels under it front to back that the leg gussets weld to, 1-5/8 in legs
- * on bullet feet, and an undershelf with turned-down edges on shelf collars.
+ * A 16-gauge 304 work table: the top, its edge a boxed bull-nose or a raised marine lip formed all round in one piece
+ * with radiused corners (or round the front and sides, with a coved backsplash and a 45° return closed by welded
+ * end caps), hat channels under it front to back that the leg gussets weld to, 1-5/8 in legs on bullet feet, and an
+ * undershelf, its edges turned down and hemmed, welded to flared gussets that clamp the legs.
  */
 function workTable(opts: { legs: 4 | 6; edge: "bull" | "marine"; splash: number; shelf: "galv" | "ss" }): Builder {
   return (s, e) => {
@@ -1407,44 +1841,48 @@ function workTable(opts: { legs: 4 | 6; edge: "bull" | "marine"; splash: number;
     const { w, d } = e;
     const Y = 0.914;
     const t = 0.0016;
-    const zBack = opts.splash ? -d + 0.025 : -d;
+    const zs = -d + 0.025;
     const legX = opts.legs === 6 ? [0.055, w / 2, w - 0.055] : [0.055, w - 0.055];
+    const sm = opts.shelf === "galv" ? p.ssDull : p.ss;
+    const ys = 0.254;
+    const ts = 0.0012;
+    const sx0 = 0.024;
+    const sx1 = w - 0.024;
+    const sz0 = -d + 0.028;
+    const sz1 = -0.028;
     if (s.detail === 0) {
       // Far off: top and edge as one slab, the splash, legs to the floor and the undershelf.
       blk(s, p.ss, [0, Y - 0.04, -d], [w, Y, 0], 0);
       if (opts.splash) blk(s, p.ss, [0, Y, -d], [w, Y + opts.splash, -d + 0.025], 0);
       for (const x of legX) for (const z of [-0.06, -d + 0.06]) gussetLeg(s, x, z, Y - 0.04);
-      blk(s, opts.shelf === "galv" ? p.ssDull : p.ss, [0.032, 0.222, -d + 0.036], [w - 0.032, 0.254, -0.036], 0);
+      blk(s, sm, [sx0, ys - 0.032, sz0], [sx1, ys, sz1], 0);
       return;
     }
-    // The top sheet and its edges.
-    blk(s, p.ss, [0.0, Y - t, zBack + (opts.splash ? 0.012 : 0.02)], [w, Y, -0.02], 0);
-    sweepX(s, p.ss, opts.edge === "bull" ? bullNose(s) : marineEdge(s), t, 0, w, Y - t / 2, 0);
-    const n = s.seg(6, 2);
-    const down: P2[] = [[0.024, 0], ...arc(0.006, -0.006, 0.006, Math.PI / 2, Math.PI, n).slice(1), [0, -0.038], [0.012, -0.038]];
-    for (const [x, sx] of [
-      [0, 1],
-      [w, -1],
-    ] as const) {
-      sweepZ(s, p.ss, down.map(([u, v]) => [sx * u, v] as P2), t, zBack + (opts.splash ? 0 : 0.012), -0.02, x + sx * (t / 2), Y - t / 2);
-      // The corner closed where side meets front edge.
-      const edge = opts.edge === "bull" ? bullNose(s) : marineEdge(s);
-      const cap = new THREE.Shape(edge.map(([z, y]) => new THREE.Vector2(-z, y)));
-      const g = plate(s, cap, t);
-      g.rotateY(Math.PI / 2);
-      s.add(p.ss, g, [x - (sx < 0 ? t : 0), Y - t / 2, 0]);
-    }
+    // The edge, one formed piece round the plan, and the top sheet butted inside it.
+    const fine = s.fine(2);
+    const back = opts.edge === "bull" ? 0.02 : 0.03;
+    const R = 0.045;
+    const fn = fine ? 7 : 2;
+    const edge = sheetOutline((opts.edge === "bull" ? bullNose(s, back) : marineEdge(s, back)).map(([z, y]) => [-z, y] as P2), t);
+    const plan: P2[] = opts.splash ? [[0, -d], [0, 0], [w, 0], [w, -d]] : [[0, 0], [w, 0], [w, -d], [0, -d]];
+    const edgePath = filletPath(plan, R, fn, !opts.splash);
+    s.add(p.ss, pathSweep(edge, edgePath, Y - t / 2, !opts.splash));
+    const topLine = opts.splash ? offsetPath(filletPath([[0, zs + 0.008], [0, 0], [w, 0], [w, zs + 0.008]], R, fn), back) : offsetPath(edgePath, back, true);
+    const tg = plate(s, planShape(topLine), t);
+    tg.rotateX(-Math.PI / 2);
+    s.add(p.ss, tg, [0, Y - t, 0]);
     if (opts.splash) {
+      // The splash: coved up from the top, a 45° return to the wall, its ends closed by welded caps.
       const sh = opts.splash;
-      const zs = -d + 0.025;
-      sweepX(s, p.ss, [[zs + 0.03, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.025], [zs - 0.024, sh - 0.001], [-d + 0.0008, sh - 0.001], [-d + 0.0008, sh - 0.025]], t, 0, w, Y - t / 2);
+      const n = s.seg(6, 2);
+      sweepX(s, p.ss, [[zs + 0.008, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.025], [zs - 0.024, sh - 0.001], [-d + 0.0008, sh - 0.001], [-d + 0.0008, sh - 0.025]], t, t, w - t, Y - t / 2);
       for (const x of [0, w - t]) {
         const cap = new THREE.Shape([[-zs, 0], [-zs, sh - 0.025], [d - 0.001, sh], [d, sh], [d, 0]].map(([u, v]) => new THREE.Vector2(u!, v!)));
         const g = plate(s, cap, t);
         g.rotateY(Math.PI / 2);
         s.add(p.ss, g, [x, Y - t, 0]);
       }
-    } else sweepX(s, p.ss, down.map(([u, v]) => [-d + u, v] as P2), t, 0.002, w - 0.002, Y - t / 2);
+    }
 
     // Hat channels under the top, front to back, at every pair of legs and between.
     const hats = [...legX];
@@ -1454,34 +1892,145 @@ function workTable(opts: { legs: 4 | 6; edge: "bull" | "marine"; splash: number;
       for (let j = 1; j < k; j++) hats.push(legX[i]! + (span * j) / k);
     }
     const hatY = Y - t;
-    for (const x of hats) sweepZ(s, p.ss, [[-0.04, 0], [-0.02, 0], [-0.02, -0.03], [0.02, -0.03], [0.02, 0], [0.04, 0]], 0.0012, zBack + 0.03, -0.045, x, hatY - 0.0006);
+    const hz0 = -d + 0.045;
+    for (const x of hats) sweepZ(s, p.ss, [[-0.04, 0], [-0.02, 0], [-0.02, -0.03], [0.02, -0.03], [0.02, 0], [0.04, 0]], 0.0012, hz0, -0.045, x, hatY - 0.0006);
     // Legs, gussets welded under the hat channels.
     const zf = -0.06;
     const zr = -d + 0.06;
     for (const x of legX) for (const z of [zf, zr]) gussetLeg(s, x, z, hatY - 0.031);
-    // The undershelf: 18-gauge, edges turned down, on collars round the legs.
-    const ys = 0.254;
-    const sm = opts.shelf === "galv" ? p.ssDull : p.ss;
-    const sx0 = 0.032;
-    const sx1 = w - 0.032;
-    const sz0 = -d + 0.036;
-    const sz1 = -0.036;
-    blk(s, sm, [sx0, ys - 0.0012, sz0], [sx1, ys, sz1], 0);
-    const lip: P2[] = [[-0.02, 0], [0, 0], [0, -0.032], [-0.01, -0.032]];
-    sweepX(s, sm, lip, 0.0012, sx0, sx1, ys - 0.0006, sz1);
-    sweepX(s, sm, lip.map(([z, y]) => [-z, y] as P2), 0.0012, sx0, sx1, ys - 0.0006, sz0);
-    sweepZ(s, sm, lip, 0.0012, sz0, sz1, sx0, ys - 0.0006);
-    sweepZ(s, sm, lip.map(([x, y]) => [-x, y] as P2), 0.0012, sz0, sz1, sx1, ys - 0.0006);
+
+    // The undershelf: 18-gauge, its edges turned down and hemmed under, mitred at the corners, on the legs' gussets.
+    const nb = fine ? 4 : 1;
+    const lip = sheetOutline([[0.02, 0], [0.004, 0], ...arc(0.004, -0.004, 0.004, Math.PI / 2, Math.PI, nb).slice(1), [0, -0.029], ...arc(0.003, -0.029, 0.003, Math.PI, Math.PI * 1.5, nb).slice(1), [0.012, -0.032]], ts);
+    const shelfPath: P2[] = [[sx0, sz1], [sx1, sz1], [sx1, sz0], [sx0, sz0]];
+    s.add(sm, pathSweep(lip, shelfPath, ys - ts / 2, true));
+    const sg = plate(s, planShape(offsetPath(shelfPath, 0.02, true)), ts);
+    sg.rotateX(-Math.PI / 2);
+    s.add(sm, sg, [0, ys - ts, 0]);
+    // Each gusset: a drawn socket flared up to a flange welded under the shelf, pinned to the leg by a set screw.
+    const gp: [number, number][] = fine
+      ? [[LEG_R + 0.0012, 0], [LEG_R + 0.002, 0.003], [LEG_R + 0.0025, 0.022], [0.0245, 0.031], [0.0272, 0.0345], [0.028, 0.0365], [0.028, 0.0378], [0, 0.0378]]
+      : [[LEG_R + 0.0015, 0], [LEG_R + 0.0025, 0.022], [0.028, 0.035], [0, 0.0378]];
     for (const x of legX)
       for (const z of [zf, zr]) {
-        s.add(sm, cyl(s, LEG_R + 0.0035, 0.045, "y", 24), [x, ys - 0.018, z]);
-        if (s.fine(2)) s.add(p.ssBright, hex(0.0042, 0.006, "z"), [x, ys - 0.025, z + LEG_R + 0.006]);
+        s.add(sm, lathe(s, gp, fine ? 24 : 14), [x, ys - ts - 0.0378, z]);
+        if (fine) {
+          const sz = z > -d / 2 ? -1 : 1;
+          s.add(p.ssBright, hex(0.0042, 0.006, "z"), [x, ys - ts - 0.026, z + sz * (LEG_R + 0.0045)]);
+          s.add(p.ssBright, cyl(s, 0.0021, 0.004, "z", 8), [x, ys - ts - 0.026, z + sz * (LEG_R + 0.009)]);
+        }
       }
-    if (w > 1.5) sweepX(s, sm, [[-0.03, 0], [-0.015, 0], [-0.015, -0.022], [0.015, -0.022], [0.015, 0], [0.03, 0]], 0.0012, sx0 + 0.03, sx1 - 0.03, ys - 0.0018, -d / 2);
-    dataPlate(s, [w - 0.0016 - 0.0002, Y - 0.02, -d / 2], [0, Math.PI / 2, 0], 0.06, 0.025);
+    if (w > 1.5) sweepX(s, sm, [[-0.03, 0], [-0.015, 0], [-0.015, -0.022], [0.015, -0.022], [0.015, 0], [0.03, 0]], 0.0012, sx0 + 0.03, sx1 - 0.03, ys - ts - 0.0006, -d / 2);
+    // The listing plate on the web of the right-hand hat channel.
+    const xh = Math.max(...hats);
+    dataPlate(s, [xh + 0.02 + 0.0008, hatY - 0.016, -d / 2], [0, Math.PI / 2, 0], 0.06, 0.022);
   };
 }
 
+
+let paperM: THREE.MeshStandardMaterial | null = null;
+/** Unbleached paper towel: warm white, matt, faintly embossed, thin enough to light through. */
+function towelMat(): THREE.MeshStandardMaterial {
+  if (paperM) return paperM;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const x = c.getContext("2d")!;
+  x.fillStyle = "#808080";
+  x.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 64; i += 4) for (let j = (i / 4) % 2 ? 2 : 0; j < 64; j += 4) {
+    x.fillStyle = "#9a9a9a";
+    x.fillRect(j, i, 2, 2);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(6, 6);
+  paperM = new THREE.MeshStandardMaterial({ color: 0xeeeae0, roughness: 0.96, metalness: 0, bumpMap: t, bumpScale: 0.5, side: THREE.DoubleSide });
+  paperM.userData.uv = "own";
+  return paperM;
+}
+let stackM: THREE.MeshStandardMaterial | null = null;
+/** The edges of a stack of folded towels seen through a dispenser's window: fine uneven layers, warm white. */
+function towelStack(): THREE.MeshStandardMaterial {
+  if (stackM) return stackM;
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 64;
+  const x = c.getContext("2d")!;
+  // Each folded towel is a band, lit at its rounded fold and shadowed where the next one presses on it.
+  let y = 0;
+  let k = 7;
+  while (y < 64) {
+    const hgt = 4 + ((k * 37) % 4) * 0.5;
+    const g = x.createLinearGradient(0, y, 0, y + hgt);
+    g.addColorStop(0, "#fbf9f3");
+    g.addColorStop(0.55, "#e9e4d8");
+    g.addColorStop(1, "#8f877a");
+    x.fillStyle = g;
+    x.fillRect(0, y, 16, hgt);
+    y += hgt;
+    k = (k * 13 + 5) % 97;
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  stackM = new THREE.MeshStandardMaterial({ map: t, roughness: 0.95, metalness: 0 });
+  stackM.userData.uv = "own";
+  return stackM;
+}
+let paneM: THREE.MeshPhysicalMaterial | null = null;
+/** A dispenser's level window: a lightly smoked acrylic pane, glossy, mostly clear. */
+function windowPane(): THREE.MeshPhysicalMaterial {
+  if (!paneM) {
+    paneM = new THREE.MeshPhysicalMaterial({ color: 0x4a4f55, roughness: 0.06, metalness: 0, transparent: true, opacity: 0.32, clearcoat: 1, depthWrite: false });
+    paneM.userData.uv = "own";
+  }
+  return paneM;
+}
+/** A paper towel `w` wide hanging `len` from a dispenser's slot at the origin, curling forward as it falls. */
+function towelTail(s: Shop, w: number, len: number): THREE.BufferGeometry {
+  const ny = s.fine(2) ? 10 : 3;
+  const g = new THREE.PlaneGeometry(w, len, s.fine(2) ? 6 : 1, ny);
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const u = (len / 2 - pos.getY(i)) / len;
+    const xx = pos.getX(i) / (w / 2);
+    // Down from the slot, its lower edge kicking forward; a soft ripple across where the folds were.
+    // A multifold towel: its panel creased down the middle and its lower edge curling out.
+    const crease = 0.006 * (1 - Math.abs(xx)) * Math.min(1, u * 3);
+    pos.setXYZ(i, pos.getX(i) * (1 - 0.08 * u), -u * len * 0.95, 0.032 * u * u * u + crease + 0.0035 * Math.sin(xx * Math.PI * 2.5 + 0.7) * u);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * A falling column of water `len` long down from y = 0: it leaves the aerator 13 mm across and necks as it speeds up,
+ * then surface tension pinches it into a string of growing beads, and the last of it falls as separate drops.
+ */
+function waterStream(s: Shop, m: Mat, len: number): void {
+  const r0 = 0.0062;
+  const v0 = 0.65;
+  const neck = (y: number) => r0 * Math.pow((v0 * v0) / (v0 * v0 + 2 * 9.81 * y), 0.25);
+  const n = s.fine(2) ? 64 : 5;
+  const intact = len * 0.86;
+  const prof: [number, number][] = [[0, 0.0005], [r0 * 1.02, 0.0005]];
+  for (let i = 1; i <= n; i++) {
+    const y = (intact * i) / n;
+    const grow = Math.max(0, (y - len * 0.45) / (intact - len * 0.45));
+    const ripple = s.fine(2) ? 1 + 0.34 * grow * grow * Math.sin((y / (9 * neck(y))) * Math.PI * 2) : 1;
+    prof.push([neck(y) * ripple, -y]);
+  }
+  prof.push([neck(intact) * 0.5, -intact - 0.002], [0, -intact - 0.0035]);
+  s.add(m, hang(s, prof, s.fine(2) ? 20 : 10));
+  // The drops it has shed, between the column's end and the strainer.
+  const drops = s.fine(2) ? 4 : 1;
+  for (let i = 0; i < drops; i++) {
+    const y = intact + 0.008 + ((len - intact - 0.012) * (i + 0.5)) / drops;
+    const rd = neck(y) * (1.05 - 0.12 * i);
+    const g = ball(s, rd, s.fine(2) ? 12 : 6);
+    g.scale(1, 1.18, 1);
+    s.add(m, g, [0.0004 * (i % 2 ? 1 : -1), -y, 0]);
+  }
+}
 
 /**
  * A wall-hung hand sink: a drawn bowl in a box skirt with a rolled rim, side splash guards, a backsplash with a 45° top,
@@ -1540,32 +2089,38 @@ const handSink: Builder = (s, e) => {
     return hooks;
   }
   basin(s, p.ss, w / 2, zc, bw, bdz, bowlDepth, Y - t, r, 0.0012);
-  // Deck and the skirt round the bowl, front and sides.
-  const deck = new THREE.Shape();
-  rectPath(deck, w, -0.03 - zs, 0, w / 2, -(-0.03 + zs) / 2);
+  // The rolled rim along the front, its corners formed round to short returns where the side guards begin.
+  const zr = -0.001;
+  const zg = -0.03;
+  const rimPath = filletPath([[0, zg], [0, zr], [w, zr], [w, zg]], 0.02, s.fine(2) ? 7 : 2);
+  s.add(p.ss, pathSweep(sheetOutline(sinkRim(s), t), rimPath, Y - t / 2));
+  // The deck round the bowl: run into the rim's upstand in front, out to the side guards, back to the splash's cove.
+  const xg = 0.0022;
+  const deck = planShape([[xg, zs + 0.008], [xg, zg], ...offsetPath(rimPath, 0.018).slice(1, -1), [w - xg, zg], [w - xg, zs + 0.008]]);
   deck.holes.push(rectPath(new THREE.Path(), bw, bdz, r, w / 2, -(zb0 + zb1) / 2, true) as THREE.Path);
   const dg = plate(s, deck, t, 0, s.fine(2) ? 16 : 8);
   dg.rotateX(-Math.PI / 2);
   s.add(p.ss, dg, [0, Y - t, 0]);
-  sweepX(s, p.ss, sinkRim(s), t, 0, w, Y - t / 2, -0.001);
+  // The box skirt under it, set in behind the rim's apron, and its turned-in bottom flange.
   const skirt = 0.115;
-  blk(s, p.ss, [0.0006, Y - skirt, zs], [0.0018, Y - 0.002, -0.0006], 0.0004);
-  blk(s, p.ss, [w - 0.0018, Y - skirt, zs], [w - 0.0006, Y - 0.002, -0.0006], 0.0004);
-  blk(s, p.ss, [0.0006, Y - skirt, -0.0012], [w - 0.0006, Y - 0.04, 0], 0.0004);
-  blk(s, p.ss, [0.0006, Y - skirt - 0.004, -0.012], [w - 0.0006, Y - skirt, 0], 0.0004);
-  blk(s, p.ss, [0.0006, Y - skirt - 0.004, zs], [0.012, Y - skirt, 0], 0.0004);
-  blk(s, p.ss, [w - 0.012, Y - skirt - 0.004, zs], [w - 0.0006, Y - skirt, 0], 0.0004);
-  // Backsplash to the top of the box, with its return to the wall.
+  const zk = zr - 0.002;
+  blk(s, p.ss, [0.001, Y - skirt, zs], [xg, Y, zk], 0);
+  blk(s, p.ss, [w - xg, Y - skirt, zs], [w - 0.001, Y, zk], 0);
+  blk(s, p.ss, [xg, Y - skirt, zk - 0.0012], [w - xg, Y - 0.044, zk], 0.0004);
+  blk(s, p.ss, [xg, Y - skirt - 0.004, zk - 0.012], [w - xg, Y - skirt, zk], 0.0004);
+  blk(s, p.ss, [0.001, Y - skirt - 0.004, zs], [0.012, Y - skirt, zk - 0.012], 0.0004);
+  blk(s, p.ss, [w - 0.012, Y - skirt - 0.004, zs], [w - 0.001, Y - skirt, zk - 0.012], 0.0004);
+  // Backsplash to the top of the box, coved up from the deck, with its return to the wall.
   const sh = h - Y;
   const n = s.seg(6, 2);
-  sweepX(s, p.ss, [[zs + 0.03, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.022], [zs - 0.02, sh - 0.001], [-d + 0.0008, sh - 0.001], [-d + 0.0008, sh - 0.025]], t, 0, w, Y - t / 2);
+  sweepX(s, p.ss, [[zs + 0.008, 0], ...arc(zs + 0.008, 0.008, 0.008, -Math.PI / 2, -Math.PI, n).slice(1), [zs, sh - 0.022], [zs - 0.02, sh - 0.001], [-d + 0.0008, sh - 0.001], [-d + 0.0008, sh - 0.025]], t, xg, w - xg, Y - t / 2);
   blk(s, p.ss, [0.004, 0.0, -d], [w - 0.004, Y - t, -d + 0.0012], 0.0004);
-  // Side splash guards: welded trapezoids rising from the rim to the splash.
-  for (const x of [0.0006, w - 0.0018]) {
-    const g = plate(s, new THREE.Shape([new THREE.Vector2(0.03, 0), new THREE.Vector2(0.03, 0.04), new THREE.Vector2(-zs, 0.21), new THREE.Vector2(-zs, 0)]), 0.0012);
+  // Side splash guards: welded trapezoids rising from the rim's returns to the splash, their top edges hemmed round.
+  for (const x of [0.001, w - xg]) {
+    const g = plate(s, new THREE.Shape([new THREE.Vector2(-zg, 0), new THREE.Vector2(-zg, 0.04), new THREE.Vector2(-zs, 0.21), new THREE.Vector2(d, 0.21), new THREE.Vector2(d, 0)]), 0.0012);
     g.rotateY(Math.PI / 2);
     s.add(p.ss, g, [x, Y, 0]);
-    s.add(p.ss, pipe(s, [[x + 0.0006, Y + 0.04, -0.03], [x + 0.0006, Y + 0.21, zs]], 0.003, 0.01, 8));
+    s.add(p.ss, pipe(s, [[x + 0.0006, Y + 0.04, zg], [x + 0.0006, Y + 0.21, zs]], 0.003, 0.01, 8));
   }
   // The drain: basket strainer, tailpiece and slip nut.
   s.add(p.ssBright, cyl(s, 0.032, 0.0022, "y", 28), [w / 2, yf + 0.0011, zc]);
@@ -1603,11 +2158,10 @@ const handSink: Builder = (s, e) => {
   s.add(p.chrome, pipe(s, goose, 0.009, 0.012, s.fine(2) ? 14 : 8));
   s.add(p.chrome, cyl(s, 0.0115, 0.02, "y", 16), [xf, top - R - 0.05, zb + 2 * R]);
   if (s.fine(2)) s.add(p.enamel, cyl(s, 0.0075, 0.001, "y", 14), [xf, yo - 0.0003, zb + 2 * R]);
-  // The running water, a joint scaled by the flow.
+  // The running water, a joint scaled by the flow: a column leaving the aerator, necking as it falls faster, then
+  // rippling into beads as surface tension pinches it, and breaking into drops just above the strainer.
   const stream = s.joint("stream", [xf, yo, zb + 2 * R]);
-  const sg = cyl(stream, 0.0055, yo - yf, "y", 12, 0.0065);
-  sg.translate(0, -(yo - yf) / 2, 0);
-  stream.add(p.water, sg);
+  waterStream(stream, p.water, yo - yf);
 
   // Soap dispenser, upper left: a stainless cartridge housing, a level window, the push plate and its nozzle.
   const zd = zs;
@@ -1624,12 +2178,21 @@ const handSink: Builder = (s, e) => {
     const [x0, x1, y0, y1] = [0.262, 0.424, 0.3, 0.452];
     blk(s, p.ss, [x0, y0, zd + 0.001], [x1, y1, zd + 0.09], 0.01);
     blk(s, p.ssDull, [x0 + 0.03, y0 - 0.0005, zd + 0.03], [x1 - 0.03, y0 + 0.002, zd + 0.06], 0.001);
-    s.add(p.hdpe, rbox(s, x1 - x0 - 0.07, 0.045, 0.0012, 0.0005), [(x0 + x1) / 2, y0 - 0.02, zd + 0.045], [0.2, 0, 0]);
-    blk(s, p.glassSmoke, [x0 + 0.06, y0 + 0.03, zd + 0.089], [x1 - 0.06, y0 + 0.07, zd + 0.0915], 0.001);
+    // The next towel hanging from the slot, its fold curling toward the user.
+    s.add(towelMat(), towelTail(s, x1 - x0 - 0.075, 0.055), [(x0 + x1) / 2, y0 - 0.0005, zd + 0.045]);
+    // The level window: the edges of the stacked towels behind a lightly tinted pane in a pressed bezel.
+    const [wx0, wx1, wy0, wy1] = [x0 + 0.055, x1 - 0.055, y0 + 0.028, y0 + 0.072];
+    if (s.fine(2)) {
+    s.add(towelStack(), new THREE.PlaneGeometry(wx1 - wx0, wy1 - wy0), [(wx0 + wx1) / 2, (wy0 + wy1) / 2, zd + 0.0906]);
+    const bez = roundRect(wx1 - wx0 + 0.012, wy1 - wy0 + 0.012, 0.006);
+    bez.holes.push(rectPath(new THREE.Path(), wx1 - wx0, wy1 - wy0, 0.003, 0, 0, true) as THREE.Path);
+    s.add(p.ss, plate(s, bez, 0.0012, s.fine(2) ? 0.0004 : 0, 4), [(wx0 + wx1) / 2, (wy0 + wy1) / 2, zd + 0.09]);
+    s.add(windowPane(), rbox(s, wx1 - wx0 + 0.002, wy1 - wy0 + 0.002, 0.001, 0.0004), [(wx0 + wx1) / 2, (wy0 + wy1) / 2, zd + 0.0914]);
+    }
     s.add(p.ssBright, cyl(s, 0.006, 0.004, "z", 14), [(x0 + x1) / 2, y1 - 0.02, zd + 0.091]);
     if (s.fine(2)) s.add(p.enamel, rbox(s, 0.0015, 0.006, 0.001, 0.0003), [(x0 + x1) / 2, y1 - 0.02, zd + 0.0932]);
   }
-  dataPlate(s, [w - 0.06, Y - 0.07, 0.0002], [0, 0, 0], 0.05, 0.022);
+  dataPlate(s, [w - 0.06, Y - 0.075, zk + 0.0002], [0, 0, 0], 0.05, 0.022);
   return hooks;
 };
 
@@ -1683,40 +2246,60 @@ function washArms(j: Shop, span: number, dir: number): void {
   }
 }
 
+let china: THREE.MeshPhysicalMaterial | null = null;
+/** Vitrified hotel china: a warm white body under a hard clear glaze that holds sharp reflections. */
+function chinaMat(): THREE.MeshPhysicalMaterial {
+  if (!china) {
+    china = new THREE.MeshPhysicalMaterial({ color: 0xf2efe7, metalness: 0, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.05 });
+    china.userData.uv = "box";
+  }
+  return china;
+}
+
 /** A 20 × 20 in peg rack, its floor at y, centred at (x, z), loaded with `plates` dinner plates standing in its pegs. */
 function dishRack(s: Shop, x: number, y: number, z: number, plates: number): void {
   const p = palette();
   const S = 0.5;
   const H = 0.1;
-  // The open-sided polypropylene frame: corner posts, rails top and bottom, a lattice floor and the peg rows.
-  for (const sx of [-1, 1]) for (const sz of [-1, 1]) blk(s, p.poly, [x + sx * (S / 2 - 0.02), y, z + sz * (S / 2 - 0.02)], [x + (sx * S) / 2, y + H, z + (sz * S) / 2], 0.004);
-  for (const yy of [y + 0.006, y + H - 0.006])
+  const c = 0.018;
+  // The moulded polypropylene frame: corner posts, rails top and bottom butted between them, an open lattice of
+  // uprights in each wall, a floor of deep ribs one way and shallow ones the other, and two rows of pegs.
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) blk(s, p.poly, [x + sx * (S / 2 - c), y, z + sz * (S / 2 - c)], [x + (sx * S) / 2, y + H, z + (sz * S) / 2], 0.004);
+  const rt = 0.012;
+  for (const yy of [y, y + H - rt])
     for (const sz of [-1, 1]) {
-      blk(s, p.poly, [x - S / 2, yy - 0.006, z + sz * (S / 2 - 0.006) - 0.006], [x + S / 2, yy + 0.006, z + sz * (S / 2 - 0.006) + 0.006], 0.003);
-      blk(s, p.poly, [x + sz * (S / 2 - 0.006) - 0.006, yy - 0.006, z - S / 2], [x + sz * (S / 2 - 0.006) + 0.006, yy + 0.006, z + S / 2], 0.003);
+      blk(s, p.poly, [x - S / 2 + c, yy, z + sz * (S / 2 - rt)], [x + S / 2 - c, yy + rt, z + (sz * S) / 2], 0.003);
+      blk(s, p.poly, [x + sz * (S / 2 - rt), yy, z - S / 2 + c], [x + (sz * S) / 2, yy + rt, z + S / 2 - c], 0.003);
     }
+  const nu = s.fine(1) ? 7 : 0;
+  for (let i = 1; i <= nu; i++) {
+    const q = -S / 2 + c + ((S - 2 * c) * i) / (nu + 1);
+    for (const sz of [-1, 1]) {
+      blk(s, p.poly, [x + q - 0.004, y + rt, z + sz * (S / 2 - 0.008)], [x + q + 0.004, y + H - rt, z + (sz * S) / 2 - sz * 0.001], 0);
+      blk(s, p.poly, [x + sz * (S / 2 - 0.008), y + rt, z + q - 0.004], [x + (sz * S) / 2 - sz * 0.001, y + H - rt, z + q + 0.004], 0);
+    }
+  }
   const nl = s.fine(1) ? 9 : 4;
   for (let i = 1; i < nl; i++) {
-    blk(s, p.poly, [x - S / 2, y, z - S / 2 + (S * i) / nl - 0.003], [x + S / 2, y + 0.008, z - S / 2 + (S * i) / nl + 0.003], 0);
-    blk(s, p.poly, [x - S / 2 + (S * i) / nl - 0.003, y, z - S / 2], [x - S / 2 + (S * i) / nl + 0.003, y + 0.008, z + S / 2], 0);
+    const q = -S / 2 + (S * i) / nl;
+    blk(s, p.poly, [x - S / 2 + rt, y + 0.001, z + q - 0.003], [x + S / 2 - rt, y + 0.009, z + q + 0.003], 0);
+    blk(s, p.poly, [x + q - 0.002, y + 0.002, z - S / 2 + rt], [x + q + 0.002, y + 0.0065, z + S / 2 - rt], 0);
   }
   // Pegs in two rows across, and the plates standing between them, facing front.
   const pitch = 0.045;
   const n = Math.min(plates, 10);
   if (s.fine(1))
     for (let i = 0; i <= 10; i++)
-      for (const px of [-0.09, 0.09]) s.add(p.poly, cyl(s, 0.0035, 0.06, "y", 8, 0.002), [x + px, y + 0.038, z - S / 2 + 0.03 + i * pitch]);
-  const plateG = lathe(s, [[0, 0], [0.085, 0], [0.09, 0.004], [0.118, 0.016], [0.124, 0.02], [0.12, 0.022], [0.088, 0.008], [0, 0.006]], 40);
+      for (const px of [-0.09, 0.09]) s.add(p.poly, cyl(s, 0.0035, 0.06, "y", 8, 0.002), [x + px, y + 0.039, z - S / 2 + 0.03 + i * pitch]);
+  // A 10-1/2 in dinner plate: a foot ring under it, the well, the marly rising to a rolled rim.
+  const prof: [number, number][] = s.fine(2)
+    ? [[0, 0.0035], [0.058, 0.0035], [0.061, 0.0012], [0.064, 0], [0.068, 0], [0.071, 0.0022], [0.085, 0.0068], [0.105, 0.0125], [0.124, 0.0172], [0.1305, 0.0196], [0.1325, 0.0222], [0.1312, 0.0243], [0.1272, 0.0246], [0.112, 0.0198], [0.096, 0.0142], [0.088, 0.0102], [0.08, 0.0082], [0.06, 0.0072], [0, 0.0069]]
+    : [[0, 0.0035], [0.064, 0], [0.071, 0.0022], [0.124, 0.0172], [0.1325, 0.0222], [0.1272, 0.0246], [0.096, 0.0142], [0.08, 0.0082], [0, 0.0069]];
+  const plateG = lathe(s, prof, s.fine(2) ? 56 : 24);
   plateG.rotateX(Math.PI / 2);
-  for (let i = 0; i < n; i++) s.add(p.ceramic, plateG.clone(), [x, y + 0.008 + 0.124, z - S / 2 + 0.03 + (i + 0.5) * pitch], [-0.12, 0, 0]);
+  for (let i = 0; i < n; i++) s.add(chinaMat(), plateG.clone(), [x, y + 0.009 + 0.1325, z - S / 2 + 0.03 + (i + 0.5) * pitch], [-0.12, 0, 0]);
 }
 
-/**
- * A high-temperature door-type dishmachine: the wash tank on legs with its control fascia and gauges, a chamber with
- * rotating upper and lower wash arms and rinse arms, the rack track, and the three-sided hood that lifts straight up
- * on guides in the rear column to load a rack from either side. The rinse line, its vacuum breaker and pressure gauge
- * climb the back.
- */
 const doorDishwasher: Builder = (s, e) => {
   const p = palette();
   const { w, d, h } = e;
@@ -1727,17 +2310,17 @@ const doorDishwasher: Builder = (s, e) => {
   const r = 0.0015;
   for (const x of [0.05, w - 0.05]) for (const z of [-0.05, -d + 0.05]) gussetLeg(s, x, z, legH + 0.01, false);
   // The tank cabinet.
-  blk(s, p.ss, [0, legH, -d], [w, legH + t, 0], 0);
-  for (const x of [0, w - t]) blk(s, p.ss, [x, legH, -d], [x + t, deck, -t], r);
+  blk(s, p.ss, [t, legH, -d + t], [w - t, legH + t, -t], 0);
+  for (const x of [0, w - t]) blk(s, p.ss, [x, legH, -d], [x + t, deck, 0], r);
   blk(s, p.ss, [t, legH, -d], [w - t, deck, -d + t], r);
   // Front: the lower access panel, louvred, and the control fascia above it.
-  blk(s, p.ss, [0, legH, -t], [w, 0.6, 0], r);
+  blk(s, p.ss, [t, legH, -t], [w - t, 0.6, 0], r);
   const nv = s.fine(1) ? 8 : 0;
   for (let i = 0; i < nv; i++) blk(s, p.enamel, [0.12 + i * 0.05, legH + 0.03, 0.0001], [0.12 + i * 0.05 + 0.008, legH + 0.1, 0.0006], 0);
   if (s.fine(2)) for (const x of [0.03, w - 0.03]) for (const y of [legH + 0.03, 0.57]) screw(s, p.ssBright, [x, y, 0], 0.003);
-  blk(s, p.ss, [0, 0.6, -0.03], [w, deck, -0.028], r);
-  blk(s, p.ss, [0, 0.6, -0.03], [w, 0.602, 0], 0);
-  blk(s, p.ss, [0, deck - 0.002, -0.03], [w, deck, 0], 0);
+  blk(s, p.ss, [t, 0.602, -0.03], [w - t, deck - 0.002, -0.028], r);
+  blk(s, p.ss, [t, 0.6, -0.03], [w - t, 0.602, 0], 0);
+  blk(s, p.ss, [t, deck - 0.002, -0.03], [w - t, deck, 0], 0);
   dialGauge(s, [0.12, 0.7, -0.028], 0.034, "needle_wash");
   dialGauge(s, [0.225, 0.7, -0.028], 0.034, "needle_rinse");
   blk(s, p.screen, [0.3, 0.68, -0.028], [0.42, 0.73, -0.026], 0.002);
@@ -1749,8 +2332,8 @@ const doorDishwasher: Builder = (s, e) => {
   }
   // The tank top: a scrap screen of perforated sheet over the tank, and the rack track.
   const perf = perforatedSheet(0.004, 0.5);
-  blk(s, p.ss, [0, deck - t, -d + rearD], [w, deck, -d + rearD + 0.04], 0);
-  blk(s, p.ss, [0, deck - t, -0.06], [w, deck, -0.03], 0);
+  blk(s, p.ss, [t, deck - t, -d + rearD], [w - t, deck, -d + rearD + 0.04], 0);
+  blk(s, p.ss, [t, deck - t, -0.06], [w - t, deck, -0.03], 0);
   blk(s, s.fine(1) ? perf : p.ssDull, [0.06, deck - 0.02, -d + rearD + 0.04], [w - 0.06, deck - 0.019, -0.06], 0);
   blk(s, p.ssHeat, [0.04, deck - 0.12, -d + rearD + 0.02], [w - 0.04, deck - 0.118, -0.04], 0);
   for (const z of [-0.09, -d + rearD + 0.07]) sweepX(s, p.ss, [[0.014, 0.03], [0, 0.03], [0, 0.06], [0.018, 0.06]].map(([u, v]) => [u * (z > -0.3 ? 1 : -1), v] as P2), 0.002, 0, w, deck, z);
@@ -1788,19 +2371,23 @@ const doorDishwasher: Builder = (s, e) => {
   const H = (q: V3): V3 => [q[0] - pivot[0], q[1] - pivot[1], q[2] - pivot[2]];
   const hz0 = -d + rearD + 0.001;
   const wt = 0.025;
-  blk(hood, p.ss, H([0.004, hy0, -0.0015]), H([w - 0.004, hy1, 0]), r);
-  blk(hood, p.ss, H([0.004 + wt, hy0, -wt]), H([w - 0.004 - wt, hy1 - wt, -wt + 0.0012]), r);
-  for (const [x0, sx] of [
-    [0.004, 1],
-    [w - 0.004, -1],
-  ] as const) {
-    blk(hood, p.ss, H([x0, hy0, hz0]), H([x0 + sx * 0.0015, hy1, 0]), r);
-    blk(hood, p.ss, H([x0 + sx * (wt - 0.0012), hy0, hz0]), H([x0 + sx * wt, hy1 - wt, -wt]), r);
-    blk(hood, p.ss, H([x0, hy0, hz0]), H([x0 + sx * wt, hy0 + 0.0015, 0]), 0);
+  // One double-walled shell formed round the front and sides: the outer skin radiused over into the top, the bottom
+  // closed by a rounded return, the inner skin up to the inner top; both tops are sheets laid into it.
+  {
+    const Rc = wt + 0.004;
+    const nb = s.fine(2) ? 4 : 1;
+    const sec: P2[] = [[wt, hy1 - wt], [wt, hy0 + 0.004], ...arc(wt - 0.004, hy0 + 0.004, 0.004, 0, -Math.PI / 2, nb).slice(1), [0.004, hy0], ...arc(0.004, hy0 + 0.004, 0.004, -Math.PI / 2, -Math.PI, nb).slice(1), [0, hy1 - 0.01], ...arc(0.01, hy1 - 0.01, 0.01, Math.PI, Math.PI / 2, s.fine(2) ? 6 : 2).slice(1), [Rc, hy1]];
+    const path = filletPath([[0.004, hz0], [0.004, 0], [w - 0.004, 0], [w - 0.004, hz0]], Rc, s.fine(2) ? 8 : 2);
+    hood.add(p.ss, pathSweep(sheetOutline(sec, 0.0012), path, 0), H([0, 0, 0]));
+    for (const [u, y] of [
+      [Rc, hy1],
+      [wt, hy1 - wt],
+    ] as const) {
+      const g = plate(hood, planShape(offsetPath(path, u)), 0.0012);
+      g.rotateX(-Math.PI / 2);
+      hood.add(p.ss, g, H([0, y - 0.0006, 0]));
+    }
   }
-  blk(hood, p.ss, H([0.004, hy0, -wt]), H([w - 0.004, hy0 + 0.0015, 0]), 0);
-  blk(hood, p.ss, H([0.004, hy1 - 0.0015, hz0]), H([w - 0.004, hy1, 0]), r);
-  blk(hood, p.ss, H([0.004 + wt, hy1 - wt, hz0]), H([w - 0.004 - wt, hy1 - wt + 0.0012, -wt]), r);
   // The lift handle along the front, low, on two standoffs; and guide shoes at the back edges.
   const hh = 0.959;
   hood.add(p.ssBright, pipe(hood, [H([0.12, hh, 0]), H([0.12, hh, 0.05]), H([w - 0.12, hh, 0.05]), H([w - 0.12, hh, 0])], 0.0115, 0.03, 16));
@@ -1844,6 +2431,31 @@ const doorDishwasher: Builder = (s, e) => {
   };
 };
 
+let pvcM: THREE.MeshPhysicalMaterial | null = null;
+/** Clear flexible PVC strip curtain: faintly blue-grey, glossy, mostly see-through, its edges catching the light. */
+function pvcCurtain(): THREE.MeshPhysicalMaterial {
+  if (!pvcM) {
+    pvcM = new THREE.MeshPhysicalMaterial({ color: 0xc9d6da, roughness: 0.22, metalness: 0, transparent: true, opacity: 0.38, clearcoat: 0.6, side: THREE.DoubleSide, depthWrite: false });
+    pvcM.userData.uv = "own";
+  }
+  return pvcM;
+}
+
+/** A sheet-metal transition, open top and bottom: a `w0` × `d0` base at y = 0 to a `w1` × `d1` top at `h`, centred. */
+function frustum(w0: number, d0: number, w1: number, d1: number, h: number): THREE.BufferGeometry {
+  const b = [[-w0 / 2, 0, d0 / 2], [w0 / 2, 0, d0 / 2], [w0 / 2, 0, -d0 / 2], [-w0 / 2, 0, -d0 / 2]];
+  const u = [[-w1 / 2, h, d1 / 2], [w1 / 2, h, d1 / 2], [w1 / 2, h, -d1 / 2], [-w1 / 2, h, -d1 / 2]];
+  const pos: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    pos.push(...b[i]!, ...b[j]!, ...u[j]!, ...b[i]!, ...u[j]!, ...u[i]!);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 /**
  * A single-tank rack conveyor: racks ride the track left to right through a tunnel, pushed by a reciprocating pawl bar;
  * vinyl curtains hold the spray in at the entry, between zones and at the exit; vent cowls at each end draw the vapour
@@ -1861,10 +2473,10 @@ const conveyorDishwasher: Builder = (s, e) => {
   const roof = 1.42;
   for (const x of [0.05, w / 2, w - 0.05]) for (const z of [-0.08, -d + 0.06]) gussetLeg(s, x, z, tank0 + 0.01, false);
   // The tank: a welded box under the tunnel, its front panel with the access cover.
-  blk(s, p.ss, [0, tank0, zf - 0.01], [w, tank0 + t, zb], 0);
+  blk(s, p.ss, [t, tank0, zb], [w - t, tank0 + t, zf - 0.0015], 0);
   blk(s, p.ss, [0, tank0, zf - 0.0015], [w, deck, zf], r);
   blk(s, p.ss, [0, tank0, zb - t], [w, deck, zb], r);
-  for (const x of [0, w - t]) blk(s, p.ss, [x, tank0, zb], [x + t, deck, zf], r);
+  for (const x of [0, w - t]) blk(s, p.ss, [x, tank0, zb], [x + t, deck, zf - 0.0015], r);
   blk(s, p.ss, [0.25, tank0 + 0.08, zf], [0.85, deck - 0.06, zf + 0.002], 0.003);
   if (s.fine(2)) for (const x of [0.27, 0.83]) for (const y of [tank0 + 0.1, deck - 0.08]) screw(s, p.ssBright, [x, y, zf + 0.002], 0.0035);
   // The wash pump and its motor under the tank: a cast volute, the motor's finned frame, its conduit box.
@@ -1888,12 +2500,12 @@ const conveyorDishwasher: Builder = (s, e) => {
   blk(s, p.ss, [dx0, deck, zf - t], [dx1, dy0, zf], r);
   blk(s, p.ss, [dx0, dy1, zf - t], [dx1, roof, zf], r);
   blk(s, p.ss, [0, deck, zb - t], [w, roof, zb], r);
-  blk(s, p.ss, [0, roof - t, zb], [w, roof, zf], r);
+  blk(s, p.ss, [0, roof - t, zb], [w, roof, zf - t], r);
   for (const x of [0, w - t]) {
-    blk(s, p.ss, [x, deck, zb], [x + t, o[0], zf], 0);
-    blk(s, p.ss, [x, o[1], zb], [x + t, roof, zf], 0);
+    blk(s, p.ss, [x, deck, zb], [x + t, o[0], zf - t], 0);
+    blk(s, p.ss, [x, o[1], zb], [x + t, roof - t, zf - t], 0);
     blk(s, p.ss, [x, o[0], zb], [x + t, o[1], o[2]], 0);
-    blk(s, p.ss, [x, o[0], o[3]], [x + t, o[1], zf], 0);
+    blk(s, p.ss, [x, o[0], o[3]], [x + t, o[1], zf - t], 0);
     // A rolled lip round the opening.
     if (s.fine(1)) {
       s.add(p.ss, cyl(s, 0.005, o[1] - o[0], "y", 10), [x + 0.0007, (o[0] + o[1]) / 2, o[2]]);
@@ -1919,17 +2531,21 @@ const conveyorDishwasher: Builder = (s, e) => {
   if (s.fine(1)) curtains.forEach((x, i) => {
     s.add(p.ssBright, cyl(s, 0.005, o[3] - o[2] + 0.04, "z", 10), [x, o[1] - 0.004, zp]);
     const c = s.joint(`curtain_${i}`, [x, o[1] - 0.01, zp]);
+    // Clear PVC strips, each lapping the next, hung on hooks from the rod; they stop short of the racks' path.
     const n = 6;
     const sw = (o[3] - o[2]) / n;
-    for (let k = 0; k < n; k++) c.add(p.gasket, rbox(c, 0.003, o[1] - o[0] - 0.06, sw - 0.004, 0.001), [0, -(o[1] - o[0] - 0.06) / 2, -(o[3] - o[2]) / 2 + sw * (k + 0.5)]);
+    const sl = o[1] - o[0] - 0.06;
+    const strip = rbox(c, 0.002, sl, sw + 0.012, 0.0009);
+    for (let k = 0; k < n; k++) {
+      const zk = -(o[3] - o[2]) / 2 + sw * (k + 0.5);
+      c.add(pvcCurtain(), strip.clone(), [(k % 2 ? 1 : -1) * 0.0016, -sl / 2 - 0.004, zk]);
+      if (c.fine(2)) c.add(p.ssBright, torus(c, 0.007, 0.0012, "z", Math.PI * 2, 12, 4), [0, 0.006, zk]);
+    }
   });
 
   // Vent cowls over each end, their dampers' handles, and the control box on the roof.
   for (const xc of [0.16, w - 0.16]) {
-    const g = cutAbove(new THREE.CylinderGeometry(0.11, 0.21, 0.09, 4, 1, false), "y", 0.0449);
-    g.rotateY(Math.PI / 4);
-    g.scale(1, 1, 0.55);
-    s.add(p.ss, g, [xc, roof + 0.045, -d * 0.45]);
+    s.add(p.ss, frustum(0.38, 0.22, 0.22, 0.12, 0.09), [xc, roof, -d * 0.45]);
     ductCollar(s, xc - 0.11, xc + 0.11, -d * 0.45 - 0.06, -d * 0.45 + 0.06, roof + 0.09, h);
     s.add(p.ssDull, cyl(s, 0.004, 0.24, "x", 8), [xc, roof + 0.2, -d * 0.45]);
     s.add(p.bakelite, rbox(s, 0.012, 0.06, 0.012, 0.004), [xc + 0.13, roof + 0.22, -d * 0.45]);
@@ -1993,8 +2609,29 @@ let peMat: THREE.MeshStandardMaterial | null = null;
 /** Rotomoulded polyethylene in deep charcoal, as catering carriers are moulded. One material for every carrier. */
 export function carrierPE(): THREE.MeshStandardMaterial {
   if (!peMat) {
-    peMat = new THREE.MeshStandardMaterial({ color: 0x2d2f33, roughness: 0.62, metalness: 0 });
+    // Rotomoulded polyethylene: the mould's fine orange-peel stipple in the bump and a little in the sheen.
+    const c = document.createElement("canvas");
+    c.width = c.height = 128;
+    const x = c.getContext("2d")!;
+    x.fillStyle = "#808080";
+    x.fillRect(0, 0, 128, 128);
+    let k = 12345;
+    const rnd = () => ((k = (k * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < 2600; i++) {
+      const [px, py, r] = [rnd() * 128, rnd() * 128, 0.8 + rnd() * 1.8];
+      const v = Math.round(110 + rnd() * 50);
+      x.fillStyle = `rgba(${v},${v},${v},0.55)`;
+      for (const [ox, oy] of [[0, 0], [128, 0], [0, 128], [-128, 0], [0, -128]]) {
+        x.beginPath();
+        x.arc(px + ox!, py + oy!, r, 0, Math.PI * 2);
+        x.fill();
+      }
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    peMat = new THREE.MeshStandardMaterial({ color: 0x2d2f33, roughness: 0.64, metalness: 0, bumpMap: t, bumpScale: 0.3 });
     peMat.userData.uv = "box";
+    peMat.userData.uvScale = 1 / 0.06;
   }
   return peMat;
 }
@@ -2063,12 +2700,22 @@ const insulatedCarrier: Builder = (s, e) => {
   const rr = 0.026;
   const bev = s.fine(1) ? 0.007 : 0;
   const frame = roundRect(bw - 2 * bev, bh - 2 * bev, R - bev, 0, 0);
-  frame.holes.push(rectPath(new THREE.Path(), cw + 2 * bev, ch + 2 * bev, rr + bev, cx - bx, cy - by, true) as THREE.Path);
+  frame.holes.push(rectPath(new THREE.Path(), cw + 2 * bev + 0.004, ch + 2 * bev + 0.004, rr + bev + 0.002, cx - bx, cy - by, true) as THREE.Path);
   s.add(pe, plate(s, frame, R, bev, 16), [bx, by, zF - R]);
-  // The inner skin: the cavity, its corners radiused, open to the front frame.
+  // The inner skin: the cavity, its corners radiused, run forward through the frame to its face.
   const back = -d + 0.034;
   const Lc = zF - R - back;
-  s.add(pe, inward(openFrontBox(s, cw, ch, Lc + rr, rr)), [cx, cy, back + (Lc + rr) / 2]);
+  s.add(pe, inward(openFrontBox(s, cw, ch, Lc + R + rr, rr)), [cx, cy, back + (Lc + R + rr) / 2]);
+  // The moulded nosing where liner and frame meet: a rounded lip round the opening, standing a little proud of the
+  // frame for the door's gasket to seal on.
+  if (bev) {
+    const nb = s.fine(2) ? 5 : 2;
+    const sec: P2[] = [[0.0015, zF - 0.02], [0.0015, zF - 0.0025], ...arc(-0.0025, zF - 0.0025, 0.004, 0, Math.PI / 2, nb).slice(1), [-(bev + 0.006), zF + 0.0015], ...arc(-(bev + 0.006), zF, 0.0015, Math.PI / 2, Math.PI, 2).slice(1), [-(bev + 0.0075), zF - 0.003], [-0.0005, zF - 0.003], [-0.0005, zF - 0.02]];
+    const [xl, xr, yb, yt] = [cx - cw / 2, cx + cw / 2, cy - ch / 2, cy + ch / 2];
+    const g = pathSweep(sec, filletPath([[xl, -yb], [xr, -yb], [xr, -yt], [xl, -yt]], rr, s.fine(2) ? 8 : 2, true), 0, true);
+    g.rotateX(Math.PI / 2);
+    s.add(pe, g);
+  }
   // Moulded rails for six pans down both side walls.
   const pitch = 0.085;
   const rims: number[] = [];
@@ -2234,7 +2881,8 @@ const foodProcessor: Builder = (s, e) => {
           a += dt * 45 * Math.max(0, Math.min(1, load));
           turnJoint(b.joints.get("s_blade_spin"), "y", a);
         },
-        open: (f) => slideJoint(pj, "y", Math.max(0, Math.min(1, f)) * 0.09, rest),
+        // Far off the lid stays put; the pusher draws up its tube, never out of it.
+        open: (f) => slideJoint(pj, "y", Math.max(0, Math.min(1, f)) * 0.025, rest),
       };
     };
   }
@@ -2280,25 +2928,45 @@ const foodProcessor: Builder = (s, e) => {
     g.rotateX(-Math.PI / 2);
     blade.add(p.ssBright, g, [0, y, 0], [0, a, tilt]);
   }
-  // The lid, its feed tube and the pusher on its own joint.
-  s.add(p.glass, lathe(s, [[0.0, yt + 0.024], [0.07, yt + 0.02], [0.094, yt + 0.008], [0.1, yt], [0.1, yt - 0.006], [0.097, yt - 0.006], [0.097, yt + 0.002], [0.09, yt + 0.006], [0.068, yt + 0.016], [0, yt + 0.02]], 48), [cx, 0, cz]);
+  // The lid on its hinge at the bowl's back: moulded clear with its feed tube and the tab that works the safety rod,
+  // the pusher riding in the tube. Everything on the lid is built about the hinge pin.
+  const H: V3 = [cx, yt + 0.004, cz - 0.104];
+  const L = (q: V3): V3 => [q[0] - H[0], q[1] - H[1], q[2] - H[2]];
+  // The bowl's two hinge knuckles either side of the lid's, moulded on its rim.
+  for (const sx of [-1, 1]) {
+    s.add(p.plastic, cyl(s, 0.0055, 0.014, "x", 16), [cx + sx * 0.0175, H[1], H[2]]);
+    s.add(p.plastic, rbox(s, 0.014, 0.012, 0.01, 0.003), [cx + sx * 0.0175, yt - 0.004, cz - 0.098]);
+  }
+  if (s.fine(2)) s.add(p.ssBright, cyl(s, 0.0018, 0.05, "x", 10), [H[0], H[1], H[2]]);
+  const lid = s.joint("lid", H);
+  lid.add(p.glass, lathe(lid, [[0.0, yt + 0.024], [0.07, yt + 0.02], [0.094, yt + 0.008], [0.1, yt], [0.1, yt - 0.006], [0.097, yt - 0.006], [0.097, yt + 0.002], [0.09, yt + 0.006], [0.068, yt + 0.016], [0, yt + 0.02]], 48), L([cx, 0, cz]));
+  lid.add(p.glass, cyl(lid, 0.0052, 0.02, "x", 16), [0, 0, 0]);
+  lid.add(p.glass, rbox(lid, 0.02, 0.008, 0.012, 0.003), [0, -0.0008, 0.006]);
   const fx = cx - 0.035;
   const fz = cz + 0.03;
-  s.add(p.glass, lathe(s, [[0.03, yt + 0.01], [0.031, 0.385], [0.036, 0.39], [0.036, 0.393], [0.027, 0.393], [0.026, yt + 0.012]], 32), [fx, 0, fz]);
-  s.add(p.glass, rbox(s, 0.016, 0.13, 0.012, 0.004), [cx + 0.07, yt - 0.05, cz - 0.07], [0, Math.PI / 4, 0]);
-  const pusher = s.joint("pusher", [fx, 0.393, fz]);
+  lid.add(p.glass, lathe(lid, [[0.03, yt + 0.01], [0.031, 0.385], [0.036, 0.39], [0.036, 0.393], [0.027, 0.393], [0.026, yt + 0.012]], 32), L([fx, 0, fz]));
+  // The safety rod's channel moulded down the bowl's back right, and the short tab on the lid that presses into its
+  // top when the lid is shut: a tab reaching down the channel would swing through the bowl as the lid lifts.
+  s.add(p.glass, rbox(s, 0.016, 0.115, 0.012, 0.004), [cx + 0.07, yt - 0.0575, cz - 0.07], [0, Math.PI / 4, 0]);
+  lid.add(p.glass, new THREE.BoxGeometry(0.016, 0.016, 0.012), L([cx + 0.07, yt + 0.007, cz - 0.07]), [0, Math.PI / 4, 0]);
+  const pusher = lid.joint("pusher", L([fx, 0.393, fz]));
   pusher.add(p.hdpe, cyl(pusher, 0.024, 0.075, "y", 24), [0, -0.035, 0]);
   pusher.add(p.hdpe, lathe(pusher, [[0, 0], [0.036, 0], [0.037, 0.006], [0.03, 0.014], [0, 0.016]], 28), [0, 0.0005, 0]);
   return (b) => {
     let a = 0;
     const pj = b.joints.get("pusher");
-    const rest: V3 = pj ? [pj.position.x, pj.position.y, pj.position.z] : [fx, 0.393, fz];
+    const rest: V3 = pj ? [pj.position.x, pj.position.y, pj.position.z] : L([fx, 0.393, fz]);
     return {
       tick: (_t, dt, load) => {
         a += dt * 45 * Math.max(0, Math.min(1, load));
         turnJoint(b.joints.get("s_blade_spin"), "y", a);
       },
-      open: (f) => slideJoint(pj, "y", Math.max(0, Math.min(1, f)) * 0.09, rest),
+      // Open: the lid swings up on its hinge, front first, the pusher seated in its tube and drawn up a little.
+      open: (f) => {
+        const k = Math.max(0, Math.min(1, f));
+        turnJoint(b.joints.get("lid"), "x", -0.62 * k);
+        slideJoint(pj, "y", k * 0.022, rest);
+      },
     };
   };
 };
@@ -2312,12 +2980,16 @@ const rotarySlicer: Builder = (s, e) => {
   const p = palette();
   const { w, d } = e;
   const R = 0.152;
-  const tilt = 0.22;
-  const bc: V3 = [0.29, 0.29, -0.33];
+  // A gravity-feed slicer: the knife leans 30° so that the product table, square to it, falls toward the gauge plate.
+  const tilt = 0.52;
+  const [ct, st] = [Math.cos(tilt), Math.sin(tilt)];
+  const bc: V3 = [0.3, 0.27, -0.33];
   const f2 = s.fine(2);
   // Rounded boxes at full detail; plain ones from further off, where 1 mm rounds are lost.
   const rb = (sh: Shop, x: number, y: number, z: number, r: number) => (f2 ? rbox(sh, x, y, z, r) : new THREE.BoxGeometry(x, y, z));
-  const piv: V3 = [0.42, 0.2, -0.24];
+  // The product table's centre, in the knife's frame 11 cm out from its plane and 13 cm under its axis.
+  const piv: V3 = [bc[0] + 0.112 * ct + 0.134 * st, bc[1] + 0.112 * st - 0.134 * ct, -0.24];
+  const C = (q: V3): V3 => [q[0] - piv[0], q[1] - piv[1], q[2] - piv[2]];
   const slicerHooks = (b: Built): Hooks => {
     let a = 0;
     let pos = 0;
@@ -2356,39 +3028,60 @@ const rotarySlicer: Builder = (s, e) => {
       },
     };
   };
+  // The motor housing: one casting from the base up behind the knife, its face inclined parallel to the knife's
+  // back, its top and left side rounded over in long smooth curves.
+  const faceX = (y: number) => bc[0] + (-0.035 - (y - bc[1]) * st) / ct;
+  const housing = new THREE.Shape();
+  housing.moveTo(0.06, 0.1);
+  housing.lineTo(faceX(0.1), 0.1);
+  housing.lineTo(faceX(0.392), 0.392);
+  housing.quadraticCurveTo(faceX(0.392) - 0.022, 0.438, 0.125, 0.437);
+  housing.quadraticCurveTo(0.064, 0.436, 0.06, 0.37);
+  housing.lineTo(0.06, 0.1);
+  const hz0 = -0.565;
+  const hz1 = -0.125;
+  // Close up its edges are rounded over in six steps, so the big radii read as cast, not as facets.
+  const hb = f2 ? 0.014 : 0;
+  const housingGeo = (sh: Shop) => {
+    if (!f2) return creased(plate(sh, housing, hz1 - hz0, 0, 10), 0.86);
+    const g = new THREE.ExtrudeGeometry(housing, { depth: hz1 - hz0 - 2 * hb, bevelEnabled: true, bevelThickness: hb, bevelSize: hb, bevelSegments: 6, curveSegments: 28 });
+    g.translate(0, 0, hb);
+    return creased(g, 0.5);
+  };
+  // The housing's outer side, where the bevel leaves it.
+  const wx = 0.06 - hb;
   if (s.detail === 0) {
-    // Far off: base and column, the knife disc and its guard ring, gauge plate, carriage tray and handle, the knob.
+    // Far off: base and housing, the knife disc and its guard ring, gauge plate, carriage tray and handle, the knob.
     blk(s, p.alu, [0.02, 0, -d + 0.02], [w - 0.02, 0.1, -0.02], 0);
-    blk(s, p.alu, [0.065, 0.1, -0.58], [0.262, 0.41, -0.14], 0);
+    s.add(p.alu, housingGeo(s), [0, 0, hz0]);
     s.at(bc, [0, 0, tilt], () => {
       s.joint("rotary_blade_spin", [0, 0, 0]).add(p.ssBright, alongAxis(new THREE.CylinderGeometry(R + 0.009, R + 0.009, 0.008, 14), "x"), [0.002, 0, 0]);
-      s.joint("gauge_plate", [0, 0, 0]).add(p.alu, new THREE.BoxGeometry(0.012, 0.14, 0.19), [-0.011, -0.07, 0.095]);
+      s.joint("gauge_plate", [0, 0, 0]).add(p.alu, new THREE.BoxGeometry(0.012, 0.14, 0.19), [-0.011, -0.07, -0.095]);
     });
     const car = s.joint("carriage_slide", piv);
-    car.at([0.01, 0, 0], [0, 0, tilt], () => car.add(p.alu, new THREE.BoxGeometry(0.21, 0.03, 0.26), [0, 0, 0]));
-    car.add(p.alu, new THREE.BoxGeometry(0.02, 0.13, 0.02), [0.06, 0.07, 0.13]);
+    car.at([0, 0, 0], [0, 0, tilt], () => car.add(p.alu, new THREE.BoxGeometry(0.21, 0.03, 0.26), [0, 0, 0]));
+    car.add(p.alu, new THREE.BoxGeometry(0.02, 0.2, 0.02), C([0.47, 0.24, -0.08]));
     s.joint("index_knob", [0.12, 0.065, -0.02]).add(p.bakelite, new THREE.CylinderGeometry(0.03, 0.03, 0.025, 8).rotateX(Math.PI / 2), [0, 0, 0.0125]);
     return slicerHooks;
   }
-  // Feet and the cast base, its receiving area to the front left.
+  // Feet and the cast base.
   for (const x of [0.06, w - 0.06]) for (const z of [-0.06, -d + 0.06]) s.add(p.rubber, lathe(s, f2 ? [[0, 0], [0.026, 0], [0.024, 0.02], [0.018, 0.03], [0, 0.03]] : [[0, 0], [0.026, 0.002], [0.02, 0.03], [0, 0.03]], 20), [x, 0, z]);
   blk(s, p.alu, [0.02, 0.03, -d + 0.02], [w - 0.02, 0.1, -0.02], 0.03);
-  // The cast column behind the knife: one casting, its back rounded over, its face flat to the knife's hub.
-  const col = new THREE.Shape();
-  col.moveTo(0.07, 0.1);
-  col.lineTo(0.262, 0.1);
-  col.lineTo(0.262, 0.3);
-  col.quadraticCurveTo(0.262, 0.4, 0.2, 0.41);
-  col.lineTo(0.13, 0.4);
-  col.quadraticCurveTo(0.07, 0.39, 0.065, 0.3);
-  col.lineTo(0.07, 0.1);
-  const cg = plate(s, col, 0.44, f2 ? 0.012 : 0, f2 ? 16 : 8);
-  s.add(p.alu, cg, [0, 0, -0.58]);
-  // The motor's end bell on the column's outer side, its vents and the cord gland.
-  s.add(p.alu, lathe(s, [[0, 0], [0.085, 0], [0.085, 0.012], [0.07, 0.03], [0.03, 0.04], [0, 0.04]], 40).rotateZ(Math.PI / 2), [0.062, 0.27, -0.4]);
-  if (f2) for (let i = 0; i < 7; i++) s.add(p.enamel, rb(s, 0.002, 0.006, 0.07, 0.002), [0.052, 0.24 + i * 0.01, -0.4]);
-  s.add(p.rubber, cyl(s, 0.009, 0.03, "z", 12), [0.12, 0.13, -0.595]);
-  blk(s, p.ss, [0.04, 0.1, -0.15], [0.25, 0.104, -0.03], 0.002);
+  s.add(p.alu, housingGeo(s), [0, 0, hz0]);
+  // The motor's end bell on the housing's outer side, its vents and the cord gland.
+  s.add(p.alu, lathe(s, [[0, 0], [0.085, 0], [0.085, 0.012], [0.07, 0.03], [0.03, 0.04], [0, 0.04]], f2 ? 48 : 40).rotateZ(Math.PI / 2), [wx + 0.0005, 0.27, -0.36]);
+  // Cooling slots in the side under the end bell.
+  if (f2) for (let i = 0; i < 6; i++) s.add(p.enamel, rb(s, 0.002, 0.0045, 0.07, 0.0015), [wx - 0.0009, 0.125 + i * 0.009, -0.36]);
+  s.add(p.rubber, cyl(s, 0.009, 0.03, "z", 12), [0.12, 0.13, hz0 - 0.012]);
+  // The receiving tray on the base's front left, where the slices land: pressed stainless, its edges turned up.
+  {
+    const [rx0, rx1, rz0, rz1] = [0.045, 0.3, -0.115, -0.032];
+    const path = filletPath([[rx0, rz1], [rx1, rz1], [rx1, rz0], [rx0, rz0]], 0.012, f2 ? 5 : 1, true);
+    s.add(p.ssDull, pathSweep(sheetOutline([[0.008, 0], [0.003, 0], ...arc(0.003, 0.003, 0.003, -Math.PI / 2, -Math.PI, f2 ? 3 : 1).slice(1), [0, 0.008], ...arc(0.0015, 0.008, 0.0015, Math.PI, 0, f2 ? 4 : 1).slice(1)], 0.001), path, 0.1006, true));
+    const tg = plate(s, planShape(offsetPath(path, 0.008, true)), 0.001);
+    tg.rotateX(-Math.PI / 2);
+    s.add(p.ssDull, tg, [0, 0.1001, 0]);
+  }
   dataPlate(s, [0.3, 0.065, -d + 0.0198], [0, Math.PI, 0], 0.07, 0.035);
   // Start and stop on the base's front right.
   s.add(p.ledGreen, cyl(s, 0.011, 0.008, "z", 18), [0.44, 0.065, -0.016]);
@@ -2405,25 +3098,26 @@ const rotarySlicer: Builder = (s, e) => {
   // The knife and everything in its plane, in a frame turned so its axis (local x) leans over the carriage.
   s.at(bc, [0, 0, tilt], () => {
     // Hub and bearing boss from the housing.
-    s.add(p.alu, cyl(s, 0.05, 0.03, "x", 32), [-0.02, 0, 0]);
+    s.add(p.alu, cyl(s, 0.05, 0.034, "x", f2 ? 40 : 32), [-0.022, 0, 0]);
     const knife = s.joint("rotary_blade_spin", [0, 0, 0]);
     const kp: [number, number][] = f2 ? [[0, -0.003], [0.11, -0.003], [R - 0.004, -0.0007], [R, 0], [R - 0.004, 0.0007], [0.11, 0.0022], [0.05, 0.004], [0, 0.004]] : [[0, -0.003], [R - 0.004, -0.001], [R, 0], [R - 0.004, 0.0012], [0, 0.004]];
-    knife.add(p.ssBright, lathe(knife, kp, 72).rotateZ(-Math.PI / 2), [0.001, 0, 0]);
+    knife.add(p.ssBright, lathe(knife, kp, f2 ? 96 : 72).rotateZ(-Math.PI / 2), [0.001, 0, 0]);
     if (knife.fine(1)) for (let i = 0; i < 4; i++) {
       const a = (i / 4) * Math.PI * 2;
       knife.add(p.ssDull, cyl(knife, 0.006, 0.003, "x", 12), [0.004, Math.cos(a) * 0.085, Math.sin(a) * 0.085]);
     }
     // The centre plate over the knife's middle, its removal knob.
-    s.add(p.alu, lathe(s, [[0, 0.016], [0.06, 0.013], [0.1, 0.006], [0.116, 0.0], [0, 0]], 48).rotateZ(-Math.PI / 2), [0.007, 0, 0]);
+    s.add(p.alu, lathe(s, [[0, 0.016], [0.06, 0.013], [0.1, 0.006], [0.116, 0.0], [0, 0]], f2 ? 64 : 48).rotateZ(-Math.PI / 2), [0.007, 0, 0]);
     s.add(p.bakelite, lathe(s, [[0, 0], [0.022, 0], [0.024, 0.008], [0.016, 0.022], [0, 0.024]], 24).rotateZ(-Math.PI / 2), [0.022, 0, 0]);
-    // The ring guard round the edge from the front top over to the back, open where the carriage passes.
+    // The ring guard round the edge from the front top over to the back, open where the carriage passes, on its
+    // mounting block from the housing.
     const a0 = -0.35;
     const a1 = Math.PI + 0.9;
-    const ring = torus(s, R + 0.009, 0.007, "x", a1 - a0, 64, 8);
+    const ring = torus(s, R + 0.009, 0.007, "x", a1 - a0, f2 ? 96 : 64, f2 ? 10 : 8);
     ring.rotateX(-a0);
     s.add(p.alu, ring, [0.004, 0, 0]);
-    s.add(p.alu, rb(s, 0.022, 0.05, 0.05, 0.008), [-0.012, Math.sin(Math.PI / 2) * (R + 0.012), 0]);
-    // The gauge plate before the knife, sliding on its axis as the knob sets the slice.
+    s.add(p.alu, rb(s, 0.046, 0.04, 0.05, 0.01), [-0.02, R + 0.016, 0]);
+    // The gauge plate before the knife, sliding on its axis as the knob sets the slice, on a boss from the housing.
     const gp = s.joint("gauge_plate", [0.0, 0, 0]);
     const gs = new THREE.Shape();
     gs.moveTo(0.0, -0.14);
@@ -2434,26 +3128,30 @@ const rotarySlicer: Builder = (s, e) => {
     const gpg = plate(gp, gs, 0.012, f2 ? 0.002 : 0, 24);
     gpg.rotateY(Math.PI / 2);
     gp.add(p.alu, gpg, [-0.011, 0, 0]);
+    gp.add(p.alu, cyl(gp, 0.013, 0.036, "x", 20), [-0.029, -0.085, -0.11]);
     // The sharpener stowed on top: a cast housing with its two stones and knob.
-    s.at([0.01, R + 0.035, -0.02], [0, 0, 0], () => {
+    s.at([0.01, R + 0.05, -0.02], [0, 0, 0], () => {
       s.add(p.alu, rb(s, 0.07, 0.04, 0.09, 0.012), [0, 0, 0]);
       for (const z of [-0.025, 0.025]) s.add(p.ceramic, cyl(s, 0.014, 0.012, "x", 16), [0.03, -0.012, z]);
       s.add(p.bakelite, knobGeo(s, 0.016), [0, 0.02, 0]);
     });
   });
 
-  // The carriage: an arm from the slide under the base's right, the tray tilted to the knife, its handle and pusher.
-  s.add(p.ssBright, cyl(s, 0.012, d - 0.12, "z", 16), [0.45, 0.115, -d / 2]);
+  // The carriage: an arm from the slide on the base's right up to the product table, inclined with the knife so that
+  // the product slides down it onto the gauge plate; its end weight on a rod, and the handle at its front.
+  s.add(p.ssBright, cyl(s, 0.012, d - 0.12, "z", f2 ? 20 : 16), [0.45, 0.115, -d / 2]);
   for (const z of [-0.07, -d + 0.07]) s.add(p.alu, rb(s, 0.04, 0.03, 0.03, 0.006), [0.45, 0.112, z]);
   const car = s.joint("carriage_slide", piv);
-  const C = (q: V3): V3 => [q[0] - piv[0], q[1] - piv[1], q[2] - piv[2]];
   car.add(p.alu, rb(car, 0.05, 0.04, 0.08, 0.008), C([0.45, 0.13, -0.24]));
-  car.add(p.alu, rb(car, 0.03, 0.06, 0.05, 0.008), C([0.43, 0.165, -0.24]), [0, 0, tilt]);
-  car.at(C([0.43, 0.2, -0.24]), [0, 0, tilt], () => {
+  car.add(p.alu, rb(car, 0.032, 0.075, 0.05, 0.008), C([0.45, 0.18, -0.24]));
+  car.at([0, 0, 0], [0, 0, tilt], () => {
+    car.add(p.alu, rb(car, 0.09, 0.014, 0.12, 0.005), [0, -0.011, 0]);
     car.add(p.alu, rb(car, 0.21, 0.008, 0.26, 0.003), [0.0, 0, 0]);
     for (const sz of [-1, 1]) car.add(p.alu, rb(car, 0.21, 0.03, 0.006, 0.002), [0, 0.014, sz * 0.128]);
     car.add(p.alu, rb(car, 0.006, 0.05, 0.26, 0.002), [0.102, 0.022, 0]);
-    // The pusher: a sleeve on a rod over the tray, a spiked plate that bears the product toward the knife, a grip.
+    // Ribs pressed in the table's face, running downhill, so the product slides.
+    if (car.fine(2)) for (let i = 0; i < 7; i++) car.add(p.alu, rb(car, 0.19, 0.0016, 0.004, 0.0008), [0, 0.0046, -0.09 + i * 0.03]);
+    // The end weight: a sleeve on a rod over the table, a spiked plate that bears the product toward the knife, a grip.
     car.add(p.ssBright, cyl(car, 0.006, 0.2, "x", 12), [0.0, 0.13, -0.11]);
     car.add(p.alu, rb(car, 0.012, 0.12, 0.012, 0.004), [0.1, 0.065, -0.11]);
     car.add(p.alu, rb(car, 0.04, 0.025, 0.025, 0.006), [0.02, 0.13, -0.11]);
@@ -2462,9 +3160,9 @@ const rotarySlicer: Builder = (s, e) => {
     car.add(p.bakelite, knobGeo(car, 0.016), [0.02, 0.15, -0.11]);
     if (car.fine(2)) for (let i = 0; i < 4; i++) for (let k = 0; k < 3; k++) car.add(p.ssBright, cyl(car, 0.0016, 0.01, "x", 6, 0.0003), [-0.008, 0.055 + k * 0.02, -0.09 + i * 0.026]);
   });
-  // The handle at the carriage's front right.
-  car.add(p.alu, pipe(car, [C([0.48, 0.21, -0.12]), C([0.48, 0.33, -0.11])], 0.008, 0.02, 12));
-  car.add(p.bakelite, lathe(car, [[0, 0], [0.016, 0], [0.019, 0.02], [0.016, 0.04], [0, 0.043]], 20), C([0.48, 0.325, -0.11]));
+  // The handle: forward from the slide block and up in front of the table, a black grip on top.
+  car.add(p.alu, pipe(car, [C([0.45, 0.13, -0.2]), C([0.45, 0.13, -0.085]), C([0.47, 0.34, -0.08])], 0.008, 0.03, 12));
+  car.add(p.bakelite, lathe(car, [[0, 0], [0.016, 0], [0.019, 0.02], [0.016, 0.04], [0, 0.043]], 20), C([0.47, 0.335, -0.08]));
 
   return slicerHooks;
 };
@@ -2566,13 +3264,17 @@ const portionScale: Builder = (s, e) => {
     const a = (i / 4) * Math.PI * 2;
     s.add(p.rubber, cyl(s, 0.006, 0.004, "y", 10), [w / 2 + Math.cos(a) * 0.095, 0.1095, pz + Math.sin(a) * 0.095]);
   }
-  // The platter: a pressed sheet with its edges turned down.
-  blk(s, p.ss, [w / 2 - pw / 2, h - 0.0012, pz - pw / 2], [w / 2 + pw / 2, h, pz + pw / 2], 0.0005);
-  const lip: P2[] = [[-0.006, 0], ...arc(-0.004, -0.002, 0.002, Math.PI / 2, 0, 3), [-0.002, -0.01]];
-  sweepX(s, p.ss, lip.map(([z, y]) => [z, y] as P2), 0.0012, w / 2 - pw / 2, w / 2 + pw / 2, h - 0.0006, pz + pw / 2);
-  sweepX(s, p.ss, lip.map(([z, y]) => [-z, y] as P2), 0.0012, w / 2 - pw / 2, w / 2 + pw / 2, h - 0.0006, pz - pw / 2);
-  sweepZ(s, p.ss, lip.map(([x, y]) => [-x, y] as P2), 0.0012, pz - pw / 2, pz + pw / 2, w / 2 + pw / 2, h - 0.0006);
-  sweepZ(s, p.ss, lip.map(([x, y]) => [x, y] as P2), 0.0012, pz - pw / 2, pz + pw / 2, w / 2 - pw / 2, h - 0.0006);
+  // The platter: one pressed sheet, its edges rolled over and turned down all round, the corners drawn round.
+  {
+    const [x0, x1, z0, z1] = [w / 2 - pw / 2, w / 2 + pw / 2, pz - pw / 2, pz + pw / 2];
+    const f2 = s.fine(2);
+    const path = filletPath([[x0, z1], [x1, z1], [x1, z0], [x0, z0]], 0.007, f2 ? 5 : 2, true);
+    const rr = 0.0025;
+    s.add(p.ss, pathSweep(sheetOutline([[rr + 0.0006, 0], ...arc(rr + 0.0006, -rr, rr, Math.PI / 2, Math.PI, f2 ? 5 : 2).slice(1), [0.0006, -0.011]], 0.0012), path, h - 0.0006, true));
+    const top = plate(s, planShape(offsetPath(path, rr + 0.0006, true)), 0.0012);
+    top.rotateX(-Math.PI / 2);
+    s.add(p.ss, top, [0, h - 0.0012, 0]);
+  }
   return () => ({
     set: (name, v) => {
       if (name !== "weight") return;
@@ -2608,20 +3310,18 @@ function graterFace(kind: "coarse" | "medium" | "fine" | "slicer"): THREE.MeshSt
     xa.beginPath();
     xa.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
     xa.fill();
-    // The lip: punched outward along the hole's lower edge, so food pushed down the face meets the cut.
-    xb.fillStyle = "#f2f2f2";
+    // Where the lip was punched up out of the sheet, a soft swell just under the hole (the lip itself is modelled).
+    const g = xb.createRadialGradient(cx, cy + ry * 0.6, ry * 0.4, cx, cy + ry * 0.6, ry * 1.6);
+    g.addColorStop(0, "rgba(200,200,200,0.9)");
+    g.addColorStop(1, "rgba(128,128,128,0)");
+    xb.fillStyle = g;
     xb.beginPath();
-    xb.ellipse(cx, cy + ry * 0.55, rx * 1.2, ry * 1.1, 0, 0, Math.PI);
-    xb.fill();
-    xb.fillStyle = "#3a3a3a";
-    xb.beginPath();
-    xb.ellipse(cx, cy - ry * 0.2, rx * 1.05, ry * 0.7, 0, Math.PI, Math.PI * 2);
+    xb.ellipse(cx, cy + ry * 0.6, rx * 1.4, ry * 1.4, 0, 0, Math.PI);
     xb.fill();
   };
-  const margin = 18;
-  // The face tapers to GRATER_TAPER of its foot's width at the top; the pattern keeps its pitch and loses holes instead.
-  const half = (cy: number) => ((GRATER_TAPER + (1 - GRATER_TAPER) * (cy / H)) * W) / 2 - margin;
   if (kind === "slicer") {
+    const margin = 18;
+    const half = (cy: number) => ((GRATER_TAPER + (1 - GRATER_TAPER) * (cy / H)) * W) / 2 - margin;
     for (const cy of [H * 0.38, H * 0.62]) {
       const hw = half(cy);
       xa.fillStyle = "#000";
@@ -2629,20 +3329,14 @@ function graterFace(kind: "coarse" | "medium" | "fine" | "slicer"): THREE.MeshSt
       xb.fillStyle = "#f0f0f0";
       xb.fillRect(W / 2 - hw + 16, cy + 10, 2 * hw - 32, 8);
     }
-  } else {
-    const [cols, rows, rx, ry] = kind === "coarse" ? [5, 11, 13, 9] : kind === "medium" ? [8, 18, 7, 5] : [16, 36, 2.6, 2.6];
-    for (let j = 0; j < rows; j++)
-      for (let i = 0; i < cols - (j % 2); i++) {
-        const cx = margin + ((i + 0.5 + (j % 2) * 0.5) * (W - 2 * margin)) / cols;
-        const cy = margin + ((j + 0.5) * (H - 2 * margin)) / rows;
-        if (Math.abs(cx - W / 2) + rx * 1.2 > half(cy)) continue;
-        hole(cx, cy, rx, ry);
-        if (kind === "fine") {
-          xb.fillStyle = "#f2f2f2";
-          xb.fillRect(cx - 4, cy + 3, 8, 3);
-        }
+  } else
+    for (const [cx, cy, rx, ry] of graterHoles(kind)) {
+      hole(cx, cy, rx, ry);
+      if (kind === "fine") {
+        xb.fillStyle = "#f2f2f2";
+        xb.fillRect(cx - 4, cy + 3, 8, 3);
       }
-  }
+    }
   const ta = new THREE.CanvasTexture(ca);
   const tb = new THREE.CanvasTexture(cb);
   for (const t of [ta, tb]) t.anisotropy = 8;
@@ -2651,6 +3345,64 @@ function graterFace(kind: "coarse" | "medium" | "fine" | "slicer"): THREE.MeshSt
   m.userData.uv = "own";
   graterCache.set(kind, m);
   return m;
+}
+
+/** The punched holes of a grater face, [cx, cy, rx, ry] in its 256 × 512 texture's pixels (y down from the top). */
+function graterHoles(kind: "coarse" | "medium" | "fine"): [number, number, number, number][] {
+  const [W, H, margin] = [256, 512, 18];
+  // The face tapers to GRATER_TAPER of its foot's width at the top; the pattern keeps its pitch and loses holes instead.
+  const half = (cy: number) => ((GRATER_TAPER + (1 - GRATER_TAPER) * (cy / H)) * W) / 2 - margin;
+  const [cols, rows, rx, ry] = kind === "coarse" ? [5, 11, 13, 9] : kind === "medium" ? [8, 18, 7, 5] : [16, 36, 2.6, 2.6];
+  const out: [number, number, number, number][] = [];
+  for (let j = 0; j < rows; j++)
+    for (let i = 0; i < cols - (j % 2); i++) {
+      const cx = margin + ((i + 0.5 + (j % 2) * 0.5) * (W - 2 * margin)) / cols;
+      const cy = margin + ((j + 0.5) * (H - 2 * margin)) / rows;
+      if (Math.abs(cx - W / 2) + rx * 1.2 > half(cy)) continue;
+      out.push([cx, cy, rx, ry]);
+    }
+  return out;
+}
+
+/**
+ * The cutting teeth of a shredding face whose quad runs a (foot left), b (foot right), c (top right), d (top left):
+ * each the lower rim of its hole raised out of the sheet into a curved scoop, highest at its middle, its edge turned up
+ * the face, open behind to the hole so that the shred passes through into the box.
+ */
+function graterTeeth(kind: "coarse" | "medium", a: V3, b: V3, c: V3, d: V3, n: number): THREE.BufferGeometry {
+  const v3 = (q: V3) => new THREE.Vector3(q[0], q[1], q[2]);
+  const [A, B, Cc, D] = [v3(a), v3(b), v3(c), v3(d)];
+  const across = B.clone().sub(A);
+  const up = Cc.clone().add(D).multiplyScalar(0.5).sub(A.clone().add(B).multiplyScalar(0.5));
+  const ex = across.clone().normalize();
+  const ey = up.clone().normalize();
+  const nn = ex.clone().cross(ey).normalize();
+  const hgt = kind === "coarse" ? 0.0034 : 0.0016;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (const [cx, cy, rx, ry] of graterHoles(kind)) {
+    const ctr = A.clone().addScaledVector(across, cx / 256).addScaledVector(up, 1 - cy / 512);
+    const [Rx, Ry] = [(rx / 256) * across.length(), (ry / 512) * up.length()];
+    const base = pos.length / 3;
+    for (let k = 0; k <= n; k++) {
+      const th = Math.PI + (Math.PI * k) / n;
+      const f = -Math.sin(th);
+      const p0 = ctr.clone().addScaledVector(ex, Rx * Math.cos(th)).addScaledVector(ey, Ry * Math.sin(th));
+      const p1 = p0.clone().addScaledVector(nn, hgt * (0.15 + 0.85 * f)).addScaledVector(ey, hgt * 0.55 * f).addScaledVector(ex, -Rx * 0.08 * Math.cos(th));
+      pos.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z);
+      if (k < n) {
+        const q = base + 2 * k;
+        idx.push(q, q + 2, q + 1, q + 1, q + 2, q + 3);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  // Every vertex samples the solid margin of the face's alpha map, so the teeth share the face's material and draw.
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(new Array((pos.length / 3) * 2).fill(0.02), 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
 }
 
 /**
@@ -2688,7 +3440,10 @@ const boxGrater: Builder = (s, e) => {
     ["fine", B(1, -1), B(-1, -1), T(-1, -1), T(1, -1)],
     ["slicer", B(-1, -1), B(-1, 1), T(-1, 1), T(-1, -1)],
   ];
-  for (const [k, a, b, c, dd] of faces) s.add(s.fine(1) ? graterFace(k) : p.ss, quad(a, b, c, dd));
+  for (const [k, a, b, c, dd] of faces) {
+    s.add(s.fine(1) ? graterFace(k) : p.ss, quad(a, b, c, dd));
+    if (s.fine(2) && (k === "coarse" || k === "medium")) s.add(graterFace(k), graterTeeth(k, a, b, c, dd, k === "coarse" ? 10 : 6));
+  }
   const hh = e.h - 0.006;
   if (s.detail === 0) {
     // Far off: the four faces, the cap, the loop of the handle.
@@ -2780,12 +3535,19 @@ const cuttingBoard: Builder = (s, e) => {
     g.rotateX(-Math.PI / 2);
     s.add(m, g, [w / 2, y, -d / 2]);
   };
-  flat(roundRect(w - 0.003, d - 0.003, 0.012), h - g0, 0.0015, 0);
-  if (!s.fine(1)) return;
-  flat(roundRect(w - 0.075, d - 0.075, 0.02), g0 + 0.0002, 0.0012, h - g0 - 0.0002);
+  if (!s.fine(1)) {
+    flat(roundRect(w - 0.003, d - 0.003, 0.012), h, 0.0015, 0);
+    return;
+  }
+  // One solid board with the groove routed into it: the border full height round the groove, eased on both of its
+  // edges; the field inside, full height and eased; the groove's floor between them, buried at its edges in both.
   const rim = roundRect(w - 0.003, d - 0.003, 0.012);
   rim.holes.push(rectPath(new THREE.Path(), w - 0.057, d - 0.057, 0.028, 0, 0, true) as THREE.Path);
-  flat(rim, g0 + 0.0002, 0.0012, h - g0 - 0.0002);
+  flat(rim, h, 0.0015, 0);
+  flat(roundRect(w - 0.075, d - 0.075, 0.02), h, 0.0012, 0);
+  const floor = plate(s, roundRect(w - 0.059, d - 0.059, 0.027), h - g0 - 0.002);
+  floor.rotateX(-Math.PI / 2);
+  s.add(m, floor, [w / 2, 0.002, -d / 2]);
 };
 
 register({
