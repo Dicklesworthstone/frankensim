@@ -18,12 +18,22 @@
 //! the potential's change, so a lossless contact stores what the ends give
 //! it.
 //!
+//! A law with Hunt–Crossley loss also exposes `heat`: it receives the
+//! contact temperature [K] and returns the negative heat rate it generates
+//! [W]. The existing [`crate::AffineContactStep`] evaluates the same
+//! potential secant and the non-attractive dissipative reaction at the
+//! represented closure rate `(x1 - x0) / dt`. Its separate loss increment
+//! retains weak heat even when it rounds away in the total reaction.
+//! Mechanical work becomes stored contact energy and exported heat; only
+//! the reaction solve's remaining work defect is numerical loss.
+//!
 //! On the load line ([`LoadLine`]) the neighbours' mean flows fall
 //! linearly with the efforts, so the end closure is
 //! `x(R) = x0 + dt (released_a - released_b) - S R` with
 //! `S = dt (c_aa - c_ab - c_ba + c_bb)`, and the reaction solves
-//! `R = law(x0, x(R))`. The secant of a convex potential is monotone in the
-//! end closure, so `R - law(x(R))` is increasing and has one root in
+//! `R = law(x0, x(R))`. The secant of a convex potential and the
+//! nonnegative Hunt–Crossley factor are monotone in the end closure. With
+//! nonnegative relative compliance, `R - law(x(R))` is increasing and has one root in
 //! `[0, law(x(0))]`. That bracket is bisected exactly as fs-couple's modal
 //! impact owner bisects it (`bracket_reaction`): the root is accepted at the
 //! first evaluated reaction whose residual is within
@@ -42,10 +52,11 @@
 //!
 //! # Not covered
 //!
-//! - Contact loss: an obstacle with a Hunt–Crossley loss is refused. The
-//!   loss is heat, which the contract books only as the component's own
-//!   stored thermal energy or through a heat port; this interface has
-//!   neither yet.
+//! - The loss coefficient is the fixed value owned by the obstacle. The
+//!   heat-port temperature determines entropy generation, not the force
+//!   law. Thermal expansion and temperature-dependent contact laws are not
+//!   inferred. A lossy contact must connect its heat port to a thermal
+//!   owner or an explicitly declared reservoir.
 //! - One contact point on one closure. Distributed obstacles
 //!   ([`crate::AffineContactStep`]) are not reached by this interface.
 //! - No events: a step that enters or leaves contact is not shortened to the
@@ -69,7 +80,9 @@ use fs_math::det;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
-use crate::{DContactError, Obstacle, OpeningContactStep};
+use crate::{
+    AffineContactResponse, AffineContactStep, DContactError, Obstacle, OpeningContactStep,
+};
 
 /// The budgets of one step's reaction search: the same fields and admission
 /// as fs-couple's `ModalContactConfig`.
@@ -168,21 +181,23 @@ fn finite(value: f64, what: &'static str) -> Result<f64, DContactError> {
 struct Trial {
     reaction: f64,
     closure: f64,
-    expected: f64,
+    elastic: f64,
+    dissipated_power: f64,
     residual: f64,
     tolerance: f64,
 }
 
 impl ContactInterface {
     /// A contact with the one-point `law` (opening map `[-1]`, a finite gap,
-    /// a nonnegative weight and stiffness, `alpha >= 1`, no internal loss
-    /// and a provenance) and the search budgets `solve`.
+    /// a nonnegative weight, stiffness and internal loss, `alpha >= 1`,
+    /// and a provenance) and the search budgets `solve`. A positive
+    /// internal loss adds the scalar `heat` port after the two mechanical
+    /// ports; zero loss retains the original two-port interface.
     ///
     /// # Errors
     /// [`DContactError::Shape`] for an obstacle that is not one point on the
     /// unit opening map; [`DContactError::Parameter`] for nonfinite or
-    /// nonphysical coefficients, an empty provenance, a nonzero internal
-    /// loss (no heat port; see the module's "Not covered") or budgets
+    /// nonphysical coefficients, an empty provenance, or budgets
     /// [`ContactSolve`] does not admit.
     pub fn new(law: Obstacle, solve: ContactSolve) -> Result<Self, DContactError> {
         solve.validate()?;
@@ -202,12 +217,6 @@ impl ContactInterface {
                 what: "a contact interface's law needs a provenance",
             });
         }
-        // Admitted nonnegative above.
-        if law.internal_loss() > 0.0 {
-            return Err(DContactError::Parameter {
-                what: "contact loss is heat, and this interface has no heat port: internal_loss must be zero",
-            });
-        }
         let name = |id: &str| StableId::new(id).map_err(port_error);
         let mechanical = |id: &str| {
             PortSpec::power(
@@ -218,10 +227,14 @@ impl ContactInterface {
             )
             .map_err(port_error)
         };
+        let mut ports = vec![mechanical("a")?, mechanical("b")?];
+        if law.internal_loss() > 0.0 {
+            ports.push(PortSpec::heat(name("heat")?, PortRole::EffortIn).map_err(port_error)?);
+        }
         Ok(Self {
             law,
             solve,
-            ports: vec![mechanical("a")?, mechanical("b")?],
+            ports,
             ends: [None; 2],
         })
     }
@@ -293,20 +306,13 @@ impl ContactInterface {
         state.reaction_n.is_finite() && self.stored_energy_j(state).is_ok()
     }
 
-    /// The law's reaction for a move of the closure from `x0` to `x1` [N]:
-    /// the secant, which is the conservative reaction (no loss is admitted).
-    fn law_force(step: &OpeningContactStep, x1: f64) -> Result<f64, DContactError> {
-        let (elastic, _) = step.coefficients(-x1)?;
-        Ok(elastic.max(0.0))
-    }
-
     /// The bracket search of fs-couple's `bracket_reaction`, on
     /// `x(R) = free - slope R`.
     fn settle(
         &self,
-        step: &OpeningContactStep,
         free: f64,
         slope: f64,
+        law: impl Fn(f64) -> Result<AffineContactResponse, DContactError>,
         cx: &Cx<'_>,
     ) -> Result<Trial, DContactError> {
         let evaluate = |reaction: f64| -> Result<Trial, DContactError> {
@@ -317,11 +323,13 @@ impl ContactInterface {
             })?;
             // Unfused, as fs-couple's `solve_contact` rounds it.
             let closure = finite(free - slope * reaction, "contact trial closure")?;
-            let expected = Self::law_force(step, closure)?;
+            let response = law(closure)?;
+            let expected = response.force;
             Ok(Trial {
                 reaction,
                 closure,
-                expected,
+                elastic: response.elastic_force,
+                dissipated_power: response.dissipated_power,
                 residual: finite(reaction - expected, "contact trial residual")?,
                 tolerance: finite(
                     self.solve.tolerance(reaction, expected),
@@ -334,8 +342,8 @@ impl ContactInterface {
             return Ok(at_zero);
         }
         let mut lo = 0.0;
-        // The secant of the convex potential is monotone in the closure, so
-        // the reaction at no reaction bounds the root.
+        // The secant and the nonnegative loss factor are monotone in the
+        // closure, so the reaction at no reaction bounds the root.
         let mut hi = (-at_zero.residual).min(self.solve.maximum_force_n);
         let at_hi = evaluate(hi)?;
         if at_hi.residual.abs() <= at_hi.tolerance {
@@ -494,23 +502,25 @@ impl LoadLine for ContactInterface {
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, DContactError> {
-        let (&[flow_a, flow_b, ref end_flows @ ..], &[c_aa, c_ab, c_ba, c_bb, ref end_rows @ ..]) =
+        let (&[flow_a, flow_b, ref auxiliary @ ..], &[c_aa, c_ab, c_ba, c_bb, ref end_rows @ ..]) =
             (inputs, compliance)
         else {
             return Err(DContactError::Shape {
                 what: "contact interface inputs or line",
             });
         };
-        if end_flows.len() != self.told() || end_rows.len() != 2 * self.told() {
+        let lossy = self.law.internal_loss() > 0.0;
+        if auxiliary.len() != self.told() + usize::from(lossy) || end_rows.len() != 2 * self.told()
+        {
             return Err(DContactError::Shape {
                 what: "contact interface end inputs or their rows",
             });
         }
-        let [force_a, force_b] = outputs else {
+        if outputs.len() != 2 + usize::from(lossy) {
             return Err(DContactError::Shape {
                 what: "contact interface outputs",
             });
-        };
+        }
         if !(dt_s.is_finite() && dt_s > 0.0) {
             return Err(DContactError::Parameter {
                 what: "contact step must be positive and finite",
@@ -518,18 +528,58 @@ impl LoadLine for ContactInterface {
         }
         for &value in [flow_a, flow_b, c_aa, c_ab, c_ba, c_bb]
             .iter()
-            .chain(end_flows)
+            .chain(auxiliary)
             .chain(end_rows)
         {
             finite(value, "contact interface inputs or line")?;
         }
+        let kelvin = if lossy {
+            let value = auxiliary[0];
+            if value <= 0.0 {
+                return Err(DContactError::Parameter {
+                    what: "contact heat-port temperature must be positive and finite",
+                });
+            }
+            value
+        } else {
+            1.0
+        };
         let x0 = finite(old.closure_m, "contact closure")?;
         let step = OpeningContactStep::new(&self.law, -x0)?;
+        let dissipative_step = if lossy {
+            Some(AffineContactStep::new(&self.law, -x0, 1)?)
+        } else {
+            None
+        };
         // The end closure at no reaction, and what a unit of reaction takes
         // from it: the efforts are R at a and -R at b.
         let free = finite(x0 + dt_s * (flow_a - flow_b), "contact free closure")?;
         let slope = finite(dt_s * ((c_aa - c_ab) - (c_ba - c_bb)), "contact line slope")?;
-        let trial = self.settle(&step, free, slope, cx)?;
+        if slope < 0.0 {
+            return Err(DContactError::Parameter {
+                what: "contact relative compliance must be nonnegative",
+            });
+        }
+        let trial = self.settle(
+            free,
+            slope,
+            |closure| {
+                if let Some(dissipative) = &dissipative_step {
+                    let rate = finite((closure - x0) / dt_s, "contact closure rate")?;
+                    dissipative.response(-closure, -rate)
+                } else {
+                    // Keep the original conservative path's arithmetic.
+                    let (elastic, _) = step.coefficients(-closure)?;
+                    let force = elastic.max(0.0);
+                    Ok(AffineContactResponse {
+                        elastic_force: force,
+                        force,
+                        dissipated_power: 0.0,
+                    })
+                }
+            },
+            cx,
+        )?;
         let penetration = self.penetration_m(trial.closure);
         if penetration > self.solve.maximum_penetration_m {
             return Err(DContactError::Reaction {
@@ -541,28 +591,47 @@ impl LoadLine for ContactInterface {
         let moved = trial.closure - x0;
         // The secant's work over the move is the potential's change, with
         // no subtraction of nearly equal energies.
-        let stored_change_j = finite(trial.expected * moved, "contact stored change")?;
+        let stored_change_j = finite(trial.elastic * moved, "contact stored change")?;
         let work_j = finite(trial.reaction * moved, "contact work")?;
-        let before_j = self.potential_j(x0);
-        let after_j = self.potential_j(trial.closure);
-        *new = ContactState {
-            closure_m: trial.closure,
-            reaction_n: trial.reaction,
-        };
-        *force_a = trial.reaction;
-        *force_b = -trial.reaction;
+        let dissipated_j = finite(dt_s * trial.dissipated_power, "contact dissipated heat")?;
+        let entropy_generated_j_per_k =
+            finite(dissipated_j / kelvin, "contact entropy generation")?;
+        let numerical_loss_j = finite(
+            work_j - stored_change_j - dissipated_j,
+            "contact numerical loss",
+        )?;
+        let before_j = finite(self.potential_j(x0), "contact initial potential")?;
+        let after_j = finite(self.potential_j(trial.closure), "contact final potential")?;
         // The ends' powers are each as large as their own velocities make
         // them; the kernel's sum of them is rounded at that size.
         let at_ends = flow_a.abs()
             + flow_b.abs()
             + trial.reaction.abs() * (c_aa.abs() + c_ab.abs() + c_ba.abs() + c_bb.abs());
-        let scale = dt_s * trial.reaction.abs() * at_ends + before_j + after_j;
+        let scale = finite(
+            dt_s * trial.reaction.abs() * at_ends + before_j + after_j + dissipated_j,
+            "contact energy roundoff scale",
+        )?;
+        cx.checkpoint().map_err(|_| DContactError::Reaction {
+            what: "cancelled",
+            value: trial.reaction,
+            limit: 0.0,
+        })?;
+        *new = ContactState {
+            closure_m: trial.closure,
+            reaction_n: trial.reaction,
+        };
+        outputs[0] = trial.reaction;
+        outputs[1] = -trial.reaction;
+        if lossy {
+            outputs[2] = -trial.dissipated_power;
+        }
         Ok(Proposal::Step(Receipt {
             stored_change_j,
-            dissipated_j: 0.0,
-            // What the settled reaction does beyond the law's secant.
-            numerical_loss_j: work_j - stored_change_j,
-            entropy_generated_j_per_k: 0.0,
+            dissipated_j,
+            // What the settled reaction does beyond the native law,
+            // including the rounding of elastic work and exported heat.
+            numerical_loss_j,
+            entropy_generated_j_per_k,
             energy_tolerance_j: 64.0 * f64::EPSILON * scale + f64::MIN_POSITIVE,
             residual: trial.residual.abs(),
             tolerance: trial.tolerance,

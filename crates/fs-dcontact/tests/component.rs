@@ -12,6 +12,9 @@ use fs_ports::component::{Class, Component, LoadLine, Proposal};
 use fs_system::elements::{Mass, Motion};
 use fs_system::{NodeId, System, SystemBuilder};
 
+#[path = "component/dissipation.rs"]
+mod dissipation;
+
 fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
     let gate = CancelGate::new_clock_free();
     let pool = ArenaPool::new(ArenaConfig::default());
@@ -394,7 +397,7 @@ fn end_inputs_join_told_neighbours_and_do_not_change_the_step() {
 }
 
 #[test]
-fn contact_interfaces_refuse_shapes_losses_and_budgets_by_name() {
+fn contact_interfaces_refuse_shapes_and_budgets_by_name() {
     let shape = |law: Obstacle| {
         matches!(
             ContactInterface::new(law, solve()),
@@ -432,11 +435,15 @@ fn contact_interfaces_refuse_shapes_losses_and_budgets_by_name() {
     )
     .unwrap();
     assert!(shape(flipped));
-    // Contact loss needs a heat port.
-    assert!(parameter(
-        law(1e8, 1.5, 0.0).with_internal_loss(0.2).unwrap(),
-        solve()
-    ));
+    // Contact loss now has an explicit heat outlet.
+    let lossy = ContactInterface::new(law(1e8, 1.5, 0.0).with_internal_loss(0.2).unwrap(), solve())
+        .unwrap();
+    let ports: Vec<_> = lossy
+        .ports()
+        .iter()
+        .map(|port| port.id().as_str())
+        .collect();
+    assert_eq!(ports, ["a", "b", "heat"]);
     // Budgets.
     for bad in [
         ContactSolve {
@@ -699,6 +706,7 @@ fn the_interface_identity_follows_its_obstacle_its_budgets_and_its_ends() {
     let mut identities = vec![
         unchanged,
         named(law(2.0 * HERTZ_K, 1.5, 0.0), |_| (), [false; 2]),
+        named(wall().with_internal_loss(0.2).unwrap(), |_| (), [false; 2]),
         named(wall(), |_| (), [true, false]),
         named(wall(), |_| (), [false, true]),
         named(wall(), |_| (), [true; 2]),

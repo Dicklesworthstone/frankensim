@@ -237,21 +237,39 @@ changes with it.
 
 - `ContactInterface::new(obstacle, ContactSolve)` admits one one-point
   `Obstacle` on the unit opening map `[-1]` (the map fs-couple's modal impact
-  owner admits) with a non-empty provenance, and refuses an obstacle with a
-  Hunt–Crossley loss: the loss is heat, and the interface has no heat port.
-  Its two ports `a` and `b` are mechanical force–velocity power ports
-  (`FlowIn`, width 1). Its state `ContactState` is the closure `x` [m] (end
-  `a` towards end `b`) and the last reaction.
+  owner admits) with a non-empty provenance and nonnegative Hunt–Crossley
+  loss. Ports `a` and `b` are mechanical force–velocity power ports
+  (`FlowIn`, width 1). Positive loss adds `heat` after them (`EffortIn`,
+  width 1): positive temperature in [K], negative generated heat rate out
+  [W]. Zero loss retains the original two-port interface and conservative
+  arithmetic. Its state `ContactState` is the closure `x` [m] (end `a`
+  towards end `b`) and the last reaction.
 - A step moves the closure by `dt` times the ends' mean closure rate. The
   reaction is the `OpeningContactStep` secant of the potential between the
   start and end closures, so a lossless contact stores what the ends give
   it: `stored_change` is the potential's change and `numerical_loss` is the
   port work minus it, with `dissipated` zero.
+- With loss, the existing `AffineContactStep` evaluates the original
+  one-point obstacle at openings `-x0`, `-x1` and opening velocity
+  `-(x1-x0)/dt`. The elastic secant is `E`, the damping coefficient is
+  `D = chi E`, and the total non-attractive reaction is
+  `E + max(D (x1-x0)/dt, -E)`. The native response retains the signed loss
+  increment before adding it to `E`, so representable weak heat survives
+  rounding in the total force. Its dissipated power leaves through `heat`;
+  the receipt records `dt` times that power and entropy generation `Q/T`.
+  Stored energy remains the original conservative potential. Numerical
+  loss is settled mechanical work minus its change minus exported heat,
+  including the residual and arithmetic rounding; physical loss is not
+  silently counted as numerical loss. All derived heat, entropy and energy
+  values are checked before writing a candidate or outputs.
 - On the load line the end closure is `x0 + dt (released_a - released_b) -
   S R` with `S = dt (c_aa - c_ab - c_ba + c_bb)`. The reaction is found by
   the bracket bisection of fs-couple's `bracket_reaction`, with the same
   unfused closure arithmetic and the same acceptance tolerance
   `force_absolute_tolerance_n + force_relative_tolerance max(|R|, |law|)`.
+  Negative relative compliance refuses. For nonnegative compliance, the
+  elastic secant and nonnegative loss factor are monotone in final closure,
+  so the reaction at zero trial reaction bounds the same scalar root.
   With zero compliance the step is `propose`'s, to the bit.
 - `ContactSolve` carries the fields and admission of fs-couple's
   `ModalContactConfig`: `max_iterations` in `1..=128`, positive finite force
@@ -309,7 +327,7 @@ depths); iteration budget sweep + typed stall; collocation refinement
 jawari vs clean termination (band-energy JSON); bitwise determinism;
 typed parameter refusals.
 
-`tests/component.rs` (6, `required-features = ["component"]`): a mass on a
+`tests/component.rs` (`required-features = ["component"]`): a mass on a
 Hertz wall in an fs-system graph, against the closed forms
 `p_max = ((alpha+1) m v^2 / (2K))^(1/(alpha+1))` and
 `t_c = 2 I p_max / v` (`I` computed by quadrature in the test), at 400 and
@@ -321,8 +339,17 @@ measured coefficient, not a derived bound), and the observed order is in
 `[1.8, 2.2]`. A linear law settles where its closed-form reaction on a
 load line puts it; the kernel's conformance kit passes apart, entering and
 inside the contact; end inputs join told neighbours and leave the step
-unchanged; refusals by name (shape, loss, budgets, both ceilings, iteration
+unchanged; refusals by name (shape, budgets, both ceilings, iteration
 exhaustion, lengths, NaN, zero `dt`).
+
+Its `component/dissipation.rs` module covers the closed-form linear
+Hunt–Crossley load-line root, weak heat that rounds away in total force,
+capped non-attractive unloading, heat and end-input ordering, bitwise
+zero-loss compatibility, and invalid temperatures or entropy overflow
+refusing before publication. A two-body impact checks momentum,
+restitution and conversion of lost mechanical energy into a connected
+thermal owner's energy; checkpoint replay and cancellation/retry check
+that generated heat is neither lost nor duplicated.
 
 ## No-claim boundaries
 
@@ -351,11 +378,14 @@ exhaustion, lengths, NaN, zero `dt`).
   receipted card is proven PROVENANCE-ONLY (bitwise-identical
   2000-step trajectory, `contact_pack_migration_is_provenance_only`).
 - Obstacles are static (no moving frets/bridges) in v1.
-- `ContactInterface` (feature `component`) is lossless and one-point: it
-  refuses a Hunt–Crossley loss until it has a heat port, does not reach
-  distributed obstacles, and does not shorten a step to the instant of
-  touch. Its tests do not compare it with fs-couple's modal impact owner;
-  that comparison belongs to the drum's kernel graph.
+- `ContactInterface` (feature `component`) remains one-point and does not
+  shorten a step to the instant of touch or reach distributed obstacles.
+  Hunt–Crossley loss is fixed by its obstacle; the heat-port temperature
+  determines entropy generation, without temperature-dependent contact
+  softening, thermal expansion or inferred material validity. Its heat
+  outlet requires a connected thermal owner or an explicit reservoir.
+  Its tests do not compare it with fs-couple's modal impact owner; that
+  comparison belongs to the drum's kernel graph.
 
 ## Shared unilateral power-potential remainder
 
