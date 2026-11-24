@@ -5665,6 +5665,36 @@ inductance, continuing intervals, constant-law equivalence, replay and atomic
 refusal. Parser/source checks and independent reference-equation evaluations
 are reported separately from native execution of these regressions.
 
+On the composition kernel, `tests/nonlinear_winding_enthalpy/graph_caloric.rs`
+declares that trial as a graph: graph.rs's winding and backward-Euler cell,
+the winding built with fs-em's `PlanarWinding::magnetic_at_port_temperatures`
+(feature `component`) from the trial's eight laws and started at 300 K. Both
+sides evaluate the laws at the cell's end temperature. They differ in one
+heat: beside the Joule heat, the module deposits `-P - (T1 s1 - T0 s0)` per
+law triangle and the Component's port returns `-T1 (s1 - s0)`. The Component
+books the difference, `-(P + (T1 - T0) s0)`, as numerical loss.
+
+Held over four steps of 1/4 s, which keep the cell within the laws' 290-360 K:
+- slope 0, no term: each interval against the module within 1.6e-10 K and
+  2.1e-11 A (graph.rs's bounds hold), the end field potential within 1.1e-11
+  Wb/m, the booked loss and the cell gap within 1.5e-10 and 3.3e-10 J;
+- slope 0.004 per kelvin: the kernel's numerical loss, less the owner's
+  dissipation in closed form, is the closed-form term within 1.7e-11 J. The
+  term is -3.1e-3, -2.4e-2 and -5.4e-2 J over intervals 2 to 4 (the first
+  starts with no field). The module's cell energy, less the kernel's, is the
+  summed term (-8.17e-2 J) within 1.8 % of it; the kernel's cell ends 4.0e-2 K
+  warmer. That departure is the cooler cell's feedback: its resistivity and
+  permeability move the module's current by 7.9e-4 A and its end field
+  potential by 1.9e-4 Wb/m;
+- every kernel step passes the System's audits, the winding's entropy audit on
+  every step, and the ledger closes as in graph.rs.
+
+Six planted defects in the Component's magnetic lane each failed this test.
+Five break the receipt's balance and are refused at Propose. The sixth
+deposits the term through the port as the module does, with the balance and
+the entropy kept consistent: every step passes the audits, and the booked
+loss fails its bound.
+
 ## Source gas fields and source walls in the native DG operator
 
 The authored material-modal DG valve and DG flue loaders accept the same

@@ -4,6 +4,8 @@
 mod field;
 #[path = "nonlinear_winding_enthalpy/graph.rs"]
 mod graph;
+#[path = "nonlinear_winding_enthalpy/graph_caloric.rs"]
+mod graph_caloric;
 #[path = "nonlinear_winding_enthalpy/graph_material.rs"]
 mod graph_material;
 #[path = "nonlinear_winding_enthalpy/thermal.rs"]

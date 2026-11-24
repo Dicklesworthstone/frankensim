@@ -6,7 +6,7 @@ use super::*;
 #[path = "heat.rs"]
 mod heat;
 #[path = "../../../fs-em/tests/winding_ohmic/common.rs"]
-mod linear;
+pub(super) mod linear;
 
 use fs_couple::circuit_enthalpy::eddy::thermal::MagneticThermalLaw;
 use fs_em::{
@@ -22,9 +22,9 @@ use fs_material::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
-const VOLTAGE: f64 = 20.0;
-const END_H: f64 = 0.2;
-const HEAT_CAPACITY: f64 = 4.0 * VOLUME;
+pub(super) const VOLTAGE: f64 = 20.0;
+pub(super) const END_H: f64 = 0.2;
+pub(super) const HEAT_CAPACITY: f64 = 4.0 * VOLUME;
 const RHO_SLOPE: f64 = 0.005;
 
 /// The quantity `linear::absolute_point` asks `T` with.
@@ -52,7 +52,7 @@ pub(super) fn absolute(card: &MaterialCard) -> MaterialCard {
     MaterialCard::assemble(card.id().clone(), claims, vec![]).unwrap()
 }
 
-fn card(slope: f64) -> MaterialCard {
+pub(super) fn card(slope: f64) -> MaterialCard {
     if slope == 0.0 {
         absolute(&linear::card(
             1.0 / 18.0,
@@ -71,7 +71,7 @@ fn card(slope: f64) -> MaterialCard {
     }
 }
 
-fn problem(card: &MaterialCard) -> PlanarNonlinearMagnetostatics {
+pub(super) fn problem(card: &MaterialCard) -> PlanarNonlinearMagnetostatics {
     // Reuse the existing manufactured two-square geometry and winding profile.
     let geometry = field::problem(&field::source(false, 18.0), DEPTH);
     let material = linear::bundle_at(
@@ -88,7 +88,10 @@ fn problem(card: &MaterialCard) -> PlanarNonlinearMagnetostatics {
     .unwrap()
 }
 
-fn circuit(problem: &PlanarNonlinearMagnetostatics, initial: f64) -> NonlinearWindingCircuit<'_> {
+pub(super) fn circuit(
+    problem: &PlanarNonlinearMagnetostatics,
+    initial: f64,
+) -> NonlinearWindingCircuit<'_> {
     let profiles = field::profiles(1);
     let conductors = problem
         .materials()
@@ -132,7 +135,7 @@ fn circuit(problem: &PlanarNonlinearMagnetostatics, initial: f64) -> NonlinearWi
     .unwrap()
 }
 
-fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
+pub(super) fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
     ResolvedHeatCapacityCurve::try_new(
         card,
         HeatCapacitySourceQuery {
@@ -150,7 +153,7 @@ fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
     .unwrap()
 }
 
-fn thermal(curve: &ResolvedHeatCapacityCurve) -> DepositionSimulation<'_> {
+pub(super) fn thermal(curve: &ResolvedHeatCapacityCurve) -> DepositionSimulation<'_> {
     DepositionSimulation::new(
         vec![TimedEvent {
             time_s: 0.0,
@@ -196,7 +199,10 @@ fn thermal(curve: &ResolvedHeatCapacityCurve) -> DepositionSimulation<'_> {
     .0
 }
 
-fn laws(card: &MaterialCard, problem: &PlanarNonlinearMagnetostatics) -> Vec<MagneticThermalLaw> {
+pub(super) fn laws(
+    card: &MaterialCard,
+    problem: &PlanarNonlinearMagnetostatics,
+) -> Vec<MagneticThermalLaw> {
     problem
         .materials()
         .iter()
@@ -210,7 +216,7 @@ fn laws(card: &MaterialCard, problem: &PlanarNonlinearMagnetostatics) -> Vec<Mag
         .collect()
 }
 
-fn mu(t: f64, slope: f64) -> f64 {
+pub(super) fn mu(t: f64, slope: f64) -> f64 {
     1.0 + slope * (t - 300.0)
 }
 fn field_u(t: f64, b: f64, slope: f64) -> f64 {

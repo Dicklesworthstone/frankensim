@@ -54,8 +54,8 @@ use super::graph_material::{
 };
 use super::*;
 
-const STEPS: usize = 4;
-const TOLERANCE_J: f64 = 1e-9;
+pub(super) const STEPS: usize = 4;
+pub(super) const TOLERANCE_J: f64 = 1e-9;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -87,14 +87,14 @@ fn card_words(card: &MaterialCard, words: &mut Vec<u64>) {
 /// `T` axis. That is the point `ThermalMaterialPoint::at` writes for a cell
 /// with no liquid fraction axis.
 #[derive(Debug)]
-struct CellConductors {
+pub(super) struct CellConductors {
     card: MaterialCard,
-    context: QueryPoint,
+    pub(super) context: QueryPoint,
     originals: BTreeMap<usize, ResolvedConductorState>,
 }
 
 impl CellConductors {
-    fn new(card: &MaterialCard, circuit: &NonlinearWindingCircuit<'_>) -> Self {
+    pub(super) fn new(card: &MaterialCard, circuit: &NonlinearWindingCircuit<'_>) -> Self {
         Self {
             card: card.clone(),
             context: field::material::point(300.0),
@@ -300,11 +300,11 @@ fn timeline(
     (timeline, state)
 }
 
-/// `winding` from `circuit` beside the cells of `start`, heat port `k`
+/// `winding` from `state` beside the cells of `start`, heat port `k`
 /// routed into `ports[k]`, its source port (if any) held at `drive` volts.
-fn graph(
+pub(super) fn graph(
     winding: PlanarWinding<'static>,
-    circuit: NonlinearWindingCircuit<'static>,
+    state: PlanarWindingState<'static>,
     (start, materials, links): (
         &DepositionSimulation<'static>,
         &[(MaterialId, &'static ResolvedHeatCapacityCurve)],
@@ -315,9 +315,7 @@ fn graph(
 ) -> (System, NodeId, NodeId) {
     let (timeline, cells_start) = timeline(start, materials, links);
     let mut builder = SystemBuilder::new();
-    let electrical = builder
-        .add("winding", winding, PlanarWindingState::new(circuit))
-        .unwrap();
+    let electrical = builder.add("winding", winding, state).unwrap();
     let cells = builder.add("cells", timeline, cells_start).unwrap();
     if let Some(volts) = drive {
         builder
@@ -370,18 +368,18 @@ fn graph(
 /// entropy \[J/K\] its losses generate at their cells and the entropy
 /// conduction among the cells generates.
 #[derive(Debug, Clone)]
-struct Row {
-    kelvin: Vec<f64>,
-    current_a: f64,
-    state: Vec<f64>,
+pub(super) struct Row {
+    pub(super) kelvin: Vec<f64>,
+    pub(super) current_a: f64,
+    pub(super) state: Vec<f64>,
     stored_j: f64,
     joule_j: f64,
-    numerical_j: f64,
+    pub(super) numerical_j: f64,
     supplied_j: f64,
     entropy_j_k: [f64; 2],
 }
 
-fn module_row(
+pub(super) fn module_row(
     kelvin: Vec<f64>,
     circuit: &NonlinearWindingCircuit<'_>,
     step: &NonlinearWindingStep,
@@ -399,7 +397,12 @@ fn module_row(
     }
 }
 
-fn graph_run(system: &mut System, winding: NodeId, cells: NodeId, order: &[CellId]) -> Vec<Row> {
+pub(super) fn graph_run(
+    system: &mut System,
+    winding: NodeId,
+    cells: NodeId,
+    order: &[CellId],
+) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut before = [0.0; 6];
     with_cx(|cx| {
@@ -453,7 +456,7 @@ fn graph_run(system: &mut System, winding: NodeId, cells: NodeId, order: &[CellI
 /// The largest differences over the intervals: temperature \[K\], current
 /// \[A\], state coordinate, the four energies \[J\] and the two entropy
 /// terms \[J/K\].
-fn largest(kernel: &[Row], module: &[Row]) -> [f64; 5] {
+pub(super) fn largest(kernel: &[Row], module: &[Row]) -> [f64; 5] {
     assert_eq!((kernel.len(), module.len()), (STEPS, STEPS));
     let mut most = [0.0_f64; 5];
     for (ours, theirs) in kernel.iter().zip(module) {
@@ -496,7 +499,7 @@ fn largest(kernel: &[Row], module: &[Row]) -> [f64; 5] {
 /// 1e-8 J cell stop.
 const BOUNDS: [f64; 5] = [3e-9, 1.2e-9, 1.5e-10, 3.5e-9, 1.2e-11];
 
-fn hold(most: [f64; 5], what: &str) {
+pub(super) fn hold(most: [f64; 5], what: &str) {
     for (i, (value, bound)) in most.iter().zip(BOUNDS).enumerate() {
         assert!(
             *value <= bound,
@@ -510,7 +513,7 @@ fn hold(most: [f64; 5], what: &str) {
 /// change; the environment sink is idle; the winding and the cells generate
 /// the ledger's entropy, the routes carrying only the interface iteration's
 /// residue.
-fn ledger_closes(system: &System, winding: NodeId, cells: NodeId) {
+pub(super) fn ledger_closes(system: &System, winding: NodeId, cells: NodeId) {
     let ledger = system.ledger();
     assert!(
         ledger.energy_residual_j().abs() <= 1e-8,
@@ -701,7 +704,7 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
         let start = thermal(curve);
         let (mut system, electrical, cells) = graph(
             winding,
-            circuit,
+            PlanarWindingState::new(circuit),
             (&start, &[(MATERIAL, curve)], &[]),
             &[CELL],
             Some(DRIVE),
@@ -788,7 +791,7 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
         let start = two_bodies(curves);
         let (mut system, electrical, cells) = graph(
             winding,
-            circuit,
+            PlanarWindingState::new(circuit),
             (
                 &start,
                 &[(MATERIAL, &curves[0]), (RESISTOR_MATERIAL, &curves[1])],
