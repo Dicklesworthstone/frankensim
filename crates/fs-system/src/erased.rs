@@ -93,6 +93,7 @@ pub(crate) trait Node {
     fn identity_words(&self, words: &mut Vec<u64>);
     fn stored_energy_j(&self, state: &dyn Any) -> Result<f64, OwnerError>;
     fn stored_mass_kg(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError>;
+    fn stored_entropy_j_per_k(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError>;
     fn stored_carried_quantity(
         &self,
         state: &dyn Any,
@@ -203,6 +204,12 @@ macro_rules! mandatory_tier {
         fn stored_mass_kg(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError> {
             self.0
                 .stored_mass_kg(state_of::<C::State>(state)?)
+                .map_err(OwnerError::new)
+        }
+
+        fn stored_entropy_j_per_k(&self, state: &dyn Any) -> Result<Option<f64>, OwnerError> {
+            self.0
+                .stored_entropy_j_per_k(state_of::<C::State>(state)?)
                 .map_err(OwnerError::new)
         }
 

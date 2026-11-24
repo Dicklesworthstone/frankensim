@@ -188,6 +188,39 @@ pub struct MassAccount {
     pub audited_steps: u64,
 }
 
+/// Independently measured entropy account of one component that declares
+/// its stored entropy (`Component::stored_entropy_j_per_k`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EntropyAccount {
+    /// Net entropy entering the component through its ports [J/K].
+    pub port_entropy_in_j_per_k: Account,
+    /// Entropy the receipts of the audited steps say was generated [J/K].
+    pub entropy_generated_j_per_k: Account,
+    /// Change in independently measured stored entropy [J/K].
+    pub stored_change_j_per_k: Account,
+    /// Sum of the accepted defects, port entropy in plus generation minus
+    /// stored change [J/K].
+    pub balance_defect_j_per_k: Account,
+    /// Sum over steps of the absolute value of each step's defect \[J/K\].
+    pub absolute_defect_j_per_k: Account,
+    /// Accepted steps for which the component supplied both measurements.
+    pub audited_steps: u64,
+}
+
+impl EntropyAccount {
+    /// A present account from the words `Ledger::push_words` wrote for it.
+    fn read(words: &mut Words<'_>) -> Option<Self> {
+        Some(Self {
+            port_entropy_in_j_per_k: Account::read(words)?,
+            entropy_generated_j_per_k: Account::read(words)?,
+            stored_change_j_per_k: Account::read(words)?,
+            balance_defect_j_per_k: Account::read(words)?,
+            absolute_defect_j_per_k: Account::read(words)?,
+            audited_steps: words.u64()?,
+        })
+    }
+}
+
 /// Independently measured account for one carried stream coordinate.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CarriedAccount {
@@ -216,6 +249,10 @@ pub struct NodeAccount {
     /// One account per carried coordinate; unavailable measurements remain
     /// `None`. Ordinals are transport coordinates, not inferred species names.
     pub carried: Vec<Option<CarriedAccount>>,
+    /// Measured stored entropy, or unavailable: `None` for a component that
+    /// does not declare it. A partial account has fewer audited steps than
+    /// the ledger.
+    pub entropy: Option<EntropyAccount>,
     /// Net energy that entered through its ports [J].
     pub port_energy_in_j: Account,
     /// Change of stored energy, from receipts [J].
@@ -334,6 +371,22 @@ impl Ledger {
                     }
                 }
             }
+            match &node.entropy {
+                None => words.push(0),
+                Some(entropy) => {
+                    words.push(1);
+                    for account in [
+                        &entropy.port_entropy_in_j_per_k,
+                        &entropy.entropy_generated_j_per_k,
+                        &entropy.stored_change_j_per_k,
+                        &entropy.balance_defect_j_per_k,
+                        &entropy.absolute_defect_j_per_k,
+                    ] {
+                        account.push_words(words);
+                    }
+                    words.push(entropy.audited_steps);
+                }
+            }
             for account in [
                 &node.port_energy_in_j,
                 &node.stored_change_j,
@@ -415,11 +468,17 @@ impl Ledger {
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
+            let entropy = if words.flag()? {
+                Some(EntropyAccount::read(words)?)
+            } else {
+                None
+            };
             nodes.push(NodeAccount {
                 name: shape.name.clone(),
                 has_streams: shape.has_streams,
                 mass,
                 carried,
+                entropy,
                 port_energy_in_j: Account::read(words)?,
                 stored_change_j: Account::read(words)?,
                 dissipated_j: Account::read(words)?,

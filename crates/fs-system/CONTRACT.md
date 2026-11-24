@@ -331,6 +331,19 @@ physics owners below fs-couple can be composed without it.
   `elements::GasVolume` validates its contents and reports `mass_kg`;
   `elements::Restriction` reports zero. Other owners must opt in before the
   kernel can claim their inventory balance.
+- `Component::stored_entropy_j_per_k(state)` (fs-ports) optionally measures
+  stored entropy [J/K] from the typed state; the default `None` means not
+  declared. The driver asks every owner, at the accepted and the candidate
+  state, and when both are declared checks with fs-ports'
+  `audit_entropy_step` that the entropy entering through heat ports
+  (`dt q / T`) plus the receipt's `entropy_generated_j_per_k` equals the
+  measured change, within the fs-ports rounding allowance. The allowance is
+  relative to the reported inventories, so an owner measures its entropy
+  with rounding relative to the value it reports: `C ln(T / T_ref)` taken as
+  `ln` of the quotient is refused near `T_ref` (`tests/entropy_accounting.rs`).
+  No element of this crate declares yet: `HeatCapacity` books no generation
+  and publishes its step-mean temperature, so its measured change would
+  differ from its port entropy at third order in the step.
 - `boundary(port, f)`: the input side of a port prescribed as `f(t0, dt)`.
 - `scheduled_boundary(port, f, event_times_s)`: the same input with immutable,
   finite, strictly increasing absolute event times. The step negotiation
@@ -370,8 +383,8 @@ physics owners below fs-couple can be composed without it.
 - `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
   accepted typed states, interface warm starts and outputs, the exact
   compensated clock, step count, complete ledger and solve configuration.
-  Mass accounts, coverage counts and both words of every account are part
-  of that ledger and rewind with the other accepted accounts.
+  Mass and entropy accounts, coverage counts and both words of every account
+  are part of that ledger and rewind with the other accepted accounts.
   `restore(&checkpoint)` atomically rewinds the originating sealed system;
   the same checkpoint may be reused. A checkpoint from another system is
   refused before anything changes, even when the graphs have the same names
@@ -499,6 +512,7 @@ physics owners below fs-couple can be composed without it.
     the kernel users).
   - The absolute accounts (`NodeAccount::absolute_defect_j`,
     `MassAccount::absolute_defect_kg`, `CarriedAccount::absolute_defect`,
+    `EntropyAccount::absolute_defect_j_per_k`,
     `ConnectionAccount::absolute_energy_defect_j` and
     `absolute_mass_defect_kg`) add the size of each accepted step's defect
     where the signed account adds the defect, at publish only. A refused step
@@ -516,7 +530,12 @@ physics owners below fs-couple can be composed without it.
   transport, and `NodeAccount::mass: Option<MassAccount>` carries measured
   inventory accounting. `MassAccount` has `port_mass_in_kg`,
   `stored_change_kg`, `balance_defect_kg` and `absolute_defect_kg` accounts,
-  plus `audited_steps`.
+  plus `audited_steps`. `NodeAccount::entropy: Option<EntropyAccount>` is
+  the same for a declaring owner's entropy: `port_entropy_in_j_per_k`,
+  `entropy_generated_j_per_k` (the audited steps' receipts),
+  `stored_change_j_per_k`, `balance_defect_j_per_k` and
+  `absolute_defect_j_per_k`, plus `audited_steps`; `None` for an owner that
+  declares nothing.
   `BoundaryAccount::mass_in_kg` records signed mass entering through a stream
   boundary, and `ConnectionAccount::mass_defect_kg` records the accepted
   uncancelled mass at a connection; non-stream rows contribute zero.
@@ -1164,6 +1183,11 @@ that locates an event (a friction interface that cuts the step at a stop,
   when energy balances. Uncancelled connection mass beyond tolerance is
   `InterfaceMass`. Either refusal leaves all states, clock, warm starts and
   ledger rows unchanged, including nodes audited before the failing one.
+- Entropy measurement and the owner entropy audit also precede every
+  publication. A declared change that port entropy and booked generation do
+  not explain is refused by name as `Contract` with
+  `ContractViolation::EntropyBalance`, with the same guarantee: nothing is
+  published.
 - Junction equations use coefficients of exactly plus or minus one, so the
   connection itself adds no rounding. A junction always closes a loop between
   its setter and its members, so its interface energy cancels to the solver
@@ -2373,6 +2397,30 @@ Mass accounting, `tests/mass_accounting.rs`:
   has no mass account or system mass-conservation verdict;
 - a finite balanced transfer of `1e308` kg succeeds with zero mass defect and
   residual even though the unscaled sum of its absolute transfers overflows.
+
+Entropy accounting, `tests/entropy_accounting.rs`, a hot and a cold body
+(backward Euler, entropy `C ln(T / T_ref)`) through a stateless wall, all
+three declaring; every step is asserted taken whole, with no shortening:
+
+- over 200 steps every member has 200 audited steps and an absolute defect
+  below 1e-10 J/K, and its port, generation, change and signed defect
+  accounts agree; each body's booked change is its measured
+  `C ln(T_end / T_start)`; the members' generation sums to the ledger's
+  `entropy_generated_j_per_k`, and the pair's stored change equals it;
+- undeclared, the same pair has no entropy account and a bitwise equal
+  trajectory and generation: the audit moves no state;
+- a hot body whose entropy is skewed by 1e-6 is refused at its first step as
+  `Contract` with `EntropyBalance`, naming it, and nothing is published;
+- a cold body that takes `ln` of the quotient passes its first step from its
+  reference and is refused at the second;
+- a hot body that books 4e-14 J/K too little at every step, inside its
+  allowance, ends with a negative signed defect account and a positive
+  absolute one of about 200 times that;
+- a body whose measurement refuses is named as `Component` in the
+  `Measure` phase, and nothing is published;
+- a checkpoint rewinds the entropy accounts and a replay restores them
+  exactly; a snapshot resumed into a fresh pair carries them, and both
+  continue to the same ledger.
 
 Shared receivers, `tests/elements.rs`: two heaters routed into one body (one
 of them also into a second body and a named sink) deliver the sum of their

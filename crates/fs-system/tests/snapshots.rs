@@ -132,6 +132,10 @@ impl<C: Component> Component for Uncoded<C> {
         self.element.stored_mass_kg(state)
     }
 
+    fn stored_entropy_j_per_k(&self, state: &C::State) -> Result<Option<f64>, C::Error> {
+        self.element.stored_entropy_j_per_k(state)
+    }
+
     fn stored_carried_quantity(
         &self,
         state: &C::State,

@@ -9,9 +9,10 @@ use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::SnapshotV2Error;
 use fs_ports::StableId;
 use fs_ports::component::{
-    CarriedStepAudit, Carrier, Class, Component, ContractViolation, EndOfStep, LoadLine,
-    MassStepAudit, PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
-    STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_carried_step, audit_mass_step, audit_step,
+    CarriedStepAudit, Carrier, Class, Component, ContractViolation, EndOfStep, EntropyStepAudit,
+    LoadLine, MassStepAudit, PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt,
+    STREAM_CARRIED, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_carried_step, audit_entropy_step,
+    audit_mass_step, audit_step,
 };
 
 use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
@@ -2128,6 +2129,7 @@ enum Trial {
 struct StepScratch {
     defects: Vec<f64>,
     mass_audits: Vec<Option<MassStepAudit>>,
+    entropy_audits: Vec<Option<EntropyStepAudit>>,
     members: Vec<PortRef>,
     group_members: Vec<PortRef>,
     connection_rows: Vec<(f64, f64, f64)>,
@@ -3852,6 +3854,41 @@ impl System {
         Ok(Trial::Done { iterations })
     }
 
+    /// The entropy audit of `node`'s candidate. Every owner is asked; one
+    /// that does not declare its entropy answers None at both ends and is
+    /// not audited.
+    fn audit_entropy(
+        &self,
+        node: usize,
+        dt_s: f64,
+    ) -> Result<Option<EntropyStepAudit>, SystemError> {
+        let measure = |state: &dyn Any| {
+            self.nodes[node]
+                .stored_entropy_j_per_k(state)
+                .map_err(|error| SystemError::Component {
+                    node: self.names[node].clone(),
+                    phase: Phase::Measure,
+                    error,
+                })
+        };
+        let old = measure(self.accepted[node].as_ref())?;
+        let new = measure(self.candidate[node].as_ref())?;
+        audit_entropy_step(
+            self.nodes[node].ports(),
+            &self.layouts[node],
+            dt_s,
+            &self.inputs[self.node_inputs(node)],
+            &self.outputs[self.node_outputs(node)],
+            self.receipts[node].entropy_generated_j_per_k,
+            old,
+            new,
+        )
+        .map_err(|violation| SystemError::Contract {
+            node: self.names[node].clone(),
+            violation,
+        })
+    }
+
     /// Audit every candidate and fill the per-port energies.
     // `node` indexes six parallel per-component tables, not only `defects`.
     #[allow(clippy::needless_range_loop)]
@@ -3860,6 +3897,7 @@ impl System {
         dt_s: f64,
         defects: &mut [f64],
         mass_audits: &mut [Option<MassStepAudit>],
+        entropy_audits: &mut [Option<EntropyStepAudit>],
     ) -> Result<(), SystemError> {
         for node in 0..self.nodes.len() {
             let measure = |state: &dyn Any| {
@@ -3929,6 +3967,7 @@ impl System {
                     violation,
                 })?;
             }
+            entropy_audits[node] = self.audit_entropy(node, dt_s)?;
             for carried in 0..self.carried_audits[node].len() {
                 let measure = |state: &dyn Any| self.nodes[node]
                     .stored_carried_quantity(state, carried)
@@ -4038,6 +4077,7 @@ impl System {
         let StepScratch {
             mut defects,
             mut mass_audits,
+            mut entropy_audits,
             mut members,
             mut group_members,
             mut connection_rows,
@@ -4047,7 +4087,9 @@ impl System {
         defects.resize(self.nodes.len(), 0.0);
         mass_audits.clear();
         mass_audits.resize(self.nodes.len(), None);
-        self.audit(dt_s, &mut defects, &mut mass_audits)?;
+        entropy_audits.clear();
+        entropy_audits.resize(self.nodes.len(), None);
+        self.audit(dt_s, &mut defects, &mut mass_audits, &mut entropy_audits)?;
 
         // Connection and boundary rows of this step.
         members.clear();
@@ -4282,6 +4324,25 @@ impl System {
                 mass.absolute_defect_kg.add(audit.balance_defect_kg.abs());
                 mass.audited_steps += 1;
             }
+            if let Some(audit) = &entropy_audits[node] {
+                let entropy = account.entropy.get_or_insert_with(Default::default);
+                entropy
+                    .port_entropy_in_j_per_k
+                    .add(audit.port_entropy_in_j_per_k);
+                entropy
+                    .entropy_generated_j_per_k
+                    .add(audit.entropy_generated_j_per_k);
+                entropy
+                    .stored_change_j_per_k
+                    .add(audit.stored_change_j_per_k);
+                entropy
+                    .balance_defect_j_per_k
+                    .add(audit.balance_defect_j_per_k);
+                entropy
+                    .absolute_defect_j_per_k
+                    .add(audit.balance_defect_j_per_k.abs());
+                entropy.audited_steps += 1;
+            }
             for (account, audit) in account.carried.iter_mut().zip(&self.carried_audits[node]) {
                 if let Some(audit) = audit {
                     let account = account.get_or_insert_with(Default::default);
@@ -4318,6 +4379,7 @@ impl System {
         self.step_scratch = StepScratch {
             defects,
             mass_audits,
+            entropy_audits,
             members,
             group_members,
             connection_rows,
