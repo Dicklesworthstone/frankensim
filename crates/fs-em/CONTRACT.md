@@ -2968,6 +2968,19 @@ kernel `System` holds `'static` members, so a caller that adds this Component
 to a system gives it a problem that lives for `'static`. The state has no
 codec: a system holding it cannot be written to a durable snapshot.
 
+The owner is a type parameter. `PlanarWinding<'m, C, F>` steps a circuit `C`
+that implements the sealed `WindingOwner<'m>`, whose field's controls are `F`.
+Both default to the saturating owner (`NonlinearWindingCircuit`,
+`NonlinearEddyControls`), the only owner so far, so `PlanarWinding<'m>` and
+`PlanarWindingState<'m>` name the same types as before. The owner gives the
+Component:
+- its step and its graph-resistor rebinding;
+- each field cell's heat by triangle;
+- its stored energy and the coordinates that state equality reads.
+
+No field reaches `C` through an associated type, so the Component and its
+state stay covariant in `'m`.
+
 `PlanarWinding::at_port_temperatures` takes laws instead of conductors:
 - a `ConductorLaw` per receiver, asked for the source-bound conductor state
   of each of its triangles at the temperature its port received;

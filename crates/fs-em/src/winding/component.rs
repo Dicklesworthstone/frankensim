@@ -1,8 +1,9 @@
 //! The planar nonlinear winding owner as one Component of the composition
 //! contract (fs-ports).
 //!
-//! [`PlanarWinding`] steps [`NonlinearWindingCircuit`] once per proposal, from
-//! the accepted state, with conductors fixed at construction
+//! [`PlanarWinding`] steps its owner's circuit ([`WindingOwner`]; by default
+//! [`NonlinearWindingCircuit`]) once per proposal, from the accepted state,
+//! with conductors fixed at construction
 //! ([`PlanarWinding::new`]) or given by laws at the temperatures its heat
 //! ports receive ([`PlanarWinding::at_port_temperatures`]). Ports, in order:
 //! `source<p>` for each original external input `p` of the native graph
@@ -52,6 +53,7 @@ use super::nonlinear::{
 };
 use super::ohmic::WindingConductor;
 use crate::planar::eddy::EddyConductor;
+use crate::planar::eddy::nonlinear::NonlinearEddyControls;
 
 /// One thermal receiver: the dissipating elements whose heat leaves through
 /// one heat port.
@@ -198,26 +200,183 @@ const fn invalid(what: &'static str) -> PlanarWindingError {
     PlanarWindingError::Invalid { what }
 }
 
+/// The winding owner whose accepted circuit a [`PlanarWinding`] steps:
+/// [`NonlinearWindingCircuit`], the saturating field. Sealed: the owners are
+/// fs-em's.
+pub trait WindingOwner<'m>: owner::Sealed<'m> {}
+
+impl<'m> WindingOwner<'m> for NonlinearWindingCircuit<'m> {}
+
+mod owner {
+    use super::{
+        CircuitGraph, EddyConductor, GraphResistorMaterial, NonlinearWindingCircuit,
+        NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep, WindingConductor,
+        fmt,
+    };
+    use crate::planar::eddy::nonlinear::{NonlinearEddyControls, NonlinearEddyStep};
+
+    /// What the Component asks of its owner: one step from an accepted
+    /// circuit, the rebinding of its graph resistors, and the accepted
+    /// coordinates that its stored energy and state equality read.
+    pub trait Sealed<'m>: Clone + Sized {
+        /// The field's controls inside [`NonlinearWindingControls`].
+        type FieldControls: Copy + fmt::Debug;
+        /// The field's record inside [`NonlinearWindingStep`].
+        type FieldStep;
+
+        /// The owner's `step_to_candidate` to `target_s`, in parts.
+        fn step(
+            &self,
+            target_s: f64,
+            core: Vec<EddyConductor>,
+            windings: Vec<WindingConductor>,
+            inputs: &[f64],
+            controls: NonlinearWindingControls<Self::FieldControls>,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<(Self, NonlinearWindingStep<Self::FieldStep>), NonlinearWindingError>;
+
+        /// The owner's `with_graph_resistors`.
+        fn rebind_graph_resistors(
+            &self,
+            sources: Vec<GraphResistorMaterial>,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<Self, NonlinearWindingError>;
+
+        /// The mesh triangle and heat \[J\] of each field cell of a step, in
+        /// the owner's order.
+        fn field_heat(step: &Self::FieldStep) -> Vec<(usize, f64)>;
+
+        /// Circuit, field and end-mode storage, summed as the owner sums
+        /// `stored_before_j`.
+        fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError>;
+
+        fn graph(&self) -> &CircuitGraph;
+        fn time_s(&self) -> f64;
+        fn state(&self) -> &[f64];
+        fn currents_a(&self) -> &[f64];
+        fn flux_linkages_wb(&self) -> &[f64];
+        fn resistance_ohm(&self) -> &[f64];
+        fn conductors(&self) -> &[WindingConductor];
+        /// The field's core conductors.
+        fn core_conductors(&self) -> &[EddyConductor];
+        /// The address of the field's problem, which equal states share.
+        fn problem(&self) -> *const ();
+        fn potential_wb_m(&self) -> &[f64];
+        fn field_energy_j(&self) -> f64;
+        fn field_time_s(&self) -> f64;
+    }
+
+    impl<'m> Sealed<'m> for NonlinearWindingCircuit<'m> {
+        type FieldControls = NonlinearEddyControls;
+        type FieldStep = NonlinearEddyStep;
+
+        fn step(
+            &self,
+            target_s: f64,
+            core: Vec<EddyConductor>,
+            windings: Vec<WindingConductor>,
+            inputs: &[f64],
+            controls: NonlinearWindingControls,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<(Self, NonlinearWindingStep), NonlinearWindingError> {
+            Ok(self
+                .step_to_candidate(target_s, core, windings, inputs, controls, cancelled)?
+                .into_parts())
+        }
+
+        fn rebind_graph_resistors(
+            &self,
+            sources: Vec<GraphResistorMaterial>,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<Self, NonlinearWindingError> {
+            self.with_graph_resistors(sources, cancelled)
+        }
+
+        fn field_heat(step: &NonlinearEddyStep) -> Vec<(usize, f64)> {
+            step.cells
+                .iter()
+                .map(|cell| (cell.source.triangle, cell.heat_j))
+                .collect()
+        }
+
+        fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError> {
+            let end = self
+                .end_inductance()
+                .stored_energy_j(self.currents_a())
+                .map_err(NonlinearWindingError::from)?;
+            Ok(self.dae().system.hamiltonian(self.state()) + self.field().energy_j() + end)
+        }
+
+        fn graph(&self) -> &CircuitGraph {
+            Self::graph(self)
+        }
+
+        fn time_s(&self) -> f64 {
+            Self::time_s(self)
+        }
+
+        fn state(&self) -> &[f64] {
+            Self::state(self)
+        }
+
+        fn currents_a(&self) -> &[f64] {
+            Self::currents_a(self)
+        }
+
+        fn flux_linkages_wb(&self) -> &[f64] {
+            Self::flux_linkages_wb(self)
+        }
+
+        fn resistance_ohm(&self) -> &[f64] {
+            Self::resistance_ohm(self)
+        }
+
+        fn conductors(&self) -> &[WindingConductor] {
+            Self::conductors(self)
+        }
+
+        fn core_conductors(&self) -> &[EddyConductor] {
+            self.field().conductors()
+        }
+
+        fn problem(&self) -> *const () {
+            core::ptr::from_ref(self.field().problem()).cast()
+        }
+
+        fn potential_wb_m(&self) -> &[f64] {
+            self.field().potential_wb_m()
+        }
+
+        fn field_energy_j(&self) -> f64 {
+            self.field().energy_j()
+        }
+
+        fn field_time_s(&self) -> f64 {
+            self.field().time_s()
+        }
+    }
+}
+
 /// The accepted state: the owner's circuit, which carries the field history.
 #[derive(Clone)]
-pub struct PlanarWindingState<'m>(NonlinearWindingCircuit<'m>);
+pub struct PlanarWindingState<'m, C = NonlinearWindingCircuit<'m>>(C, PhantomData<&'m ()>);
 
-impl<'m> PlanarWindingState<'m> {
+impl<'m, C: WindingOwner<'m>> PlanarWindingState<'m, C> {
     /// The state of an accepted circuit.
     #[must_use]
-    pub const fn new(circuit: NonlinearWindingCircuit<'m>) -> Self {
-        Self(circuit)
+    pub const fn new(circuit: C) -> Self {
+        Self(circuit, PhantomData)
     }
 
     /// The accepted circuit.
     #[must_use]
-    pub const fn circuit(&self) -> &NonlinearWindingCircuit<'m> {
+    pub const fn circuit(&self) -> &C {
         &self.0
     }
 
     /// The accepted circuit, by value.
     #[must_use]
-    pub fn into_circuit(self) -> NonlinearWindingCircuit<'m> {
+    pub fn into_circuit(self) -> C {
         self.0
     }
 }
@@ -231,25 +390,25 @@ fn same_bits(a: &[f64], b: &[f64]) -> bool {
 /// state, currents, linkages, resistances, conductors and field potential,
 /// energy and clock. The graph is compared by value: a step with resistor
 /// laws builds a new one.
-impl PartialEq for PlanarWindingState<'_> {
+impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
         a.graph() == b.graph()
-            && core::ptr::eq(a.field().problem(), b.field().problem())
+            && core::ptr::eq(a.problem(), b.problem())
             && a.time_s().to_bits() == b.time_s().to_bits()
             && same_bits(a.state(), b.state())
             && same_bits(a.currents_a(), b.currents_a())
             && same_bits(a.flux_linkages_wb(), b.flux_linkages_wb())
             && same_bits(a.resistance_ohm(), b.resistance_ohm())
             && a.conductors() == b.conductors()
-            && a.field().conductors() == b.field().conductors()
-            && same_bits(a.field().potential_wb_m(), b.field().potential_wb_m())
-            && a.field().energy_j().to_bits() == b.field().energy_j().to_bits()
-            && a.field().time_s().to_bits() == b.field().time_s().to_bits()
+            && a.core_conductors() == b.core_conductors()
+            && same_bits(a.potential_wb_m(), b.potential_wb_m())
+            && a.field_energy_j().to_bits() == b.field_energy_j().to_bits()
+            && a.field_time_s().to_bits() == b.field_time_s().to_bits()
     }
 }
 
-impl fmt::Debug for PlanarWindingState<'_> {
+impl<'m, C: WindingOwner<'m>> fmt::Debug for PlanarWindingState<'m, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlanarWindingState")
             .field("time_s", &self.0.time_s())
@@ -261,11 +420,7 @@ impl fmt::Debug for PlanarWindingState<'_> {
 
 /// A step's circuit, when resistor laws rebuilt it, and its core and
 /// stranded conductors.
-type Supplied<'m> = (
-    Option<NonlinearWindingCircuit<'m>>,
-    Vec<EddyConductor>,
-    Vec<WindingConductor>,
-);
+type Supplied<C> = (Option<C>, Vec<EddyConductor>, Vec<WindingConductor>);
 
 /// Where a step's conductors and graph resistances come from.
 enum Supply {
@@ -287,22 +442,26 @@ enum Supply {
     },
 }
 
-/// The planar nonlinear winding owner behind the composition contract's
-/// source and heat ports. See the module documentation.
-pub struct PlanarWinding<'m> {
+/// The planar winding owner behind the composition contract's source and
+/// heat ports. See the module documentation. `C` is the owner's circuit and
+/// `F` its field's controls; both default to the saturating owner. Neither
+/// is reached through an associated type in a field, so the Component stays
+/// covariant in `'m`, as the saturating Component was.
+pub struct PlanarWinding<'m, C = NonlinearWindingCircuit<'m>, F = NonlinearEddyControls> {
     graph: CircuitGraph,
     sources: usize,
     supply: Supply,
     receivers: Vec<HeatReceiver>,
     triangle_port: BTreeMap<usize, usize>,
     resistor_port: BTreeMap<usize, usize>,
-    controls: NonlinearWindingControls,
+    controls: NonlinearWindingControls<F>,
     energy_tolerance_j: f64,
     ports: Vec<PortSpec>,
     problem: PhantomData<&'m ()>,
+    owner: PhantomData<fn() -> C>,
 }
 
-impl fmt::Debug for PlanarWinding<'_> {
+impl<C, F> fmt::Debug for PlanarWinding<'_, C, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlanarWinding")
             .field("sources", &self.sources)
@@ -323,7 +482,11 @@ fn place(
     Ok(())
 }
 
-impl<'m> PlanarWinding<'m> {
+impl<'m, C, F> PlanarWinding<'m, C, F>
+where
+    C: WindingOwner<'m, FieldControls = F>,
+    F: Copy + fmt::Debug,
+{
     /// The Component of `circuit`'s topology, stepped with these conductors
     /// and controls, its heat leaving through `receivers`.
     ///
@@ -333,11 +496,11 @@ impl<'m> PlanarWinding<'m> {
     /// triangle or a graph resistor is mapped to no receiver or to two; a
     /// receiver names an element that does not dissipate.
     pub fn new(
-        circuit: &NonlinearWindingCircuit<'m>,
+        circuit: &C,
         core_conductors: Vec<EddyConductor>,
         winding_conductors: Vec<WindingConductor>,
         receivers: Vec<HeatReceiver>,
-        controls: NonlinearWindingControls,
+        controls: NonlinearWindingControls<F>,
         energy_tolerance_j: f64,
     ) -> Result<Self, PlanarWindingError> {
         let triangles: Vec<usize> = core_conductors
@@ -372,19 +535,18 @@ impl<'m> PlanarWinding<'m> {
     /// receivers; some graph resistors have laws and others do not, or a law
     /// names a branch that is not a resistor.
     pub fn at_port_temperatures(
-        circuit: &NonlinearWindingCircuit<'m>,
+        circuit: &C,
         conductor_laws: Vec<Arc<dyn ConductorLaw>>,
         resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
         receivers: Vec<HeatReceiver>,
-        controls: NonlinearWindingControls,
+        controls: NonlinearWindingControls<F>,
         energy_tolerance_j: f64,
     ) -> Result<Self, PlanarWindingError> {
         if conductor_laws.len() != receivers.len() {
             return Err(invalid("one conductor law per heat receiver required"));
         }
         let cells: BTreeMap<usize, Option<u32>> = circuit
-            .field()
-            .conductors()
+            .core_conductors()
             .iter()
             .map(|c| (c.triangle, Some(c.region)))
             .chain(circuit.conductors().iter().map(|c| (c.triangle, None)))
@@ -406,11 +568,11 @@ impl<'m> PlanarWinding<'m> {
     }
 
     fn build(
-        circuit: &NonlinearWindingCircuit<'m>,
+        circuit: &C,
         triangles: &[usize],
         supply: Supply,
         receivers: Vec<HeatReceiver>,
-        controls: NonlinearWindingControls,
+        controls: NonlinearWindingControls<F>,
         energy_tolerance_j: f64,
     ) -> Result<Self, PlanarWindingError> {
         if !(energy_tolerance_j.is_finite() && energy_tolerance_j > 0.0) {
@@ -511,6 +673,7 @@ impl<'m> PlanarWinding<'m> {
             energy_tolerance_j,
             ports,
             problem: PhantomData,
+            owner: PhantomData,
         })
     }
 
@@ -518,7 +681,7 @@ impl<'m> PlanarWinding<'m> {
     /// step, its ports and the state's topology are this Component's.
     fn admit(
         &self,
-        old: &PlanarWindingState<'m>,
+        old: &PlanarWindingState<'m, C>,
         dt_s: f64,
         inputs: &[f64],
         outputs: usize,
@@ -556,10 +719,10 @@ impl<'m> PlanarWinding<'m> {
     /// stranded conductors of a step whose heat ports received `kelvin`.
     fn supply_at(
         &self,
-        old: &NonlinearWindingCircuit<'m>,
+        old: &C,
         kelvin: &[f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Supplied<'m>, PlanarWindingError> {
+    ) -> Result<Supplied<C>, PlanarWindingError> {
         let (cells, conductors, resistors) = match &self.supply {
             Supply::Fixed { core, windings } => return Ok((None, core.clone(), windings.clone())),
             Supply::Laws {
@@ -611,15 +774,17 @@ impl<'m> PlanarWinding<'m> {
                 })?;
             sources.push(GraphResistorMaterial { branch, conductor });
         }
-        let driven = old.with_graph_resistors(sources, cancelled)?;
+        let driven = old.rebind_graph_resistors(sources, cancelled)?;
         Ok((Some(driven), core, windings))
     }
 
     /// The heat of each receiver over a step [J], from the owner's records
-    /// of its stranded cells, core cells and graph resistors, in that order.
+    /// of its stranded cells, field cells (`field`) and graph resistors, in
+    /// that order.
     fn heat_by_receiver(
         &self,
-        step: &NonlinearWindingStep,
+        step: &NonlinearWindingStep<C::FieldStep>,
+        field: &[(usize, f64)],
     ) -> Result<Vec<f64>, PlanarWindingError> {
         let mut heat = vec![0.0; self.receivers.len()];
         let triangle = |t: usize| {
@@ -631,8 +796,8 @@ impl<'m> PlanarWinding<'m> {
         for cell in &step.cells {
             heat[triangle(cell.source.triangle)?] += cell.heat_j;
         }
-        for cell in &step.field.cells {
-            heat[triangle(cell.source.triangle)?] += cell.heat_j;
+        for &(cell, heat_j) in field {
+            heat[triangle(cell)?] += heat_j;
         }
         for resistor in &step.graph_resistors {
             let port = self
@@ -657,14 +822,10 @@ impl<'m> PlanarWinding<'m> {
 
 /// Circuit, field and end-mode storage of an accepted state, summed as the
 /// owner sums `stored_before_j`.
-fn energy(state: &PlanarWindingState<'_>) -> Result<f64, PlanarWindingError> {
-    let circuit = &state.0;
-    let end = circuit
-        .end_inductance()
-        .stored_energy_j(circuit.currents_a())
-        .map_err(NonlinearWindingError::from)?;
-    let total =
-        circuit.dae().system.hamiltonian(circuit.state()) + circuit.field().energy_j() + end;
+fn energy<'m, C: WindingOwner<'m>>(
+    state: &PlanarWindingState<'m, C>,
+) -> Result<f64, PlanarWindingError> {
+    let total = state.0.stored_energy_j()?;
     if !total.is_finite() {
         return Err(invalid("the winding's stored energy is not finite"));
     }
@@ -717,8 +878,12 @@ fn branch_words(element: Branch, words: &mut Vec<u64>) {
     }
 }
 
-impl<'m> Component for PlanarWinding<'m> {
-    type State = PlanarWindingState<'m>;
+impl<'m, C, F> Component for PlanarWinding<'m, C, F>
+where
+    C: WindingOwner<'m, FieldControls = F>,
+    F: Copy + fmt::Debug,
+{
+    type State = PlanarWindingState<'m, C>;
     type Error = PlanarWindingError;
 
     /// The graph; the fixed conductors' triangles, regions, resistivity bits
@@ -809,16 +974,19 @@ impl<'m> Component for PlanarWinding<'m> {
         EndOfStep::Untold
     }
 
-    fn stored_energy_j(&self, state: &PlanarWindingState<'m>) -> Result<f64, PlanarWindingError> {
+    fn stored_energy_j(
+        &self,
+        state: &PlanarWindingState<'m, C>,
+    ) -> Result<f64, PlanarWindingError> {
         energy(state)
     }
 
     fn propose(
         &self,
-        old: &PlanarWindingState<'m>,
+        old: &PlanarWindingState<'m, C>,
         dt_s: f64,
         inputs: &[f64],
-        new: &mut PlanarWindingState<'m>,
+        new: &mut PlanarWindingState<'m, C>,
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, PlanarWindingError> {
@@ -827,7 +995,7 @@ impl<'m> Component for PlanarWinding<'m> {
         let (sources, heats) = (self.sources, self.receivers.len());
         let (driven, core, windings) =
             self.supply_at(&old.0, &inputs[sources..], &mut || cx.checkpoint().is_err())?;
-        let candidate = driven.as_ref().unwrap_or(&old.0).step_to_candidate(
+        let (circuit, step) = driven.as_ref().unwrap_or(&old.0).step(
             target_s,
             core,
             windings,
@@ -835,14 +1003,15 @@ impl<'m> Component for PlanarWinding<'m> {
             self.controls,
             &mut || cx.checkpoint().is_err(),
         )?;
-        let step = candidate.step();
+        let step = &step;
         if step.parameter_work_j != 0.0 || step.mechanical_work_j != 0.0 {
             return Err(PlanarWindingError::UnaccountedWork {
                 parameter_j: step.parameter_work_j,
                 mechanical_j: step.mechanical_work_j,
             });
         }
-        let heat = self.heat_by_receiver(step)?;
+        let field = C::field_heat(&step.field);
+        let heat = self.heat_by_receiver(step, &field)?;
         let heat_j: f64 = heat.iter().sum();
         let entropy: f64 = heat
             .iter()
@@ -855,11 +1024,11 @@ impl<'m> Component for PlanarWinding<'m> {
             + step.supplied_work_j.abs()
             + step.numerical_dissipation_j.abs()
             + heat_j;
-        let elements = step.cells.len() + step.field.cells.len() + step.graph_resistors.len();
+        let elements = step.cells.len() + field.len() + step.graph_resistors.len();
         let rounding = arithmetic_rounding_floor(
             64_usize
                 .saturating_add(8_usize.saturating_mul(old.0.state().len()))
-                .saturating_add(8_usize.saturating_mul(old.0.field().potential_wb_m().len()))
+                .saturating_add(8_usize.saturating_mul(old.0.potential_wb_m().len()))
                 .saturating_add(8_usize.saturating_mul(elements + sources + heats)),
             magnitude,
         );
@@ -901,7 +1070,7 @@ impl<'m> Component for PlanarWinding<'m> {
             residual: report.residual_norm,
             tolerance,
         };
-        *new = PlanarWindingState(candidate.into_parts().0);
+        *new = PlanarWindingState::new(circuit);
         Ok(Proposal::Step(receipt))
     }
 }
