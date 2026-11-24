@@ -15,7 +15,6 @@
 import type { FieldArrays } from "./fieldViz.ts";
 import type { StripLoadsState } from "./forceOverlay.ts";
 import type { YawDecomposition } from "./lateralView.ts";
-import type { LessonRun } from "./lessons.ts";
 import type { DesignPoint, SweepRunner } from "./sweeps.ts";
 
 export interface InstrumentSample {
@@ -361,45 +360,70 @@ const ADAPTERS: readonly AdapterDef[] = [
     key: "lessons",
     label: "Lessons",
     async load(content) {
-      const ls = await import("./lessons.ts");
-      const catalog = ls.curatedLessons();
-      let li = 0;
-      let run: LessonRun | null = null;
-      return {
-        update() {
-          if (!run) {
-            const lesson = catalog[li];
-            if (lesson === undefined) {
-              setLines(content, ["no lessons"]);
-              return;
-            }
-            const started = ls.startLesson(lesson);
-            if (!started.ok) {
-              setLines(content, [`${lesson.id}: refused ${started.refusal.code}`]);
-              li = (li + 1) % catalog.length;
-              return;
-            }
-            run = started.value;
-          }
-          const check = ls.validateLesson(run.lesson);
-          setLines(content, [
-            `lesson ${li + 1}/${catalog.length}: ${run.lesson.title}`,
-            `step ${Math.min(run.stepIndex + 1, run.lesson.steps.length)} / ${
-              run.lesson.steps.length
-            }${run.done ? " · done" : ""}`,
-            `declared claims ${run.lesson.declaredClaims.length} · validate ${
-              check.ok ? "ok" : check.refusal.code
-            }`,
-          ]);
-          const next = ls.advanceLesson(run);
-          if (next.ok) {
-            run = next.value;
-          } else {
-            li = (li + 1) % catalog.length;
-            run = null;
-          }
-        },
-      };
+      const { curatedLessons, validateLesson } = await import("./lessons.ts");
+      const catalog = curatedLessons();
+      const guide = document.createElement("p");
+      guide.textContent =
+        "Reading guide · static teaching material. The named views and references describe each lesson. Reading a step does not run an experiment or produce evidence.";
+
+      const lessonChoice = document.createElement("select");
+      const stepChoice = document.createElement("select");
+      function labeledChoice(title: string, choice: HTMLSelectElement): HTMLLabelElement {
+        const label = document.createElement("label");
+        label.style.display = "block";
+        choice.style.maxWidth = "100%";
+        // Native select navigation must not also steer the aircraft.
+        choice.addEventListener("keydown", (event) => event.stopPropagation());
+        label.append(title, document.createElement("br"), choice);
+        return label;
+      }
+      const notes = document.createElement("div");
+      notes.setAttribute("aria-live", "polite");
+      notes.setAttribute("aria-atomic", "true");
+      for (const lesson of catalog) {
+        lessonChoice.add(new Option(lesson.title, lesson.id));
+      }
+      content.replaceChildren(guide, labeledChoice("Lesson", lessonChoice),
+        labeledChoice("Step", stepChoice), notes);
+
+      function showStep(): void {
+        const lesson = catalog[lessonChoice.selectedIndex];
+        const step = lesson?.steps[stepChoice.selectedIndex];
+        if (lesson === undefined || step === undefined) return;
+        const views = document.createElement("p");
+        views.textContent = `Named views: ${step.overlays.join(", ")}`;
+        const statements = document.createElement("ul");
+        for (const claim of step.voicedClaims) {
+          const item = document.createElement("li");
+          item.textContent = claim;
+          statements.appendChild(item);
+        }
+        notes.replaceChildren(views);
+        if (statements.childElementCount > 0) notes.appendChild(statements);
+      }
+      function selectLesson(): void {
+        stepChoice.replaceChildren();
+        const lesson = catalog[lessonChoice.selectedIndex];
+        if (lesson === undefined) {
+          stepChoice.disabled = true;
+          setLines(notes, ["No lessons available."]);
+          return;
+        }
+        const check = validateLesson(lesson);
+        stepChoice.disabled = !check.ok;
+        if (!check.ok) {
+          setLines(notes, [check.refusal.message]);
+          return;
+        }
+        lesson.steps.forEach((step, index) => {
+          stepChoice.add(new Option(`${index + 1} of ${lesson.steps.length} · ${step.title}`));
+        });
+        showStep();
+      }
+      lessonChoice.addEventListener("change", selectLesson);
+      stepChoice.addEventListener("change", showStep);
+      selectLesson();
+      return { update() {} };
     },
   },
   {

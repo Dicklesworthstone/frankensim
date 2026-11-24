@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Wright Flyer lesson reader browser test</title>
+<pre id="result">Running</pre>
+<script type="module">
+  // Open /test/lessonReader.html on the app's Vite dev server.
+  import { createInstrumentsPanel } from "../src/instruments.ts";
+  import { curatedLessons } from "../src/lessons.ts";
+
+  const result = document.getElementById("result");
+  function check(condition, message) {
+    if (!condition) throw new Error(message);
+  }
+  let frame;
+  const panel = createInstrumentsPanel(document.body, { onFrame(cb) { frame = cb; } });
+  try {
+    const checkbox = [...document.querySelectorAll(".wf-inst-row")]
+      .find(label => label.textContent === "Lessons").querySelector("input");
+    checkbox.click();
+    // The adapter is loaded lazily. Read it before any simulation frames arrive.
+    await new Promise((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (document.querySelectorAll(".wf-inst-tile select").length === 2) {
+          clearTimeout(timeout);
+          observer.disconnect();
+          resolve();
+        }
+      });
+      const timeout = setTimeout(() => { observer.disconnect(); reject(new Error("reader never loaded")); }, 5000);
+      observer.observe(document.body, { subtree: true, childList: true });
+    });
+    const tile = document.querySelector(".wf-inst-tile");
+    const [lessons, steps] = tile.querySelectorAll("select");
+    check(lessons.labels[0]?.textContent.startsWith("Lesson"), "lesson selector needs a label");
+    check(steps.labels[0]?.textContent.startsWith("Step"), "step selector needs a label");
+    check(tile.textContent.includes("static teaching material"), "teaching source must be visible");
+    const notes = tile.querySelector('[aria-live="polite"]');
+    const catalog = curatedLessons();
+    for (const [i, lesson] of catalog.entries()) {
+      lessons.selectedIndex = i;
+      lessons.dispatchEvent(new Event("change"));
+      check(steps.selectedIndex === 0, "lesson selection starts at the first step");
+      check(steps.options.length === lesson.steps.length, "all steps must be selectable");
+      for (let j = lesson.steps.length - 1; j >= 0; j--) {
+        steps.selectedIndex = j;
+        steps.dispatchEvent(new Event("change"));
+        const step = lesson.steps[j];
+        check(steps.selectedOptions[0].text.includes(step.title), "step title missing");
+        check(step.overlays.every(view => notes.textContent.includes(view)), "named view missing");
+        check(JSON.stringify([...notes.querySelectorAll("li")].map(item => item.textContent)) ===
+          JSON.stringify(step.voicedClaims), "step must display exactly its authored claims");
+        const before = notes.textContent;
+        for (let tick = 1; tick <= 100; tick++) frame({ tick });
+        check(steps.selectedIndex === j && notes.textContent === before, "a flight tick changed the reading position");
+      }
+    }
+    result.textContent = "PASS";
+  } catch (error) {
+    result.textContent = "FAIL: " + error.message;
+  } finally {
+    panel.dispose();
+  }
+</script>
