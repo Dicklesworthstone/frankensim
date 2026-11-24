@@ -1,4 +1,4 @@
-//! G0: a smooth feedback solve stays inside its owner's source-law domain.
+//! G0: smooth feedback retracts unsupported or residual-growing Newton updates.
 
 #![allow(clippy::float_cmp)]
 
@@ -272,4 +272,216 @@ fn shortening_at_a_newton_iterate_still_restarts_the_physical_step() {
     let state = system.state::<[f64; 2]>(node).unwrap();
     assert_eq!(state[0], 1.0);
     assert!((state[1] - reference()).abs() < 2.0e-13);
+}
+
+/// The fixed point is x = ln(target). From zero with target=100, the
+/// first full Newton update is x=99: finite and in-domain, but far worse.
+/// An optional second coordinate closes y=x^2 and starts with zero scale
+/// and zero linear correction, despite opening under the first update.
+struct Exponential {
+    ports: [PortSpec; 2],
+    target: f64,
+}
+
+impl Exponential {
+    fn new(target: f64, auxiliary: bool) -> Self {
+        let width = NonZeroUsize::new(if auxiliary { 2 } else { 1 }).unwrap();
+        Self {
+            ports: [
+                PortSpec::signal_in(StableId::new("input").unwrap(), width),
+                PortSpec::signal_out(StableId::new("output").unwrap(), width),
+            ],
+            target,
+        }
+    }
+}
+
+impl Component for Exponential {
+    type State = [f64; 2];
+    type Error = OutsideSupport;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::Smooth
+    }
+
+    fn stored_energy_j(&self, _: &Self::State) -> Result<f64, Self::Error> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        old: &Self::State,
+        _: f64,
+        inputs: &[f64],
+        new: &mut Self::State,
+        outputs: &mut [f64],
+        _: &Cx<'_>,
+    ) -> Result<Proposal, Self::Error> {
+        let x = inputs[0];
+        let exponential = x.exp();
+        if !x.is_finite() || !exponential.is_finite() {
+            return Err(OutsideSupport(x));
+        }
+        *new = [old[0] + 1.0, x];
+        outputs[0] = x + self.target - exponential;
+        if outputs.len() == 2 {
+            outputs[1] = x * x;
+        }
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+impl PortTangent for Exponential {
+    fn jvp(
+        &self,
+        _: &Self::State,
+        _: f64,
+        inputs: &[f64],
+        direction: &[f64],
+        outputs: &mut [f64],
+        _: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        outputs[0] = (1.0 - inputs[0].exp()) * direction[0];
+        if outputs.len() == 2 {
+            outputs[1] = 2.0 * inputs[0] * direction[0];
+        }
+        Ok(())
+    }
+
+    fn vjp(
+        &self,
+        _: &Self::State,
+        _: f64,
+        inputs: &[f64],
+        output_bar: &[f64],
+        input_bar: &mut [f64],
+        _: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        input_bar[0] = (1.0 - inputs[0].exp()) * output_bar[0];
+        if input_bar.len() == 2 {
+            input_bar[0] += 2.0 * inputs[0] * output_bar[1];
+            input_bar[1] = 0.0;
+        }
+        Ok(())
+    }
+}
+
+fn exponential_feedback(
+    tangent: bool,
+    auxiliary: bool,
+    target: f64,
+) -> (System, NodeId, PortRef, PortRef) {
+    let mut builder = SystemBuilder::new();
+    let law = Exponential::new(target, auxiliary);
+    let node = if tangent {
+        builder.add_with_tangent("law", law, [0.0, 0.0])
+    } else {
+        builder.add("law", law, [0.0, 0.0])
+    }
+    .unwrap();
+    let input = builder.port(node, "input").unwrap();
+    let output = builder.port(node, "output").unwrap();
+    builder.signal(output, input).unwrap();
+    let mut system = builder.seal().unwrap();
+    let width = if auxiliary { 2 } else { 1 };
+    assert!(system.guess(input, &[0.0, 0.0][..width]));
+    (system, node, input, output)
+}
+
+#[test]
+fn finite_but_growing_newton_updates_are_damped_to_the_analytic_root() {
+    // Ordinary full Newton updates go 0 -> 99 -> 98 -> 97 ... and
+    // cannot reach ln(100) within the default 25-update budget.
+    assert!((99.0_f64.exp() - 100.0).is_finite());
+    assert!(99.0_f64.exp() - 100.0 > 1.0e40);
+    for tangent in [true, false] {
+        let (mut system, node, input, output) = exponential_feedback(tangent, false, 100.0);
+        let report = with_cx(|cx| system.step(0.125, cx)).expect("damped exponential root");
+        let state = system.state::<[f64; 2]>(node).unwrap();
+        assert_eq!(state[0], 1.0);
+        assert!((state[1] - 100.0_f64.ln()).abs() < 2.0e-12, "{state:?}");
+        assert_eq!(system.last_input(input)[0], state[1]);
+        assert!((system.last_output(output)[0] - state[1]).abs() < 2.0e-11);
+        assert!(report.iterations <= SolveConfig::default().max_iterations);
+        assert_eq!((system.steps(), system.time_s()), (1, 0.125));
+        assert_eq!(system.ledger().energy_residual_j(), 0.0);
+    }
+}
+
+#[test]
+fn residual_backtracking_exhaustion_is_atomic_and_replays_after_recovery() {
+    for budget in [0, 1] {
+        let (mut system, node, input, output) = exponential_feedback(true, false, 100.0);
+        system.set_config(SolveConfig {
+            max_iterations: budget,
+            ..SolveConfig::default()
+        });
+        let before = observed(&system, node, input, output);
+        let ledger = system.ledger().clone();
+        let error = with_cx(|cx| system.step(0.125, cx)).expect_err("insufficient search budget");
+        let SystemError::NotConverged {
+            iterations,
+            worst,
+            residual,
+            ..
+        } = error
+        else {
+            panic!("successful proposals must exhaust as NotConverged");
+        };
+        assert_eq!(iterations, budget);
+        assert_eq!(worst, "law.input");
+        if budget == 0 {
+            assert_eq!(residual, -99.0);
+        } else {
+            assert!(residual > 1.0e40);
+        }
+        assert_eq!(observed(&system, node, input, output), before);
+        assert_eq!(system.ledger(), &ledger);
+        assert_eq!((system.steps(), system.time_s()), (0, 0.0));
+
+        system.set_config(SolveConfig::default());
+        let checkpoint = system.checkpoint().unwrap();
+        let first = with_cx(|cx| system.step(0.125, cx)).unwrap();
+        let after = observed(&system, node, input, output);
+        let ledger = system.ledger().clone();
+        system.restore(&checkpoint).unwrap();
+        let replay = with_cx(|cx| system.step(0.125, cx)).unwrap();
+        assert_eq!(first.iterations, replay.iterations);
+        assert_eq!(observed(&system, node, input, output), after);
+        assert_eq!(system.ledger(), &ledger);
+    }
+}
+
+#[test]
+fn nonlinear_coupling_can_open_a_wire_with_no_preceding_scale() {
+    for tangent in [true, false] {
+        let (mut system, node, input, output) = exponential_feedback(tangent, true, 100.0);
+        with_cx(|cx| system.step(0.125, cx)).expect("zero-scale curved output must not stall");
+        let x = 100.0_f64.ln();
+        let actual = system.last_input(input);
+        assert!((actual[0] - x).abs() < 2.0e-12, "{actual:?}");
+        assert!((actual[1] - x * x).abs() < 1.0e-10, "{actual:?}");
+        for (input, output) in actual.iter().zip(system.last_output(output)) {
+            assert!((input - output).abs() < 1.0e-10);
+        }
+        assert_eq!(system.state::<[f64; 2]>(node).unwrap()[0], 1.0);
+    }
+}
+
+#[test]
+fn an_exact_smooth_fixed_point_needs_no_iteration_budget() {
+    let (mut system, node, input, output) = exponential_feedback(true, false, 1.0);
+    system.set_config(SolveConfig {
+        max_iterations: 0,
+        ..SolveConfig::default()
+    });
+    let report = with_cx(|cx| system.step(0.125, cx)).unwrap();
+    assert_eq!(report.iterations, 0);
+    assert_eq!(*system.state::<[f64; 2]>(node).unwrap(), [1.0, 0.0]);
+    assert_eq!(system.last_input(input), &[0.0]);
+    assert_eq!(system.last_output(output), &[0.0]);
 }

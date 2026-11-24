@@ -172,7 +172,7 @@ pub struct SolveConfig {
     pub relative_tolerance: f64,
     /// Interface residual always allowed, in the unknown's own unit.
     pub absolute_tolerance: f64,
-    /// Scalar bracket probes, Newton updates and domain backtracks allowed per
+    /// Scalar bracket probes, Newton updates and backtracks allowed per
     /// block and trial.
     pub max_iterations: u32,
     /// Times one step may be shortened at a component's request.
@@ -3219,7 +3219,33 @@ impl System {
         }
     }
 
-    /// Halve a refused numerical update toward the valid iterate it came
+    /// Size of a trial's residual, using scales and rounding floors frozen
+    /// at the preceding valid iterate. A trial cannot hide growth by making
+    /// its own outputs large. This is only a search merit: the ordinary
+    /// residual and conservation checks still decide acceptance.
+    fn update_merit(&self, unknowns: &[usize], scale: &[f64], floor: &[f64]) -> f64 {
+        let mut merit = 0.0_f64;
+        for (row, &index) in unknowns.iter().enumerate() {
+            let target = self.drivers[index].value(&self.outputs, &self.boundary_values);
+            let residual = self.inputs[index] - target;
+            if !residual.is_finite() {
+                return f64::INFINITY;
+            }
+            // A zero row with a zero Newton correction has no scale yet.
+            // Curvature can open it on this update; it participates in the
+            // next iterate's merit and in every ordinary residual check.
+            if scale[row] > 0.0 {
+                let size = (residual.abs() - floor[row]).max(0.0) / scale[row];
+                if !size.is_finite() {
+                    return f64::INFINITY;
+                }
+                merit = merit.max(size);
+            }
+        }
+        merit
+    }
+
+    /// Halve a refused or growing update toward the valid iterate it came
     /// from. Each retry consumes the same block budget as a Newton update;
     /// stop before rounding turns the retry into no update at all.
     fn backtrack_update(
@@ -3359,6 +3385,7 @@ impl System {
         // Zero until the block has a valid iterate and a Newton correction.
         // `residual` holds that correction until the next proposals succeed.
         let mut update_fraction = 0.0;
+        let mut preceding_merit = 0.0;
         // A trial starts from the values the last step ended with. For the
         // component on a load line those are the flows of the last step, not
         // the released flows of this one, and whatever it answers there is
@@ -3375,6 +3402,7 @@ impl System {
         }
         loop {
             let mut first_refusal = None;
+            let mut merit_exhausted = false;
             loop {
                 cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
                 let mut refused = None;
@@ -3404,26 +3432,31 @@ impl System {
                         }
                     }
                 }
-                let Some(error) = refused else {
-                    break;
-                };
-                if !can_backtrack
+                if let Some(error) = refused {
+                    if !can_backtrack
+                        || update_fraction == 0.0
+                        || !matches!(
+                            error,
+                            SystemError::Component {
+                                phase: Phase::Propose,
+                                ..
+                            }
+                        )
+                    {
+                        return Err(error);
+                    }
+                    // An owner's first typed refusal stays authoritative if
+                    // this ray exhausts its budget, even if a later proposal
+                    // succeeds but fails the residual-decrease test.
+                    if first_refusal.is_none() {
+                        first_refusal = Some(error);
+                    }
+                } else if !can_backtrack
                     || update_fraction == 0.0
-                    || !matches!(
-                        error,
-                        SystemError::Component {
-                            phase: Phase::Propose,
-                            ..
-                        }
-                    )
+                    || self.update_merit(unknowns, scale, floor)
+                        <= (1.0 - 1.0e-4 * update_fraction) * preceding_merit
                 {
-                    return Err(error);
-                }
-                // Keep the full update's typed refusal if no shorter update
-                // works. Cancellation and invalid shortening requests take
-                // the immediate error path above, never this recovery path.
-                if first_refusal.is_none() {
-                    first_refusal = Some(error);
+                    break;
                 }
                 if !self.backtrack_update(
                     unknowns,
@@ -3432,7 +3465,14 @@ impl System {
                     &mut update_fraction,
                     &mut iterations,
                 ) {
-                    return Err(first_refusal.expect("a refused update started backtracking"));
+                    if let Some(error) = first_refusal {
+                        return Err(error);
+                    }
+                    // Every proposal succeeded. Measure its actual residual
+                    // below before reporting exhaustion, not the correction
+                    // still held in `residual` here.
+                    merit_exhausted = true;
+                    break;
                 }
             }
             // The scale of an unknown is the size of the terms its driver
@@ -3544,6 +3584,9 @@ impl System {
                         worst = (row, excess);
                     }
                 }
+            }
+            if merit_exhausted {
+                return Err(self.not_converged(nodes, unknowns, residual, iterations, worst.0));
             }
             // A residual that passes its own test can still be large for
             // what reads it. An effort is a gauge quantity: a temperature
@@ -3746,10 +3789,25 @@ impl System {
                     nodes: self.names_of(nodes),
                 });
             }
-            for (row, &index) in unknowns.iter().enumerate() {
-                if can_backtrack {
+            if can_backtrack {
+                // These scratch arrays are free after the residual/carried
+                // checks. Freeze a unit-aware metric before changing inputs.
+                // The correction gives an initially zero wire a scale when
+                // its linearization moves it; no arbitrary unit floor is
+                // introduced. Rounding floors are frozen on the same ray.
+                for (row, &index) in unknowns.iter().enumerate() {
+                    scale[row] = scale[row].max(residual[row].abs());
+                    floor[row] = self.config.absolute_tolerance
+                        + ROUNDING_UNITS * f64::EPSILON * scale[row]
+                        + ROUNDING_UNITS * f64::EPSILON * rounding[row];
+                    if self.input_is_energy_rate[index] {
+                        floor[row] += ROUNDING_UNITS * f64::EPSILON * power_scale;
+                    }
                     update_start[row] = self.inputs[index];
                 }
+                preceding_merit = self.update_merit(unknowns, scale, floor);
+            }
+            for (row, &index) in unknowns.iter().enumerate() {
                 self.inputs[index] += residual[row];
             }
             update_fraction = 1.0;

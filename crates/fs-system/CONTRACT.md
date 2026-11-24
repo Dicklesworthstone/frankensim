@@ -39,30 +39,44 @@ coating/half-cell resistance or separate surface storage.
 `tests/radiation.rs` contains independent Stefan-Boltzmann, reversal,
 equilibrium, tangent and finite-body energy-balance checks.
 
-## Recovery from a refused smooth Newton update
+## Recovery and residual decrease in smooth Newton blocks
 
 For a feedback block containing a `Smooth` component and otherwise only
-`Smooth` or `ExactLinear` components, the driver may retract a Newton update
-that a component refuses. It retains the preceding valid input vector and
-halves the same correction until every proposal succeeds or the existing
-`max_iterations` budget is exhausted. Every retry counts against that budget;
-rounding that would return every input to its starting value stops the search.
-An exhausted search returns the full update's original typed owner error.
+`Smooth` or `ExactLinear` components, the driver retracts a generated
+Newton update when an owner refuses it or its successful proposals fail
+a sufficient residual-decrease test. It retains the preceding valid inputs
+and halves the same correction. Each retry consumes the existing
+`max_iterations` budget; rounding that returns every input to its starting
+value stops the search.
 
-This recovery starts only after a valid initial proposal. Starting-input
+The search merit is the maximum residual above a frozen absolute/roundoff
+allowance, normalized by scales from the preceding valid iterate and the
+full Newton correction. These remain fixed on that correction's search,
+so a growing trial cannot disguise its error with its own large outputs.
+The accepted trial satisfies merit <= (1 - 1e-4 * fraction) * prior_merit.
+A coordinate with zero prior scale and zero correction is omitted only
+from this merit: curvature can open it, and the ordinary residual checks
+still judge it immediately.
+
+If that search exhausts after any typed owner refusal, its first such
+refusal is returned. If all proposals succeeded, `NotConverged` reports
+the actual last trial residual. This does not publish candidate state.
+An exact fixed point still requires no iteration budget.
+
+Recovery starts only after valid initial proposals. Initial-input
 refusals, cancellation, tangent failures, malformed shortening requests and
-`Proposal::Shorten` keep their existing meanings. Load-line blocks and scalar
-bracket plans retain their own policies. A successful full Newton update keeps
-its original arithmetic. The ordinary residual, conservation, admission and
-atomic publication checks still decide whether a candidate can be accepted.
+`Proposal::Shorten` retain their meanings. Load-line blocks and scalar
+bracket plans retain their policies. Residual propagation, conservation,
+admission and atomic publication still govern physical-step acceptance.
+Sufficient decrease does not establish global convergence or uniqueness.
 
-The extra numeric workspace is allocated at sealing. A recovered owner error
-still uses the existing boxed error representation, so recovery from a typed
-refusal is not claimed to allocate nothing. This is domain recovery, not a
-residual-decrease line search or a global convergence guarantee.
-`tests/smooth_support.rs` compares a positive-domain logarithmic feedback root
-with independent bisection and exercises declared/differenced tangents,
-budget exhaustion, rollback, checkpoint replay, cancellation and shortening.
+Numeric workspace is allocated at sealing; the merit reuses existing
+scale/floor scratch. A recovered typed error still uses the existing boxed
+error representation, so that failure path is not claimed allocation-free.
+`tests/smooth_support.rs` compares logarithmic and exponential feedback
+with independent analytic/bracketed references, with declared/differenced
+tangents, finite overshoot, initially zero nonlinear coordinates, budget
+exhaustion, rollback/replay, cancellation and shortening.
 
 ## Scalar monotone feedback
 
