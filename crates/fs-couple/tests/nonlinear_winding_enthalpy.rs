@@ -8,6 +8,8 @@ mod graph;
 mod graph_caloric;
 #[path = "nonlinear_winding_enthalpy/graph_material.rs"]
 mod graph_material;
+#[path = "nonlinear_winding_enthalpy/graph_solid.rs"]
+mod graph_solid;
 #[path = "winding_graph/kernel.rs"]
 mod kernel;
 #[path = "nonlinear_winding_enthalpy/thermal.rs"]

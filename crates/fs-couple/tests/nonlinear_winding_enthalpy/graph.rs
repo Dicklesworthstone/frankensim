@@ -46,66 +46,11 @@ use super::graph_material::{
     DESTINATIONS, LINKS, RESISTOR_CELL, RESISTOR_MATERIAL, bindings, graph_card, native, resistors,
     solve_controls, two_bodies,
 };
-use super::kernel::{graph, ledger_closes, with_cx};
+use super::kernel::{CellConductors, card_words, graph, ledger_closes, with_cx};
 use super::*;
 
 pub(super) const STEPS: usize = 4;
 pub(super) const TOLERANCE_J: f64 = 1e-9;
-
-fn card_words(card: &MaterialCard, words: &mut Vec<u64>) {
-    for chunk in card.content_hash().0.chunks(8) {
-        words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-    }
-}
-
-/// A cell's winding conductors at the cell's temperature, as the module
-/// re-resolves them: each triangle's conductor in the construction circuit,
-/// rebound to its material at the cell's query point with `kelvin` on the
-/// `T` axis. That is the point `ThermalMaterialPoint::at` writes for a cell
-/// with no liquid fraction axis.
-#[derive(Debug)]
-pub(super) struct CellConductors {
-    card: MaterialCard,
-    pub(super) context: QueryPoint,
-    originals: BTreeMap<usize, ResolvedConductorState>,
-}
-
-impl CellConductors {
-    pub(super) fn new(card: &MaterialCard, circuit: &NonlinearWindingCircuit<'_>) -> Self {
-        Self {
-            card: card.clone(),
-            context: field::material::point(300.0),
-            originals: circuit
-                .conductors()
-                .iter()
-                .map(|source| (source.triangle, source.conductor.clone()))
-                .collect(),
-        }
-    }
-}
-
-impl ConductorLaw for CellConductors {
-    fn conductor(&self, triangle: usize, kelvin: f64) -> Result<ResolvedConductorState, String> {
-        let original = self
-            .originals
-            .get(&triangle)
-            .ok_or_else(|| format!("triangle {triangle} has no conductor"))?;
-        let point = self
-            .context
-            .clone()
-            .with("T", kelvin)
-            .map_err(|e| format!("{e:?}"))?;
-        let material = original
-            .material()
-            .at_query_point(&self.card, &point)
-            .map_err(|e| format!("{e:?}"))?;
-        original.with_material(material).map_err(|e| e.to_string())
-    }
-
-    fn identity_words(&self, words: &mut Vec<u64>) {
-        card_words(&self.card, words);
-    }
-}
 
 /// A material graph resistor at its cell's temperature, as the module
 /// resolves it: the cell's card at its query point with `kelvin` on the `T`
@@ -464,7 +409,12 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
         let problem: &'static PlanarNonlinearMagnetostatics =
             Box::leak(Box::new(field::problem(card, DEPTH)));
         let circuit = field::single(problem, card, SERIES_OHM, 0.0, DRIVE);
-        let law = Arc::new(CellConductors::new(card, &circuit));
+        let law = Arc::new(CellConductors::new(
+            card,
+            field::material::point(300.0),
+            circuit.field().conductors(),
+            circuit.conductors(),
+        ));
 
         // The module, its conductors checked against the law at its own end
         // temperature, bit for bit.
@@ -491,7 +441,7 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
             Some(|_| DRIVE),
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL]);
-        ledger_closes(&system, electrical, cells);
+        ledger_closes(&system, electrical, cells, 0.0);
 
         // Graph 1: each interval of the kernel against the bisection fixed
         // point from the kernel's own start of interval.
@@ -546,7 +496,12 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
             Box::leak(Box::new(field::problem(&cards[0], DEPTH)));
         let circuit = native(problem, &cards[0]);
         let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
-        let law = Arc::new(CellConductors::new(&cards[0], &circuit));
+        let law = Arc::new(CellConductors::new(
+            &cards[0],
+            field::material::point(300.0),
+            circuit.field().conductors(),
+            circuit.conductors(),
+        ));
         let resistor = Arc::new(BodyResistor::new(&cards[1], &key, &resistors()[0]));
 
         let module = material_module((cards, curves), &circuit, &law, &resistor, &key);
@@ -586,7 +541,7 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
             None,
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL, RESISTOR_CELL]);
-        ledger_closes(&system, electrical, cells);
+        ledger_closes(&system, electrical, cells, 0.0);
         let most = largest(&kernel, &module);
         println!(
             "graph 3 (alpha {alpha}): kernel against module: {:.1e} K, {:.1e} A, state {:.1e}, {:.1e} J, {:.1e} J/K; end {:.6} K, {:.6} K",

@@ -5843,6 +5843,38 @@ reported work allowances and deterministic retry after cancellation/refusal.
 The model retains the original fixed geometry, source domains and first-order
 coupling; it does not infer thermal evolution of nonlinear hysteresis fits.
 
+On the composition kernel, `tests/nonlinear_winding_enthalpy/graph_solid.rs`
+declares the first of those fixtures, four cells with no link, as a graph:
+fs-em's `PlanarWinding` (feature `component`), built with
+`at_port_temperatures` on the fixture's solid-region circuit, beside the
+backward-Euler `ThermalTimeline` of `tests/winding_graph/kernel.rs`:
+- one heat port per cell receives that cell's four conducting triangles;
+- every triangle's conductor follows the card at the temperature its port
+  receives, rebound as the module rebinds it, so that each region's current
+  profile follows its conductivity;
+- cell 0's authored 6 W source enters through the timeline's environment
+  port.
+
+Held over two steps of 0.1 s at 1 V, in this order:
+- the ledger: the environment sink gives the heater's authored 6 W times
+  the run's 0.2 s, not a reading of the run; the supplied work, less the
+  circuit's stored change and numerical loss, plus that heat, equals the
+  cells' stored change within 1e-8 J;
+- each interval against `closed()`, the P1 quadrature that the module
+  tests' `check_receipt` calls, on the kernel's own states: the profiles,
+  the resistance, the region currents, the terminal voltage and the flux
+  change hold, and each cell's stored change is its closed-form heat, with
+  the heater's on cell 0, within 4.874e-14 J;
+- each interval against the module, once the law has given the module's
+  own conductors at each of its end temperatures, bit for bit: within
+  7.390e-13 K, 4.633e-13 A, 5.347e-14 Wb/m and 7.994e-15 1/m².
+The bounds sit about fifty times above.
+
+Ten planted defects in the graph, its fixture, `closed()` and the shared
+kernel each failed this test before its module comparison. The three in
+`closed()` and the two in the heater also failed both module tests that
+call `check_receipt`.
+
 
 
 ## Source-dependent directional histories on sustained mixed trajectories

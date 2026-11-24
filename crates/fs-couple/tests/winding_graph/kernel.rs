@@ -1,13 +1,20 @@
-//! The composition-kernel plumbing of the winding graphs: the cells as one
-//! backward-Euler timeline whose cell ports return end-of-step temperatures,
-//! a `PlanarWinding` beside them with one heat route per heat port, and the
-//! closure of the kernel's ledger. Each includer's root supplies `DT`.
+//! The composition-kernel plumbing of the winding graphs: the law that
+//! rebinds each triangle's conductor to its cell's card at its port's
+//! temperature, the cells as one backward-Euler timeline whose cell ports
+//! return end-of-step temperatures, a `PlanarWinding` beside them with one
+//! heat route per heat port, and the closure of the kernel's ledger. Each
+//! includer's root supplies `DT`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_em::winding::component::{PlanarWinding, PlanarWindingState, WindingOwner};
+use fs_em::planar::eddy::EddyConductor;
+use fs_em::winding::component::{ConductorLaw, PlanarWinding, PlanarWindingState, WindingOwner};
+use fs_em::winding::ohmic::WindingConductor;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{MaterialCard, QueryPoint};
+use fs_material::conductor::ResolvedConductorState;
 use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_system::{NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
@@ -19,6 +26,70 @@ use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, Condu
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, MaterialId, ThermalLaw};
 
 use super::DT;
+
+pub(super) fn card_words(card: &MaterialCard, words: &mut Vec<u64>) {
+    for chunk in card.content_hash().0.chunks(8) {
+        words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
+}
+
+/// Each triangle's conductor in the construction circuit, core and winding
+/// alike, rebound to its material at the cell's query point with `kelvin` on
+/// the `T` axis, as the modules rebind them. That is the point
+/// `ThermalMaterialPoint::at` writes for a cell with no liquid fraction axis.
+#[derive(Debug)]
+pub(super) struct CellConductors {
+    card: MaterialCard,
+    context: QueryPoint,
+    originals: BTreeMap<usize, ResolvedConductorState>,
+}
+
+impl CellConductors {
+    pub(super) fn new(
+        card: &MaterialCard,
+        context: QueryPoint,
+        core: &[EddyConductor],
+        windings: &[WindingConductor],
+    ) -> Self {
+        let core = core
+            .iter()
+            .map(|source| (source.triangle, &source.conductor));
+        let windings = windings
+            .iter()
+            .map(|source| (source.triangle, &source.conductor));
+        Self {
+            card: card.clone(),
+            context,
+            originals: core
+                .chain(windings)
+                .map(|(triangle, conductor)| (triangle, conductor.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl ConductorLaw for CellConductors {
+    fn conductor(&self, triangle: usize, kelvin: f64) -> Result<ResolvedConductorState, String> {
+        let original = self
+            .originals
+            .get(&triangle)
+            .ok_or_else(|| format!("triangle {triangle} has no conductor"))?;
+        let point = self
+            .context
+            .clone()
+            .with("T", kelvin)
+            .map_err(|e| format!("{e:?}"))?;
+        let material = original
+            .material()
+            .at_query_point(&self.card, &point)
+            .map_err(|e| format!("{e:?}"))?;
+        original.with_material(material).map_err(|e| e.to_string())
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        card_words(&self.card, words);
+    }
+}
 
 pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -203,11 +274,12 @@ where
 }
 
 /// The kernel's ledger closes: the energy the source supplied, less the
-/// circuit's stored change and numerical dissipation, is the cells' stored
-/// change; the environment sink is idle; the winding and the cells generate
-/// the ledger's entropy, the routes carrying only the interface iteration's
-/// residue.
-pub(super) fn ledger_closes(system: &System, winding: NodeId, cells: NodeId) {
+/// circuit's stored change and numerical dissipation, plus `environment_j`,
+/// the heat the cells' authored boundaries take in, is the cells' stored
+/// change; the environment sink gives exactly `environment_j`; the winding
+/// and the cells generate the ledger's entropy, the routes carrying only the
+/// interface iteration's residue.
+pub(super) fn ledger_closes(system: &System, winding: NodeId, cells: NodeId, environment_j: f64) {
     let ledger = system.ledger();
     assert!(
         ledger.energy_residual_j().abs() <= 1e-8,
@@ -215,14 +287,19 @@ pub(super) fn ledger_closes(system: &System, winding: NodeId, cells: NodeId) {
         ledger.energy_residual_j()
     );
     assert_eq!(ledger.sinks.len(), 1);
-    assert!(ledger.sinks[0].heat_j.value().abs() <= 1e-12);
+    let sink = ledger.sinks[0].heat_j.value();
+    assert!(
+        (sink + environment_j).abs() <= 1e-12 * (1.0 + environment_j.abs()),
+        "{sink} vs {environment_j}"
+    );
     let node = &ledger.nodes[winding.index()];
     let supplied: f64 = ledger
         .boundaries
         .iter()
         .map(|b| b.energy_in_j.value())
         .sum();
-    let left = supplied - node.stored_change_j.value() - node.numerical_loss_j.value();
+    let left =
+        supplied - node.stored_change_j.value() - node.numerical_loss_j.value() + environment_j;
     let stored = ledger.nodes[cells.index()].stored_change_j.value();
     assert!(
         left > 1.0 && (stored - left).abs() <= 1e-8,

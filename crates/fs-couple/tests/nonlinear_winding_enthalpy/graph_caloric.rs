@@ -24,8 +24,8 @@ use fs_em::winding::component::{
 };
 use fs_em::winding::nonlinear::NonlinearWindingCircuit;
 
-use super::graph::{CellConductors, Row, STEPS, TOLERANCE_J, graph_run, hold, largest, module_row};
-use super::kernel::{graph, ledger_closes};
+use super::graph::{Row, STEPS, TOLERANCE_J, graph_run, hold, largest, module_row};
+use super::kernel::{CellConductors, graph, ledger_closes};
 use super::magnetic_thermal::{self as trial, END_H, HEAT_CAPACITY, VOLTAGE, linear, mu};
 use super::*;
 
@@ -126,8 +126,8 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
         let problem: &'static PlanarNonlinearMagnetostatics =
             Box::leak(Box::new(trial::problem(card)));
         let circuit = trial::circuit(problem, 0.0);
-        let mut law = CellConductors::new(card, &circuit);
-        law.context = linear::absolute_point(300.0);
+        let (core, windings) = (circuit.field().conductors(), circuit.conductors());
+        let law = CellConductors::new(card, linear::absolute_point(300.0), core, windings);
         let law = Arc::new(law);
         let (module, potential) = caloric_module(card, curve, problem, &circuit, &law);
 
@@ -163,7 +163,7 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
             Some(|_| VOLTAGE),
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL]);
-        ledger_closes(&system, electrical, cells);
+        ledger_closes(&system, electrical, cells, 0.0);
         let entropy = system.ledger().nodes[electrical.index()]
             .entropy
             .clone()

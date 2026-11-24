@@ -2,6 +2,7 @@
 //! circuit/field/caloric histories. All material values are synthetic fixtures.
 
 use super::*;
+use std::collections::BTreeMap;
 #[path = "../../../fs-em/tests/winding_ohmic/common.rs"]
 mod linear;
 
@@ -29,17 +30,17 @@ use fs_material::{
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_rep_mesh::{Metric2, TriComplex2};
 
-const STEP: f64 = 0.1;
-const VOLTAGE: f64 = 1.0;
+pub(super) const STEP: f64 = 0.1;
+pub(super) const VOLTAGE: f64 = 1.0;
 const END_H: f64 = 0.05;
 const CELL_VOLUME: f64 = 0.5 * DEPTH;
-const HEAT_CAPACITY: f64 = 4.0 * CELL_VOLUME;
-const HEATER_W: f64 = 6.0;
-const SOLID_MATERIAL: MaterialId = MaterialId(30);
-const CELL_IDS: [CellId; 4] = [CellId(20), CellId(21), CellId(22), CellId(23)];
+pub(super) const HEAT_CAPACITY: f64 = 4.0 * CELL_VOLUME;
+pub(super) const HEATER_W: f64 = 6.0;
+pub(super) const SOLID_MATERIAL: MaterialId = MaterialId(30);
+pub(super) const CELL_IDS: [CellId; 4] = [CellId(20), CellId(21), CellId(22), CellId(23)];
 const TURN_COUNTS: [f64; 2] = [6.0, -6.0];
 
-fn config() -> CircuitEnthalpySolve {
+pub(super) fn config() -> CircuitEnthalpySolve {
     CircuitEnthalpySolve {
         maximum_cells: 4,
         ..controls()
@@ -114,7 +115,7 @@ fn mesh() -> TriComplex2 {
     .unwrap()
 }
 
-fn receiver(mesh: &TriComplex2, triangle: usize) -> Option<usize> {
+pub(super) fn receiver(mesh: &TriComplex2, triangle: usize) -> Option<usize> {
     let center: [f64; 2] = [0, 1].map(|axis| {
         mesh.faces()[triangle]
             .iter()
@@ -131,7 +132,7 @@ fn receiver(mesh: &TriComplex2, triangle: usize) -> Option<usize> {
     Some(2 * section + usize::from(center[1] > 0.5))
 }
 
-fn circuit(problem: &PlanarNonlinearMagnetostatics) -> NonlinearWindingCircuit<'_> {
+pub(super) fn circuit(problem: &PlanarNonlinearMagnetostatics) -> NonlinearWindingCircuit<'_> {
     let mesh = problem.mesh();
     let boundary: Vec<_> = mesh
         .vertices()
@@ -217,23 +218,38 @@ fn circuit(problem: &PlanarNonlinearMagnetostatics) -> NonlinearWindingCircuit<'
     .unwrap()
 }
 
-fn with_system<R>(
+/// `value` for the rest of the run, as the declared graphs hold their parts.
+fn leak<T>(value: T) -> &'static T {
+    Box::leak(Box::new(value))
+}
+
+/// The fixture's parts, leaked so that a declared graph holds them as the
+/// module tests do.
+pub(super) struct Parts {
+    pub(super) card: &'static MaterialCard,
+    pub(super) context: &'static QueryPoint,
+    pub(super) curve: &'static ResolvedHeatCapacityCurve,
+    pub(super) thermal: DepositionSimulation<'static>,
+    pub(super) problem: &'static PlanarNonlinearMagnetostatics,
+    pub(super) cells: &'static [MaterialCell<'static>],
+    pub(super) regions: Vec<MagneticRegion>,
+    pub(super) links: Vec<ConductionLink>,
+}
+
+/// The card at `slope`, its query point, its caloric curve and the four
+/// cells over them.
+fn material(
     slope: f64,
-    linked: bool,
-    run: impl FnOnce(
-        &MaterialCard,
-        DepositionSimulation<'_>,
-        &PlanarNonlinearMagnetostatics,
-        &[MaterialCell<'_>],
-        &[MagneticRegion],
-        &[ConductionLink],
-    ) -> R,
-) -> R {
-    let card = source(slope);
-    let air = source(0.0);
-    let context = linear::absolute_point(300.0);
+) -> (
+    &'static MaterialCard,
+    &'static QueryPoint,
+    &'static ResolvedHeatCapacityCurve,
+    &'static [MaterialCell<'static>; 4],
+) {
+    let card = leak(source(slope));
+    let context = leak(linear::absolute_point(300.0));
     let curve = ResolvedHeatCapacityCurve::try_new(
-        &card,
+        card,
         HeatCapacitySourceQuery {
             heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
             density: &PropertyKey::new("density", Density::DIMS),
@@ -247,19 +263,28 @@ fn with_system<R>(
         1e-9,
     )
     .unwrap();
-    let conductivity = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
-    let cells = CELL_IDS.map(|cell| MaterialCell {
+    let curve = leak(curve);
+    let conductivity = leak(PropertyKey::new(
+        "thermal_conductivity",
+        THERMAL_CONDUCTIVITY_DIMS,
+    ));
+    let cells = leak(CELL_IDS.map(|cell| MaterialCell {
         cell,
         material_id: SOLID_MATERIAL,
         curve: curve.curve(),
         point: ThermalMaterialPoint {
-            material: &card,
-            context: &context,
+            material: card,
+            context,
             temperature_axis: "T",
             liquid_fraction_axis: None,
         },
-        conductivity: Some((&conductivity, MaterialPropertySelection::SingleClaimOnly)),
-    });
+        conductivity: Some((conductivity, MaterialPropertySelection::SingleClaimOnly)),
+    }));
+    (card, context, curve, cells)
+}
+
+pub(super) fn parts(slope: f64, linked: bool) -> Parts {
+    let (card, context, curve, cells) = material(slope);
     let mut events: Vec<_> = CELL_IDS
         .into_iter()
         .enumerate()
@@ -327,6 +352,26 @@ fn with_system<R>(
     )
     .unwrap()
     .0;
+    let (regions, problem) = magnetics(card, context);
+    Parts {
+        card,
+        context,
+        curve,
+        thermal,
+        problem,
+        cells,
+        regions,
+        links,
+    }
+}
+
+/// Each triangle's magnetic region, a cell's or fixed, and the field problem
+/// over the fixture's card and the air.
+fn magnetics(
+    card: &MaterialCard,
+    context: &QueryPoint,
+) -> (Vec<MagneticRegion>, &'static PlanarNonlinearMagnetostatics) {
+    let air = source(0.0);
     let mesh = mesh();
     let regions: Vec<_> = (0..mesh.faces().len())
         .map(|triangle| match receiver(&mesh, triangle) {
@@ -341,11 +386,11 @@ fn with_system<R>(
         .map(|triangle| {
             IsotropicMagneticMaterial::Linear(linear::bundle_at(
                 if receiver(&mesh, triangle).is_some() {
-                    &card
+                    card
                 } else {
                     &air
                 },
-                &context,
+                context,
                 ElectricalPropertyBasis::Resistivity,
             ))
         })
@@ -353,22 +398,72 @@ fn with_system<R>(
     let problem =
         PlanarNonlinearMagnetostatics::new(mesh, materials, linear::limits(), &mut || false)
             .unwrap();
-    run(&card, thermal, &problem, &cells, &regions, &links)
+    (regions, leak(problem))
 }
 
-fn temperatures(thermal: &DepositionSimulation<'_>) -> [f64; 4] {
+fn with_system<R>(
+    slope: f64,
+    linked: bool,
+    run: impl FnOnce(
+        &MaterialCard,
+        DepositionSimulation<'_>,
+        &PlanarNonlinearMagnetostatics,
+        &[MaterialCell<'_>],
+        &[MagneticRegion],
+        &[ConductionLink],
+    ) -> R,
+) -> R {
+    let parts = parts(slope, linked);
+    run(
+        parts.card,
+        parts.thermal,
+        parts.problem,
+        parts.cells,
+        &parts.regions,
+        &parts.links,
+    )
+}
+
+pub(super) fn temperatures(thermal: &DepositionSimulation<'_>) -> [f64; 4] {
     CELL_IDS.map(|cell| thermal.temperature_k(cell).unwrap())
+}
+
+/// One conducting triangle of [`closed`]: its cell, volume \[m³\],
+/// conductivity \[S/m\], vertex electric field \[V/m\], heat \[J\] and
+/// profile \[1/m²\].
+#[derive(Clone, Copy)]
+struct ClosedTriangle {
+    cell: usize,
+    volume: f64,
+    sigma: f64,
+    electric: [f64; 3],
+    heat: f64,
+    profile: f64,
+}
+
+/// [`closed`]'s step: each conducting triangle, each cell's heat \[J\],
+/// each region's net current \[A\], the resistance \[Ω\], the profiles'
+/// pairing with the potential's change and the end turns' increment
+/// \[Wb\], and the profiles' motion against the old potential \[Wb\].
+pub(super) struct Closed {
+    triangles: BTreeMap<usize, ClosedTriangle>,
+    pub(super) cell_heat: [f64; 4],
+    net_current: [f64; 2],
+    resistance: f64,
+    pairing: f64,
+    end_increment: f64,
+    profile_motion: f64,
 }
 
 // Independent exact P1 quadrature and constitutive relations. This uses the
 // returned A only as a field to check, not the driver's recovered E/J or heat.
-fn check_receipt(
-    card: &MaterialCard,
+// The module tests and the declared graph hold their states to this one
+// function.
+pub(super) fn closed(
     old: &NonlinearWindingCircuit<'_>,
     next: &NonlinearWindingCircuit<'_>,
     temperature: [f64; 4],
-    step: &NonlinearWindingStep,
-) -> [f64; 4] {
+) -> Closed {
     let mesh = next.field().problem().mesh();
     let delta: Vec<_> = next
         .field()
@@ -400,12 +495,11 @@ fn check_receipt(
     let mut net_current = [0.0; 2];
     let mut pairing = 0.0;
     let mut profile_motion = 0.0;
-    assert_eq!(step.field.cells.len(), 16);
-    assert!(step.cells.is_empty());
-    assert!(step.graph_resistors.is_empty());
-    for loss in &step.field.cells {
-        let triangle = loss.source.triangle;
-        let cell = receiver(mesh, triangle).unwrap();
+    let mut triangles = BTreeMap::new();
+    for triangle in 0..mesh.faces().len() {
+        let Some(cell) = receiver(mesh, triangle) else {
+            continue;
+        };
         let region = cell / 2;
         let volume = mesh.face_measure(triangle).unwrap();
         let face = mesh.faces()[triangle];
@@ -415,8 +509,115 @@ fn check_receipt(
             face.map(|v| unit_drive * current - (delta[v as usize] - mean_delta[region]) / STEP);
         let heat = STEP * sigma[cell] * volume / 12.0
             * (electric.iter().sum::<f64>().powi(2) + electric.iter().map(|e| e * e).sum::<f64>());
-        near(next.profiles_per_m2()[0][triangle], profile);
-        near(loss.source.conductor.resistivity_ohm_m(), 1.0 / sigma[cell]);
+        cell_heat[cell] += heat;
+        net_current[region] += sigma[cell] * electric.iter().sum::<f64>() / 3.0 * volume / DEPTH;
+        pairing += profile * volume * face.iter().map(|&v| delta[v as usize] / 3.0).sum::<f64>();
+        profile_motion += (profile - old.profiles_per_m2()[0][triangle])
+            * volume
+            * face
+                .iter()
+                .map(|&v| old.field().potential_wb_m()[v as usize] / 3.0)
+                .sum::<f64>();
+        triangles.insert(
+            triangle,
+            ClosedTriangle {
+                cell,
+                volume,
+                sigma: sigma[cell],
+                electric,
+                heat,
+                profile,
+            },
+        );
+    }
+    let resistance: f64 = (0..2)
+        .map(|region| (TURN_COUNTS[region] * DEPTH).powi(2) / weight[region])
+        .sum();
+    let end_increment = END_H * (current - old.currents_a()[0]);
+    Closed {
+        triangles,
+        cell_heat,
+        net_current,
+        resistance,
+        pairing,
+        end_increment,
+        profile_motion,
+    }
+}
+
+/// The identities of [`closed`] that the accepted states carry alone: each
+/// profile, the resistance, each region's net current, the terminal voltage
+/// and the change of the flux linkage.
+pub(super) fn holds(
+    closed: &Closed,
+    old: &NonlinearWindingCircuit<'_>,
+    next: &NonlinearWindingCircuit<'_>,
+) {
+    let &Closed {
+        ref triangles,
+        net_current,
+        resistance,
+        pairing,
+        end_increment,
+        profile_motion,
+        ..
+    } = closed;
+    for (&triangle, closed) in triangles {
+        near(next.profiles_per_m2()[0][triangle], closed.profile);
+    }
+    let current = next.currents_a()[0];
+    near(next.resistance_ohm()[0], resistance);
+    for (region, &turns) in TURN_COUNTS.iter().enumerate() {
+        near(net_current[region], turns * current);
+    }
+    near(
+        VOLTAGE,
+        resistance * current + (pairing + end_increment) / STEP,
+    );
+    near(
+        next.flux_linkages_wb()[0] - old.flux_linkages_wb()[0],
+        pairing + end_increment + profile_motion,
+    );
+    if old.time_s() > 0.0 {
+        // A moving conductivity profile must not turn the old retained A into
+        // an artificial voltage. This quantity is nonzero in this geometry.
+        assert!(profile_motion.abs() > 1e-9);
+    }
+}
+
+/// The module's step record against [`closed`], after [`holds`].
+fn check_receipt(
+    card: &MaterialCard,
+    old: &NonlinearWindingCircuit<'_>,
+    next: &NonlinearWindingCircuit<'_>,
+    temperature: [f64; 4],
+    step: &NonlinearWindingStep,
+) -> [f64; 4] {
+    let closed = closed(old, next, temperature);
+    holds(&closed, old, next);
+    let Closed {
+        triangles,
+        cell_heat,
+        resistance,
+        pairing,
+        end_increment,
+        ..
+    } = closed;
+    let current = next.currents_a()[0];
+    assert_eq!(step.field.cells.len(), 16);
+    assert!(step.cells.is_empty());
+    assert!(step.graph_resistors.is_empty());
+    assert_eq!(triangles.len(), step.field.cells.len());
+    for loss in &step.field.cells {
+        let ClosedTriangle {
+            cell,
+            volume,
+            sigma,
+            electric,
+            heat,
+            ..
+        } = triangles[&loss.source.triangle];
+        near(loss.source.conductor.resistivity_ohm_m(), 1.0 / sigma);
         assert_eq!(
             loss.source.conductor.material().card_identity(),
             card.content_hash()
@@ -433,48 +634,21 @@ fn check_receipt(
         assert!((source_t - temperature[cell]).abs() < 1e-10);
         for vertex in 0..3 {
             near(loss.electric_field_v_m[vertex], electric[vertex]);
-            near(
-                loss.current_density_a_m2[vertex],
-                sigma[cell] * electric[vertex],
-            );
+            near(loss.current_density_a_m2[vertex], sigma * electric[vertex]);
         }
         near(loss.volume_m3, volume);
         near(loss.heat_j, heat);
         near(loss.power_w * STEP, heat);
-        cell_heat[cell] += heat;
-        net_current[region] += sigma[cell] * electric.iter().sum::<f64>() / 3.0 * volume / DEPTH;
-        pairing += profile * volume * face.iter().map(|&v| delta[v as usize] / 3.0).sum::<f64>();
-        profile_motion += (profile - old.profiles_per_m2()[0][triangle])
-            * volume
-            * face
-                .iter()
-                .map(|&v| old.field().potential_wb_m()[v as usize] / 3.0)
-                .sum::<f64>();
     }
-    let resistance: f64 = (0..2)
-        .map(|region| (TURN_COUNTS[region] * DEPTH).powi(2) / weight[region])
-        .sum();
-    near(next.resistance_ohm()[0], resistance);
     for (region, &turns) in TURN_COUNTS.iter().enumerate() {
-        near(net_current[region], turns * current);
         near(step.field.region_currents_a[region].1, turns * current);
     }
-    let end_increment = END_H * (current - old.currents_a()[0]);
     assert!((step.inductive_voltage_v[0] - (pairing + end_increment) / STEP).abs() < 1e-9);
     near(
         step.terminal_voltage_v[0],
         resistance * current + (pairing + end_increment) / STEP,
     );
     near(step.terminal_voltage_v[0], VOLTAGE);
-    near(
-        next.flux_linkages_wb()[0] - old.flux_linkages_wb()[0],
-        pairing + end_increment + profile_motion,
-    );
-    if old.time_s() > 0.0 {
-        // A moving conductivity profile must not turn the old retained A into
-        // an artificial voltage. This quantity is nonzero in this geometry.
-        assert!(profile_motion.abs() > 1e-9);
-    }
     near(
         step.field.uniform_drive_work_j,
         STEP * resistance * current * current,

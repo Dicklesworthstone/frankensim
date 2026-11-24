@@ -8,7 +8,7 @@
 //!
 //! - `fs_em::winding::component::PlanarWinding::at_port_temperatures` on
 //!   the play-memory owner: one heat port, every triangle's conductor, copper
-//!   and core alike ([`CardConductors`]), following the cell's card at the
+//!   and core alike ([`CellConductors`]), following the cell's card at the
 //!   temperature the port receives; the authored 0.3-ohm graph resistor keeps
 //!   its ohms;
 //! - the shared kernel's backward-Euler cell (`winding_graph/kernel.rs`);
@@ -22,14 +22,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fs_em::winding::component::{ConductorLaw, HeatReceiver, PlanarWinding, PlanarWindingState};
-use fs_matdb::QueryPoint;
-use fs_material::conductor::ResolvedConductorState;
 use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_system::{NodeId, System};
 use fs_thermal::component::TimelineState;
 
 use super::common::MATERIAL;
-use super::kernel::{graph, ledger_closes, with_cx};
+use super::kernel::{CellConductors, graph, ledger_closes, with_cx};
 use super::*;
 
 const STEPS: usize = 4;
@@ -41,56 +39,6 @@ type PlayState = PlanarWindingState<'static, HystereticWindingCircuit<'static>>;
 /// The source's volts over the step that starts at `t0`.
 fn drive(t0: f64) -> f64 {
     DRIVES[(t0 / DT).round() as usize]
-}
-
-/// Each triangle's conductor in the construction circuit, copper and core
-/// alike, rebound to its material at the cell's query point with `kelvin` on
-/// the `T` axis, as the module rebinds them.
-#[derive(Debug)]
-struct CardConductors {
-    card: MaterialCard,
-    context: QueryPoint,
-    originals: BTreeMap<usize, ResolvedConductorState>,
-}
-
-impl CardConductors {
-    fn new(card: &MaterialCard, circuit: &HystereticWindingCircuit<'_>) -> Self {
-        let core = circuit.field().conductors().iter();
-        let copper = circuit.conductors().iter();
-        Self {
-            card: card.clone(),
-            context: point(300.0),
-            originals: core
-                .map(|source| (source.triangle, source.conductor.clone()))
-                .chain(copper.map(|source| (source.triangle, source.conductor.clone())))
-                .collect(),
-        }
-    }
-}
-
-impl ConductorLaw for CardConductors {
-    fn conductor(&self, triangle: usize, kelvin: f64) -> Result<ResolvedConductorState, String> {
-        let original = self
-            .originals
-            .get(&triangle)
-            .ok_or_else(|| format!("triangle {triangle} has no conductor"))?;
-        let point = self
-            .context
-            .clone()
-            .with("T", kelvin)
-            .map_err(|e| format!("{e:?}"))?;
-        let material = original
-            .material()
-            .at_query_point(&self.card, &point)
-            .map_err(|e| format!("{e:?}"))?;
-        original.with_material(material).map_err(|e| e.to_string())
-    }
-
-    fn identity_words(&self, words: &mut Vec<u64>) {
-        for chunk in self.card.content_hash().0.chunks(8) {
-            words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-        }
-    }
 }
 
 /// One accepted interval: the cell's temperature \[K\], the winding current
@@ -208,7 +156,7 @@ fn module_run(
     card: &MaterialCard,
     curve: &ResolvedHeatCapacityCurve,
     start: &HystereticWindingCircuit<'_>,
-    law: &CardConductors,
+    law: &CellConductors,
 ) -> Vec<Row> {
     let context = point(300.0);
     let cells = cells(card, curve, &context);
@@ -317,7 +265,12 @@ fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
     let owner: &'static PlanarHystereticMagnetostatics =
         Box::leak(Box::new(problem(card, paired_squares())));
     let start = circuit(card, owner);
-    let law = Arc::new(CardConductors::new(card, &start));
+    let law = Arc::new(CellConductors::new(
+        card,
+        point(300.0),
+        start.field().conductors(),
+        start.conductors(),
+    ));
     let winding = PlanarWinding::at_port_temperatures(
         &start,
         vec![law.clone()],
@@ -339,7 +292,7 @@ fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
         Some(drive),
     );
     let kernel = kernel_run(&mut system, electrical, cells);
-    ledger_closes(&system, electrical, cells);
+    ledger_closes(&system, electrical, cells, 0.0);
 
     // Each interval against `reference()` from the kernel's own start of
     // interval.
