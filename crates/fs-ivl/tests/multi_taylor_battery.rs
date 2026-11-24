@@ -251,7 +251,11 @@ fn truncated_product_uses_actual_offsets_about_a_rounded_center() {
     let mut shifted = TaylorModel1::variable(Interval::new(a, b), 1).unwrap();
     shifted.set_poly_coeff(0, 0.0);
     let shifted = TaylorModel::from_tm1(&shifted, "x", None).unwrap();
-    let value = shifted.mul(&shifted).unwrap().eval_box(&[Interval::point(b)]).unwrap();
+    let value = shifted
+        .mul(&shifted)
+        .unwrap()
+        .eval_box(&[Interval::point(b)])
+        .unwrap();
     assert!(value.contains((b - a) * (b - a)), "{value:?}");
     assert!(value.width() < 2.0 * (b - a) * (b - a));
 }
@@ -425,6 +429,42 @@ fn test_multivariate_composition() {
 }
 
 #[test]
+fn value_remainders_do_not_certify_derivatives_even_at_order_zero() {
+    for order in [0, 2] {
+        let mut source = TaylorModel1::constant(0.0, Interval::new(-1.0, 1.0), order).unwrap();
+        source.set_remainder(Interval::new(-1.0, 1.0));
+        let model = TaylorModel::from_tm1(&source, "x", None).unwrap();
+        // sin(1_000_000*x) is enclosed by this value model. Its derivative
+        // at zero is 1_000_000, with no finite frequency bound in the model.
+        assert_eq!(model.diff(0).unwrap().range().unwrap(), Interval::WHOLE);
+        assert_eq!(model.lipschitz_bound().unwrap(), f64::INFINITY);
+    }
+}
+
+#[test]
+fn exact_polynomial_derivatives_keep_useful_extreme_scale_bounds() {
+    for slope in [1e-200, 1.0, 1e200] {
+        let mut source = TaylorModel1::constant(0.0, Interval::new(-1.0, 1.0), 1).unwrap();
+        source.set_poly_coeff(1, slope);
+        source.set_remainder(Interval::point(7.0));
+        let model = TaylorModel::from_tm1(&source, "x", None).unwrap();
+        assert!(model.diff(0).unwrap().range().unwrap().contains(slope));
+        let bound = model.lipschitz_bound().unwrap();
+        assert!(bound.is_finite() && bound >= slope && bound < 1.01 * slope);
+    }
+}
+
+#[test]
+fn derivative_coefficient_overflow_preserves_finite_polynomial_storage() {
+    let mut source = TaylorModel1::constant(0.0, Interval::new(-1.0, 1.0), 3).unwrap();
+    source.set_poly_coeff(3, f64::MAX);
+    let model = TaylorModel::from_tm1(&source, "x", None).unwrap();
+    let derivative = model.diff(0).unwrap();
+    assert!(derivative.coefficients().iter().all(|c| c.is_finite()));
+    assert_eq!(derivative.range().unwrap(), Interval::WHOLE);
+}
+
+#[test]
 fn test_differentiation_and_gradient() {
     let vars = vec![
         VariableInfo::new("x", Interval::new(0.0, 2.0)).unwrap(),
@@ -455,10 +495,11 @@ fn test_differentiation_and_gradient() {
     let val_df_dy = df_dy.eval_box(&pt).unwrap();
 
     assert!(val_df_dx.contains(4.5));
-    assert!((val_df_dx.midpoint() - 4.5).abs() < 1e-13);
-
     assert!(val_df_dy.contains(9.75));
-    assert!((val_df_dy.midpoint() - 9.75).abs() < 1e-13);
+    // Arithmetic has introduced an interval value remainder. That
+    // representation retains no bound on the remainder's derivative.
+    assert_eq!(val_df_dx, Interval::WHOLE);
+    assert_eq!(val_df_dy, Interval::WHOLE);
 
     // Gradient
     let grad = f.gradient().unwrap();
@@ -507,4 +548,119 @@ fn test_lipschitz_bound_and_integration() {
     let integral = f.integrate_axis(0, 0.0, 2.0).unwrap();
     assert!(integral.contains(8.0));
     assert!((integral.midpoint() - 8.0).abs() < 1e-13);
+}
+
+#[test]
+fn sums_and_differences_retain_roundoff_after_cancellation() {
+    let vars = vec![VariableInfo::new("x", Interval::new(-1.0, 1.0)).unwrap()];
+    let one = TaylorModel::constant(1.0, vars.clone(), 0).unwrap();
+    let small_value = 2.0_f64.powi(-54);
+    let small = TaylorModel::constant(small_value, vars, 0).unwrap();
+
+    for (intermediate, expected) in [
+        (one.add(&small).unwrap(), small_value),
+        (one.sub(&small).unwrap(), -small_value),
+    ] {
+        let residual = intermediate.sub(&one).unwrap().range().unwrap();
+        assert!(residual.contains(expected), "{residual:?}");
+        assert!(residual.width() < 1e-13, "{residual:?}");
+    }
+}
+
+#[test]
+fn scaling_retains_a_normal_value_after_coefficient_underflow() {
+    let extent = 2.0_f64.powi(490);
+    let vars = vec![VariableInfo::new("x", Interval::new(-extent, extent)).unwrap()];
+    let variable = TaylorModel::variable(0, vars, 1).unwrap();
+    let factor = 2.0_f64.powi(-538);
+    let scaled = variable.scale(factor).unwrap().scale(factor).unwrap();
+
+    // The coefficient is 2^-1076, below binary64's range, but the exact
+    // endpoint values ±2^-586 are normal and belong in the enclosure.
+    for sign in [-1.0, 1.0] {
+        let value = scaled.eval_box(&[Interval::point(sign * extent)]).unwrap();
+        assert!(value.contains(sign * 2.0_f64.powi(-586)), "{value:?}");
+        assert!(value.width().is_finite());
+    }
+}
+
+#[test]
+fn arithmetic_overflow_keeps_finite_coefficients_and_an_unbounded_remainder() {
+    let vars = vec![VariableInfo::new("x", Interval::new(-1.0, 1.0)).unwrap()];
+    let positive = TaylorModel::constant(f64::MAX, vars.clone(), 1).unwrap();
+    let negative = TaylorModel::constant(-f64::MAX, vars, 1).unwrap();
+    for result in [
+        positive.add(&positive).unwrap(),
+        positive.sub(&negative).unwrap(),
+        positive.scale(2.0).unwrap(),
+    ] {
+        assert!(result.coefficients().iter().all(|c| c.is_finite()));
+        assert_eq!(result.remainder(), Interval::WHOLE);
+        assert_eq!(result.range().unwrap(), Interval::WHOLE);
+    }
+}
+
+#[test]
+fn sparse_constants_stay_bounded_when_unused_domain_powers_overflow() {
+    let vars = vec![VariableInfo::new("x", Interval::new(-f64::MAX, f64::MAX)).unwrap()];
+    let two = TaylorModel::constant(2.0, vars.clone(), MAX_MULTIVARIATE_ORDER).unwrap();
+    let three = TaylorModel::constant(3.0, vars, MAX_MULTIVARIATE_ORDER).unwrap();
+    for (model, expected) in [
+        (two.add(&three).unwrap(), 5.0),
+        (two.sub(&three).unwrap(), -1.0),
+        (two.scale(0.5).unwrap(), 1.0),
+    ] {
+        let range = model.range().unwrap();
+        assert!(range.contains(expected), "{range:?}");
+        assert!(range.width() < 1e-12, "{range:?}");
+    }
+}
+
+#[test]
+fn reciprocal_tail_preserves_sign_for_every_order_and_denominator_sign() {
+    let domain = Interval::new(-1.0, 1.0);
+    for order in 0..=4 {
+        for (polynomial, remainder) in [(1.0, 1.0), (-1.0, -1.0), (1.0, -0.5), (-1.0, 0.5)] {
+            let mut source = TaylorModel1::constant(polynomial, domain, order).unwrap();
+            source.set_remainder(Interval::point(remainder));
+            let denominator = TaylorModel::from_tm1(&source, "x", None).unwrap();
+            let one = TaylorModel::constant(1.0, denominator.variables().to_vec(), order).unwrap();
+            let expected = 1.0 / (polynomial + remainder);
+            for result in [denominator.reciprocal().unwrap(), one.div(&denominator).unwrap()] {
+                let range = result.range().unwrap();
+                assert!(range.contains(expected), "order {order}, {polynomial} + {remainder}: {range:?}");
+                assert!(range.width() < 1e-10, "{range:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn reciprocal_retains_the_roundoff_of_its_constant_coefficient() {
+    let source = TaylorModel::constant(3.0, Vec::new(), 0).unwrap();
+    let inverse = source.reciprocal().unwrap();
+    // For the rounded binary64 coefficient near 1/3, 3*c - 1 is exactly
+    // representable. The FMA measures the error independently of the series.
+    let defect = -3.0_f64.mul_add(inverse.coefficients()[0], -1.0);
+    assert_ne!(defect, 0.0);
+    let error = defect / 3.0;
+    assert!(inverse.remainder().contains(error), "{:?}", inverse.remainder());
+    assert!(inverse.remainder().width() < 1e-13);
+    assert!(
+        inverse.range().unwrap().encloses(Interval::point(1.0) / Interval::point(3.0))
+    );
+}
+
+#[test]
+fn reciprocal_accepts_a_remainder_that_keeps_a_zero_polynomial_away_from_zero() {
+    for (remainder, expected) in [
+        (Interval::new(2.0, 4.0), Interval::new(0.25, 0.5)),
+        (Interval::new(-4.0, -2.0), Interval::new(-0.5, -0.25)),
+    ] {
+        let mut source = TaylorModel1::constant(0.0, Interval::new(-1.0, 1.0), 2).unwrap();
+        source.set_remainder(remainder);
+        let inverse = TaylorModel::from_tm1(&source, "x", None).unwrap().reciprocal().unwrap();
+        assert!(inverse.range().unwrap().encloses(expected));
+        assert!(inverse.coefficients().iter().all(|coefficient| coefficient.is_finite()));
+    }
 }

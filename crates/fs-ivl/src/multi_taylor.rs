@@ -376,10 +376,23 @@ impl TaylorModel {
     pub fn add(&self, other: &Self) -> Result<Self, TaylorModelError> {
         self.check_compatible(other)?;
         let mut res = self.clone();
-        for (c_res, &c_other) in res.coefficients.iter_mut().zip(&other.coefficients) {
-            *c_res += c_other;
-        }
         res.remainder = res.remainder + other.remainder;
+        for (index, (c_res, &c_other)) in res
+            .coefficients
+            .iter_mut()
+            .zip(&other.coefficients)
+            .enumerate()
+        {
+            if *c_res == 0.0 || c_other == 0.0 {
+                *c_res += c_other;
+            } else {
+                *c_res = crate::taylor::split_mid(
+                    Interval::point(*c_res) + Interval::point(c_other),
+                    self.monomial_range(&self.multi_indices[index]),
+                    &mut res.remainder,
+                );
+            }
+        }
         Ok(res)
     }
 
@@ -387,10 +400,23 @@ impl TaylorModel {
     pub fn sub(&self, other: &Self) -> Result<Self, TaylorModelError> {
         self.check_compatible(other)?;
         let mut res = self.clone();
-        for (c_res, &c_other) in res.coefficients.iter_mut().zip(&other.coefficients) {
-            *c_res -= c_other;
-        }
         res.remainder = res.remainder - other.remainder;
+        for (index, (c_res, &c_other)) in res
+            .coefficients
+            .iter_mut()
+            .zip(&other.coefficients)
+            .enumerate()
+        {
+            if *c_res == 0.0 || c_other == 0.0 {
+                *c_res -= c_other;
+            } else {
+                *c_res = crate::taylor::split_mid(
+                    Interval::point(*c_res) - Interval::point(c_other),
+                    self.monomial_range(&self.multi_indices[index]),
+                    &mut res.remainder,
+                );
+            }
+        }
         Ok(res)
     }
 
@@ -400,10 +426,20 @@ impl TaylorModel {
             return Err(TaylorModelError::NonFiniteScaleFactor);
         }
         let mut res = self.clone();
-        for c in &mut res.coefficients {
-            *c *= factor;
-        }
         res.remainder = res.remainder * Interval::point(factor);
+        for (index, c) in res.coefficients.iter_mut().enumerate() {
+            // Exact zero and sign changes need no domain power, which may
+            // overflow even when this sparse coefficient stays finite.
+            if *c == 0.0 || factor == 0.0 || factor.abs() == 1.0 {
+                *c *= factor;
+            } else {
+                *c = crate::taylor::split_mid(
+                    Interval::point(*c) * Interval::point(factor),
+                    self.monomial_range(&self.multi_indices[index]),
+                    &mut res.remainder,
+                );
+            }
+        }
         Ok(res)
     }
 
@@ -496,44 +532,45 @@ impl TaylorModel {
         })
     }
 
-    /// Compute the rigorous reciprocal `1 / P(x)` if the denominator excludes zero.
+    /// Compute the reciprocal of the entire model if its range excludes zero.
     pub fn reciprocal(&self) -> Result<Self, TaylorModelError> {
         let r = self.range()?;
         if r.contains_zero() {
             return Err(TaylorModelError::DenominatorContainsZero);
         }
         let c0 = self.coefficients[0];
+        let one = Interval::point(1.0);
+        let denominator = if c0 == 0.0 { r } else { Interval::point(c0) };
+        let mut inverse = Self::constant(0.0, self.variables.clone(), self.order)?;
+        inverse.coefficients[0] =
+            crate::taylor::split_mid(one / denominator, one, &mut inverse.remainder);
         if c0 == 0.0 {
-            return Err(TaylorModelError::DenominatorContainsZero);
+            // A nonzero remainder can exclude zero even with no polynomial
+            // constant. The range reciprocal still supplies an enclosure.
+            return Ok(inverse);
         }
 
-        // Decompose: self = c0 * (1 + u) where u = (self - c0) / c0
-        let inv_c0 = 1.0 / c0;
+        // self = c0 * (1 + u). Retain the rounding of 1/c0 in every use.
         let mut u = self.clone();
         u.coefficients[0] = 0.0;
-        u = u.scale(inv_c0)?;
+        u = u.mul(&inverse)?;
 
-        // Expand 1 / (1 + u) = 1 - u + u^2 - u^3 + ... + (-u)^p
+        // Expand 1 / (1 + u) = 1 - u + u^2 - u^3 + ... + (-u)^p.
         let mut sum = Self::constant(1.0, self.variables.clone(), self.order)?;
-        let mut u_power = u.clone();
-        let mut sign = -1.0;
-
-        for _ in 1..=self.order {
-            let term = u_power.scale(sign)?;
-            sum = sum.add(&term)?;
-            sign = -sign;
-            if self.order > 1 {
-                u_power = u_power.mul(&u)?;
-            }
+        let mut power = sum.clone();
+        let minus_u = u.scale(-1.0)?;
+        for _ in 0..self.order {
+            power = power.mul(&minus_u)?;
+            sum = sum.add(&power)?;
         }
 
-        // Geometric series remainder bound: (-u_range)^(p+1) / (1 + u_range) / c0
+        // The finite geometric identity has tail (-u)^(p+1) / self.
+        // Its sign matters for one-sided remainders, including at order zero.
+        // Use the admitted denominator range instead of widening 1 + u again.
         let u_box = u.range()?;
-        let u_pow_p1 = u_box.powi(self.order + 1);
-        let denom = Interval::point(1.0) + u_box;
-        let rem_geom = (u_pow_p1 / denom) * Interval::point(inv_c0);
+        let rem_geom = (-u_box).powi(self.order + 1) / r;
 
-        let mut res = sum.scale(inv_c0)?;
+        let mut res = sum.mul(&inverse)?;
         res.remainder = res.remainder + rem_geom;
         Ok(res)
     }
@@ -786,7 +823,9 @@ impl TaylorModel {
 
     /// Partial derivative with respect to `axis`.
     ///
-    /// Differentiates the polynomial representation and tracks certified remainder bounds.
+    /// Differentiates the polynomial with outward coefficient rounding. A
+    /// nonconstant value remainder provides no derivative bound, so the
+    /// derivative remainder is the whole line in that case.
     /// Differentiating along a fixed/degenerate zero-width axis returns exact zero.
     pub fn diff(&self, axis: usize) -> Result<Self, TaylorModelError> {
         if axis >= self.dim {
@@ -801,14 +840,18 @@ impl TaylorModel {
             return Self::constant(0.0, self.variables.clone(), target_order);
         }
 
-        if self.order == 0 {
-            return Self::constant(0.0, self.variables.clone(), 0);
-        }
-
-        let new_order = self.order - 1;
+        let new_order = self.order.saturating_sub(1);
         let new_terms = term_count(self.dim, new_order)?;
         let new_multi_indices = generate_multi_indices(self.dim, new_order);
         let mut new_coeffs = vec![0.0; new_terms];
+        // Even a very small bounded value remainder can oscillate arbitrarily
+        // quickly. Only a finite singleton establishes a constant offset.
+        let mut diff_rem =
+            if self.remainder.lo().is_finite() && self.remainder.lo() == self.remainder.hi() {
+                Interval::point(0.0)
+            } else {
+                Interval::WHOLE
+            };
 
         for (coeff, mi) in self.coefficients.iter().zip(&self.multi_indices) {
             if *coeff == 0.0 {
@@ -818,28 +861,16 @@ impl TaylorModel {
             if alpha_k > 0 {
                 let mut beta = mi.clone();
                 beta[axis] -= 1;
-                let weight = *coeff * (alpha_k as f64);
                 if let Some(pos) = new_multi_indices.iter().position(|m| m == &beta) {
-                    new_coeffs[pos] += weight;
+                    new_coeffs[pos] = if alpha_k == 1 {
+                        *coeff
+                    } else {
+                        let weight = Interval::point(*coeff) * Interval::point(alpha_k as f64);
+                        crate::taylor::split_mid(weight, self.monomial_range(&beta), &mut diff_rem)
+                    };
                 }
             }
         }
-
-        // Remainder: exact polynomial models have exact zero derivative remainder
-        let diff_rem = if self.remainder.width() == 0.0 {
-            Interval::point(0.0)
-        } else {
-            // Outward enlargement for nonzero remainder
-            let rad = self.variables[axis].radius();
-            if rad > 0.0 {
-                Interval::new(
-                    -self.remainder.hi().abs() / rad,
-                    self.remainder.hi().abs() / rad,
-                )
-            } else {
-                self.remainder
-            }
-        };
 
         Ok(Self {
             dim: self.dim,
@@ -866,12 +897,20 @@ impl TaylorModel {
     /// Certified Lipschitz constant bound over the entire domain box: `L = √(∑ L_k²)`.
     pub fn lipschitz_bound(&self) -> Result<f64, TaylorModelError> {
         let grad_ranges = self.gradient_range()?;
-        let mut sum_sq = 0.0;
+        let scale = grad_ranges
+            .iter()
+            .map(|iv| iv.lo().abs().max(iv.hi().abs()))
+            .fold(0.0_f64, f64::max);
+        if scale == 0.0 || !scale.is_finite() {
+            return Ok(scale);
+        }
+        let mut sum_sq = Interval::point(0.0);
         for iv in grad_ranges {
             let max_mag = iv.lo().abs().max(iv.hi().abs());
-            sum_sq += max_mag * max_mag;
+            let normalized = Interval::point(max_mag) / Interval::point(scale);
+            sum_sq = sum_sq + normalized.powi(2);
         }
-        Ok(sum_sq.sqrt())
+        Ok((sum_sq.sqrt() * Interval::point(scale)).hi())
     }
 
     /// Integrate the model along coordinate `axis` over `[a, b] ⊆ D_{axis}`.

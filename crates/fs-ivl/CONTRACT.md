@@ -64,6 +64,18 @@ mechanism and is likewise absent from the production dependency graph.
   whole-line remainder. Focused tests exercise signed remainders, coefficient
   overflow, a subnormal coefficient with a normal contribution, and adjacent
   endpoints with an asymmetric centered box.
+- Multivariate addition, subtraction and scaling absorb coefficient rounding
+  over each monomial's actual centered range. Sparse zero coefficients retain
+  finite bounds even when unused high-order domain powers would overflow.
+  Reciprocal models carry an interval enclosure of the inverse constant and
+  the signed geometric-series tail. A range excluding zero also admits a
+  reciprocal when the polynomial constant is zero.
+- Multivariate differentiation encloses polynomial coefficient rounding. A
+  finite singleton value remainder is a constant offset. A nonpoint value
+  remainder has no implied derivative bound and produces a whole-line
+  derivative enclosure, including for order-zero models. The Lipschitz norm
+  uses scaled outward interval arithmetic to avoid intermediate overflow and
+  underflow whenever a finite bound is representable.
 - `TaylorModel1` — univariate Taylor models: f64 polynomial in (x−c)
   plus a RIGOROUS interval remainder; the containment law extended to
   FUNCTIONS (f(x) ∈ P(x−c) + rem for all x in the domain, tested).
