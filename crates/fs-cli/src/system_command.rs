@@ -72,10 +72,11 @@ use fs_system::constitutive::{
     NonlinearCapacitor, NonlinearInductor,
 };
 use fs_system::elements::{
-    Admittance, AffineSignal, Conductance, ControlledSource, ControllerState, Damper, FlowSource,
-    Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater, IdealDiode, IdealSwitch, Mass,
-    ModulatedTransformer, Motion, Resistance, Restriction, SampledController, SignalClock,
-    SignalLimiter, SignalSource, Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
+    Admittance, AffineSignal, Conductance, ConductanceMatrix, ControlledSource, ControllerState,
+    Damper, FlowSource, Force, GasContents, GasVolume, Gyrator, HeatCapacity, HeatNode, Heater,
+    IdealDiode, IdealSwitch, Mass, ModulatedTransformer, Motion, Resistance, Restriction,
+    SampledController, SignalClock, SignalLimiter, SignalSource, Slider, SliderEnd, Slip,
+    SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::ledger::{Account, CarriedAccount, Ledger};
 use fs_system::{
@@ -406,6 +407,13 @@ Elements (ports in brackets; physical fields use SI units):
                  Alternatively, material = \"name\" replaces phase and
                  enthalpy_curve with the declared source calorics.
   conductance    conductance_w_k                                      [a, b]
+  gray_radiation area_m2, emissivity_a, emissivity_b                    [a, b]
+                 Equal-area diffuse-gray surfaces with full mutual view.
+                 Area is positive; both fixed emissivities are in (0, 1].
+                 Heat follows sigma*A*(T_a^4-T_b^4)/(1/eps_a+1/eps_b-1),
+                 using the temperatures supplied at the two heat ports.
+                 Reports heat_rate_w, positive from a to b. No medium,
+                 enclosure view-factor solve or separate surface storage.
   layer_conductor conductivity_a, conductivity_b                     [a, b]
                  (each 2 to 4096 [temperature_k, k_w_m_k] knots),
                  geometry = {kind: planar, distances_m: [a, b], area_m2}
@@ -1528,6 +1536,8 @@ enum Kind {
     /// Fixed material mass on an authored sensible/latent enthalpy chart.
     EnthalpyBody,
     Conductance,
+    /// Full-view exchange between two diffuse-gray surfaces at their heat ports.
+    GrayRadiation,
     /// Original temperature-dependent layer integrals and contact jump.
     LayerConductor,
     /// A thermal node of no capacity joined to bodies by conductances, with
@@ -1555,7 +1565,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 58] = [
+    const TABLE: [(&'static str, Self); 59] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1607,6 +1617,7 @@ impl Kind {
         ("heat_capacity", Self::HeatCapacity),
         ("enthalpy_body", Self::EnthalpyBody),
         ("conductance", Self::Conductance),
+        ("gray_radiation", Self::GrayRadiation),
         ("layer_conductor", Self::LayerConductor),
         ("heat_node", Self::HeatNode),
         ("thermal_timeline", Self::ThermalTimeline),
@@ -3640,6 +3651,22 @@ fn element(
                 Conductance::new(number(definition, "conductance_w_k", &what)?).map_err(invalid)?;
             add(builder, name, wall, ())?
         }
+        Kind::GrayRadiation => {
+            fields(
+                definition,
+                &["kind", "area_m2", "emissivity_a", "emissivity_b"],
+                &what,
+            )?;
+            let exchange = ConductanceMatrix::gray_radiation(
+                number(definition, "area_m2", &what)?,
+                [
+                    number(definition, "emissivity_a", &what)?,
+                    number(definition, "emissivity_b", &what)?,
+                ],
+            )
+            .map_err(invalid)?;
+            add(builder, name, exchange, ())?
+        }
         Kind::LayerConductor => {
             let conductor = layer_conductor(definition, materials, &what)?;
             if let Some(names) = definition.get("materials").and_then(J::as_array) {
@@ -4669,6 +4696,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::ModulatedTransformer
             | Kind::DiracJunction
             | Kind::Conductance
+            | Kind::GrayRadiation
             | Kind::TraceContact
             | Kind::LayerConductor
             | Kind::HeatNode
@@ -4930,6 +4958,17 @@ impl Device {
             NO_CLAIM
         };
         let mut description = std::borrow::Cow::Borrowed(base);
+        if self
+            .elements
+            .iter()
+            .any(|element| element.kind == Kind::GrayRadiation)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; gray radiation exchanges Stefan-Boltzmann heat between equal-area \
+                 diffuse-gray surfaces with full mutual view and fixed authored emissivities; \
+                 no participating medium, enclosure view-factor solve or separate surface storage"
+            ));
+        }
         if self
             .elements
             .iter()
@@ -5985,7 +6024,9 @@ impl Device {
                 };
                 vec![("ratio", ratio), ("effort_a", output("a")), ("flow_b", output("b"))]
             }
-            Kind::Conductance | Kind::LayerConductor => vec![("heat_rate_w", output("a"))],
+            Kind::Conductance | Kind::GrayRadiation | Kind::LayerConductor => {
+                vec![("heat_rate_w", output("a"))]
+            }
             // The temperature the node's balance gave it in the last step.
             Kind::HeatNode => vec![("temperature_k", output("source"))],
             // What crossed from `a` to `b` during the last step.

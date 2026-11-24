@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 4.0,
+  "step_s": 0.125,
+  "sample_every_s": 0.5,
+  "elements": {
+    "hot": {"kind": "heat_capacity", "capacity_j_k": 1000.0, "temperature_k": 600.0},
+    "cold": {"kind": "heat_capacity", "capacity_j_k": 2000.0, "temperature_k": 300.0},
+    "exchange": {
+      "kind": "gray_radiation",
+      "area_m2": 0.25,
+      "emissivity_a": 0.8,
+      "emissivity_b": 0.6
+    }
+  },
+  "connections": [
+    {"join": ["hot.heat", "exchange.a"]},
+    {"join": ["cold.heat", "exchange.b"]}
+  ]
+}

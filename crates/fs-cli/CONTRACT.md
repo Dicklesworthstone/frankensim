@@ -1,5 +1,31 @@
 # CONTRACT: fs-cli
 
+## Radiative exchange on system graphs
+
+A `gray_radiation` element declares `area_m2`, `emissivity_a` and
+`emissivity_b`, with heat ports `a` and `b`. Lowering constructs
+`fs_system::elements::ConductanceMatrix::gray_radiation` and uses the
+ordinary tangent-enabled graph path; the CLI adds no heat integration.
+The area must be positive and both fixed emissivities must lie in `(0, 1]`.
+Unknown fields, including an unsupported view factor, are refused by name.
+
+The report and probe `heat_rate_w` are positive from `a` to `b`.
+Before the first accepted step there is no reported rate. The stateless
+interface adds no adaptive error coordinate; its connected thermal bodies
+retain their existing state-error accounts. Native identity and the scene
+binding preserve the authored parameters through checkpoint/resume.
+
+`examples/system/radiative_exchange.json` connects two finite heat capacities
+through this element and runs with
+`frankensim --json system examples/system/radiative_exchange.json`.
+`tests/system_command/radiation.rs` exercises both directions and equilibrium,
+an independent midpoint energy-balance reference, binary/native report
+agreement, checkpoint replay and parameter refusals.
+The model is limited to equal-area diffuse-gray surfaces with full mutual
+view, authored fixed emissivities and no participating medium or separate
+surface storage; it does not solve enclosure view factors.
+
+
 ## Ordinary solid heat-capacity tables in cooling-cht
 
 An authored solid may select `volumetric_heat_capacity_table_j_m3_k` instead
