@@ -103,6 +103,26 @@ below states its own limits.
 
 ## Component contract v0
 
+`component::StateSignals<C, F>` appends declared `SignalOut` ports to any
+Component while retaining its original state, physical ports, receipts,
+inventories, admission, step limits and events. The pure callback observes the
+accepted start state, so its values are held during the step and have zero
+input tangent. Optional `PortTangent`, `LoadLine` and `StageResidual` tiers
+forward to the original owner with the original port indices. Invalid,
+unwritten or nonfinite observations refuse; observation buffer operations
+poll cancellation in bounded chunks. Original owner refusals and shortening
+remain authoritative.
+
+The adapter forwards a native state codec only when
+`with_observation_identity` declares the complete observation law. Its
+identity length-prefixes the original owner identity and binds the adapter
+version and declared observation digest. An unidentifiable closure cannot
+make a system durably resumable. This adds explicit held observations, not
+implicit feedback or a new time-order claim. `tests/component_reference/observed.rs`
+and the load-line regression check native state/receipt equivalence, tangent
+transpose actions, residual/load-line forwarding, cancellation, invalid
+observations, shortening and codec identity.
+
 `component` is the executable composition contract (bead
 `frankensim-rc-1109-root-3gc12.5.1`). It is version 0 and may change until the
 five kernel slices of that epic pass on it. Its first implementer outside this

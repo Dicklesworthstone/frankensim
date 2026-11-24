@@ -22,6 +22,57 @@ use fs_ports::component::{
 };
 use fs_ports::{PortKind, StableId};
 
+#[test]
+fn observed_friction_keeps_the_same_load_line_and_physical_heat() {
+    use fs_ports::component::StateSignals;
+    let pad = DryPad::new(2.0, Fault::None);
+    let observed = StateSignals::new(
+        pad,
+        vec![PortSpec::signal_out(
+            StableId::new("limit").unwrap(),
+            NonZeroUsize::MIN,
+        )],
+        |pad: &DryPad, _: &(), output: &mut [f64], _: &Cx<'_>| {
+            output[0] = pad.limit_n;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(observed.line_ports(), observed.inner().line_ports());
+    assert_eq!(observed.line_ends(), observed.inner().line_ends());
+    with_cx(|cx| {
+        for released in [-3.0, -0.1, 0.0, 0.1, 3.0] {
+            let (mut outputs, mut native) = ([0.0; 3], [0.0; 2]);
+            let wrapped = observed
+                .propose_on_line(
+                    &(),
+                    0.01,
+                    &[released, 300.0],
+                    &[0.2],
+                    &mut (),
+                    &mut outputs,
+                    cx,
+                )
+                .unwrap();
+            let plain = observed
+                .inner()
+                .propose_on_line(
+                    &(),
+                    0.01,
+                    &[released, 300.0],
+                    &[0.2],
+                    &mut (),
+                    &mut native,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(wrapped, plain);
+            assert_eq!(&outputs[..2], &native);
+            assert_eq!(outputs[2], 2.0);
+        }
+    });
+}
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     let pool = ArenaPool::new(ArenaConfig::default());

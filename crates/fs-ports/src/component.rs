@@ -36,6 +36,8 @@
 //! the five kernel slices pass on it.
 
 pub mod conformance;
+mod observed;
+pub use observed::{ObservationError, StateSignals};
 
 use core::fmt;
 use core::num::NonZeroUsize;

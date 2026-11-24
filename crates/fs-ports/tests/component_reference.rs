@@ -41,6 +41,9 @@ use fs_ports::component::{
 use fs_ports::{PortKind, StableId};
 use fs_qty::Dims;
 
+#[path = "component_reference/observed.rs"]
+mod state_signals;
+
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {
