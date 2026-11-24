@@ -4,7 +4,7 @@
 use super::*;
 use std::collections::BTreeMap;
 #[path = "../../../fs-em/tests/winding_ohmic/common.rs"]
-mod linear;
+pub(super) mod linear;
 
 use fs_couple::circuit_enthalpy::{
     contacts::{heat::MaterialHeatNetwork, material::ElectricalContactNetwork},
@@ -32,7 +32,7 @@ use fs_rep_mesh::{Metric2, TriComplex2};
 
 pub(super) const STEP: f64 = 0.1;
 pub(super) const VOLTAGE: f64 = 1.0;
-const END_H: f64 = 0.05;
+pub(super) const END_H: f64 = 0.05;
 const CELL_VOLUME: f64 = 0.5 * DEPTH;
 pub(super) const HEAT_CAPACITY: f64 = 4.0 * CELL_VOLUME;
 pub(super) const HEATER_W: f64 = 6.0;
@@ -428,6 +428,26 @@ pub(super) fn temperatures(thermal: &DepositionSimulation<'_>) -> [f64; 4] {
     CELL_IDS.map(|cell| thermal.temperature_k(cell).unwrap())
 }
 
+/// The magnetic laws of the second test: each conducting triangle's
+/// permeability from the card, affine in temperature over 290-360 K.
+pub(super) fn magnetic_laws(
+    card: &MaterialCard,
+    problem: &PlanarNonlinearMagnetostatics,
+) -> Vec<MagneticThermalLaw> {
+    problem
+        .materials()
+        .iter()
+        .enumerate()
+        .filter(|(triangle, _)| receiver(problem.mesh(), *triangle).is_some())
+        .map(|(triangle, original)| MagneticThermalLaw {
+            triangle,
+            law: ThermalMagneticMaterial::new(card, original.material(), "T", [290.0, 360.0])
+                .unwrap(),
+            maximum_flux_density_t: 4.0,
+        })
+        .collect()
+}
+
 /// One conducting triangle of [`closed`]: its cell, volume \[m³\],
 /// conductivity \[S/m\], vertex electric field \[V/m\], heat \[J\] and
 /// profile \[1/m²\].
@@ -750,23 +770,7 @@ fn full_heat_assembly_preserves_solid_loss_and_magnetic_caloric_owners() {
                     thermal_contacts: &[],
                     radiation: None,
                 };
-                let laws: Vec<_> = problem
-                    .materials()
-                    .iter()
-                    .enumerate()
-                    .filter(|(triangle, _)| receiver(problem.mesh(), *triangle).is_some())
-                    .map(|(triangle, original)| MagneticThermalLaw {
-                        triangle,
-                        law: ThermalMagneticMaterial::new(
-                            card,
-                            original.material(),
-                            "T",
-                            [290.0, 360.0],
-                        )
-                        .unwrap(),
-                        maximum_flux_density_t: 4.0,
-                    })
-                    .collect();
+                let laws = magnetic_laws(card, problem);
                 let gate = CancelGate::new();
                 let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
                 pool.scope(|arena| {

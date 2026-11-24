@@ -16,20 +16,36 @@
 //!
 //! Held, in this order, to the ledger with the heater's heat, to solid.rs's
 //! closed form on the kernel's own states, and to the module, step for step.
+//!
+//! The second test declares solid.rs's second, `MaterialHeatNetwork`'s
+//! assembly with sixteen magnetic laws, on the magnetic lane:
+//! `PlanarWinding::magnetic_at_port_temperatures` with the same laws, and
+//! link 17 in the timeline. Its ports return `-T1 (s1 - s0)` beside the
+//! Joule heat where the module deposits `-P - (T1 s1 - T0 s0)`; the
+//! Component books the difference, `-(P + (T1 - T0) s0)`, as numerical
+//! loss, as in graph_caloric.rs.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use fs_em::winding::component::{ConductorLaw, HeatReceiver, PlanarWinding, PlanarWindingState};
+use fs_couple::circuit_enthalpy::contacts::heat::MaterialHeatNetwork;
+use fs_couple::circuit_enthalpy::contacts::material::ElectricalContactNetwork;
+use fs_couple::circuit_enthalpy::eddy::thermal::MagneticThermalLaw;
+use fs_couple::circuit_enthalpy::material::MaterialNetwork;
+use fs_em::winding::component::{
+    ConductorLaw, HeatReceiver, MagneticLaw, MagneticLaws, PlanarWinding, PlanarWindingState,
+};
 use fs_em::winding::nonlinear::NonlinearWindingCircuit;
+use fs_rep_mesh::TriComplex2;
 use fs_system::{NodeId, System};
 use fs_thermal::component::TimelineState;
+use fs_thermal::enthalpy::conduction::ConductiveLink;
 
 use super::graph::TOLERANCE_J;
 use super::kernel::{CellConductors, graph, ledger_closes, with_cx};
 use super::solid::{
-    CELL_IDS, HEAT_CAPACITY, HEATER_W, Parts, SOLID_MATERIAL, STEP, VOLTAGE, circuit, closed,
-    config, holds, parts, receiver, temperatures,
+    CELL_IDS, END_H, HEAT_CAPACITY, HEATER_W, Parts, SOLID_MATERIAL, STEP, VOLTAGE, circuit,
+    closed, config, holds, linear, magnetic_laws, parts, receiver, temperatures,
 };
 use super::*;
 
@@ -121,23 +137,65 @@ fn module_run(parts: &Parts, law: &CellConductors) -> Vec<State> {
     states
 }
 
+/// A triangle's flux density \[T\] from a P1 potential \[Wb/m\]: the
+/// potential's gradient turned a quarter.
+fn flux_density(mesh: &TriComplex2, potential: &[f64], triangle: usize) -> [f64; 2] {
+    let face = mesh.faces()[triangle].map(|v| v as usize);
+    let [p, q, r] = face.map(|v| mesh.vertices()[v]);
+    let [a, b, c] = face.map(|v| potential[v]);
+    let twice_area = (q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1]);
+    let dx = (a * (q[1] - r[1]) + b * (r[1] - p[1]) + c * (p[1] - q[1])) / twice_area;
+    let dy = (a * (r[0] - q[0]) + b * (p[0] - r[0]) + c * (q[0] - p[0])) / twice_area;
+    [dy, -dx]
+}
+
 /// Each interval of `states` against solid.rs's closed form: its identities
 /// on the accepted states, and the largest departure of a cell's stored
-/// change from its closed-form heat, with the heater's on cell 0 \[J\].
-fn closed_form(states: &[State]) -> f64 {
-    let mut most = 0.0_f64;
+/// change from its closed-form heat \[J\]. Beside the Joule heat that is the
+/// heater's on cell 0, link 17's conduction between cells 0 and 1 when
+/// `linked`, and each magnetic triangle's port heat `-T1 (s1 - s0)` at
+/// `slope` per kelvin, `s = V B^2 slope / (2 mu^2)`. Also, over the run, the
+/// terms `-(P + (T1 - T0) s0)` that the Component books, `P` the owner's
+/// parameter work at the retained B, and the owner's backward-Euler
+/// dissipation \[J\].
+fn closed_form(states: &[State], slope: f64, linked: bool) -> [f64; 3] {
+    let (mut most, mut terms, mut dissipation) = (0.0_f64, 0.0, 0.0);
     for ((old, before), (next, after)) in states.iter().zip(&states[1..]) {
         let closed = closed(old, next, *after);
         holds(&closed, old, next);
+        let mut other = [STEP * HEATER_W, 0.0, 0.0, 0.0];
+        if linked {
+            let transfer = STEP * 0.5 * (after[0] - after[1]);
+            other[0] -= transfer;
+            other[1] += transfer;
+        }
+        dissipation += 0.5 * END_H * (next.currents_a()[0] - old.currents_a()[0]).powi(2);
+        let mesh = next.field().problem().mesh();
+        for triangle in 0..mesh.faces().len() {
+            let b = [old, next].map(|c| flux_density(mesh, c.field().potential_wb_m(), triangle));
+            let volume = mesh.face_measure(triangle).unwrap();
+            let owner = receiver(mesh, triangle);
+            let local = if owner.is_some() { slope } else { 0.0 };
+            let t = owner.map_or([300.0; 2], |cell| [before[cell], after[cell]]);
+            let mu = t.map(|t| 1.0 + local * (t - 300.0));
+            let b2 = b.map(|b| b[0] * b[0] + b[1] * b[1]);
+            let entropy = [0, 1].map(|i| 0.5 * volume * b2[i] * local / mu[i].powi(2));
+            let change = (b[1][0] - b[0][0]).powi(2) + (b[1][1] - b[0][1]).powi(2);
+            dissipation += 0.5 * volume * change / mu[1];
+            if let Some(cell) = owner {
+                let parameter = 0.5 * volume * b2[0] * (1.0 / mu[1] - 1.0 / mu[0]);
+                other[cell] -= t[1] * (entropy[1] - entropy[0]);
+                terms -= parameter + (t[1] - t[0]) * entropy[0];
+            }
+        }
         for cell in 0..CELL_IDS.len() {
-            let heater = if cell == 0 { STEP * HEATER_W } else { 0.0 };
             let stored = HEAT_CAPACITY * (after[cell] - before[cell]);
-            most = most.max((stored - closed.cell_heat[cell] - heater).abs());
+            most = most.max((stored - closed.cell_heat[cell] - other[cell]).abs());
         }
         // The heater is real: its cell runs ahead of its neighbour.
         assert!(after[0] > after[1] + 0.5, "{after:?}");
     }
-    most
+    [most, terms, dissipation]
 }
 
 /// The largest differences over the intervals' ends: temperature \[K\],
@@ -198,7 +256,7 @@ fn the_declared_graph_reproduces_the_solid_winding_and_its_heater() {
     // The heater's heat is its authored source over the run, not a reading.
     ledger_closes(&system, electrical, cells, HEATER_W * STEP * STEPS as f64);
 
-    let departure = closed_form(&kernel);
+    let [departure, ..] = closed_form(&kernel, 0.0, false);
     println!("graph S1: kernel against the closed form: {departure:.3e} J");
     assert!(departure <= CLOSED_J, "{departure:e} J above {CLOSED_J:e}");
 
@@ -210,5 +268,184 @@ fn the_declared_graph_reproduces_the_solid_winding_and_its_heater() {
     );
     for (value, bound) in most.iter().zip(MODULE) {
         assert!(*value <= bound, "{most:?} against {MODULE:?}");
+    }
+}
+
+/// The module's accepted states from `parts` through `MaterialHeatNetwork`'s
+/// assembly with `laws`, every conductor it reports held to `law` at its
+/// cell's end temperature, bit for bit.
+fn heat_module_run(parts: &Parts, law: &CellConductors, laws: &[MagneticThermalLaw]) -> Vec<State> {
+    let bulk = MaterialNetwork {
+        cells: parts.cells,
+        resistors: &[],
+        links: &parts.links,
+    };
+    let electrical = ElectricalContactNetwork {
+        bulk: &bulk,
+        contacts: &[],
+        electrical_bases: &[],
+    };
+    let assembly = MaterialHeatNetwork {
+        electrical: &electrical,
+        thermal_contacts: &[],
+        radiation: None,
+    };
+    let mesh = parts.problem.mesh();
+    let mut thermal = parts.thermal.clone();
+    let mut circuit = circuit(parts.problem);
+    let mut states = vec![(circuit.clone(), temperatures(&thermal))];
+    with_cx(|cx| {
+        let prepared = assembly.prepare(cx, &thermal).unwrap();
+        for interval in 1..=STEPS {
+            let next = prepared
+                .step_nonlinear_winding_candidate(
+                    cx,
+                    &thermal,
+                    interval as f64 * STEP,
+                    &circuit,
+                    &[VOLTAGE],
+                    &parts.regions,
+                    &[],
+                    1e-12,
+                    Some((laws, linear::limits())),
+                    config(),
+                    field::controls(),
+                    &[0.0; 4],
+                )
+                .unwrap();
+            let t = temperatures(next.thermal());
+            for loss in &next.report().electrical.field.cells {
+                let triangle = loss.source.triangle;
+                let cell = receiver(mesh, triangle).unwrap();
+                assert_eq!(
+                    law.conductor(triangle, t[cell]).unwrap(),
+                    loss.source.conductor,
+                    "interval {interval}, triangle {triangle}"
+                );
+            }
+            (thermal, circuit, _) = next.into_parts();
+            states.push((circuit.clone(), t));
+        }
+    });
+    states
+}
+
+/// Bounds of the second test, about fifty times the rounding measured over
+/// the three variants: [`closed_form`]'s departure and the booked loss, less
+/// the owner's dissipation, against the terms \[J\].
+const MAGNETIC_J: [f64; 2] = [2.5e-12, 9e-12];
+
+/// At slope 0, the same: [`largest`] and the cells' energy gap \[J\].
+const CONTROL: [f64; 5] = [5e-10, 2.5e-11, 2.7e-12, 3.7e-12, 4.3e-10];
+
+/// At slope 0.004, [`largest`] and the gap's departure from the terms as a
+/// fraction of them. They measure 1.274e-8 K, 5.285e-12 A, 9.837e-13 Wb/m,
+/// 1.644e-10 1/m2 and 1.1e-3, all from the cooler cells' feedback through
+/// their resistivity and permeability, as in graph_caloric.rs; the bounds
+/// sit about a third above.
+const FEEDBACK: [f64; 5] = [1.6e-8, 7e-12, 1.3e-12, 2.1e-10, 1.5e-3];
+
+/// The fixture of `full_heat_assembly_preserves_solid_loss_and_magnetic_caloric_owners`
+/// in its three variants: no link at slope 0, link 17 at slope 0, and link
+/// 17 at slope 0.004 per kelvin.
+#[test]
+fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
+    for (linked, slope) in [(false, 0.0), (true, 0.0), (true, 0.004)] {
+        let parts = parts(slope, linked);
+        let start = circuit(parts.problem);
+        let law = Arc::new(CellConductors::new(
+            parts.card,
+            parts.context.clone(),
+            start.field().conductors(),
+            start.conductors(),
+        ));
+        let laws = magnetic_laws(parts.card, parts.problem);
+        let magnetic = MagneticLaws {
+            triangles: laws
+                .iter()
+                .map(|binding| MagneticLaw {
+                    triangle: binding.triangle,
+                    law: binding.law.clone(),
+                })
+                .collect(),
+            assembly: linear::limits(),
+        };
+        let shared: Arc<dyn ConductorLaw> = law.clone();
+        let winding = PlanarWinding::magnetic_at_port_temperatures(
+            &start,
+            vec![shared; CELL_IDS.len()],
+            BTreeMap::new(),
+            magnetic,
+            receivers(&start),
+            field::controls(),
+            TOLERANCE_J,
+        )
+        .unwrap();
+        // Link 17 conducts as the module's `ConductionLink` does: the card's
+        // 1 W/(m K) over 0.25 m to each cell's centre.
+        let links: Vec<_> = parts
+            .links
+            .iter()
+            .map(|link| ConductiveLink {
+                link_id: link.link,
+                half_distances_m: [link.distance_a_m, link.distance_b_m],
+                contact_resistance_m2_k_w: 0.0,
+            })
+            .collect();
+        let (mut system, electrical, cells) = graph(
+            winding,
+            PlanarWindingState::at_temperatures(start, vec![300.0; CELL_IDS.len()]),
+            (&parts.thermal, &[(SOLID_MATERIAL, parts.curve)], &links),
+            &CELL_IDS,
+            Some(|_| VOLTAGE),
+        );
+        let kernel = kernel_run(&mut system, electrical, cells);
+        ledger_closes(&system, electrical, cells, HEATER_W * STEP * STEPS as f64);
+        let node = &system.ledger().nodes[electrical.index()];
+        assert_eq!(node.entropy.as_ref().unwrap().audited_steps, STEPS as u64);
+
+        let [departure, terms, dissipation] = closed_form(&kernel, slope, linked);
+        let booked = (node.numerical_loss_j.value() - dissipation - terms).abs();
+        println!(
+            "graph S2 (link {linked}, slope {slope}): closed form {departure:.3e} J; booked against the terms \
+             {booked:.3e} J; terms {terms:.4e} J, dissipation {dissipation:.4e} J"
+        );
+        for (value, bound) in [departure, booked].into_iter().zip(MAGNETIC_J) {
+            assert!(value <= bound, "{value:e} above {bound:e}");
+        }
+
+        let module = heat_module_run(&parts, &law, &laws);
+        let most = largest(&kernel, &module);
+        let gap: f64 = (0..CELL_IDS.len())
+            .map(|cell| HEAT_CAPACITY * (module[STEPS].1[cell] - kernel[STEPS].1[cell]))
+            .sum();
+        println!(
+            "graph S2 (link {linked}, slope {slope}): kernel against module: {:.3e} K, {:.3e} A, {:.3e} Wb/m, \
+             {:.3e} 1/m2; cells' gap {gap:.4e} J",
+            most[0], most[1], most[2], most[3]
+        );
+        if slope == 0.0 {
+            assert_eq!(terms.to_bits(), 0.0_f64.to_bits());
+            let values = [most[0], most[1], most[2], most[3], gap.abs()];
+            for (value, bound) in values.into_iter().zip(CONTROL) {
+                assert!(value <= bound, "slope 0: {values:?} against {CONTROL:?}");
+            }
+        } else {
+            // The term is resolved, two orders above the bound of its
+            // booking; the module's cells end cooler by it, less the feedback
+            // of their resistivity and permeability.
+            assert!(-terms > 100.0 * MAGNETIC_J[1], "{terms:e}");
+            let fraction = (gap - terms).abs() / terms.abs();
+            println!(
+                "graph S2 (slope {slope}): the cells' gap departs from the terms by {fraction:.3e} of them"
+            );
+            let values = [most[0], most[1], most[2], most[3], fraction];
+            for (value, bound) in values.into_iter().zip(FEEDBACK) {
+                assert!(
+                    value <= bound,
+                    "slope {slope}: {values:?} against {FEEDBACK:?}"
+                );
+            }
+        }
     }
 }

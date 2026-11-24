@@ -5875,6 +5875,39 @@ kernel each failed this test before its module comparison. The three in
 `closed()` and the two in the heater also failed both module tests that
 call `check_receipt`.
 
+A second test there declares the heat-assembly fixture, `MaterialHeatNetwork`
+with sixteen magnetic laws, in its three variants: no link at slope 0, link
+17 at slope 0, and link 17 at 0.004 per kelvin. The winding is built with
+`magnetic_at_port_temperatures` from the module test's own laws, and link 17
+joins the timeline's cells 0 and 1 with the card's 1 W/(m K). The ports
+return `-T1 (s1 - s0)` beside the Joule heat where the module deposits
+`-P - (T1 s1 - T0 s0)`; the Component books the difference as numerical
+loss, as in graph_caloric.rs.
+
+Held over the same two steps, in this order:
+- the ledger with the heater's heat, and the winding's entropy audit on
+  both steps;
+- each interval against `closed()` and each cell's closed-form heat, now
+  with the link's conduction and each port's reversible heat, within
+  4.874e-14 J; the booked loss, less the owner's backward-Euler dissipation
+  in closed form, is the terms within 1.773e-13 J;
+- at slope 0, against the module: within 1.006e-11 K, 4.633e-13 A,
+  5.471e-14 Wb/m and 7.461e-14 1/m², and the cells' energies within
+  8.640e-12 J; the bounds sit about fifty times above;
+- at slope 0.004 the terms sum to -7.193e-9 J (the fixture's field is
+  weak), and the module's cells end with that much less energy, within
+  0.11 % of it. The module departs by 1.274e-8 K, 5.285e-12 A,
+  9.837e-13 Wb/m and 1.644e-10 1/m², the cooler cells' feedback through
+  their resistivity and permeability.
+
+Eight planted defects in the graph, its closed form, the shared magnetic
+laws and fs-em's magnetic lane each failed this test. Five failed at the
+closed form or the booked loss. The kernel refused two: the magnetic laws
+left off the winding, and link 17 left out of the timeline. The module
+refused the one in the shared laws, which also failed the module test. A
+ninth, the ports started at 310 K, cannot fail it: the field starts at
+zero, so the start temperatures meet no entropy.
+
 
 
 ## Source-dependent directional histories on sustained mixed trajectories
