@@ -8,6 +8,31 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## Live passive constitutive laws for scalar dissipation
+
+A Damper can follow an `Arc<dyn DissipationLaw>` through `Damper::following`.
+The law receives the LIVE heat-port temperature and signed relative flow
+f_a - f_b at every proposal and tangent evaluation. It returns a finite
+nonnegative dimensionless factor and its two finite partials, ordered
+[temperature, relative flow], multiplying the original reference resistance.
+The resulting effort is R(T,u) u and the heat output is -R(T,u) u^2.
+Both JVP and VJP carry the dependence through force and emitted heat.
+
+The law may explicitly return zero dissipation. Negative or nonfinite
+factors, unrepresentable responses, and declared source-support failures
+refuse the trial; negative differential resistance alone is not treated
+as negative dissipation. This remains a Smooth component and confers no
+monotonicity or global uniqueness guarantee. A factor cusp at zero flow
+is admissible only when its effort and heat products have the supplied
+continuous derivatives there.
+
+The complete authored law contributes identity words in addition to the
+reference coefficient. Stateless checkpoint encoding is unchanged.
+Dampers without a law retain their original arithmetic and identity.
+The hook adds no material dependency to fs-system: a physics/material
+owner supplies its source law, while the shared component owns the heat,
+entropy, tangent and composition behavior.
+
 ## Diffuse-gray radiative exchange
 
 `ConductanceMatrix::gray_radiation(area_m2, [emissivity_a, emissivity_b])`

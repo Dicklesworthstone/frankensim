@@ -5,8 +5,9 @@
 //! tangent of its port map, so a device made of masses, springs, dampers,
 //! heat capacities and conductances can be written down as data and stepped
 //! by [`crate::System`] with no element-specific code in the driver.
-//! Parameters are constants in SI units. Laws that depend on the state of a
-//! material or come from material cards belong to the physics owners.
+//! Reference parameters are constants in SI units. A [`Damper`] can follow a
+//! [`DissipationLaw`] at its live temperature and relative flow. Material-card
+//! resolution and the constitutive law itself remain with the physics owner.
 //!
 //! # Domains
 //!
@@ -70,6 +71,7 @@
 use core::f64::consts::PI;
 use core::fmt;
 use core::num::NonZeroUsize;
+use std::sync::Arc;
 
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
@@ -90,6 +92,8 @@ mod controlled_source;
 pub use controlled_source::ControlledSource;
 mod dirac;
 pub use dirac::{DiracError, DiracJunction};
+mod dissipation;
+pub use dissipation::DissipationLaw;
 mod electrical;
 pub use electrical::{IdealDiode, IdealSwitch};
 mod gap_field;
@@ -1109,13 +1113,16 @@ impl PortTangent for Spring {
     }
 }
 
-/// A linear viscous damper between ports `a` and `b`, force
+/// A viscous damper between ports `a` and `b`, force
 /// `damping (f_a - f_b)`. The power it absorbs leaves as heat through port
-/// `heat` at the temperature that port receives.
+/// `heat` at the temperature that port receives. Without [`Self::following`]
+/// its coefficient is constant; a constitutive law may scale it at the
+/// live heat-port temperature and signed relative flow.
 #[derive(Debug, Clone)]
 pub struct Damper {
     damping_n_s_m: f64,
     ports: [PortSpec; 3],
+    law: Option<Arc<dyn DissipationLaw>>,
 }
 
 impl Damper {
@@ -1141,7 +1148,23 @@ impl Damper {
                 port("b", Some(kind), PortRole::FlowIn),
                 heat("heat", PortRole::EffortIn),
             ],
+            law: None,
         })
+    }
+
+    /// Scale the reference resistance by `law` at the temperature received
+    /// through `heat` and the signed relative flow `f_a - f_b`.
+    ///
+    /// Every proposal and tangent uses the same live inputs. All absorbed
+    /// power still leaves through `heat`; no new state or integrator is
+    /// introduced. A source-domain refusal, negative factor, or non-finite
+    /// response refuses the step rather than clamping the law. The class
+    /// stays [`Class::Smooth`]: passivity does not imply a monotone response
+    /// or a unique solution of a coupled graph.
+    #[must_use]
+    pub fn following(mut self, law: Arc<dyn DissipationLaw>) -> Self {
+        self.law = Some(law);
+        self
     }
 }
 
@@ -1167,6 +1190,10 @@ impl Component for Damper {
 
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.push(self.damping_n_s_m.to_bits());
+        if let Some(law) = &self.law {
+            words.push(u64::from_le_bytes(*b"dissip01"));
+            law.identity_words(words);
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -1194,7 +1221,12 @@ impl Component for Damper {
         inputs_finite(inputs)?;
         let rate = inputs[0] - inputs[1];
         let kelvin = temperature(inputs[2])?;
-        let force_n = self.damping_n_s_m * rate;
+        let force_n = match &self.law {
+            None => self.damping_n_s_m * rate,
+            Some(law) => {
+                dissipation::response(self.damping_n_s_m, law.as_ref(), kelvin, rate)?.effort
+            }
+        };
         let loss_w = force_n * rate;
         outputs[0] = force_n;
         outputs[1] = -force_n;
@@ -1224,8 +1256,27 @@ impl PortTangent for Damper {
         inputs: &[f64],
         d_inputs: &[f64],
         d_outputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
+        if let Some(law) = &self.law {
+            cx.checkpoint()?;
+            inputs_finite(inputs)?;
+            let response = dissipation::response(
+                self.damping_n_s_m,
+                law.as_ref(),
+                inputs[2],
+                inputs[0] - inputs[1],
+            )?;
+            let d_rate = d_inputs[0] - d_inputs[1];
+            let effort =
+                response.effort_by_flow * d_rate + response.effort_by_temperature * d_inputs[2];
+            let power =
+                response.power_by_flow * d_rate + response.power_by_temperature * d_inputs[2];
+            d_outputs[0] = effort;
+            d_outputs[1] = -effort;
+            d_outputs[2] = -power;
+            return Ok(());
+        }
         let rate = inputs[0] - inputs[1];
         let d_rate = d_inputs[0] - d_inputs[1];
         d_outputs[0] = self.damping_n_s_m * d_rate;
@@ -1241,8 +1292,25 @@ impl PortTangent for Damper {
         inputs: &[f64],
         bar_outputs: &[f64],
         bar_inputs: &mut [f64],
-        _cx: &Cx<'_>,
+        cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
+        if let Some(law) = &self.law {
+            cx.checkpoint()?;
+            inputs_finite(inputs)?;
+            let response = dissipation::response(
+                self.damping_n_s_m,
+                law.as_ref(),
+                inputs[2],
+                inputs[0] - inputs[1],
+            )?;
+            let effort = bar_outputs[0] - bar_outputs[1];
+            let along = response.effort_by_flow * effort - response.power_by_flow * bar_outputs[2];
+            bar_inputs[0] = along;
+            bar_inputs[1] = -along;
+            bar_inputs[2] = response.effort_by_temperature * effort
+                - response.power_by_temperature * bar_outputs[2];
+            return Ok(());
+        }
         let rate = inputs[0] - inputs[1];
         let c = self.damping_n_s_m;
         let along = c * (bar_outputs[0] - bar_outputs[1]) - 2.0 * c * rate * bar_outputs[2];
