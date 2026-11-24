@@ -177,3 +177,49 @@ fn g1_source_realization_needs_no_nonlinear_envelope() {
     close(spectrum.branches()[0].modulus_pa, 1.0, 1e-15);
     close(spectrum.branches()[0].viscosity_pa_s, 1e20, 1e-15);
 }
+
+#[test]
+fn g0_free_recovery_through_subnormal_strains_is_admitted() {
+    // A released hammer's felt recovers toward zero strain. Below f64::MIN_POSITIVE
+    // (gradual underflow) rounding is absolute, not relative to the step's energies,
+    // so the balance check must still admit each free-recovery step. Starting state:
+    // the Satie bars 1-2 render's refusal (strains [2.8e-158, 1.9e-320], stress 0).
+    for (modulus, viscosity) in [(1e5, 2000.0), (7e4, 14000.0), (3e8, 50.0), (2e3, 9e5)] {
+        let spectrum = CreepSpectrum::new(vec![
+            CreepBranch {
+                modulus_pa: modulus,
+                viscosity_pa_s: viscosity,
+            },
+            CreepBranch {
+                modulus_pa: 0.7 * modulus,
+                viscosity_pa_s: 7.0 * viscosity,
+            },
+        ])
+        .unwrap();
+        for dt in [1.0 / 96000.0, 1.0 / 48000.0, 1e-3, 0.05, 2.0] {
+            let p = spectrum.prepare(dt).unwrap();
+            for start in [
+                [2.8074071386543054e-158, 1.8587e-320],
+                [1e-150, 1e-160],
+                [1e-3, 4e-4],
+            ] {
+                let mut state = [0.0; MAX_FELT_RATE_BRANCHES];
+                state[..2].copy_from_slice(&start);
+                for step in 0..4000 {
+                    let trial = p.advance(&state, 0.0).unwrap_or_else(|e| {
+                        panic!("E {modulus} dt {dt} step {step} state {state:?}: {e}")
+                    });
+                    assert!(trial.dissipated_energy_j_m3 >= 0.0);
+                    assert!(trial.balance_residual_j_m3.abs() <= trial.roundoff_bound_j_m3);
+                    assert!(
+                        trial.strain[..2]
+                            .iter()
+                            .zip(&state)
+                            .all(|(a, b)| *a >= 0.0 && a <= b)
+                    );
+                    state = trial.strain;
+                }
+            }
+        }
+    }
+}

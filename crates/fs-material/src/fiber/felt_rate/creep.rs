@@ -288,7 +288,10 @@ impl PreparedCreep {
                 .to_f64()
                 .abs()
                 .max(step.stored_change.to_f64().abs())
-                .max(step.heat.to_f64().abs());
+                .max(step.heat.to_f64().abs())
+                // Below MIN_POSITIVE rounding is absolute (gradual underflow):
+                // one subnormal spacing is EPSILON * MIN_POSITIVE.
+                .max(f64::MIN_POSITIVE);
             roundoff = roundoff + state_rounding + dd(128.0 * f64::EPSILON * scale);
         }
         let residual = work - stored_change - heat;
