@@ -1,0 +1,19 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 1.0,
+  "step_s": 0.0625,
+  "elements": {
+    "field": {"kind": "gap_inductor", "mu_turns_area_h_m": 1.5,
+      "gap_limits_m": [0.5, 1.5], "gap_m": 1.0, "flux_linkage_wb": 1.2},
+    "body": {"kind": "mass", "mass_kg": 2.0, "position_m": 1.0},
+    "push": {"kind": "force", "force_n": 0.05},
+    "load": {"kind": "resistor", "resistance_ohm": 0.8},
+    "case": {"kind": "heat_capacity", "capacity_j_k": 1000.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["body.p", {"port": "field.gap", "ratio": -1}, "push.p"]},
+    {"join": ["field.field", "load.a"]},
+    {"prescribe": "load.b", "current_a": 0},
+    {"route": "load.heat", "to": [["case.heat", 1.0]]}
+  ]
+}

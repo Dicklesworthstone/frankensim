@@ -13,6 +13,7 @@ mod contact;
 mod dirac;
 mod dissipation;
 mod friction;
+mod gap_field;
 mod gas;
 mod hydraulic;
 mod materials;
@@ -648,6 +649,24 @@ a signal_source to closed or prescribe value there, using held_table for
 binary schedules. Reports expose current_a, voltage_v and the switch's closed
 command from the last step (null initially). Fixed stepping only; these ideal
 relations contain no semiconductor loss, recovery, arcing or impulse model.
+Moving-gap fields couple an electrical circuit to a guided mechanical end:
+  gap_capacitor epsilon_area_f_m, gap_limits_m: [lower, upper],
+                 gap_m, charge_c = 0                                 [field, gap]
+  gap_inductor  mu_turns_area_h_m, gap_limits_m: [lower, upper],
+                 gap_m, flux_linkage_wb = 0                          [field, gap]
+  These are fs-system's uniform gap fields, with constant epsilon A or
+  mu N^2 A. field receives current and returns voltage for the capacitor;
+  it receives voltage and returns current for the inductor. gap receives
+  opening velocity and returns the positive attractive force opposing it.
+  In a join on mass.p, give gap the member ratio -1 so positive mass motion
+  opens the gap and the field pulls back. Both limits and the initial gap
+  are required: 0 <= lower < gap_m < upper. A step outside that open interval
+  refuses, never clamps. Reports and samples include the field coordinate,
+  gap_m, and last-step voltage_v, current_a, attraction_n, gap_velocity_m_s
+  (the last-step values are null initially). Adaptive tolerances must name
+  both state coordinates; supported order is at most 2. The same native
+  field energy supplies both electrical effort and mechanical force;
+  no fringe field, saturation, temperature dependence or impact is inferred.
 A resistor or resistor_branch that names a scene material whose declaration
 names a resistivity_property is that material's uniform conductor of length
 length_m and cross-section area_m2: in every trial fs-material's Ohmic node
@@ -1538,6 +1557,10 @@ enum Kind {
     NonlinearCapacitor,
     /// Flux storage governed by a source-owned I(flux) curve.
     NonlinearInductor,
+    /// The uniform electric field of a capacitor with a moving gap.
+    GapCapacitor,
+    /// The uniform magnetic field of an inductor with a moving gap.
+    GapInductor,
     Gyrator,
     /// A lossless power map whose scalar ratio comes from a signal.
     ModulatedTransformer,
@@ -1583,7 +1606,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 59] = [
+    const TABLE: [(&'static str, Self); 61] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1626,6 +1649,8 @@ impl Kind {
         ("carreau_pipe", Self::CarreauPipe),
         ("nonlinear_capacitor", Self::NonlinearCapacitor),
         ("nonlinear_inductor", Self::NonlinearInductor),
+        ("gap_capacitor", Self::GapCapacitor),
+        ("gap_inductor", Self::GapInductor),
         ("gyrator", Self::Gyrator),
         ("modulated_transformer", Self::ModulatedTransformer),
         ("dirac_junction", Self::DiracJunction),
@@ -1759,6 +1784,10 @@ enum Coordinate {
     Position,
     Velocity,
     Scalar,
+    /// Charge or flux linkage of a moving-gap field.
+    FieldCoordinate,
+    /// The moving-gap field's independent mechanical coordinate.
+    GapWidth,
     Enthalpy,
     SourceWork,
     Network(adaptive_metric::NetworkCoordinate),
@@ -1800,6 +1829,10 @@ impl ErrorAccount {
             Coordinate::Velocity => checkpoint.state::<Motion>(self.node)
                 .map_or(f64::NAN, |state| state.velocity_m_s),
             Coordinate::Scalar => checkpoint.state::<f64>(self.node).copied().unwrap_or(f64::NAN),
+            Coordinate::FieldCoordinate => checkpoint.state::<gap_field::State>(self.node)
+                .map_or(f64::NAN, |state| state.coordinate),
+            Coordinate::GapWidth => checkpoint.state::<gap_field::State>(self.node)
+                .map_or(f64::NAN, |state| state.gap_m),
             Coordinate::Enthalpy => checkpoint.state::<EquilibriumPhaseState>(self.node)
                 .map_or(f64::NAN, |state| state.specific_enthalpy_j_kg()),
             Coordinate::SourceWork => checkpoint.state::<SourceAccount>(self.node)
@@ -1973,7 +2006,7 @@ fn step_order(element: &Element) -> Option<u32> {
                 2
             },
         ),
-        Kind::ModalStructure | Kind::GasVolume => Some(2),
+        Kind::ModalStructure | Kind::GasVolume | Kind::GapCapacitor | Kind::GapInductor => Some(2),
         _ => None,
     }
 }
@@ -3631,6 +3664,9 @@ fn element(
             flux_current_curve = Some(curve.clone());
             add(builder, name, NonlinearInductor::new(curve), flux)?
         }
+        Kind::GapCapacitor | Kind::GapInductor => {
+            gap_field::element(builder, name, definition, kind == Kind::GapInductor, &what)?
+        }
         Kind::Gyrator => gyrator(builder, name, definition, &what)?,
         Kind::ModulatedTransformer => modulated_transformer(builder, name, definition, &what)?,
         Kind::DiracJunction => add(builder, name, dirac::junction(definition, name, &what)?, ())?,
@@ -4700,6 +4736,13 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             }
             Kind::NonlinearCapacitor => vec![("charge_c", Coordinate::Scalar)],
             Kind::NonlinearInductor => vec![("flux_wb", Coordinate::Scalar)],
+            Kind::GapCapacitor | Kind::GapInductor => vec![
+                (
+                    gap_field::coordinate_name(element.kind == Kind::GapInductor),
+                    Coordinate::FieldCoordinate,
+                ),
+                ("gap_m", Coordinate::GapWidth),
+            ],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
             Kind::Source(_)
@@ -5515,6 +5558,16 @@ impl Device {
                  band and confer no material-card provenance or extra heat storage"
             ));
         }
+        if self.elements.iter().any(|element| {
+            matches!(element.kind, Kind::GapCapacitor | Kind::GapInductor)
+        }) {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; moving-gap fields use fs-system's native discrete gradient \
+                 to exchange electrical and mechanical work between one fixed and one guided \
+                 boundary, with constant epsilon A or mu N^2 A and an open admitted gap \
+                 interval; no fringe field, saturation, temperature dependence or impact law"
+            ));
+        }
         description
     }
 
@@ -5921,6 +5974,9 @@ impl Device {
                 let current = element.flux_current_curve.as_ref()
                     .and_then(|curve| curve.current_a(flux).ok()).unwrap_or(f64::NAN);
                 vec![("flux_wb", flux), ("current_a", current)]
+            }
+            Kind::GapCapacitor | Kind::GapInductor => {
+                gap_field::values(system, element.node, element.kind == Kind::GapInductor)
             }
             Kind::HeatCapacity => vec![(
                 "temperature_k",

@@ -36,6 +36,8 @@ mod dirac;
 mod radiation;
 #[path = "system_command/dissipation.rs"]
 mod dissipation;
+#[path = "system_command/gap_field.rs"]
+mod gap_field;
 
 fn example(name: &str) -> String {
     format!(

@@ -1817,6 +1817,39 @@ prescribed `current_a` is positive into its stored charge. Its reported
 readings are step means. The legacy `capacitor`, `resistor` and `join` retain
 their series-loop conventions.
 
+`gap_capacitor` and `gap_inductor` lower to the kernel's `GapField` with its
+native port tangent. They couple a moving uniform gap to an electrical
+field through the owner's shared stored energy `H = x^2 g / (2 s)`. The
+capacitor takes `epsilon_area_f_m` (permittivity times plate area) and
+optional `charge_c`, default zero. The inductor takes `mu_turns_area_h_m`
+(permeability times turns squared times pole area) and optional
+`flux_linkage_wb`, default zero; that coordinate is the winding's flux
+linkage, not its magnetic flux. Both require `gap_m` and a two-entry
+`gap_limits_m` array. The positive finite coupling scale, ordered finite
+limits with a nonnegative lower bound, finite state and finite stored
+energy retain the owner's admission.
+
+The `field` port takes `current_a` and returns voltage for a capacitor,
+or takes `voltage_v` and returns current for an inductor. Positive input
+increases the field coordinate. The mechanical `gap` port receives opening
+velocity and returns the field's attractive force. When a mass's positive
+position follows the gap width, join its `p` to `gap` with member
+`{"port":"field.gap","ratio":-1}` as in
+`examples/system/gap_capacitor.json`. The field's existing discrete gradient
+and the ordinary graph connections exchange electrical and mechanical work.
+
+Reports and probes expose `charge_c` or `flux_linkage_wb`, plus `gap_m`, and
+the actual last-step `voltage_v`, `current_a`, `attraction_n` and
+`gap_velocity_m_s` from the native ports. The last-step values are null
+initially. Both state coordinates must have adaptive error tolerances;
+the supported adaptive order is at most two. Native snapshots
+retain both coordinates and bind the field kind, coupling scale and gap
+limits. A state or trial step on or outside either gap limit refuses;
+there is no clamping or implicit contact model. The coefficients remain
+authored constants. The owner models a uniform dielectric gap or magnetic
+air gap with negligible return-path storage; fringing, saturation and
+temperature-dependent field coefficients are outside this scene kind.
+
 `ideal_diode` and `ideal_switch` lower to the native fs-system load-line
 Components, with no scene-side solve. Each takes only `kind`. Their electrical
 `p` port receives current and returns voltage, with positive power into the
