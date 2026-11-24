@@ -2266,6 +2266,19 @@ export function blendPose(o: BodyPose, a: BodyPose, b: BodyPose, w: number): Bod
 /* A person                                                                                                       */
 /* ------------------------------------------------------------------------------------------------------------ */
 
+/** A capsule: the segment a-b swept by radius r (world space when a Staff hands it out). */
+export interface Capsule {
+  name: string;
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  r: number;
+}
+/**
+ * Asks the scene whether a capsule of the body is inside something: return the horizontal push (world, metres) that
+ * would take it out, or null when it is clear. Set on a Staff as `obstacles`.
+ */
+export type ObstacleQuery = (c: Readonly<Capsule>) => THREE.Vector3 | null;
+
 export interface StaffOptions {
   /** Apron colour (default: chosen from the seed). */
   apron?: THREE.ColorRepresentation;
@@ -2342,6 +2355,13 @@ const _v1 = V();
 const _v2 = V();
 const _v3 = V();
 const _v4 = V();
+const _tv1 = V();
+const _tv2 = V();
+const _tv3 = V();
+const _tq = new THREE.Quaternion();
+const _sw1 = V();
+const _sw2 = V();
+const _sw3 = V();
 const _q1 = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _q3 = new THREE.Quaternion();
@@ -2566,12 +2586,22 @@ function detailedMaterials(cohort: Cohort, a: DetailedAsset, L: Look): Record<st
   out.whites = cachedMat(`${cohort}:whites`, () =>
     new THREE.MeshPhysicalMaterial({ map: suitAo, color: L.white, normalMap: suitN, roughness: 0.86, metalness: 0, side: THREE.DoubleSide, ...twillSheen }),
   );
+  // The cap is cotton jersey: matt, soft-sheened, its weave laid on at the cloth's own scale (its texture
+  // coordinates are metres).
   const capWhite = L.cap.getHex() === L.white.getHex();
-  out.cap = capWhite
-    ? out.whites
-    : cachedMat(`${cohort}:cap:${L.cap.getHexString()}`, () =>
-        new THREE.MeshPhysicalMaterial({ map: suitAo, color: L.cap, normalMap: suitN, roughness: 0.8, metalness: 0, side: THREE.DoubleSide, sheen: 0.4, sheenRoughness: 0.7, sheenColor: new THREE.Color(0x888c94) }),
-      );
+  out.cap = cachedMat(`${cohort}:cap:${L.cap.getHexString()}`, () =>
+    new THREE.MeshPhysicalMaterial({
+      color: capWhite ? L.white.clone().multiplyScalar(0.96) : L.cap,
+      normalMap: patternFor(M.whites.normalMap, mpu("cap"), 0.012),
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 0.92,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      sheen: capWhite ? 0.5 : 0.6,
+      sheenRoughness: 0.55,
+      sheenColor: new THREE.Color(capWhite ? 0xffffff : 0x9a9ea6),
+    }),
+  );
   out.buttons = cachedMat(`buttons:${L.button.getHexString()}`, () => new THREE.MeshPhysicalMaterial({ color: L.button, roughness: 0.55, metalness: 0, clearcoat: 0.3, clearcoatRoughness: 0.4 }));
   out.trousers = L.check
     ? cachedMat(`${cohort}:check`, () =>
@@ -2633,6 +2663,19 @@ export class Staff {
   readonly ready: Promise<void>;
   /** Which body is drawn now. */
   body: "procedural" | "detailed" = "procedural";
+  /** Mass of what the item socket holds (kg). While it is carried the hips move back and the trunk leans back so
+   *  that the body and the load together stay balanced over the feet. */
+  itemKg = 4;
+  /** The scene's obstacles, if it has any to report (see `capsules` and `collide`). */
+  obstacles: ObstacleQuery | null = null;
+  /** Time (s) of the pose being applied, for motion with inertia (the apron's swing); NaN when posed out of time. */
+  private clockT = Number.NaN;
+  private clockPrev = Number.NaN;
+  private dtNow = 0;
+  private hem: Record<Side, { p: THREE.Vector3; v: THREE.Vector3; ok: boolean }> = {
+    L: { p: V(), v: V(), ok: false },
+    R: { p: V(), v: V(), ok: false },
+  };
   /** Triangles by material. */
   readonly trisBy: Record<string, number> = {};
   /** The last pose applied. */
@@ -2736,7 +2779,7 @@ export class Staff {
     this.place(0, 0, 0);
     this.stand(0);
     this.ready =
-      opts.body !== "detailed"
+      opts.body === "procedural"
         ? Promise.resolve()
         : loadDetailedBody(cohort).then(
             (a) => this.useDetailed(a),
@@ -2851,6 +2894,10 @@ export class Staff {
   /* Applying a pose                                                                                           */
 
   pose(p: BodyPose): void {
+    // A step of time since the last pose (0 when out of sequence: inertial parts then settle where they hang).
+    const dt = this.clockT - this.clockPrev;
+    this.dtNow = dt > 0 && dt < 0.1 ? dt : 0;
+    this.clockPrev = this.clockT;
     if (p !== this.current) copyPose(this.current, p);
     for (const k of Object.keys(this.rom)) this.rom[k] = 0;
     // Root and pelvis.
@@ -2882,6 +2929,89 @@ export class Staff {
       this.item.position.copy(p.itemPos);
       this.item.quaternion.copy(p.itemQuat);
     }
+  }
+
+  /**
+   * The apron's lower edge as a damped pendulum (about 1.4 Hz, a third of critical damping) hung from the cloth bone,
+   * swinging after the body's starts, stops and turns. It may swing forward and out, never back into the thighs.
+   * `hang` is where it hangs at rest (body space); returns where it is now (body space).
+   */
+  private apronSwing(side: Side, hang: THREE.Vector3, fwdT: THREE.Vector3): THREE.Vector3 {
+    const st = this.hem[side];
+    const len = 0.3 * this.B.s;
+    const pivot = this.toWorld(this.Pw[this.idx(`apron_${side}`)]!, _sw1);
+    const yaw = this.placed.yaw;
+    const goal = _sw2.copy(hang).applyAxisAngle(Y, yaw).multiplyScalar(len).add(pivot);
+    const dt = this.dtNow;
+    if (!st.ok || dt <= 0) {
+      st.p.copy(goal);
+      st.v.set(0, 0, 0);
+      st.ok = true;
+      return hang;
+    }
+    const w = 2 * Math.PI * 1.4;
+    const z = 0.33;
+    const n = Math.max(1, Math.ceil(dt / 0.008));
+    const h = dt / n;
+    for (let k = 0; k < n; k++) {
+      st.v.addScaledVector(_sw3.subVectors(goal, st.p), w * w * h).multiplyScalar(1 - 2 * z * w * h);
+      st.p.addScaledVector(st.v, h);
+      // On its string.
+      st.p.sub(pivot).setLength(len).add(pivot);
+    }
+    const out = _sw3.subVectors(st.p, pivot).normalize().applyAxisAngle(Y, -yaw);
+    // Never back into the thighs, and no more than 25 degrees off its hang.
+    const back = out.dot(fwdT) - hang.dot(fwdT);
+    if (back < 0) out.addScaledVector(fwdT, -back).normalize();
+    const ang = out.angleTo(hang);
+    if (ang > 25 * DEG) out.copy(hang).lerp(out, (25 * DEG) / ang).normalize();
+    return hang.copy(out);
+  }
+
+  /**
+   * The body as capsules in world space for the current pose: trunk, upper arms, forearms, thighs and shins (and
+   * the head), for a scene's navigation or fixtures to keep bodies out of counters and each other.
+   */
+  capsules(out: Capsule[] = []): Capsule[] {
+    const s = this.B.s;
+    const segs: [string, string, string, number][] = [
+      ["trunk", "spine_01", "neck", this.dims.torso_capsule_radius_m],
+      ["head", "head", "gaze_target", 0.1 * s],
+      ["upper_arm_L", "upper_arm_L", "forearm_L", 0.048 * s],
+      ["upper_arm_R", "upper_arm_R", "forearm_R", 0.048 * s],
+      ["forearm_L", "forearm_L", "hand_L", 0.04 * s],
+      ["forearm_R", "forearm_R", "hand_R", 0.04 * s],
+      ["thigh_L", "thigh_L", "shin_L", 0.075 * s],
+      ["thigh_R", "thigh_R", "shin_R", 0.075 * s],
+      ["shin_L", "shin_L", "foot_L", 0.055 * s],
+      ["shin_R", "shin_R", "foot_R", 0.055 * s],
+    ];
+    out.length = segs.length;
+    segs.forEach(([name, a, b, r], i) => {
+      const c = out[i] ?? { name, a: V(), b: V(), r };
+      c.name = name;
+      c.r = r;
+      this.toWorld(this.Pw[this.idx(a)]!, c.a);
+      if (b === "gaze_target") c.b.copy(this.Pw[this.idx("head")]!).add(_sw1.set(0, 0.16 * s, 0.02 * s));
+      else c.b.copy(this.Pw[this.idx(b)]!);
+      this.toWorld(c.b, c.b);
+      out[i] = c;
+    });
+    return out;
+  }
+  private capsCache: Capsule[] = [];
+  /**
+   * The deepest horizontal push (world) that `obstacles` asks for over the body's capsules this pose, or null when
+   * the body is clear (or there is no query).
+   */
+  collide(): THREE.Vector3 | null {
+    if (!this.obstacles) return null;
+    let best: THREE.Vector3 | null = null;
+    for (const c of this.capsules(this.capsCache)) {
+      const push = this.obstacles(c);
+      if (push && (!best || push.lengthSq() > best.lengthSq())) best = push.clone();
+    }
+    return best;
   }
 
   private romNote(key: RomKey, deg: number): void {
@@ -3151,10 +3281,11 @@ export class Staff {
     const f = this.liftHeel;
     // Raising the heel by an angle takes back about 0.6 of it at the ankle (the knee straightens a little too).
     const raise = ((df - lim) / 0.6) * DEG;
-    // Ankle about the ball: in the foot's frame the ankle sits mtpFwd behind and (ankY - toe height) above it.
-    const ball = V(0, B.J[`toe_${side}`]!.y - B.ankY, B.mtpFwd).applyQuaternion(f0.quat).add(f0.pos);
+    // Ankle about the ball's contact on the floor (not the joint above it, which would drag the sole): in the foot's
+    // frame the ankle sits mtpFwd behind it and ankY above. The toes stay put (see legSolve).
+    const ball = V(0, -B.ankY, B.mtpFwd).applyQuaternion(f0.quat).add(f0.pos);
     f.quat.copy(f0.quat).multiply(qAxis(X, raise, _q1));
-    f.pos.copy(V(0, B.ankY - B.J[`toe_${side}`]!.y, -B.mtpFwd).applyQuaternion(f.quat)).add(ball);
+    f.pos.copy(V(0, B.ankY, -B.mtpFwd).applyQuaternion(f.quat)).add(ball);
     f.toe = f0.toe + raise;
     this.legSolve(side, f, true);
   }
@@ -3197,12 +3328,28 @@ export class Staff {
     this.setWorld(`thigh_${side}`, frameQuat(t0, nt0, t, n, _q1));
     this.setWorld(`shin_${side}`, frameQuat(s0, ns0, sv, n, _q1));
     this.setWorld(`foot_${side}`, f.quat);
+    // A planted toe stays where it is: with the heel up the foot turns about the floor under the ball, and the toe
+    // joint is held straight above that point (the sole bends there) instead of swinging forward with the foot.
+    {
+      const J = this.B.J;
+      const tb = this.bonesArr[this.idx(`toe_${side}`)]!;
+      const rest = _tv1.copy(J[`toe_${side}`]!).sub(J[`foot_${side}`]!);
+      const fw = _tv2.set(0, 0, 1).applyQuaternion(f.quat);
+      const heelUp = Math.max(0, -Math.atan2(fw.y, Math.hypot(fw.x, fw.z)));
+      const plant = heelUp > 1e-4 ? clamp(f.toe / heelUp, 0, 1) : 0;
+      if (plant > 0) {
+        const h = J[`toe_${side}`]!.y;
+        const up = _tv2.set(0, h, 0).applyQuaternion(_tq.copy(f.quat).invert());
+        rest.addScaledVector(up.sub(_tv3.set(0, h, 0)), plant);
+      }
+      tb.position.copy(rest);
+    }
     this.setLocal(`toe_${side}`, qAxis(X, -f.toe, _q1));
     // The apron's cloth bone: plumb from the knee, unless the shin swings forward of plumb and pushes the cloth.
     const fwdT = Z.clone().applyQuaternion(this.Qw[this.idx(`thigh_${side}`)]!);
     const plumb = V(0, -1, 0);
     const push = smooth(-0.04, 0.04, sv.dot(fwdT) - plumb.dot(fwdT));
-    const hang = plumb.lerp(sv, push).normalize();
+    const hang = this.apronSwing(side, plumb.lerp(sv, push).normalize(), fwdT);
     _q1.setFromUnitVectors(t, hang).multiply(this.Qw[this.idx(`thigh_${side}`)]!);
     this.setWorld(`apron_${side}`, _q1);
     // ROM: hip flexion against the pelvis, knee flexion, ankle pitch against the shin.
@@ -3417,7 +3564,12 @@ export class Staff {
   /* Motions at the current placement                                                                          */
 
   /** Stand at ease: slow weight shifts and breathing (t in seconds). */
+  /** Set the time the next pose belongs to (seconds, any origin); motion with inertia integrates between poses. */
+  clock(t: number): void {
+    this.clockT = t;
+  }
   stand(t = 0): void {
+    this.clockT = t;
     const p = standPose(this, t, this.scratch);
     fitHips(this, p);
     this.pose(p);
@@ -3427,6 +3579,7 @@ export class Staff {
    * (the pan's centre for saute, the pot rim's centre for stir, the plate, board, rack bar or shelved pan's centre).
    */
   work(kind: WorkKind, t: number, opts: WorkOpts = {}): void {
+    this.clockT = t;
     const p = workPose(this, kind, t, opts, this.scratch);
     fitHips(this, p);
     this.pose(p);
@@ -3500,6 +3653,37 @@ function fitHips(st: Staff, p: BodyPose, k = 0.012, weight: readonly [number, nu
   const dy = py - p.pelvis.y;
   p.pelvis.y = py;
   return dy;
+}
+
+/**
+ * A carried load's balance: the body's own centre of mass moves the other way by the load's moment over its mass,
+ * so that body and load together stay over the feet. Most of it is the hips going back, the rest the trunk leaning
+ * back from them; the load and the hands holding it move with the hips. Returns the hips' shift (body z, metres).
+ */
+function balanceLoad(st: Staff, p: BodyPose): number {
+  if (!p.itemOn || st.itemKg <= 0) return 0;
+  const B = st.B;
+  const f0 = p.feet[0]!.pos;
+  const f1 = p.feet[1]!.pos;
+  // The middle of the support: between the feet, a little ahead of the ankles (mid-foot).
+  const sx = 0.5 * (f0.x + f1.x);
+  const sz = 0.5 * (f0.z + f1.z) + 0.35 * B.toeFwd;
+  const k = st.itemKg / st.massKg;
+  const dx = -k * (p.itemPos.x - sx);
+  const dz = -k * (p.itemPos.z - sz);
+  const hip = 0.6;
+  p.pelvis.x += hip * dx;
+  p.pelvis.z += hip * dz;
+  p.itemPos.x += hip * dx;
+  p.itemPos.z += hip * dz;
+  for (const a of p.arms)
+    if (a.ik > 0) {
+      a.pos.x += hip * dx;
+      a.pos.z += hip * dz;
+    }
+  // The rest from the trunk: its mass centre sits about 0.28 m above the hips.
+  p.flex += Math.atan2((1 - hip) * dz, 0.28 * B.s);
+  return hip * dz;
 }
 
 function relaxArms(p: BodyPose): void {
@@ -3890,6 +4074,7 @@ export function workPose(st: Staff, kind: WorkKind, t: number, o: WorkOpts = {},
       panGrips(st, p, p.itemPos, p.itemQuat, o.halfWidth ?? HOTEL_PAN.gripHalf, 1, 1);
       p.flex -= 2 * DEG;
       p.gaze.set(0, B.eyeY - 0.3, 2.5);
+      balanceLoad(st, p);
       break;
     }
     case "push": {
@@ -4125,6 +4310,8 @@ export interface RoutineState {
   local: number;
   /** Whether the item socket is in use (a pan carried or lifted, a rack pushed). */
   holding: boolean;
+  /** When the staff's `obstacles` say the body is inside something this pose: the push (world) that clears it. */
+  blocked?: THREE.Vector3 | null;
 }
 
 const BIG = 1e9;
@@ -4259,16 +4446,18 @@ export class Routine {
       return;
     }
     // Step length from the walk ratio (step length over cadence, about 0.0066 m per step/min for adults).
-    const L0 = clamp(Math.sqrt(v * 60 * 0.006 * s), 0.3 * s, 0.78 * s);
+    // Carrying a load people take shorter, flatter steps with longer double support.
+    const loaded = upper === "carry";
+    const L0 = clamp(Math.sqrt(v * 60 * 0.006 * s), 0.3 * s, 0.78 * s) * (loaded ? 0.84 : 1);
     const n = Math.max(2, Math.round(D / L0 + 0.5));
     const L = D / (n - 0.5);
     const T = L / v;
-    const ds = 0.2 * T;
+    const ds = (loaded ? 0.27 : 0.2) * T;
     const sw = T - ds;
     const vk = clamp(v / 1.3, 0.2, 1.2);
-    const hsAng = (7 + 7 * vk) * DEG;
+    const hsAng = (7 + 7 * vk) * DEG * (loaded ? 0.75 : 1);
     // The foot rolls over the ball until it stands steep at toe-off (about 50 degrees at a brisk walk).
-    const toAng = (32 + 20 * vk) * DEG;
+    const toAng = (32 + 20 * vk) * DEG * (loaded ? 0.8 : 1);
     const lead: Side = this.lastStep === "L" ? "R" : "L";
     const other: Side = lead === "L" ? "R" : "L";
     const t0 = this.t;
@@ -4430,7 +4619,8 @@ export class Routine {
       const u = clamp((t - (pl.tOff - pl.toDur)) / pl.toDur, 0, 1);
       pitch = -pl.toAng * Math.pow(u, 1.25);
       toe = -pitch;
-      pv = [B.mtpFwd, B.J.toe_R!.y - B.ankY];
+      // About the floor under the ball, where the sole stays in contact (the toes are held planted by the leg).
+      pv = [B.mtpFwd, -B.ankY];
     }
     let x = pl.x;
     let y = B.ankY;
@@ -4492,6 +4682,7 @@ export class Routine {
     const s = B.s;
     const D = this.duration;
     const tm = this.loop ? ((t % D) + D) % D : clamp(t, 0, D);
+    st.clock(t);
     const gi = this.segIndex(tm);
     const g = this.segs[gi]!;
     const n = this.segs.length;
@@ -4543,6 +4734,7 @@ export class Routine {
     // The gait on top: eased in and out at the segment's ends so it meets standing without a jump.
     const moving = g.type === "walk" || g.type === "turn";
     const restY = p.pelvis.y;
+    const restZ = B.J.pelvis!.z;
     if (moving) {
       const m = smooth(g.t0, g.t0 + 0.45, tm) * (1 - smooth(g.t1 - 0.45, g.t1, tm));
       const mx = smooth(g.t0, g.t0 + 0.15, tm) * (1 - smooth(g.t1 - 0.15, g.t1, tm));
@@ -4555,9 +4747,19 @@ export class Routine {
       const walk = g.type === "walk" ? 1 : 0.5;
       // Over the loaded foot, a third of the way out.
       p.pelvis.x = lerp(p.pelvis.x, 0.32 * (wl * fl.x + (1 - wl) * fr.x), mx);
-      p.pelvis.z = lerp(p.pelvis.z, 0.012 * s, m);
+      // With a load the hips stay back where its balance put them (see balanceLoad).
+      const loadBack = g.upper === "carry" ? p.pelvis.z - restZ : 0;
+      p.pelvis.z = lerp(p.pelvis.z, 0.012 * s + loadBack, m);
       p.pelvis.y = lerp(p.pelvis.y, B.hipY - 0.004 * s, m);
-      p.yaw = lerp(p.yaw, -0.07 * fd, m);
+      // The pelvis turns ahead of the feet into a turn or a bend in the path (the head leads it further, by gaze).
+      let lead = 0;
+      if (g.type === "turn") lead = wrapPi(g.yaw1 - ryaw);
+      else if (g.path) {
+        const a0 = g.path.at(along);
+        const a1 = g.path.at(along + 0.7 * s);
+        if (Math.hypot(a1.x - a0.x, a1.z - a0.z) > 1e-3) lead = wrapPi(Math.atan2(a1.x - a0.x, a1.z - a0.z) - ryaw);
+      }
+      p.yaw = lerp(p.yaw, -0.07 * fd + clamp(0.32 * lead, -0.24, 0.24), m);
       p.roll = lerp(p.roll, 0.06 * (2 * wl - 1) * walk, mx);
       p.tilt = lerp(p.tilt, 0.03 + 0.01 * Math.abs(fd), m);
       if (g.upper === "free") {
@@ -4606,7 +4808,7 @@ export class Routine {
       for (const a of p.arms) if (a.ik > 0) a.pos.y += dy;
     }
     st.pose(p);
-    return { activity: g.type, work: g.work, local, holding: p.itemOn };
+    return { activity: g.type, work: g.work, local, holding: p.itemOn, blocked: st.obstacles ? st.collide() : undefined };
   }
 }
 

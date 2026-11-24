@@ -454,8 +454,17 @@ export function mountBrigadeStage(root: HTMLElement): void {
       out: root.querySelector<HTMLElement>(spec.out),
       fill: -1,
     };
-    // The rearmost reach over the lift, from the poses themselves: the trunk's joints find the deepest stoops on the
-    // way down and back, the skinned surface says how far back the body reaches there.
+    measureRear(c);
+    c.clash.visible = false;
+    c.clash.renderOrder = 4;
+    scene.add(c.clash);
+    return c;
+  });
+
+  /** The rearmost reach over the lift, from the poses themselves: the trunk's joints find the deepest stoops on the
+   * way down and back, the skinned surface says how far back the body reaches there. */
+  function measureRear(c: Cook): void {
+    const st = c.st;
     const N = 43;
     const quick: number[] = [];
     for (let k = 0; k < N; k++) {
@@ -474,11 +483,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
           c.rearY = r.y;
         }
       }
-    c.clash.visible = false;
-    c.clash.renderOrder = 4;
-    scene.add(c.clash);
-    return c;
-  });
+  }
 
   /* Camera: down the aisle from the P05 end, raised, a little to the tables' side so the hands and pans show. */
   const camera = new THREE.PerspectiveCamera(30, 16 / 10, 0.05, 40);
@@ -495,10 +500,14 @@ export function mountBrigadeStage(root: HTMLElement): void {
   });
   /** The boxes the view must hold: each cook standing, the pan's shelf in front, the floor behind at full stoop. */
   const keep: THREE.Vector3[] = [];
-  for (const c of cooks) {
+  const keepBoxes = () => {
+    keep.length = 0;
+    for (const c of cooks) {
     const x = c.st.placement.x;
     for (const dx of [-0.42, 0.42]) for (const y of [0, c.st.dims.standing_height_m + 0.04]) for (const z of [SHELF_BACK, c.rearZ + 0.06]) keep.push(new THREE.Vector3(x + dx, y, z));
-  }
+    }
+  };
+  keepBoxes();
   const ndc = new THREE.Vector3();
   /** Fit the three cooks to the stage, whatever its shape: the nearest distance that holds every box corner. */
   const frame = () => {
@@ -695,6 +704,17 @@ export function mountBrigadeStage(root: HTMLElement): void {
   syncReach();
   pose();
   readouts();
+  // When a cook's detailed body arrives, measure the clearance again on its surface.
+  for (const c of cooks)
+    void c.st.ready.then(() => {
+      if (c.st.body !== "detailed") return;
+      c.skinBack = backVertices(c.st);
+      measureRear(c);
+      keepBoxes();
+      frame();
+      syncAisle();
+      pose();
+    });
 
   let inView = false;
   observeInView(stageEl, (v) => {
