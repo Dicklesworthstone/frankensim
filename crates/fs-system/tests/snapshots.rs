@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::marker::PhantomData;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::identity::{
@@ -17,9 +18,11 @@ use fs_blake3::identity::{
 use fs_exec::solver::SolverStateV2;
 use fs_exec::solver::snapshot_v2::{
     self, ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotAlgorithmIdV2,
-    SnapshotAuthoritySubjectIdV2, SnapshotBudgetStateIdV2, SnapshotDeterminismV2,
-    SnapshotExecutionFingerprintIdV2, SnapshotLimitsV2, SnapshotPauseRequestIdV2,
-    SnapshotProvenanceIdV2, SnapshotRngCounterIdV2, StateIdentityCharterV2,
+    SnapshotAuthoritySubjectIdV2, SnapshotBudgetStateIdV2, SnapshotDecoderV2,
+    SnapshotDeterminismV2, SnapshotEncoderV2, SnapshotExecutionFingerprintIdV2, SnapshotLimitsV2,
+    SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
+    SnapshotStateCodecIdV2, SnapshotStateSchemaIdV2, SnapshotStateTypeIdV2, SnapshotV2Error,
+    StateIdentityCharterV2,
 };
 use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
 use fs_ports::PortKind;
@@ -81,7 +84,12 @@ fn paused() -> PausedSnapshotBoundaryV2 {
 
 /// The context a snapshot of `system` is sealed and opened under.
 fn context(system: &System) -> ExpectedResumeContextV2 {
-    ExpectedResumeContextV2::for_paused_state::<SystemImage>(
+    context_as::<SystemImage>(system)
+}
+
+/// The same context for a state type `S`.
+fn context_as<S: SolverStateV2>(system: &System) -> ExpectedResumeContextV2 {
+    ExpectedResumeContextV2::for_paused_state::<S>(
         SnapshotAlgorithmIdV2::from_bytes([0xA1; 32]),
         1,
         system.problem_id(),
@@ -1302,11 +1310,19 @@ fn the_image_charter_derives_its_pinned_identities() {
     // Codec version 1 (7a35133254) wrote each ledger account as a sum and
     // its compensation. Its image names the same state type and another
     // schema and codec, so a resume expecting this charter refuses it.
-    assert_eq!(charter.codec_version, 2);
+    // The carried (06a4a2d4ba) and entropy (17c5438df5) accounts entered
+    // the words under version 2's number. Version 3 keeps the type and
+    // schema and moves the codec.
+    assert_eq!(charter.codec_version, 3);
     assert_eq!(
         hex(charter.state_type_id().as_bytes()),
         "48da3c2f4172ca570c03fff02710ddf757ba2074a03c78d8265692ceb22c76f3"
     );
+    assert_eq!(
+        hex(charter.state_schema_id().as_bytes()),
+        "f0d2f972a050c8f399866e4b59fc4b6d95a75f73198f1dc5ef3bcb84b6ed7e8e"
+    );
+    assert_ne!(hex(charter.state_codec_id().as_bytes()), PREVIOUS_CODEC);
     assert_ne!(
         hex(charter.state_schema_id().as_bytes()),
         "c6babd96283371b55c6ebb51d1f09277f3bd70366818671fa3e5e69d522ab499"
@@ -1315,4 +1331,80 @@ fn the_image_charter_derives_its_pinned_identities() {
         hex(charter.state_codec_id().as_bytes()),
         "d1db2647a701d3f951fa8e8af095a92d1404bdef940ad975ea277598a385d4e3"
     );
+}
+
+/// The image codec identity of version 2, which version 3 replaced.
+const PREVIOUS_CODEC: &str = "f8584656769c289057c35efaf340f217ea9b24fb5b089151fd6c7af7f32ea3e8";
+
+/// `SystemImage`'s charter at codec version 2.
+static PREVIOUS_CHARTER: LazyLock<StateIdentityCharterV2> =
+    LazyLock::new(|| StateIdentityCharterV2 {
+        codec_version: 2,
+        ..*SystemImage::charter().expect("a chartered family")
+    });
+
+/// An image sealed as a binary of codec version 2 sealed it: the type,
+/// schema, codec identity and version number of version 2. The words are
+/// a current image's, so only the identity it is sealed under is old.
+struct PreviousImage(SystemImage);
+
+impl SolverStateV2 for PreviousImage {
+    const STATE_TYPE_ID_V2: SnapshotStateTypeIdV2 = SystemImage::STATE_TYPE_ID_V2;
+    const STATE_SCHEMA_ID_V2: SnapshotStateSchemaIdV2 = SystemImage::STATE_SCHEMA_ID_V2;
+    const STATE_CODEC_ID_V2: SnapshotStateCodecIdV2 = SnapshotStateCodecIdV2::from_bytes([
+        0xf8, 0x58, 0x46, 0x56, 0x76, 0x9c, 0x28, 0x90, 0x57, 0xc3, 0x5e, 0xfa, 0xf3, 0x40, 0xf2,
+        0x17, 0xea, 0x9b, 0x24, 0xfb, 0x5b, 0x08, 0x91, 0x51, 0xfd, 0x6c, 0x7a, 0xf7, 0xf3, 0x2e,
+        0xa3, 0xe8,
+    ]);
+    const STATE_CODEC_VERSION_V2: u32 = 2;
+
+    fn charter() -> Option<&'static StateIdentityCharterV2> {
+        Some(&PREVIOUS_CHARTER)
+    }
+
+    fn encode_v2(&self, encoder: &mut SnapshotEncoderV2<'_>) -> Result<(), SnapshotV2Error> {
+        self.0.encode_v2(encoder)
+    }
+
+    fn decode_v2(decoder: &mut SnapshotDecoderV2<'_, '_>) -> Result<Self, SnapshotV2Error> {
+        SystemImage::decode_v2(decoder).map(Self)
+    }
+}
+
+#[test]
+fn an_image_of_codec_version_2_is_refused_before_its_words_are_read() {
+    let mut device = Device::build();
+    run(&mut device, 0, Device::SPLIT);
+    let shown = device.shown();
+    let sealed = device
+        .system
+        .snapshot(&context(&device.system), limits(), || false)
+        .expect("sealed");
+    let current = opened_here(&sealed);
+    let previous = PreviousImage(current.state().clone())
+        .seal_v2(
+            &context_as::<PreviousImage>(&device.system),
+            limits(),
+            || false,
+        )
+        .expect("version 2's identity still seals");
+    let (bytes, expectation) = (previous.bytes(), previous.expectation());
+    // The bytes are whole: read as version 2, they open.
+    assert!(PreviousImage::unseal_v2_expected(bytes, &expectation, limits(), || false).is_ok());
+    // A current reader refuses them at the identity gate, before decoding
+    // words that would have decoded.
+    let Err(refused) = SystemImage::unseal_v2_expected(bytes, &expectation, limits(), || false)
+    else {
+        panic!("an image of codec version 2 opened as version 3");
+    };
+    assert!(
+        matches!(refused, SnapshotV2Error::WrongStateSchema),
+        "{refused:?}"
+    );
+    // The current image resumes, and the system that sealed both is as it
+    // was.
+    let mut resumed = Device::build();
+    resumed.system.resume(&current).expect("version 3 resumes");
+    assert_eq!(resumed.shown(), shown);
+    assert_eq!(device.shown(), shown);
 }

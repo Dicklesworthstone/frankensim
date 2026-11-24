@@ -405,12 +405,17 @@ physics owners below fs-couple can be composed without it.
     holds the accepted wire values, the compensated clock, the step count, the
     solve configuration and every number of the ledger. Names are not in it;
     they come from the resuming system.
-  - The image's charter is at codec version 2 (item 5): each ledger account is
-    written as the hi and lo words of its normalized double-double total, and
-    the absolute accounts sit beside the signed ones. A decode refuses a pair
-    that is not normalized. An image of codec version 1 (7a35133254, a sum and
-    its compensation per account) names the same state type and another
-    schema and codec, so fs-exec refuses to open it as a `SystemImage`.
+  - The image's charter is at codec version 3. Since version 2 (item 5) each
+    ledger account is written as the hi and lo words of its normalized
+    double-double total, and the absolute accounts sit beside the signed ones.
+    A decode refuses a pair that is not normalized. The carried accounts
+    (06a4a2d4ba) and the per-node entropy flag and account (17c5438df5) were
+    added to the words under version 2's number, so version 3 has version 2's
+    schema and another codec identity. fs-exec refuses an image of version 2
+    as `WrongStateSchema` before reading its words. An image of codec
+    version 1 (7a35133254, a sum and its compensation per account) names the
+    same state type and another schema and codec, so fs-exec refuses to open
+    it as a `SystemImage`.
   - The context names the problem. `System::problem_id()` hashes:
     - the `Debug` text of the description the system was sealed from: names,
       ports, classes and tiers, load lines, connections, driven ports and heat
@@ -1566,8 +1571,8 @@ sealing system: the device of `tests/checkpoints.rs` at step 73 (a sine force
 whose account holds a clock, a moving support, damper heat routed to a body,
 a recorder whose words grow with the run, and a window), and the two vessels
 of `tests/elements.rs` with their restriction at step 250. A child process of
-the same test binary receives only the envelope bytes (3,504 and 2,888 bytes
-with the ledger of codec version 2, measured on ts2 2026-11-14) and the
+the same test binary receives only the envelope bytes (3,560 and 2,912 bytes
+with the ledger of codec version 3, measured 2026-11-24) and the
 subject id the sealer kept, on its stdin. The child first refuses a wrong
 subject and a flipped byte with nothing changed. It then shows, to the bit,
 what the uninterrupted run shows after the split and after each of the 184
@@ -1581,8 +1586,11 @@ refuses another width (`Decode`, after the members before it decoded), and a
 context of another problem at sealing. Truncated bytes, and a byte flipped at
 the start, middle or end, never open. A gas constant one ulp lower or a
 conductance one ulp higher is another problem. The image charter derives its
-pinned ids: codec version 2, the state type of version 1, and a schema and
-codec other than version 1's. Mechanical, thermal and source elements use their
+pinned ids: codec version 3, the state type of version 1, version 2's schema,
+a codec other than version 2's, and a schema and codec other than version 1's.
+An image sealed under version 2's identity holding a current image's words
+opens as version 2, a version 3 reader refuses it as `WrongStateSchema`, and
+the system that sealed it is unchanged. Mechanical, thermal and source elements use their
 production codecs, without test-only serialization wrappers. Native codec
 regressions also change every core physical coefficient, every waveform
 parameter and knot, the power domain and optional signal layout; a resumed
