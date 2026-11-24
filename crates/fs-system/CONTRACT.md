@@ -8,6 +8,37 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## Diffuse-gray radiative exchange
+
+`ConductanceMatrix::gray_radiation(area_m2, [emissivity_a, emissivity_b])`
+constructs a two-port heat interface for equal-area, diffuse-gray surfaces
+with full mutual view. It uses the existing conductance component's proposal,
+heat delivery, entropy receipt, tangent and identity paths; it adds no
+integration driver or separate surface state.
+
+The heat rate from `a` to `b` is
+`sigma * area * epsilon_eff * (T_a^4 - T_b^4)`, where
+`sigma = 5.670374419e-8 W/(m^2 K^4)` and
+`epsilon_eff = 1 / (1/epsilon_a + 1/epsilon_b - 1)`.
+The effective emissivity is evaluated without taking reciprocals of tiny
+emissivities. The temperature factor uses the fourth-power secant, preserving
+small temperature differences. A 1 K reference normalizes the law's factor
+to a dimensionless value and its base conductance to W/K; its two exact
+partials feed the ordinary JVP/VJP. Every proposal uses the current port
+temperatures. The optional `ConductanceLaw::rate_partials` supplies direct
+normalized-rate derivatives; other laws retain the product-rule fallback.
+Radiation uses direct cubic partials so a large temperature contrast does not
+cancel the colder surface's derivative.
+
+Admission requires finite positive area and emissivities in `(0, 1]`.
+Unrepresentable coefficients or law evaluations refuse; the interface does
+not clamp temperatures. Identity retains the original area and ordered
+emissivities. Fixed authored properties confer no material-card provenance.
+There is no participating medium, general enclosure/view-factor solve,
+coating/half-cell resistance or separate surface storage.
+`tests/radiation.rs` contains independent Stefan-Boltzmann, reversal,
+equilibrium, tangent and finite-body energy-balance checks.
+
 ## Recovery from a refused smooth Newton update
 
 For a feedback block containing a `Smooth` component and otherwise only

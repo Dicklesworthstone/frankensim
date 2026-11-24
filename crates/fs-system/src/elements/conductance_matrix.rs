@@ -110,9 +110,78 @@ pub trait ConductanceLaw: fmt::Debug + Send + Sync {
     /// [`ElementError::Law`]; it never clamps the state or extrapolates the law.
     fn factor(&self, kelvin_a: f64, kelvin_b: f64) -> Result<(f64, [f64; 2]), String>;
 
+    /// Optional direct partials of `factor(T_a, T_b) * (T_a - T_b)`,
+    /// with respect to the two temperatures. These partials are dimensionless;
+    /// the element multiplies them by each point's reference conductance [W/K].
+    ///
+    /// The default uses the product rule from [`Self::factor`]. A law may
+    /// supply an equivalent form to avoid cancellation, for example the cold
+    /// surface derivative of radiation at a large temperature contrast.
+    /// The factor's domain and positivity checks still run first, and direct
+    /// partials must be finite. This changes neither heat nor its entropy.
+    fn rate_partials(&self, _kelvin_a: f64, _kelvin_b: f64) -> Option<[f64; 2]> {
+        None
+    }
+
     /// Words that identify the law. They join the element's identity after its interface
     /// points, so two elements that differ in their law differ in identity.
     fn identity_words(&self, words: &mut Vec<u64>);
+}
+
+/// Surface-only diffuse-gray exchange. The reference temperature is 1 K, so
+/// `reference_conductance_w_k = 4 sigma A epsilon_eff (1 K)^3` and the factor
+/// is dimensionless. The rounded SI constant and effective-emissivity reduction
+/// match fs-thermal's `enthalpy::conduction::implicit::link::GrayRadiativeLink`.
+#[derive(Debug)]
+struct GrayRadiation {
+    area_m2: f64,
+    emissivities: [f64; 2],
+    reference_conductance_w_k: f64,
+}
+
+impl ConductanceLaw for GrayRadiation {
+    fn factor(&self, kelvin_a: f64, kelvin_b: f64) -> Result<(f64, [f64; 2]), String> {
+        let a = temperature(kelvin_a).map_err(|error| error.to_string())?;
+        let b = temperature(kelvin_b).map_err(|error| error.to_string())?;
+        // With a and b measured in units of 1 K, factor(1, 1) = 1.
+        // Factoring a^4 - b^4 preserves small temperature differences.
+        let sum = a + b;
+        let squares = a * a + b * b;
+        let factor = (0.25 * sum) * squares;
+        let partials = [
+            0.25 * squares + (0.5 * a) * sum,
+            0.25 * squares + (0.5 * b) * sum,
+        ];
+        let conductance = self.reference_conductance_w_k * factor;
+        if !(factor.is_finite()
+            && factor > 0.0
+            && partials.iter().all(|value| value.is_finite())
+            && conductance.is_finite()
+            && conductance > 0.0
+            && (conductance * (a - b)).is_finite())
+        {
+            return Err("gray radiation has an unrepresentable conductance or heat rate".into());
+        }
+        Ok((factor, partials))
+    }
+
+    fn rate_partials(&self, kelvin_a: f64, kelvin_b: f64) -> Option<[f64; 2]> {
+        // The normalized flux is (Ta^4 - Tb^4) / (4 (1 K)^3).
+        // Its derivative at the colder side must not subtract large hot-side terms.
+        Some([
+            (kelvin_a * kelvin_a) * kelvin_a,
+            -(kelvin_b * kelvin_b) * kelvin_b,
+        ])
+    }
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        words.extend([
+            u64::from_le_bytes(*b"grayrad1"),
+            self.area_m2.to_bits(),
+            self.emissivities[0].to_bits(),
+            self.emissivities[1].to_bits(),
+        ]);
+    }
 }
 
 /// `law`'s factor and partials at one interface point, checked, or the step's refusal.
@@ -132,6 +201,26 @@ fn checked_factor(
                 "the factor {factor} with partials {partials:?} at {kelvin_a} K and {kelvin_b} K \
                  is not positive and finite"
             ),
+        })
+    }
+}
+
+/// Partials of the normalized rate, preserving the factor's domain checks.
+fn checked_rate_partials(
+    law: &dyn ConductanceLaw,
+    kelvin_a: f64,
+    kelvin_b: f64,
+) -> Result<[f64; 2], ElementError> {
+    let (factor, [by_a, by_b]) = checked_factor(law, kelvin_a, kelvin_b)?;
+    let partials = law.rate_partials(kelvin_a, kelvin_b).unwrap_or_else(|| {
+        let jump = kelvin_a - kelvin_b;
+        [factor + jump * by_a, jump * by_b - factor]
+    });
+    if partials.iter().all(|value| value.is_finite()) {
+        Ok(partials)
+    } else {
+        Err(ElementError::Law {
+            reason: "the normalized heat-rate partials are not finite".into(),
         })
     }
 }
@@ -216,6 +305,69 @@ impl ConductanceMatrix {
             law: None,
             guards: Vec::new(),
         })
+    }
+
+    /// Radiation between two opaque diffuse-gray surfaces of equal area [m2]
+    /// and full mutual view, at the absolute temperatures [K] of ports `a`
+    /// and `b`. Both heat ports have width one. The fixed emissivities are
+    /// ordered by port, and heat into `a` is
+    /// `sigma A epsilon_eff (T_a^4 - T_b^4)`, with
+    /// `epsilon_eff = 1 / (1/epsilon_a + 1/epsilon_b - 1)`.
+    ///
+    /// This reuses the conductance component's conservative heat exchange,
+    /// entropy generation and analytic tangent. Its stored reference
+    /// conductance is `4 sigma A epsilon_eff (1 K)^3` [W/K]; the dimensionless
+    /// law factor is `(T_a + T_b)(T_a^2 + T_b^2) / (4 (1 K)^3)`.
+    /// Thus neither near-equilibrium heat nor its tangent subtracts fourth
+    /// powers. The state is `()`, and the class is [`Class::Smooth`].
+    ///
+    /// These are surface temperatures: no half-cell or coating resistance,
+    /// surface storage, participating medium, variable emissivity, view-factor
+    /// geometry or enclosure radiosity solve is supplied. The original area
+    /// and emissivity bits participate in durable problem identity.
+    ///
+    /// # Errors
+    /// [`ElementError::Parameter`] when area is not positive and finite, an
+    /// emissivity is outside `(0, 1]`, or the reference conductance is not
+    /// representable as a positive finite number. Perfect reflectors are
+    /// outside this positive-conductance constructor. Unrepresentable live
+    /// conductance or heat rates refuse through [`ElementError::Law`].
+    pub fn gray_radiation(area_m2: f64, emissivities: [f64; 2]) -> Result<Self, ElementError> {
+        if !(area_m2.is_finite() && area_m2 > 0.0) {
+            return Err(ElementError::Parameter {
+                name: "radiating area [m2]",
+                value: area_m2,
+            });
+        }
+        for (name, value) in ["emissivity_a", "emissivity_b"]
+            .into_iter()
+            .zip(emissivities)
+        {
+            if !(value.is_finite() && value > 0.0 && value <= 1.0) {
+                return Err(ElementError::Parameter { name, value });
+            }
+        }
+        // Same stable reduction as the native finite-cell radiation owner:
+        // never multiply two tiny emissivities or take their reciprocals.
+        let low = emissivities[0].min(emissivities[1]);
+        let high = emissivities[0].max(emissivities[1]);
+        let effective = low / ((1.0 - low) + low / high);
+        let reference_conductance_w_k = (4.0 * 5.670_374_419e-8 * area_m2) * effective;
+        let weights = [(0, 1.0), (0, 0.0), (0, 0.0)];
+        Ok(Self::new(
+            1,
+            1,
+            vec![InterfacePoint {
+                a: weights,
+                b: weights,
+                conductance_w_k: reference_conductance_w_k,
+            }],
+        )?
+        .following(Arc::new(GrayRadiation {
+            area_m2,
+            emissivities,
+            reference_conductance_w_k,
+        })))
     }
 
     /// The same interface with every point's conductance scaled by `law`'s factor at the two
@@ -465,10 +617,8 @@ impl PortTangent for ConductanceMatrix {
         for point in &self.points {
             let (hot, cold) = self.at(point, inputs);
             let (d_hot, d_cold) = self.at(point, d_inputs);
-            let (factor, [by_a, by_b]) = checked_factor(law.as_ref(), hot, cold)?;
-            let jump = hot - cold;
-            let d_rate = point.conductance_w_k
-                * ((factor + jump * by_a) * d_hot + (jump * by_b - factor) * d_cold);
+            let [by_a, by_b] = checked_rate_partials(law.as_ref(), hot, cold)?;
+            let d_rate = point.conductance_w_k * (by_a * d_hot + by_b * d_cold);
             self.spread(point, d_rate, d_outputs);
         }
         Ok(())
@@ -497,13 +647,9 @@ impl PortTangent for ConductanceMatrix {
         for point in &self.points {
             let (hot, cold) = self.at(point, inputs);
             let (bar_a, bar_b) = self.at(point, bar_outputs);
-            let (factor, [by_a, by_b]) = checked_factor(law.as_ref(), hot, cold)?;
-            let jump = hot - cold;
+            let [by_a, by_b] = checked_rate_partials(law.as_ref(), hot, cold)?;
             let bar_rate = point.conductance_w_k * (bar_a - bar_b);
-            let (to_a, to_b) = (
-                bar_rate * (factor + jump * by_a),
-                bar_rate * (jump * by_b - factor),
-            );
+            let (to_a, to_b) = (bar_rate * by_a, bar_rate * by_b);
             for &(index, weight) in &point.a {
                 bar_inputs[index] = weight.mul_add(to_a, bar_inputs[index]);
             }
