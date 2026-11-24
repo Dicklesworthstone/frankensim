@@ -248,7 +248,7 @@ impl OpenDiffuseEnclosure {
         let mut temperatures = surface_temperatures_k.to_vec();
         temperatures.push(ambient_temperature_k);
         let exchange = solve_radiosity_system(
-            cx,
+            &mut |stage, at| super::prepared::poll(cx, stage, at),
             &temperatures,
             |i| {
                 if i == n {

@@ -6,8 +6,8 @@
 //! solver's pivot, subtraction, and FMA order, including interleaved row swaps.
 
 use super::{
-    ConductionError, Cx, GrayDiffuseEnclosure, MAX_ENCLOSURE_SURFACES, RadiosityReport,
-    radiation_error,
+    ConductionError, Cx, GrayDiffuseEnclosure, MAX_ENCLOSURE_SURFACES, RadiosityPoll,
+    RadiosityReport, radiation_error,
 };
 
 /// A prepared radiosity operator borrowed from one immutable enclosure.
@@ -34,17 +34,25 @@ impl<'a> PreparedRadiosity<'a> {
         cx: &Cx<'_>,
         enclosure: &'a GrayDiffuseEnclosure,
     ) -> Result<Self, ConductionError> {
+        Self::new_polled(&mut |stage, at| poll(cx, stage, at), enclosure)
+    }
+
+    /// `new`, polling through `poll` in place of a `Cx`.
+    pub(super) fn new_polled(
+        poll: &mut RadiosityPoll<'_>,
+        enclosure: &'a GrayDiffuseEnclosure,
+    ) -> Result<Self, ConductionError> {
         let n = enclosure.surfaces.len();
         let mut matrix = vec![vec![0.0; n]; n];
         for (i, row) in matrix.iter_mut().enumerate() {
-            poll(cx, "radiation-radiosity-assemble", i)?;
+            poll("radiation-radiosity-assemble", i)?;
             let emissivity = enclosure.surfaces[i].emissivity.value;
             for (j, entry) in row.iter_mut().enumerate() {
                 *entry = if i == j { 1.0 } else { 0.0 }
                     - (1.0 - emissivity) * enclosure.view_factors.factors[i][j];
             }
         }
-        let factors = DenseRadiosityFactorization::new(cx, &matrix)?;
+        let factors = DenseRadiosityFactorization::new_polled(poll, &matrix)?;
         Ok(Self { enclosure, factors })
     }
 
@@ -58,7 +66,17 @@ impl<'a> PreparedRadiosity<'a> {
         cx: &Cx<'_>,
         surface_temperatures_k: &[f64],
     ) -> Result<RadiosityReport, ConductionError> {
-        self.enclosure.solve_with_factors(cx, surface_temperatures_k, Some(&self.factors))
+        self.solve_polled(&mut |stage, at| poll(cx, stage, at), surface_temperatures_k)
+    }
+
+    /// `solve`, polling through `poll` in place of a `Cx`.
+    pub(super) fn solve_polled(
+        &self,
+        poll: &mut RadiosityPoll<'_>,
+        surface_temperatures_k: &[f64],
+    ) -> Result<RadiosityReport, ConductionError> {
+        self.enclosure
+            .solve_with_factors(poll, surface_temperatures_k, Some(&self.factors))
     }
 
     pub(crate) fn enclosure(&self) -> &GrayDiffuseEnclosure {
@@ -69,6 +87,15 @@ impl<'a> PreparedRadiosity<'a> {
     // check the original equations. Reuse the same factorization for each RHS.
     pub(crate) fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
         self.factors.solve(cx, rhs)
+    }
+
+    /// `solve_rhs`, polling through `poll` in place of a `Cx`.
+    pub(super) fn solve_rhs_polled(
+        &self,
+        poll: &mut RadiosityPoll<'_>,
+        rhs: &[f64],
+    ) -> Result<Vec<f64>, ConductionError> {
+        self.factors.solve_polled(poll, rhs)
     }
 }
 
@@ -84,6 +111,14 @@ pub(super) struct DenseRadiosityFactorization {
 
 impl DenseRadiosityFactorization {
     pub(super) fn new(cx: &Cx<'_>, matrix: &[Vec<f64>]) -> Result<Self, ConductionError> {
+        Self::new_polled(&mut |stage, at| poll(cx, stage, at), matrix)
+    }
+
+    /// `new`, polling through `poll` in place of a `Cx`.
+    pub(super) fn new_polled(
+        poll: &mut RadiosityPoll<'_>,
+        matrix: &[Vec<f64>],
+    ) -> Result<Self, ConductionError> {
         let n = matrix.len();
         if !(2..=MAX_ENCLOSURE_SURFACES).contains(&n)
             || matrix.iter().any(|row| row.len() != n || row.iter().any(|v| !v.is_finite()))
@@ -99,7 +134,7 @@ impl DenseRadiosityFactorization {
         let scale = upper.iter().flatten().copied().map(f64::abs)
             .fold(0.0f64, f64::max).max(f64::MIN_POSITIVE);
         for column in 0..n {
-            poll(cx, "radiation-radiosity-factor", column)?;
+            poll("radiation-radiosity-factor", column)?;
             let mut pivot = column;
             let mut pivot_abs = upper[column][column].abs();
             for (row, values) in upper.iter().enumerate().skip(column + 1) {
@@ -130,11 +165,20 @@ impl DenseRadiosityFactorization {
             }
             multipliers.push(column_multipliers);
         }
-        poll(cx, "radiation-radiosity-factor", n)?;
+        poll("radiation-radiosity-factor", n)?;
         Ok(Self { upper, pivots, multipliers })
     }
 
     pub(super) fn solve(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+        self.solve_polled(&mut |stage, at| poll(cx, stage, at), rhs)
+    }
+
+    /// `solve`, polling through `poll` in place of a `Cx`.
+    pub(super) fn solve_polled(
+        &self,
+        poll: &mut RadiosityPoll<'_>,
+        rhs: &[f64],
+    ) -> Result<Vec<f64>, ConductionError> {
         let n = self.upper.len();
         if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
             return Err(radiation_error(
@@ -144,7 +188,7 @@ impl DenseRadiosityFactorization {
         }
         let mut b = rhs.to_vec();
         for column in 0..n {
-            poll(cx, "radiation-radiosity-apply", column)?;
+            poll("radiation-radiosity-apply", column)?;
             let pivot = self.pivots[column];
             if pivot != column { b.swap(column, pivot); }
             let pivot_rhs = b[column];
@@ -155,7 +199,7 @@ impl DenseRadiosityFactorization {
         }
         let mut x = vec![0.0; n];
         for row in (0..n).rev() {
-            poll(cx, "radiation-radiosity-backsolve", row)?;
+            poll("radiation-radiosity-backsolve", row)?;
             let mut value = b[row];
             for (column, &known) in x.iter().enumerate().skip(row + 1) {
                 value = (-self.upper[row][column]).mul_add(known, value);
@@ -168,7 +212,7 @@ impl DenseRadiosityFactorization {
                 ));
             }
         }
-        poll(cx, "radiation-radiosity-backsolve", n)?;
+        poll("radiation-radiosity-backsolve", n)?;
         Ok(x)
     }
 
@@ -213,7 +257,7 @@ impl DenseRadiosityFactorization {
     }
 }
 
-fn poll(cx: &Cx<'_>, stage: &'static str, at: usize) -> Result<(), ConductionError> {
+pub(super) fn poll(cx: &Cx<'_>, stage: &'static str, at: usize) -> Result<(), ConductionError> {
     cx.checkpoint().map_err(|_| ConductionError::Cancelled { stage, at })
 }
 

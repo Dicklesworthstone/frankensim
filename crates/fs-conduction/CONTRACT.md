@@ -1744,6 +1744,41 @@ rollback are preserved. Focused finite-plate regressions compare the native
 trajectory with an independently evaluated explicit recurrence, vary only
 emissivity, and check work-budget refusal. Source/time refinement remains needed.
 
+## Closed material radiation on the implicit thermal graph
+
+`MaterialRadiation::exchange` attaches a closed material enclosure to the
+implicit thermal graph as one coupled heat source: `RadiationExchange`, an
+`ImplicitCoupledHeatSourceLaw` over the radiating cells in `CellId` order. Its
+admission is `resolve`'s, through the same helper, checked against the timeline
+at attach; a later event that changes a cell's exposed area needs a fresh
+attachment. Each surface's emissivity source is pinned to the claim its
+binding's selection picks at the binding's material point. Each query resolves
+the emissivities at the cells' trial enthalpies, solves the original radiosity
+equations once and applies `resolve`'s gates. Where `resolve`'s own per-query
+selection would pick another claim, or refuse, the query refuses. Elsewhere the
+powers equal `resolve`'s, bit for bit.
+
+The tangent is exact. It takes the emissivity and emission slopes from the
+pinned source, makes one radiosity solve per cell column on the same factors,
+and differentiates the emissive heat law `A e (B - G)`. It steers Newton only;
+acceptance stays on the residual. A material query refused at a trial state is a
+material-domain refusal, so the line search backs off. The enclosure is closed,
+so the powers are declared a passive exchange within the binding's power
+tolerance, and the graph books their production as
+`passive_exchange_generation_j_k`.
+
+The radiosity assembly, factor and solve stages poll through a closure, so this
+owner polls through the graph's checkpoint and returns a checkpoint's own error
+unchanged. The `Cx` entry points keep their signatures and poll points.
+
+`tests/deposition_radiation.rs` covers: powers equal to `resolve` and the
+tangent against central differences on the solid and liquid ramps and the
+latent plateau; one implicit graph step against
+`MaterialRadiation::step_candidate`; a second, observation-backed claim refused
+next to its domain edge under the single-claim and the preferring selections;
+the checkpoint error; attach refusals. Not claimed: open enclosures, a claim
+switch inside a step, or time accuracy beyond the graph's own steps.
+
 ## Material contact sources on the shared thermal timeline
 
 `transient::deposition::contact::MaterialContactObserver<O>` joins the original

@@ -227,34 +227,12 @@ impl MaterialRadiation<'_> {
         ->Result<RadiationCellSources,RadiationCellError> {
         checkpoint(cx)?;
         let invalid=RadiationCellError::Invalid;
-        let n=self.enclosure.surfaces().len();
-        if self.cells.len()!=n || !nonnegative(self.power_tolerance_w)
-            || !nonnegative(self.radiosity_tolerance_w_m2) {
-            return Err(invalid("complete radiative bindings and finite nonnegative watt tolerances required"));
-        }
-        let mut ordered=vec![None;n]; let mut areas=BTreeMap::new();
-        for binding in self.cells {
-            checkpoint(cx)?;
-            if binding.surface>=n || ordered[binding.surface].is_some() {
-                return Err(invalid("duplicate or foreign enclosure surface index"));
-            }
-            let cell=thermal.cells().get(&binding.cell).ok_or(invalid("inactive radiating cell"))?;
-            if cell.material_id!=binding.material_id
-                || !thermal.uses_material_law(binding.material_id,binding.curve as &dyn ThermalLaw) {
-                return Err(invalid("radiating cell must retain its original caloric object and material ID"));
-            }
-            let area=areas.entry(binding.cell).or_insert(0.0);
-            *area+=self.enclosure.surfaces()[binding.surface].area_m2();
-            if !area.is_finite() || *area>thermal.exposed_area_m2(binding.cell)? {
-                return Err(invalid("radiating traces exceed the cell's exposed area"));
-            }
-            ordered[binding.surface]=Some(binding);
-        }
+        let ordered=self.admitted(thermal,&mut ||checkpoint(cx))?;
+        let n=ordered.len();
         let mut emissivities=Vec::with_capacity(n); let mut temperatures=Vec::with_capacity(n);
         let mut samples=Vec::with_capacity(n);
         for (surface,binding) in ordered.into_iter().enumerate() {
             checkpoint(cx)?;
-            let binding=binding.ok_or(invalid("unbound enclosure surface"))?;
             let h=thermal.cells()[&binding.cell].specific_h_j_kg;
             let phase=binding.curve.state_at_specific_enthalpy(h).map_err(RadiationCellError::Phase)?;
             let (emissivity,material)=SurfaceEmissivity::from_thermal_state(
@@ -285,6 +263,42 @@ impl MaterialRadiation<'_> {
         }
         checkpoint(cx)?;
         Ok(RadiationCellSources {sources_w:sources,surfaces:samples,enclosure,radiosity:report})
+    }
+}
+
+impl<'a> MaterialRadiation<'a> {
+    /// `resolve`'s admission, in enclosure surface order: complete bindings and
+    /// finite nonnegative tolerances; each surface once; an active cell with its
+    /// original material ID and caloric object; summed traces within each
+    /// cell's exposed area. `checkpoint` runs once per binding.
+    pub(crate) fn admitted(&self,thermal:&DepositionSimulation<'_>,
+        checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
+        ->Result<Vec<&'a RadiatingCell<'a>>,RadiationCellError> {
+        let invalid=RadiationCellError::Invalid;
+        let n=self.enclosure.surfaces().len();
+        if self.cells.len()!=n || !nonnegative(self.power_tolerance_w)
+            || !nonnegative(self.radiosity_tolerance_w_m2) {
+            return Err(invalid("complete radiative bindings and finite nonnegative watt tolerances required"));
+        }
+        let mut ordered=vec![None;n]; let mut areas=BTreeMap::new();
+        for binding in self.cells {
+            checkpoint()?;
+            if binding.surface>=n || ordered[binding.surface].is_some() {
+                return Err(invalid("duplicate or foreign enclosure surface index"));
+            }
+            let cell=thermal.cells().get(&binding.cell).ok_or(invalid("inactive radiating cell"))?;
+            if cell.material_id!=binding.material_id
+                || !thermal.uses_material_law(binding.material_id,binding.curve as &dyn ThermalLaw) {
+                return Err(invalid("radiating cell must retain its original caloric object and material ID"));
+            }
+            let area=areas.entry(binding.cell).or_insert(0.0);
+            *area+=self.enclosure.surfaces()[binding.surface].area_m2();
+            if !area.is_finite() || *area>thermal.exposed_area_m2(binding.cell)? {
+                return Err(invalid("radiating traces exceed the cell's exposed area"));
+            }
+            ordered[binding.surface]=Some(binding);
+        }
+        ordered.into_iter().map(|binding|binding.ok_or(invalid("unbound enclosure surface"))).collect()
     }
 }
 

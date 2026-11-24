@@ -46,6 +46,8 @@ mod balance;
 mod convection;
 pub(crate) mod enclosure_exchange;
 pub use enclosure_exchange::EnclosureExchangeReport;
+mod material_exchange;
+pub use material_exchange::RadiationExchange;
 mod prepared;
 /// Diffuse-gray surface exchange through a partially open black environment.
 pub mod open;
@@ -94,6 +96,12 @@ pub(crate) use ambient::{AmbientRadiationTrial, solve_ambient_radiation_with};
 
 /// CODATA exact SI value after the 2019 kelvin redefinition, W/(m² K⁴).
 pub const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.670_374_419e-8;
+
+/// A cancellation poll at a named radiosity stage and step. The `Cx` entry points
+/// pass `Cx::checkpoint` mapped to `ConductionError::Cancelled { stage, at }`; an
+/// owner that holds only a checkpoint closure passes its own.
+pub(crate) type RadiosityPoll<'p> =
+    dyn FnMut(&'static str, usize) -> Result<(), ConductionError> + 'p;
 
 pub use fs_material::thermal::source::{EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY};
 
@@ -1100,12 +1108,16 @@ impl GrayDiffuseEnclosure {
         cx: &Cx<'_>,
         surface_temperatures_k: &[f64],
     ) -> Result<RadiosityReport, ConductionError> {
-        self.solve_with_factors(cx, surface_temperatures_k, None)
+        self.solve_with_factors(
+            &mut |stage, at| prepared::poll(cx, stage, at),
+            surface_temperatures_k,
+            None,
+        )
     }
 
     fn solve_with_factors(
         &self,
-        cx: &Cx<'_>,
+        poll: &mut RadiosityPoll<'_>,
         surface_temperatures_k: &[f64],
         factors: Option<&prepared::DenseRadiosityFactorization>,
     ) -> Result<RadiosityReport, ConductionError> {
@@ -1125,7 +1137,7 @@ impl GrayDiffuseEnclosure {
                 surface.name(), "gray-diffuse surface temperature", temperature,
             )?;
         }
-        solve_radiosity_system(cx, surface_temperatures_k,
+        solve_radiosity_system(poll, surface_temperatures_k,
             |i| self.surfaces[i].emissivity.value, |i| self.surfaces[i].area_m2,
             &self.view_factors,
             self.surfaces.iter().all(|surface| {
@@ -1145,7 +1157,7 @@ impl GrayDiffuseEnclosure {
 // black bath use the SAME radiosity and stable heat equations. Callers admit
 // physical temperatures and retain the material evidence before this kernel.
 fn solve_radiosity_system(
-    cx: &Cx<'_>,
+    poll: &mut RadiosityPoll<'_>,
     surface_temperatures_k: &[f64],
     emissivity: impl Fn(usize) -> f64,
     area_m2: impl Fn(usize) -> f64,
@@ -1169,10 +1181,7 @@ fn solve_radiosity_system(
         let mut matrix = vec![vec![0.0; n]; n];
         let mut rhs = vec![0.0; n];
         for i in 0..n {
-            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
-                stage: "radiation-radiosity-assemble",
-                at: i,
-            })?;
+            poll("radiation-radiosity-assemble", i)?;
             let emissivity = emissivity(i);
             for j in 0..n {
                 matrix[i][j] = if i == j { 1.0 } else { 0.0 }
@@ -1191,8 +1200,8 @@ fn solve_radiosity_system(
             );
         }
         let radiosity_delta = match factors {
-            Some(factors) => factors.solve(cx, &rhs)?,
-            None => solve_dense(cx, &matrix, &rhs)?,
+            Some(factors) => factors.solve_polled(poll, &rhs)?,
+            None => solve_dense(poll, &matrix, &rhs)?,
         };
         let radiosity_w_m2 = radiosity_delta
             .iter()
@@ -1593,7 +1602,7 @@ fn run_conduction(
 }
 
 pub(crate) fn solve_dense(
-    cx: &Cx<'_>,
+    poll: &mut RadiosityPoll<'_>,
     matrix: &[Vec<f64>],
     rhs: &[f64],
 ) -> Result<Vec<f64>, ConductionError> {
@@ -1608,10 +1617,7 @@ pub(crate) fn solve_dense(
         .fold(0.0f64, f64::max)
         .max(f64::MIN_POSITIVE);
     for column in 0..n {
-        cx.checkpoint().map_err(|_| ConductionError::Cancelled {
-            stage: "radiation-radiosity-factor",
-            at: column,
-        })?;
+        poll("radiation-radiosity-factor", column)?;
         let mut pivot = column;
         let mut pivot_abs = a[column][column].abs();
         for (row, values) in a.iter().enumerate().skip(column + 1) {
