@@ -46,7 +46,9 @@ use super::graph_material::{
     DESTINATIONS, LINKS, RESISTOR_CELL, RESISTOR_MATERIAL, bindings, graph_card, native, resistors,
     solve_controls, two_bodies,
 };
-use super::kernel::{CellConductors, card_words, graph, ledger_closes, with_cx};
+use super::kernel::{
+    CellConductors, card_words, conduction, graph, ledger_closes, timeline, with_cx,
+};
 use super::*;
 
 pub(super) const STEPS: usize = 4;
@@ -57,7 +59,7 @@ pub(super) const TOLERANCE_J: f64 = 1e-9;
 /// axis, the cell's conductivity and the resistor's resistivity pinned to
 /// the claims they select at 300 K, over the `CellResistor`'s path.
 #[derive(Debug)]
-struct BodyResistor {
+pub(super) struct BodyResistor {
     card: MaterialCard,
     context: QueryPoint,
     requirements: Vec<ScalarPropertyRequirement>,
@@ -67,8 +69,12 @@ struct BodyResistor {
 }
 
 impl BodyResistor {
-    fn new(card: &MaterialCard, conductivity: &PropertyKey, resistor: &CellResistor) -> Self {
-        let context = field::material::point(300.0);
+    pub(super) fn new(
+        card: &MaterialCard,
+        context: QueryPoint,
+        conductivity: &PropertyKey,
+        resistor: &CellResistor,
+    ) -> Self {
         let requirements = vec![
             ScalarPropertyRequirement::try_with_key(conductivity, ScalarAdmissibility::NonNegative)
                 .unwrap(),
@@ -436,7 +442,7 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
         let (mut system, electrical, cells) = graph(
             winding,
             PlanarWindingState::new(circuit),
-            (&start, &[(MATERIAL, curve)], &[]),
+            timeline(&start, conduction(&start, &[(MATERIAL, curve)], &[])),
             &[CELL],
             Some(|_| DRIVE),
         );
@@ -502,7 +508,12 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
             circuit.field().conductors(),
             circuit.conductors(),
         ));
-        let resistor = Arc::new(BodyResistor::new(&cards[1], &key, &resistors()[0]));
+        let resistor = Arc::new(BodyResistor::new(
+            &cards[1],
+            field::material::point(300.0),
+            &key,
+            &resistors()[0],
+        ));
 
         let module = material_module((cards, curves), &circuit, &law, &resistor, &key);
 
@@ -528,14 +539,17 @@ fn the_declared_graph_reproduces_the_material_resistor_winding_and_its_heat_cell
         let (mut system, electrical, cells) = graph(
             winding,
             PlanarWindingState::new(circuit),
-            (
+            timeline(
                 &start,
-                &[(MATERIAL, &curves[0]), (RESISTOR_MATERIAL, &curves[1])],
-                &[ConductiveLink {
-                    link_id: 17,
-                    half_distances_m: [0.5; 2],
-                    contact_resistance_m2_k_w: 0.0,
-                }],
+                conduction(
+                    &start,
+                    &[(MATERIAL, &curves[0]), (RESISTOR_MATERIAL, &curves[1])],
+                    &[ConductiveLink {
+                        link_id: 17,
+                        half_distances_m: [0.5; 2],
+                        contact_resistance_m2_k_w: 0.0,
+                    }],
+                ),
             ),
             &[CELL, RESISTOR_CELL],
             None,

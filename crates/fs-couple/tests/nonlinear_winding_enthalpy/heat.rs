@@ -1,5 +1,7 @@
 //! Independent two-temperature circuit/field/radiation/contact balance.
 use super::*;
+#[path = "graph_heat.rs"]
+mod graph_heat;
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiative;
 use fs_conduction::{
@@ -59,9 +61,9 @@ fn claim(name: &str, dims: fs_qty::Dims, value: PropertyValue, upper: f64) -> Pr
     }
 }
 
-fn cards(e: f64, upper: f64) -> [MaterialCard; 2] {
+fn cards(e: f64, upper: f64, slope: f64) -> [MaterialCard; 2] {
     [
-        card(SLOPE),
+        card(slope),
         absolute(&linear::card(
             0.5,
             GRAPH_ALPHA,
@@ -145,63 +147,75 @@ fn interface(cards: &[MaterialCard; 2], resistance: f64) -> InterfaceSystemCard 
     .unwrap()
 }
 
-fn with_heat<R>(
-    e: f64,
-    resistance: f64,
-    upper: f64,
-    run: impl FnOnce(
-        &Cx<'_>,
-        &CancelGate,
-        &MaterialHeatNetwork<'_>,
-        DepositionSimulation<'_>,
-        &PlanarNonlinearMagnetostatics,
-        &[MagneticThermalLaw],
-    ) -> R,
-) -> R {
-    let cards = cards(e, upper);
-    let curves = cards.each_ref().map(caloric);
-    let context = linear::absolute_point(300.0);
-    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
-    let cells = [0, 1].map(|i| MaterialCell {
+fn leak<T>(value: T) -> &'static T {
+    Box::leak(Box::new(value))
+}
+
+/// The fixture with the winding cell's emissivity `e`, the interface's
+/// resistance `resistance` \[m2 K/W\] at 300 K, the cards' upper
+/// temperature `upper` \[K\] and the winding card's permeability slope
+/// `slope` \[1/K\], leaked so that graph_heat.rs's graph can hold it.
+struct Parts {
+    cards: &'static [MaterialCard; 2],
+    curves: &'static [ResolvedHeatCapacityCurve; 2],
+    context: &'static QueryPoint,
+    key: &'static PropertyKey,
+    assembly: &'static MaterialHeatNetwork<'static>,
+    thermal: DepositionSimulation<'static>,
+    field: &'static PlanarNonlinearMagnetostatics,
+    bindings: Vec<MagneticThermalLaw>,
+}
+
+fn parts(e: f64, resistance: f64, upper: f64, slope: f64) -> Parts {
+    let cards = leak(cards(e, upper, slope));
+    let curves = leak(cards.each_ref().map(caloric));
+    let context = leak(linear::absolute_point(300.0));
+    let key = leak(PropertyKey::new(
+        "thermal_conductivity",
+        THERMAL_CONDUCTIVITY_DIMS,
+    ));
+    let cells = leak([0, 1].map(|i| MaterialCell {
         cell: if i == 0 { CELL } else { SINK },
         material_id: if i == 0 { MATERIAL } else { SINK_MATERIAL },
         curve: curves[i].curve(),
         point: ThermalMaterialPoint {
             material: &cards[i],
-            context: &context,
+            context,
             temperature_axis: "T",
             liquid_fraction_axis: None,
         },
-        conductivity: Some((&key, MaterialPropertySelection::SingleClaimOnly)),
-    });
-    let resistors = [CellResistor {
+        conductivity: Some((key, MaterialPropertySelection::SingleClaimOnly)),
+    }));
+    let resistors = leak([CellResistor {
         destination: DESTINATIONS[0],
         length_m: 1.0,
         area_m2: VOLUME,
         selection: MaterialPropertySelection::SingleClaimOnly,
-    }];
-    let bulk = MaterialNetwork {
-        cells: &cells,
-        resistors: &resistors,
+    }]);
+    let bulk = leak(MaterialNetwork {
+        cells,
+        resistors,
         links: &LINKS,
-    };
-    let electrical = ElectricalContactNetwork {
-        bulk: &bulk,
+    });
+    let electrical = leak(ElectricalContactNetwork {
+        bulk,
         contacts: &[],
         electrical_bases: &[(2, ElectricalPropertyBasis::Resistivity)],
-    };
-    let interface = interface(&cards, resistance);
-    let interface_context = QueryPoint::new()
-        .with("aT", 300.0)
-        .unwrap()
-        .with("bT", 300.0)
-        .unwrap();
-    let contacts = [MaterialContactLink {
+    });
+    let interface = leak(interface(cards, resistance));
+    let interface_context = leak(
+        QueryPoint::new()
+            .with("aT", 300.0)
+            .unwrap()
+            .with("bT", 300.0)
+            .unwrap(),
+    );
+    let contacts = leak([MaterialContactLink {
         link: 17,
         point: ThermalInterfacePoint {
-            interface: &interface,
+            interface,
             materials: [&cards[0], &cards[1]],
-            context: &interface_context,
+            context: interface_context,
             temperature_axes: ["aT", "bT"],
             liquid_fraction_axes: [None, None],
             mean_temperature_axis: None,
@@ -212,16 +226,16 @@ fn with_heat<R>(
             curve: curves[i].curve(),
         }),
         selection: ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
-    }];
-    let surfaces = [0, 1].map(|i| RadiatingCell {
+    }]);
+    let surfaces = leak([0, 1].map(|i| RadiatingCell {
         surface: i,
         cell: cells[i].cell,
         material_id: cells[i].material_id,
         curve: curves[i].curve(),
         material: cells[i].point,
         selection: MaterialPropertySelection::SingleClaimOnly,
-    });
-    let enclosure = radiative::enclosure([0, 1].map(|i| {
+    }));
+    let enclosure = leak(radiative::enclosure([0, 1].map(|i| {
         SurfaceEmissivity::from_thermal_state(
             "original magnetic assembly surface",
             cells[i].point,
@@ -230,18 +244,18 @@ fn with_heat<R>(
         )
         .unwrap()
         .0
-    }));
-    let radiation = MaterialRadiation {
-        enclosure: &enclosure,
-        cells: &surfaces,
+    })));
+    let radiation = leak(MaterialRadiation {
+        enclosure,
+        cells: surfaces,
         power_tolerance_w: 1e-8,
         radiosity_tolerance_w_m2: 1e-8,
-    };
-    let assembly = MaterialHeatNetwork {
-        electrical: &electrical,
-        thermal_contacts: &contacts,
-        radiation: Some(&radiation),
-    };
+    });
+    let assembly = leak(MaterialHeatNetwork {
+        electrical,
+        thermal_contacts: contacts,
+        radiation: Some(radiation),
+    });
     let mut events: Vec<_> = [0, 1]
         .map(|i| TimedEvent {
             time_s: 0.0,
@@ -304,8 +318,34 @@ fn with_heat<R>(
     )
     .unwrap()
     .0;
-    let field = problem(&cards[0]);
-    let bindings = laws(&cards[0], &field);
+    let field = leak(problem(&cards[0]));
+    let bindings = laws(&cards[0], field);
+    Parts {
+        cards,
+        curves,
+        context,
+        key,
+        assembly,
+        thermal,
+        field,
+        bindings,
+    }
+}
+
+fn with_heat<R>(
+    e: f64,
+    resistance: f64,
+    upper: f64,
+    run: impl FnOnce(
+        &Cx<'_>,
+        &CancelGate,
+        &MaterialHeatNetwork<'_>,
+        DepositionSimulation<'_>,
+        &PlanarNonlinearMagnetostatics,
+        &[MagneticThermalLaw],
+    ) -> R,
+) -> R {
+    let parts = parts(e, resistance, upper, SLOPE);
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -321,7 +361,14 @@ fn with_heat<R>(
             fs_exec::Budget::INFINITE,
             fs_exec::ExecMode::Deterministic,
         );
-        run(&cx, &gate, &assembly, thermal, &field, &bindings)
+        run(
+            &cx,
+            &gate,
+            parts.assembly,
+            parts.thermal,
+            parts.field,
+            &parts.bindings,
+        )
     })
 }
 
@@ -335,33 +382,55 @@ fn config() -> CircuitEnthalpySolve {
 // Independent manufactured P1 modes: B=mu(Tc)*I, lambda=2*depth*B.
 // A scalar sink heat balance and total physical energy determine both T's.
 // No native constitutive, radiation, electrical or nonlinear solver is called.
+// `current` and `balances` are one interval's, from `t0` and `i0` [K, A] to
+// `[tc, ts]` at `slope` [1/K]; graph_heat.rs holds the kernel's states to them.
+fn resistances(tc: f64, ts: f64) -> [f64; 2] {
+    [
+        1.0 + RHO_SLOPE * (tc - 300.0),
+        1.0 + GRAPH_ALPHA * (ts - 300.0),
+    ]
+}
+
+fn current(t0: [f64; 2], i0: f64, [tc, ts]: [f64; 2], slope: f64) -> f64 {
+    let b0 = mu(t0[0], slope) * i0;
+    (2.0 * DEPTH * b0 + END_H * i0 + DT * VOLTAGE)
+        / (2.0 * DEPTH * mu(tc, slope) + END_H + DT * resistances(tc, ts).iter().sum::<f64>())
+}
+
+/// The sink's heat balance and the total energy's \[J\] with `current`
+/// \[A\], `e` the winding cell's emissivity and `contact` the interface's
+/// resistance at 300 K \[m2 K/W\].
+fn balances(
+    t0: [f64; 2],
+    i0: f64,
+    [tc, ts]: [f64; 2],
+    current: f64,
+    (e, contact, slope): (f64, f64, f64),
+) -> [f64; 2] {
+    let b0 = mu(t0[0], slope) * i0;
+    let b = mu(tc, slope) * current;
+    let g = 1.0 / (1.0 + contact * (1.0 + 0.001 * (tc - 300.0)));
+    let radiated = 5.670_374_419e-8 * (tc.powi(4) - ts.powi(4))
+        / (1.0 / (e * (1.0 + 0.0001 * (tc - 300.0))) + 1.0 / (0.6 * (1.0 + 0.0001 * (ts - 300.0)))
+            - 1.0);
+    let transfer = g * (tc - ts) + radiated;
+    let numerical =
+        VOLUME * (b - b0).powi(2) / (2.0 * mu(tc, slope)) + 0.5 * END_H * (current - i0).powi(2);
+    [
+        HEAT_CAPACITY * (ts - t0[1]) - DT * (resistances(tc, ts)[1] * current * current + transfer),
+        HEAT_CAPACITY * (tc - t0[0]) + HEAT_CAPACITY * (ts - t0[1]) + field_u(tc, b, slope)
+            - field_u(t0[0], b0, slope)
+            + 0.5 * END_H * (current * current - i0 * i0)
+            + numerical
+            - DT * VOLTAGE * current,
+    ]
+}
+
 fn reference(t0: [f64; 2], i0: f64, e: f64, contact: f64) -> ([f64; 2], f64) {
-    let b0 = mu(t0[0], SLOPE) * i0;
     let residual = |tc: f64, ts: f64| {
-        let resistance = [
-            1.0 + RHO_SLOPE * (tc - 300.0),
-            1.0 + GRAPH_ALPHA * (ts - 300.0),
-        ];
-        let current = (2.0 * DEPTH * b0 + END_H * i0 + DT * VOLTAGE)
-            / (2.0 * DEPTH * mu(tc, SLOPE) + END_H + DT * resistance.iter().sum::<f64>());
-        let b = mu(tc, SLOPE) * current;
-        let g = 1.0 / (1.0 + contact * (1.0 + 0.001 * (tc - 300.0)));
-        let radiated = 5.670_374_419e-8 * (tc.powi(4) - ts.powi(4))
-            / (1.0 / (e * (1.0 + 0.0001 * (tc - 300.0)))
-                + 1.0 / (0.6 * (1.0 + 0.0001 * (ts - 300.0)))
-                - 1.0);
-        let transfer = g * (tc - ts) + radiated;
-        let numerical = VOLUME * (b - b0).powi(2) / (2.0 * mu(tc, SLOPE))
-            + 0.5 * END_H * (current - i0).powi(2);
-        (
-            HEAT_CAPACITY * (ts - t0[1]) - DT * (resistance[1] * current * current + transfer),
-            HEAT_CAPACITY * (tc - t0[0]) + HEAT_CAPACITY * (ts - t0[1]) + field_u(tc, b, SLOPE)
-                - field_u(t0[0], b0, SLOPE)
-                + 0.5 * END_H * (current * current - i0 * i0)
-                + numerical
-                - DT * VOLTAGE * current,
-            current,
-        )
+        let current = current(t0, i0, [tc, ts], SLOPE);
+        let [sink, total] = balances(t0, i0, [tc, ts], current, (e, contact, SLOPE));
+        (sink, total, current)
     };
     let at = |tc| {
         let (mut lo, mut hi) = (280.0, 400.0);

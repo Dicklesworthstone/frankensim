@@ -42,7 +42,7 @@ use fs_thermal::component::TimelineState;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 
 use super::graph::TOLERANCE_J;
-use super::kernel::{CellConductors, graph, ledger_closes, with_cx};
+use super::kernel::{CellConductors, conduction, graph, ledger_closes, timeline, with_cx};
 use super::solid::{
     CELL_IDS, END_H, HEAT_CAPACITY, HEATER_W, Parts, SOLID_MATERIAL, STEP, VOLTAGE, circuit,
     closed, config, holds, linear, magnetic_laws, parts, receiver, temperatures,
@@ -248,7 +248,10 @@ fn the_declared_graph_reproduces_the_solid_winding_and_its_heater() {
     let (mut system, electrical, cells) = graph(
         winding,
         PlanarWindingState::new(start),
-        (&parts.thermal, &[(SOLID_MATERIAL, parts.curve)], &[]),
+        timeline(
+            &parts.thermal,
+            conduction(&parts.thermal, &[(SOLID_MATERIAL, parts.curve)], &[]),
+        ),
         &CELL_IDS,
         Some(|_| VOLTAGE),
     );
@@ -395,7 +398,10 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
         let (mut system, electrical, cells) = graph(
             winding,
             PlanarWindingState::at_temperatures(start, vec![300.0; CELL_IDS.len()]),
-            (&parts.thermal, &[(SOLID_MATERIAL, parts.curve)], &links),
+            timeline(
+                &parts.thermal,
+                conduction(&parts.thermal, &[(SOLID_MATERIAL, parts.curve)], &links),
+            ),
             &CELL_IDS,
             Some(|_| VOLTAGE),
         );

@@ -25,7 +25,7 @@ use fs_em::winding::component::{
 use fs_em::winding::nonlinear::NonlinearWindingCircuit;
 
 use super::graph::{Row, STEPS, TOLERANCE_J, graph_run, hold, largest, module_row};
-use super::kernel::{CellConductors, graph, ledger_closes};
+use super::kernel::{CellConductors, conduction, graph, ledger_closes, timeline};
 use super::magnetic_thermal::{self as trial, END_H, HEAT_CAPACITY, VOLTAGE, linear, mu};
 use super::*;
 
@@ -33,7 +33,7 @@ use super::*;
 /// from `(i0, t0)` to `(i1, t1)` \[A, K\], with `b = mu(t) i` in every
 /// triangle: the owner's backward-Euler dissipation and the term
 /// `-(P + (t1 - t0) s0)` \[J\], `s0 = -dpsi/dT` at the start.
-fn closed((i0, t0): (f64, f64), (i1, t1): (f64, f64), slope: f64) -> [f64; 2] {
+pub(super) fn closed((i0, t0): (f64, f64), (i1, t1): (f64, f64), slope: f64) -> [f64; 2] {
     let (m0, m1) = (mu(t0, slope), mu(t1, slope));
     let b0 = m0 * i0;
     let numerical = VOLUME * (m1 * i1 - b0).powi(2) / (2.0 * m1) + 0.5 * END_H * (i1 - i0).powi(2);
@@ -158,7 +158,7 @@ fn the_declared_graph_and_the_magnetic_trial_differ_by_the_booked_term() {
         let (mut system, electrical, cells) = graph(
             winding,
             PlanarWindingState::at_temperatures(circuit, vec![300.0]),
-            (&start, &[(MATERIAL, curve)], &[]),
+            timeline(&start, conduction(&start, &[(MATERIAL, curve)], &[])),
             &[CELL],
             Some(|_| VOLTAGE),
         );

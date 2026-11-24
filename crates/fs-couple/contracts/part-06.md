@@ -5908,6 +5908,48 @@ refused the one in the shared laws, which also failed the module test. A
 ninth, the ports started at 310 K, cannot fail it: the field starts at
 zero, so the start temperatures meet no entropy.
 
+`tests/nonlinear_winding_enthalpy/graph_heat.rs`, included from heat.rs,
+declares H1's fixture as a graph:
+- `magnetic_at_port_temperatures` with the module's own magnetic laws, the
+  winding's conductors at the winding cell's port temperature and the
+  material graph resistor (`BodyResistor`) at the sink's;
+- kernel.rs's `conduction` graph of the two cells. Between it and
+  `timeline` the graph attaches link 17's interface contact
+  (`PreparedMaterialContact`, through `with_contacts`) and the enclosure
+  (`RadiationExchange`, through `with_coupled_heat_source`).
+
+It runs each of H1's three (emissivity, contact) variants twice: at slope 0
+as the control, and at H1's 0.004 per kelvin. heat.rs builds the fixture in
+`parts` (leaked), and `reference()`'s closed forms for one interval are
+`current` and `balances`, which the graph calls on the kernel's own states.
+
+Held over four steps of 0.25 s, in this order:
+- the ledger, and the winding's entropy audit on every step;
+- against `current`, `balances` and graph_caloric.rs's `closed`, over the
+  six variants: the current within 3.3e-11 A, the sink's balance within
+  1.0e-9 J, the total balance less the term within 8.2e-10 J, and the
+  booked loss less the owner's dissipation and the term within 7.3e-11 J;
+- at slope 0, against the module: within 8.2e-10 K, 4.4e-11 A and
+  1.3e-11 Wb/m, and the cells' energies within 7.5e-10 J;
+- at slope 0.004 the terms sum to between -2.45e-2 and -2.55e-2 J, and the
+  module's cells end with that much less energy, within 1.26 % of it. The
+  module departs by up to 1.04e-2 K, 2.3e-4 A and 5.3e-5 Wb/m, which is
+  the cells' feedback through their resistivities, contact, radiation and
+  permeability.
+
+Ten planted defects each failed this test before its module comparison:
+- link 17's contact, the radiation or the magnetic laws left off the graph;
+- `BodyResistor` at 300 K;
+- three defects in `balances` and `current`;
+- the slope ignored in `parts`;
+- kernel.rs's `conduction` without its links;
+- the term re-booked in fs-em.
+
+The defects in shared pieces also failed the other tests that use them:
+graph 3 for `BodyResistor`, H1 for `balances` and `current`, the other two
+linked graphs for `conduction`, and graph_caloric.rs and graph_solid.rs for
+fs-em.
+
 
 
 ## Source-dependent directional histories on sustained mixed trajectories

@@ -27,7 +27,7 @@ use fs_system::{NodeId, System};
 use fs_thermal::component::TimelineState;
 
 use super::common::MATERIAL;
-use super::kernel::{CellConductors, graph, ledger_closes, with_cx};
+use super::kernel::{CellConductors, conduction, graph, ledger_closes, timeline, with_cx};
 use super::*;
 
 const STEPS: usize = 4;
@@ -287,7 +287,7 @@ fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
     let (mut system, electrical, cells) = graph(
         winding,
         PlanarWindingState::new(start.clone()),
-        (&cell, &[(MATERIAL, curve)], &[]),
+        timeline(&cell, conduction(&cell, &[(MATERIAL, curve)], &[])),
         &[CELL],
         Some(drive),
     );

@@ -155,13 +155,13 @@ impl ImplicitConductionLaw for Conduction {
     }
 }
 
-/// The cells of `start` as one backward-Euler timeline whose cell ports
-/// return end-of-step temperatures, joined by `links`.
-fn timeline(
+/// The cells of `start` as one implicit conduction graph, joined by
+/// `links`.
+pub(super) fn conduction(
     start: &DepositionSimulation<'static>,
     materials: &[(MaterialId, &'static ResolvedHeatCapacityCurve)],
     links: &[ConductiveLink],
-) -> (ThermalTimeline<'static>, TimelineState<'static>) {
+) -> ImplicitConductionGraph<'static> {
     let laws: &'static [Conduction] = Box::leak(
         materials
             .iter()
@@ -179,14 +179,22 @@ fn timeline(
         .zip(laws)
         .map(|(id, law)| (id, law as &dyn ImplicitConductionLaw))
         .collect();
-    let conduction = ImplicitConductionGraph::new(
+    ImplicitConductionGraph::new(
         start,
         &observer,
         &implicit,
         ImplicitConductionLinearControls::default(),
         || Ok(()),
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// `conduction` over the cells of `start` as one backward-Euler timeline
+/// whose cell ports return end-of-step temperatures.
+pub(super) fn timeline(
+    start: &DepositionSimulation<'static>,
+    conduction: ImplicitConductionGraph<'static>,
+) -> (ThermalTimeline<'static>, TimelineState<'static>) {
     let controls = ImplicitConductionControls {
         maximum_dt_s: DT,
         cell_tolerance_j: 1e-10,
@@ -206,17 +214,13 @@ fn timeline(
     (timeline, state)
 }
 
-/// `winding` from `state` beside the cells of `start`, heat port `k`
-/// routed into `ports[k]`, its source port (if any) held at `drive(t0)` volts
+/// `winding` from `state` beside the cells' `timeline` from `cells_start`,
+/// heat port `k` routed into `ports[k]`, its source port (if any) held at `drive(t0)` volts
 /// over the step that starts at `t0`.
 pub(super) fn graph<C, F>(
     winding: PlanarWinding<'static, C, F>,
     state: PlanarWindingState<'static, C>,
-    (start, materials, links): (
-        &DepositionSimulation<'static>,
-        &[(MaterialId, &'static ResolvedHeatCapacityCurve)],
-        &[ConductiveLink],
-    ),
+    (timeline, cells_start): (ThermalTimeline<'static>, TimelineState<'static>),
     ports: &[CellId],
     drive: Option<fn(f64) -> f64>,
 ) -> (System, NodeId, NodeId)
@@ -224,7 +228,6 @@ where
     C: WindingOwner<'static, FieldControls = F> + 'static,
     F: Copy + fmt::Debug + 'static,
 {
-    let (timeline, cells_start) = timeline(start, materials, links);
     let mut builder = SystemBuilder::new();
     let electrical = builder.add("winding", winding, state).unwrap();
     let cells = builder.add("cells", timeline, cells_start).unwrap();
