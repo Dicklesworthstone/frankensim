@@ -22,6 +22,7 @@
 //! System::checkpoint / restore               accepted-state rewind and replay
 //! System::step_adaptive                      state/account error-controlled steps
 //! System::step_to_event                      locate a state-triggered threshold
+//! System::step_to_events                     locate the earliest threshold in a set
 //! ```
 //!
 //! [`elements`] holds ideal lumped elements (mass, spring, damper, force,
@@ -78,7 +79,8 @@ pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffere
 pub use ledger::Ledger;
 pub use system::{
     BoundaryFn, Checkpoint, CheckpointError, EventBracket, EventConfig, EventDirection, EventError,
-    EventReport, EventStatus, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError,
-    SystemImage, heat_sink,
+    EventReport, EventSetConfig, EventSetError, EventSetReport, EventSetStatus, EventStatus,
+    LocatedEvent, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError, SystemImage,
+    heat_sink,
 };
 pub use wiring::{AdmissionError, HeatSink, NodeId, PortRef, RouteTemperature};

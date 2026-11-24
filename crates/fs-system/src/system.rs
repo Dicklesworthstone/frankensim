@@ -29,7 +29,10 @@ mod line;
 mod scalar;
 mod snapshot;
 
-pub use events::{EventBracket, EventConfig, EventDirection, EventError, EventReport, EventStatus};
+pub use events::{
+    EventBracket, EventConfig, EventDirection, EventError, EventReport, EventSetConfig,
+    EventSetError, EventSetReport, EventSetStatus, EventStatus, LocatedEvent,
+};
 pub use snapshot::SystemImage;
 
 use line::Line;

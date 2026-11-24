@@ -136,6 +136,35 @@ and locate an event preceding that endpoint.
 caps, direction, replay, retained accounting and diagnostic allowances, and
 atomic cancellation, refusal, trial-budget and clock-resolution boundaries.
 
+`System::step_to_events(dt_max, config, directions, guards, cx)` extends the
+same driver to a nonempty set of competing thresholds. The callback fills one
+finite output for each direction; unwritten outputs are reset to NaN and
+refused with their index. Every output is checked before returning all exact
+entry zeros as `EventSetStatus::AtStart`, independently of direction. Each
+guard must satisfy the same continuity and at-most-one-zero assumptions.
+
+All guards share one duration bisection and `EventSetConfig` trial budget.
+Its lower endpoint precedes every requested crossing; its upper endpoint
+reaches at least one. Once the common bracket is within tolerance,
+`EventSetStatus::Located` contains every requested crossing reached in that
+bracket, in declaration order. These events are numerically unresolved within
+the bracket, without a claim of exact simultaneity. A later root just beyond
+the retained endpoint is not included, even if its distance from the earliest
+root is less than the tolerance. An exact sampled upper zero collapses the
+bracket only if it is the sole crossed guard: an exact later zero must not
+hide another guard's earlier crossing. Final guard values and all located
+brackets correspond to the single retained ordinary step. Increasing the
+guard count adds guard work, not a separate physics search per guard.
+
+The scalar API uses this same search and preserves its original report and
+`EventError` variants; the batch API returns `EventSetError` with indexed
+invalid outputs, an explicit empty-set refusal, and every unresolved crossing
+on budget exhaustion. Both have identical complete rollback and cancellation
+semantics. No reset, priority-dependent reset ordering, or impact law is
+introduced. `tests/event_sets.rs` covers competing physical thresholds,
+declaration order, exact later roots, unresolved simultaneous brackets,
+initial-zero validation, scalar parity, shared physics work and full rollback.
+
 ## Scalar monotone feedback
 
 A `Class::Monotone1d` component without `PortTangent` can close a feedback loop
