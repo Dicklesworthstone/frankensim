@@ -22,6 +22,7 @@ pub(in crate::enthalpy) struct StageHeat {
     reservoir_entropy_j_k: f64,
     conduction_generation_j_k: f64,
     source_entropy_j_k: f64,
+    passive_exchange_j_k: f64,
     has_unclassified_sources: bool,
     advection: Option<AdvectiveEntropyContribution>,
 }
@@ -50,6 +51,8 @@ impl StageQuadrature<'_> {
                 finite(audit.conduction_generation_j_k + earlier.conduction_generation_j_k)?;
             audit.unclassified_source_at_cell_j_k =
                 finite(audit.unclassified_source_at_cell_j_k + earlier.source_entropy_j_k)?;
+            audit.passive_exchange_generation_j_k =
+                finite(audit.passive_exchange_generation_j_k + earlier.passive_exchange_j_k)?;
             audit.has_unclassified_sources |= earlier.has_unclassified_sources;
             if let Some(advection) = earlier.advection {
                 audit.advection.get_or_insert_with(Default::default).accumulate(advection)?;
@@ -76,6 +79,7 @@ impl StageHeat {
             reservoir_entropy_j_k: entropy.reservoir_entropy_input_j_k,
             conduction_generation_j_k: entropy.conduction_generation_j_k,
             source_entropy_j_k: entropy.unclassified_source_at_cell_j_k,
+            passive_exchange_j_k: entropy.passive_exchange_generation_j_k,
             has_unclassified_sources: entropy.has_unclassified_sources,
             advection: entropy.advection,
         }
@@ -104,6 +108,7 @@ impl StageHeat {
         self.reservoir_entropy_j_k = finite(self.reservoir_entropy_j_k * factor)?;
         self.conduction_generation_j_k = finite(self.conduction_generation_j_k * factor)?;
         self.source_entropy_j_k = finite(self.source_entropy_j_k * factor)?;
+        self.passive_exchange_j_k = finite(self.passive_exchange_j_k * factor)?;
         self.advection = self.advection.map(|value| value.scaled(factor)).transpose()?;
         checkpoint()?;
         Ok(self)
@@ -152,6 +157,35 @@ impl<'m, T> BackwardEulerTrial<'m, T> {
             heat.source_entropy_j_k = source_entropy_j_k;
             heat.has_unclassified_sources = has_unclassified_sources;
             heat.advection = Some(advection);
+        }
+        Ok(())
+    }
+
+    /// Classify the current endpoint's declared passive exchange. Its
+    /// production and the entropy of every other source were sampled apart at
+    /// the same temperatures. The production adds to the earlier stages' total
+    /// `add_earlier_entropy` carried in; the other sources' entropy, with the
+    /// earlier stages' share, replaces the unclassified term.
+    /// Actual stored energy, rates, residuals and acceptance stay unchanged.
+    pub(in crate::enthalpy) fn classify_endpoint_exchange(
+        &mut self,
+        generation_j_k: f64,
+        source_entropy_j_k: f64,
+        quadrature: Option<StageQuadrature<'_>>,
+    ) -> Result<(), DepositionError> {
+        let audit = self.entropy.as_mut().ok_or(DepositionError::InvalidInput(
+            "exchange classification requires the native entropy account",
+        ))?;
+        let earlier = quadrature.and_then(|stage| stage.earlier);
+        audit.unclassified_source_at_cell_j_k =
+            finite(source_entropy_j_k + earlier.map_or(0.0, |heat| heat.source_entropy_j_k))?;
+        audit.passive_exchange_generation_j_k =
+            finite(audit.passive_exchange_generation_j_k + generation_j_k)?;
+        audit.refresh_temporal_defect()?;
+        if let Some(heat) = &mut self.stage_heat {
+            // Retained first-stage heat has no earlier quadrature contribution.
+            heat.source_entropy_j_k = source_entropy_j_k;
+            heat.passive_exchange_j_k = generation_j_k;
         }
         Ok(())
     }

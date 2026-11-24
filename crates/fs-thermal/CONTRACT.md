@@ -201,10 +201,19 @@ G0, in `crates/fs-system/tests/thermal_timeline_slice.rs` (run with
 Entropy. An implicit timeline's receipt books the entropy its owner's solve
 generates in the owner's links and boundaries: the solve's own
 `EntropyAudit::conduction_generation_j_k`, at the solve's quadrature
-temperatures. Heat handed in through a cell port is the delivering
-component's to account for. `an_implicit_timeline_books_its_owners_conduction_entropy`
-(in the G0 file) holds the booked value to the owner's account under backward
-Euler and SDIRK2, within 1e-12 of it. It holds the backward-Euler step to
+temperatures, plus a declared passive exchange's
+`passive_exchange_generation_j_k` when that is positive (a coupled source
+declaring its powers closed; "Sparse coupled heat-generation feedback"
+below). A negative exchange production, admitted inside its closure and
+rounding allowance, stays signed in the owner's audit and is not booked.
+Heat handed in through a cell port is the delivering component's to account
+for. `an_implicit_timeline_books_its_owners_conduction_entropy` (in the G0
+file) holds the booked value to the owner's account under backward Euler and
+SDIRK2, within 1e-12 of it;
+`an_implicit_timeline_books_a_declared_exchanges_production_and_none_below_zero`
+holds it to conduction plus exchange for 0.05 W moved from the 310 K cell
+into the 295 K one, and to the conduction alone for 1e-3 W moved the other
+way inside a 1 W tolerance. It holds the backward-Euler step to
 `G (T_a - T_b)^2 / (T_a T_b)` for the link plus `q (T_0 - T_a) / (T_a T_0)`
 for a 280 K film, at the end temperatures. The boundary part completes the
 account only when the environment wire is routed at the authored ambient
@@ -507,6 +516,52 @@ solver, infer reaction inventory, or credit upstream work twice. Calibrated
 source validity and upstream energy ownership remain explicit. Source
 entropy stays unclassified even when separately active contributions cancel
 in their net cell power, including retained first-stage SDIRK heat.
+
+A source whose `passive_exchange_tolerance_w` returns a tolerance declares
+its powers a closed passive exchange among its cells: they sum to zero within
+that tolerance at every query, and a query that does not is refused,
+including the one the attachment makes. The tolerance is read once, at
+attachment, and must be finite and nonnegative. At each solve endpoint (the
+backward-Euler end, each SDIRK stage) the exchange's `dt sum P_i / T_i` is
+sampled at the cell temperatures before its powers join the sources, as
+balanced advection's is, and kept signed in
+`EntropyAudit::passive_exchange_generation_j_k`. The unclassified source term
+is rebuilt from the other sources alone, so the two parts make the
+undeclared term and the temporal defect does not change beyond rounding.
+Production below `-dt (tol + n EPSILON sum |P_i|) / T_min` (n declared
+cells, `T_min` the coldest of them) is refused as an entropy loss beyond the
+closure and rounding allowance; inside it the signed value is kept. A
+declared source still sets `has_unclassified_sources`, so the passive SDIRK
+entropy check still skips. A declared exchange beside an implicit flow is
+refused in either attachment order: the two classifications are not
+combined. The thermal timeline books the production when it is positive
+(the timeline's Entropy paragraph above).
+
+Three tests in `enthalpy::conduction::implicit::graph::tests::passive_exchange`
+pin this. One steps the same exchange law declared and undeclared under
+backward Euler and SDIRK2: end states and energy are equal bit for bit, as
+are the storage, reservoir and conduction terms; the two parts make the
+undeclared unclassified term, and the defects agree, within 1e-15 J/K; the
+backward-Euler production is the sum by hand at the end temperatures within
+1e-15 of it. One holds the refusals: negative, NaN and infinite tolerances,
+2e-9 W left over against a 1e-9 W tolerance (5e-10 W steps), and a declared
+exchange beside a flow in both orders (undeclared, the same source attaches).
+One holds the gate: three plateau cells at exactly 300 K with 1, 3 and -4 W
+produce a rounding-sized negative value inside the
+`dt 3 EPSILON 8 W / 300 K` band and are admitted under both schemes; 1 W
+moved from a 300 K cell into a 400 K one is refused at a 0.2 W tolerance and
+admitted at 0.3125 W with its signed loss kept.
+
+Seventeen planted defects in fs-thermal were each caught by these tests:
+the rounding band dropped from the allowance; the allowance doubled, or
+taken at the hottest cell; the closure check, the tolerance's finiteness
+check, or either order's flow refusal dropped; the exchange sampled after
+its powers join the sources; the classification not made, or not applied to
+the trial; the unclassified term not rebuilt; the endpoint's production not
+added; the first stage's production not carried, not reweighted, or not
+retained; the defect keeping the production; accumulation dropping it. Two
+more, in the timeline's booking (the conduction alone; a negative production
+booked), were each caught by the fs-system test.
 
 Three exact production-leaf native Rust tests passed for ordered sparse
 binding, cross-cell Joule residual derivatives with reversed coordinates and

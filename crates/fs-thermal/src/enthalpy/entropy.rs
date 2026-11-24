@@ -66,17 +66,25 @@ pub struct EntropyAudit {
     /// Nonnegative production in finite-temperature conductive links and boundaries,
     /// evaluated on the SAME start/end quadrature as the accepted heat flux.
     pub conduction_generation_j_k: f64,
+    /// Production inside an implicit coupled source that declares itself a
+    /// closed passive exchange (`passive_exchange_tolerance_w`): `dt * sum
+    /// P_i / T_i` over its cells at the same quadrature temperatures, kept
+    /// signed. Its powers are then excluded from the unclassified source
+    /// contribution below. Zero without such a source.
+    pub passive_exchange_generation_j_k: f64,
     /// Explicit flow-owner classification, when requested. These terms are
     /// excluded from the unclassified source contribution below.
     pub advection: Option<AdvectiveEntropyContribution>,
     /// Applied source energy divided by its receiving cell's quadrature temperature.
     /// This is a thermal-storage contribution, NOT an assigned boundary entropy.
+    /// A declared passive exchange's powers are booked above instead.
     /// The source owner must classify heat, work conversion and its own entropy.
     pub unclassified_source_at_cell_j_k: f64,
     /// Whether ANY active source was nonzero, even if signed contributions cancel.
     pub has_unclassified_sources: bool,
-    /// Storage minus reservoir input, conductive production, classified
-    /// advection and source-at-cell contribution. Includes time quadrature,
+    /// Storage minus reservoir input, conductive production, a declared
+    /// passive exchange's production, classified advection and source-at-cell
+    /// contribution. Includes time quadrature,
     /// algebraic residual and roundoff;
     /// never relabel this as physical heat or material entropy production.
     pub temporal_defect_j_k: f64,
@@ -90,6 +98,8 @@ impl EntropyAudit {
             finite(self.reservoir_entropy_input_j_k + other.reservoir_entropy_input_j_k)?;
         self.conduction_generation_j_k =
             finite(self.conduction_generation_j_k + other.conduction_generation_j_k)?;
+        self.passive_exchange_generation_j_k =
+            finite(self.passive_exchange_generation_j_k + other.passive_exchange_generation_j_k)?;
         self.unclassified_source_at_cell_j_k =
             finite(self.unclassified_source_at_cell_j_k + other.unclassified_source_at_cell_j_k)?;
         self.has_unclassified_sources |= other.has_unclassified_sources;
@@ -107,6 +117,11 @@ impl EntropyAudit {
             -self.reservoir_entropy_input_j_k, -self.conduction_generation_j_k,
             -self.unclassified_source_at_cell_j_k] {
             defect.add(value)?;
+        }
+        // Without a declared exchange nothing is added, so every other
+        // account keeps its bits.
+        if self.passive_exchange_generation_j_k != 0.0 {
+            defect.add(-self.passive_exchange_generation_j_k)?;
         }
         if let Some(advection) = self.advection {
             defect.add(-advection.boundary_entropy_input_j_k)?;
@@ -395,7 +410,7 @@ impl DepositionSimulation<'_> {
             advection: None,
             unclassified_source_at_cell_j_k: finite(duration_s * source.value()?)?,
             has_unclassified_sources: has_source,
-            temporal_defect_j_k: 0.0,
+            ..EntropyAudit::default()
         };
         audit.refresh_temporal_defect()?;
         checkpoint()?;

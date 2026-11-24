@@ -35,6 +35,9 @@ use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_si
 use fs_thermal::component::{
     ImplicitScheme, ThermalTimeline, TimelineBuildError, TimelineRefusal, TimelineState,
 };
+use fs_thermal::enthalpy::conduction::implicit::coupled_source::{
+    ImplicitCoupledHeatSourceLaw, ImplicitCoupledHeatSourceState,
+};
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
     ImplicitConductionLaw, ImplicitConductionLinearControls, ImplicitConductionReport,
@@ -1273,6 +1276,92 @@ fn an_implicit_timeline_books_its_owners_conduction_entropy() {
         receipt.entropy_generated_j_per_k.to_bits(),
         0.0_f64.to_bits()
     );
+}
+
+/// Heat `q_w` moved from cell 10 into cell 20 at every query: a closed
+/// passive exchange while cell 10 is the warmer, declared with `tolerance_w`.
+struct Moved {
+    calorics: [&'static dyn ThermalLaw; 2],
+    q_w: f64,
+    tolerance_w: f64,
+}
+
+impl ImplicitCoupledHeatSourceLaw for Moved {
+    fn caloric_laws(&self) -> &[&dyn ThermalLaw] {
+        &self.calorics
+    }
+
+    fn power_dependencies(&self) -> &[(usize, usize)] {
+        &[]
+    }
+
+    fn state_at_specific_enthalpies_and_time(
+        &self,
+        _specific_h_j_kg: &[f64],
+        _time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitCoupledHeatSourceState, DepositionError> {
+        checkpoint()?;
+        Ok(ImplicitCoupledHeatSourceState {
+            powers_w: vec![-self.q_w, self.q_w],
+            power_enthalpy_derivatives_w_kg_j: Vec::new(),
+        })
+    }
+
+    fn passive_exchange_tolerance_w(&self) -> Option<f64> {
+        Some(self.tolerance_w)
+    }
+}
+
+#[test]
+fn an_implicit_timeline_books_a_declared_exchanges_production_and_none_below_zero() {
+    // 0.05 W moved inside the graph from cell 10 (310 K) to cell 20 (295 K),
+    // declared closed, adds its production to the link's. 1e-3 W moved the
+    // other way, inside a declared 1 W, leaves the owner's signed loss in its
+    // audit and books the conduction alone.
+    let gate = CancelGate::new_clock_free();
+    let scene = Scene::default();
+    let (active, laws) = scene.active();
+    let controls = implicit_controls(0.5);
+    let (dt_s, rates) = (0.25, [2.0, -0.5]);
+    let held = HeldSources::new([(A, rates[0]), (B, rates[1])]);
+    let inputs = [rates[0], rates[1], 293.15];
+    let calorics = laws.map(|law| law as &'static dyn ThermalLaw);
+    for (q_w, tolerance_w) in [(0.05, 0.0), (-1.0e-3, 1.0)] {
+        let moved: &'static Moved = Box::leak(Box::new(Moved {
+            calorics,
+            q_w,
+            tolerance_w,
+        }));
+        let graph = || {
+            scene
+                .graph(&active, laws)
+                .with_coupled_heat_source(&active, &[A, B], moved, 0, || Ok(()))
+                .expect("declared exchange")
+        };
+        for scheme in [ImplicitScheme::BackwardEuler, ImplicitScheme::Sdirk2] {
+            let component = ThermalTimeline::implicit(vec![A, B], graph(), controls, scheme)
+                .expect("component");
+            let start = component.start(&active).expect("start");
+            let (_, receipt, _) = propose(&component, &start, dt_s, &inputs, &gate).expect("step");
+            let (_, report) = owner_solve(&graph(), &active, &held, dt_s, controls, scheme);
+            let (conduction, exchange) = (
+                report.entropy.conduction_generation_j_k,
+                report.entropy.passive_exchange_generation_j_k,
+            );
+            let (booked, owner) = if q_w > 0.0 {
+                assert!(exchange > 0.0, "{exchange}");
+                (receipt.entropy_generated_j_per_k, conduction + exchange)
+            } else {
+                assert!(exchange < 0.0, "{exchange}");
+                (receipt.entropy_generated_j_per_k, conduction)
+            };
+            assert!(
+                (booked - owner).abs() <= 1.0e-12 * owner,
+                "{booked} vs {owner}"
+            );
+        }
+    }
 }
 
 #[test]

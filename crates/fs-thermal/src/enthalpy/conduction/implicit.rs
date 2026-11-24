@@ -1034,6 +1034,8 @@ impl<'a> ImplicitConductionChain<'a> {
         // Share the bounded checkpoint with the original owner and its nested
         // constitutive callback. Calls are sequential, with no retained borrow.
         let checkpoint = std::cell::RefCell::new(checkpoint);
+        // A declared passive exchange's entropy, sampled inside `resolve`.
+        let exchange = std::cell::Cell::new(None);
         let resolve = |thermal: &DepositionSimulation<'m>| {
             let mut endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
             let boundaries = endpoint.boundary_values.clone();
@@ -1048,10 +1050,15 @@ impl<'a> ImplicitConductionChain<'a> {
             if let (Some(source), Some(state)) =
                 (&self.coupled_heat_source, &endpoint.coupled_heat_source_state)
             {
-                for (&id, &power) in source.cells.iter().zip(&state.powers_w) {
-                    (checkpoint.borrow_mut())()?;
-                    sources.add(thermal, id, power)?;
-                }
+                let dt_s = quadrature.map_or(step.duration_s(), |stage| stage.implicit_dt_s);
+                exchange.set(source.add_powers(
+                    thermal,
+                    state,
+                    &mut sources,
+                    transfers,
+                    entropy.then_some(dt_s),
+                    &mut || (checkpoint.borrow_mut())(),
+                )?);
             }
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
@@ -1112,6 +1119,10 @@ impl<'a> ImplicitConductionChain<'a> {
                 classified.advection, classified.source_entropy_j_k,
                 classified.has_unclassified_sources, quadrature,
             )?;
+        }
+        if let Some(exchange) = exchange.get() {
+            let (production, others) = (exchange.generation_j_k, exchange.source_entropy_j_k);
+            trial.classify_endpoint_exchange(production, others, quadrature)?;
         }
         if trial.entropy_audit().is_some() {
             let owned_sources = trial.payload().heat_source_states

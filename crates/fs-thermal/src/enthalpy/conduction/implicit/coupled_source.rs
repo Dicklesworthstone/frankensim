@@ -1,7 +1,10 @@
 //! Sparse cross-cell heat-generation feedback on the original enthalpy graph.
 
 use super::{ImplicitConductionChain, ImplicitConductionError, LinearTopology, finite};
-use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, ThermalLaw};
+use crate::enthalpy::observe::EnergySum;
+use crate::enthalpy::{
+    CellId, DepositionError, DepositionSimulation, HeatTransfer, SourcePowers, ThermalLaw, positive,
+};
 use std::collections::BTreeSet;
 
 /// Signed total cell powers and the complete sparse source tangent.
@@ -86,6 +89,22 @@ pub trait ImplicitCoupledHeatSourceLaw {
     fn next_transition_time_s(&self, _after_s: f64) -> Option<f64> {
         None
     }
+
+    /// `Some(tolerance)` declares this source a closed passive exchange: it
+    /// only moves heat among its cells, with no work and no store of its own,
+    /// and the powers of every query sum to at most `tolerance` watts in
+    /// magnitude. The native owner refuses a query that breaks that bound,
+    /// and books the exchange's production, `dt * sum P_i / T_i` at the cells'
+    /// quadrature temperatures, as `EntropyAudit::passive_exchange_generation_j_k`
+    /// instead of an unclassified source. A stage whose production is below
+    /// minus `dt * (tolerance + n * EPSILON * sum |P_i|) / T_min` (`n` cells,
+    /// `T_min` the coldest) is refused; above it the signed value is kept.
+    /// Read once, at attach; refused beside an implicit flow. The powers still
+    /// mark the interval as sourced (`has_unclassified_sources`). `None`, the
+    /// default, keeps the source's entropy unclassified.
+    fn passive_exchange_tolerance_w(&self) -> Option<f64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +170,15 @@ pub(super) struct CoupledHeatSource<'a> {
     pub law: &'a dyn ImplicitCoupledHeatSourceLaw,
     pub cells: Vec<CellId>,
     pub dependencies: Vec<SourceDependency>,
+    pub exchange_tolerance_w: Option<f64>,
+}
+
+/// A declared exchange's entropy at one native stage, sampled apart from
+/// every other source at the same cell temperatures.
+#[derive(Clone, Copy)]
+pub(super) struct ClassifiedExchangeEntropy {
+    pub generation_j_k: f64,
+    pub source_entropy_j_k: f64,
 }
 
 impl CoupledHeatSource<'_> {
@@ -170,7 +198,111 @@ impl CoupledHeatSource<'_> {
             self.law
                 .state_at_specific_enthalpies_and_time(&h, thermal.time_s, checkpoint)?;
         state.admit(self.cells.len(), self.dependencies.len(), checkpoint)?;
+        if let Some(tolerance_w) = self.exchange_tolerance_w {
+            let mut closure = EnergySum::default();
+            for &power in &state.powers_w {
+                closure.add(power)?;
+            }
+            if closure.value()?.abs() > tolerance_w {
+                return Err(DepositionError::InvalidInput(
+                    "declared passive exchange powers exceed their closure tolerance",
+                ));
+            }
+        }
         Ok(state)
+    }
+
+    /// Add the powers to `sources`. With `entropy_dt_s`, a declared exchange's
+    /// entropy over that stage is classified first, before its powers join
+    /// the sources (`classify_exchange`).
+    pub(super) fn add_powers(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        state: &ImplicitCoupledHeatSourceState,
+        sources: &mut SourcePowers,
+        transfers: &[HeatTransfer],
+        entropy_dt_s: Option<f64>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ClassifiedExchangeEntropy>, DepositionError> {
+        let classified = match entropy_dt_s {
+            Some(dt_s) => {
+                self.classify_exchange(thermal, state, sources, transfers, dt_s, checkpoint)?
+            }
+            None => None,
+        };
+        for (&id, &power) in self.cells.iter().zip(&state.powers_w) {
+            checkpoint()?;
+            sources.add(thermal, id, power)?;
+        }
+        Ok(classified)
+    }
+
+    /// The declared exchange's `dt * sum P_i / T_i`, and the entropy of every
+    /// OTHER source and transfer, both at `thermal`'s cell temperatures as the
+    /// native audit evaluates at-cell sources. `sources` and `transfers` must
+    /// not hold the exchange's powers. `None` without a declaration.
+    fn classify_exchange(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        state: &ImplicitCoupledHeatSourceState,
+        sources: &SourcePowers,
+        transfers: &[HeatTransfer],
+        duration_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ClassifiedExchangeEntropy>, DepositionError> {
+        let Some(tolerance_w) = self.exchange_tolerance_w else {
+            return Ok(None);
+        };
+        let temperature = |id| -> Result<f64, DepositionError> {
+            let t = thermal.temperature_k(id)?;
+            if positive(t) {
+                Ok(t)
+            } else {
+                Err(DepositionError::MaterialDomain)
+            }
+        };
+        let (powers, _) = thermal.entropy_source_contributions(
+            sources,
+            &SourcePowers::default(),
+            transfers,
+            checkpoint,
+        )?;
+        let mut source = EnergySum::default();
+        for (i, (&id, cell)) in thermal.cells.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            if let Some(power) = powers.get(&id) {
+                source.add_divided(power, temperature(id)?)?;
+            } else {
+                source.add(finite(cell.boundary.source_w / temperature(id)?)?)?;
+            }
+        }
+        let mut generation = EnergySum::default();
+        let mut magnitude = EnergySum::default();
+        let mut coldest_k = f64::INFINITY;
+        for (i, (&id, &power)) in self.cells.iter().zip(&state.powers_w).enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            let t = temperature(id)?;
+            generation.add(finite(power / t)?)?;
+            magnitude.add(power.abs())?;
+            coldest_k = coldest_k.min(t);
+        }
+        let generation_j_k = finite(duration_s * generation.value()?)?;
+        // The closure bound, plus the rounding of the n quotients and their sum.
+        let rounding_w = finite(self.cells.len() as f64 * f64::EPSILON * magnitude.value()?)?;
+        let allowance_j_k = finite(duration_s * finite((tolerance_w + rounding_w) / coldest_k)?)?;
+        if generation_j_k < -allowance_j_k {
+            return Err(DepositionError::InvalidInput(
+                "declared passive exchange lost entropy beyond its closure and rounding allowance",
+            ));
+        }
+        Ok(Some(ClassifiedExchangeEntropy {
+            generation_j_k,
+            source_entropy_j_k: finite(duration_s * source.value()?)?,
+        }))
     }
 }
 
@@ -186,7 +318,10 @@ impl<'a> ImplicitConductionChain<'a> {
     /// Powers are additive with independently authored, observed and local
     /// endpoint sources; callers must not credit the same physical loss twice.
     /// The native external-heat account integrates their sum using the original
-    /// BE/SDIRK quadrature. Source entropy remains unclassified. This attachment
+    /// BE/SDIRK quadrature. Source entropy remains unclassified unless the law
+    /// declares a closed passive exchange
+    /// (`ImplicitCoupledHeatSourceLaw::passive_exchange_tolerance_w`), which is
+    /// refused beside an implicit flow. This attachment
     /// does not change source state, material inventory or accepted history.
     pub fn with_coupled_heat_source(
         mut self,
@@ -204,6 +339,17 @@ impl<'a> ImplicitConductionChain<'a> {
         {
             return Err(ImplicitConductionError::Invalid(
                 "one nonempty coupled heat source with matching original calorics is required",
+            ));
+        }
+        let exchange_tolerance_w = law.passive_exchange_tolerance_w();
+        if exchange_tolerance_w.is_some_and(|tolerance| !tolerance.is_finite() || tolerance < 0.0) {
+            return Err(ImplicitConductionError::Invalid(
+                "a declared passive exchange needs a finite nonnegative closure tolerance",
+            ));
+        }
+        if exchange_tolerance_w.is_some() && self.advection.is_some() {
+            return Err(ImplicitConductionError::Invalid(
+                "a declared passive exchange and an implicit flow are not classified together",
             ));
         }
         self.admit(thermal, &mut checkpoint)?;
@@ -236,6 +382,7 @@ impl<'a> ImplicitConductionChain<'a> {
             law,
             cells: cells.to_vec(),
             dependencies,
+            exchange_tolerance_w,
         });
         self.endpoint(thermal, &mut checkpoint)?;
         checkpoint()?;

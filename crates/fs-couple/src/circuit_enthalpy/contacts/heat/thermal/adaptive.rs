@@ -151,6 +151,7 @@ fn thermal_entropy(source: CircuitEntropyAudit) -> Result<EntropyAudit, Depositi
         thermal_storage_change_j_k: source.thermal_storage_change_j_k,
         reservoir_entropy_input_j_k: source.reservoir_entropy_input_j_k,
         conduction_generation_j_k: source.conduction_generation_j_k,
+        passive_exchange_generation_j_k: 0.0,
         advection: None,
         unclassified_source_at_cell_j_k: source.unclassified_source_at_cell_j_k,
         has_unclassified_sources: source.has_unclassified_sources,

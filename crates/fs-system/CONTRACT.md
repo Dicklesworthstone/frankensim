@@ -1823,12 +1823,21 @@ behind the contract), two linked cells with a law each.
   Euler that is the link's `G (T_a - T_b)^2 / (T_a T_b)` plus the film's
   `q (T_0 - T_a) / (T_a T_0)` at the end temperatures. The explicit rule books
   exactly zero.
+- Declared exchange
+  (`an_implicit_timeline_books_a_declared_exchanges_production_and_none_below_zero`):
+  a coupled source moving 0.05 W from cell 10 to cell 20, declared closed with
+  a zero tolerance, books the owner's conduction plus exchange production, to
+  1e-12 of it, under both schemes. 1e-3 W moved the other way inside a 1 W
+  tolerance leaves a negative production in the owner's audit and books the
+  conduction alone.
 Thirty-seven planted defects in the explicit component were each caught, and
 twenty-three in the implicit driver; none was planted for the end-of-step
 option or for the contact carried outside. Five more were planted in the
 entropy wiring, and each failed the entropy test: the implicit step booking
 zero, its storage change, or its generation plus its reservoir input; the
-explicit rule booking heat; the receipt ignoring the solve.
+explicit rule booking heat; the receipt ignoring the solve. Two more, in the
+declared exchange's booking (the conduction alone; a negative production
+booked), each failed the declared-exchange test.
 
 Against the hand-written coupling,
 `crates/fs-couple/tests/legacy/rigid_damping_heat/graph.rs` (run with

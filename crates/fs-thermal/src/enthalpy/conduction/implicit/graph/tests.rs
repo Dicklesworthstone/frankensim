@@ -1749,3 +1749,6 @@ fn an_event_on_a_link_carried_outside_is_refused_like_one_on_a_bound_link() {
         Ok(())
     );
 }
+
+#[path = "passive_exchange_tests.rs"]
+mod passive_exchange;

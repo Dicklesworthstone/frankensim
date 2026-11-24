@@ -116,7 +116,10 @@
 //! generates inside it, the owner's `conduction_generation_j_k`: each link's
 //! `G (T_a - T_b)^2 / (T_a T_b)` and each boundary's exchange with its
 //! authored ambient or reservoir, over the step, at the solve's quadrature
-//! temperatures (the end temperatures for backward Euler). The entropy of
+//! temperatures (the end temperatures for backward Euler). A coupled source
+//! on the graph that declares a closed passive exchange adds its production
+//! (`passive_exchange_generation_j_k`), booked as zero where the owner's
+//! signed value lies in its admitted rounding band below zero. The entropy of
 //! heat handed in through a cell port is the delivering component's to book.
 //! The boundary part completes the account only when the environment wire is
 //! routed at the authored ambient temperature, which is not checked. The
@@ -858,7 +861,8 @@ impl<'a> ThermalTimeline<'a> {
                     held,
                     audit: report.energy,
                     solve: (report.maximum_cell_residual_j, controls.cell_tolerance_j),
-                    entropy_j_k: report.entropy.conduction_generation_j_k,
+                    entropy_j_k: report.entropy.conduction_generation_j_k
+                        + report.entropy.passive_exchange_generation_j_k.max(0.0),
                 }))
             }
         }
@@ -882,8 +886,9 @@ struct Advanced<'a> {
     /// The implicit solve's largest cell residual and its tolerance [J];
     /// zeros for the explicit rule.
     solve: (f64, f64),
-    /// The entropy the implicit solve generated in the owner's links and
-    /// boundaries [J/K]; zero for the explicit rule, which keeps no entropy
+    /// The entropy the implicit solve generated in the owner's links,
+    /// boundaries and declared passive exchange [J/K]; zero for the explicit
+    /// rule, which keeps no entropy
     /// account.
     entropy_j_k: f64,
 }

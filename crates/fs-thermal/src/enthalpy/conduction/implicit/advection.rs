@@ -332,6 +332,15 @@ impl ImplicitConductionChain<'_> {
                 "implicit advection already bound",
             ));
         }
+        if self
+            .coupled_heat_source
+            .as_ref()
+            .is_some_and(|source| source.exchange_tolerance_w.is_some())
+        {
+            return Err(ImplicitConductionError::Invalid(
+                "a declared passive exchange and an implicit flow are not classified together",
+            ));
+        }
         self.admit(thermal, &mut checkpoint)?;
         let rates = flow.implicit_enthalpy_tangent(&mut checkpoint)?;
         // Admit the actual initial prescribed flow with its original owner.
