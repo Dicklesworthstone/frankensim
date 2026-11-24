@@ -2536,6 +2536,37 @@ accepted circuit, magnetic or thermal history. Fixed geometry, constant
 source-admitted magnetic coefficients and wholly solid caloric charts retain
 the same first-order estimated MQS limitations as the field-driven adapter.
 
+On the composition kernel, `tests/hysteretic_winding_enthalpy/graph.rs`
+declares the voltage-reversal regression as a graph: fs-em's
+`PlanarWinding` on the play-memory owner (feature `component`), built with
+`at_port_temperatures`, beside the backward-Euler `ThermalTimeline` of
+`tests/winding_graph/kernel.rs`, which the nonlinear winding graphs share:
+- one heat port receives every triangle's copper, core Joule and pinning
+  heat and the 0.3-ohm graph resistor's;
+- every triangle's conductor, copper and core alike, follows the cell's
+  card at the temperature the port receives, rebound as the module rebinds
+  it;
+- the source port follows the step's start time: 20, 0, -30 and 0 V.
+
+Held over four steps of 0.02 s, in this order:
+- the ledger: residual within 1e-8 J; the supplied work, less the circuit's
+  stored change and numerical loss, equals the cell's stored change within
+  1e-8 J; the routes' entropy stays within the interface tolerance;
+- each interval against `reference()`, the scalar P1/play balance, from the
+  kernel's own start of interval (temperature, current, potentials, every
+  triangle's field and retained polarization, and the energies): within
+  1.408e-10 K, 1.355e-11 A, 5.049e-13 Wb/m, 4.809e-12 A/m, 9.618e-13 T and
+  7.449e-12 J;
+- each interval against the module, once the law has given the module's
+  own conductors at each of its end temperatures, bit for bit: within
+  2.171e-10 K, the others as against `reference()` to rounding.
+The bounds sit about fifty times above. The cell ends above 340 K, and the
+retained polarization ends reversed.
+
+Eight planted defects in the graph's law, drive, receiver and cell and in
+the shared kernel's heat route each failed this test before its module
+comparison: six at the comparison with `reference()`, two at construction.
+
 ## Spatial hysteretic induction on the original finite thermal timeline
 
 The default-off `magnetic-hysteresis` feature adds

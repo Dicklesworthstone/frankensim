@@ -4,6 +4,10 @@
 
 #[path = "hysteretic_induction/common.rs"]
 mod common;
+#[path = "hysteretic_winding_enthalpy/graph.rs"]
+mod graph;
+#[path = "winding_graph/kernel.rs"]
+mod kernel;
 use common::{
     CELL, CP, DIRECTIONS, MU, PIN, VOLUME, bisect, boundary, caloric, card, cells, conductor,
     field_controls, near, paired_squares, play, point, problem, resistivity, routes, storage,
