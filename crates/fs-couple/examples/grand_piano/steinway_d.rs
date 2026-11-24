@@ -79,9 +79,12 @@ const LONG_BRIDGE: &[[f64; 2]] = &[
     [259.,550.],[287.,607.],[320.,663.],[352.,718.],[393.,772.],
     [431.,825.],[472.,868.],[519.,905.],[570.,932.],[624.,953.],[670.,960.],
 ];
+// The drawing's bass bridge ended at RT-0425's D2 coupling point: D#2 and E2
+// projected onto its free end, D2 to within 2 mm of it. The last point
+// continues the final segment to 3 cm past E2's published contact.
 const BASS_BRIDGE: &[[f64; 2]] = &[
     [150.,153.],[184.,147.],[224.,165.],[260.,193.],[286.,239.],[302.,294.],
-    [315.,358.],[326.,429.],
+    [315.,358.],[326.,429.],[333.,474.],
 ];
 const CUTOFF: &[[f64; 2]] = &[[57.,730.],[193.,930.]];
 
