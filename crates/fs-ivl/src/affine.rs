@@ -11,7 +11,19 @@
 //! [`crate::Interval`]'s: `to_interval()` always encloses the true value
 //! set. Tested against the interval path and the dd oracle.
 
+use std::sync::Arc;
+
 use crate::Interval;
+
+/// Equality is shared ownership, never an address used to order arithmetic.
+#[derive(Debug, Clone, Default)]
+struct SymbolScope(Arc<()>);
+
+impl PartialEq for SymbolScope {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// One rounding-error bound for a computed value: ½ ulp of the magnitude,
 /// rounded up, plus a subnormal floor. Deliberately generous — err is
@@ -24,9 +36,21 @@ fn round_err(v: f64) -> f64 {
 /// affine forms only cancel where they share symbols, so all correlated
 /// inputs must be built through the same context (deterministic ids — no
 /// global state, replay-stable).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct AffineCtx {
     next: u32,
+    scope: SymbolScope,
+}
+
+impl Clone for AffineCtx {
+    /// A fork issues independent symbols. Previously issued forms retain
+    /// their identities even after their originating context is dropped.
+    fn clone(&self) -> Self {
+        Self {
+            next: self.next,
+            scope: SymbolScope::default(),
+        }
+    }
 }
 
 impl AffineCtx {
@@ -45,9 +69,13 @@ impl AffineCtx {
         // rounded up (mid is not exactly central).
         let rad = (x.hi() - mid).max(mid - x.lo()).next_up();
         let sym = self.next;
-        self.next += 1;
+        self.next = self
+            .next
+            .checked_add(1)
+            .expect("affine noise symbols exhausted");
         Affine {
             center: mid,
+            scope: Some(self.scope.clone()),
             terms: vec![(sym, rad)],
             err: 0.0,
         }
@@ -59,6 +87,7 @@ impl AffineCtx {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Affine {
     center: f64,
+    scope: Option<SymbolScope>,
     /// (symbol id, coefficient), strictly ascending by id.
     terms: Vec<(u32, f64)>,
     /// Anonymous slack: rounding + nonlinear absorption, always ≥ 0.
@@ -71,6 +100,7 @@ impl Affine {
     pub fn constant(c: f64) -> Affine {
         Affine {
             center: c,
+            scope: None,
             terms: Vec::new(),
             err: 0.0,
         }
@@ -111,6 +141,30 @@ impl Affine {
         Interval::new(lo, hi)
     }
 
+    /// Independently allocated symbol supplies each start at zero. Combining
+    /// them as one basis would introduce a false correlation. Collapse to
+    /// anonymous outward-rounded slack at this boundary.
+    fn distinct_scopes(&self, other: &Self) -> bool {
+        !self.terms.is_empty() && !other.terms.is_empty() && self.scope != other.scope
+    }
+
+    fn anonymous(&self) -> Self {
+        Self {
+            center: self.center,
+            scope: None,
+            terms: Vec::new(),
+            err: self.radius(),
+        }
+    }
+
+    fn combined_scope(&self, other: &Self) -> Option<SymbolScope> {
+        if self.terms.is_empty() {
+            other.scope.clone()
+        } else {
+            self.scope.clone()
+        }
+    }
+
     /// Scale by a constant.
     #[must_use]
     pub fn scale(&self, k: f64) -> Affine {
@@ -126,7 +180,12 @@ impl Affine {
                 (s, ck)
             })
             .collect();
-        Affine { center, terms, err }
+        Affine {
+            center,
+            scope: self.scope.clone(),
+            terms,
+            err,
+        }
     }
 
     /// Helper: terms scaled by k (center untouched), rounding absorbed.
@@ -148,6 +207,7 @@ impl core::ops::Neg for &Affine {
     fn neg(self) -> Affine {
         Affine {
             center: -self.center,
+            scope: self.scope.clone(),
             terms: self.terms.iter().map(|&(s, c)| (s, -c)).collect(),
             err: self.err,
         }
@@ -159,6 +219,9 @@ impl core::ops::Add<&Affine> for &Affine {
     /// Addition: symbol-wise coefficient merge; every computed coefficient
     /// absorbs its rounding error into `err`.
     fn add(self, o: &Affine) -> Affine {
+        if self.distinct_scopes(o) {
+            return &self.anonymous() + &o.anonymous();
+        }
         let center = self.center + o.center;
         let mut err = (self.err + o.err).next_up();
         err = (err + round_err(center)).next_up();
@@ -183,7 +246,12 @@ impl core::ops::Add<&Affine> for &Affine {
                 terms.push((s, c));
             }
         }
-        Affine { center, terms, err }
+        Affine {
+            center,
+            scope: self.combined_scope(o),
+            terms,
+            err,
+        }
     }
 }
 
@@ -201,6 +269,9 @@ impl core::ops::Mul<&Affine> for &Affine {
     /// Multiplication (standard first-order AA): the bilinear noise·noise
     /// residue is bounded by rad(x)·rad(y) and absorbed into `err`.
     fn mul(self, o: &Affine) -> Affine {
+        if self.distinct_scopes(o) {
+            return &self.anonymous() * &o.anonymous();
+        }
         let center = self.center * o.center;
         let rx = self.radius();
         let ry = o.radius();
@@ -217,6 +288,7 @@ impl core::ops::Mul<&Affine> for &Affine {
         let merged = merge_terms(&sx, &sy, &mut err);
         Affine {
             center,
+            scope: self.combined_scope(o),
             terms: merged,
             err,
         }
@@ -258,6 +330,21 @@ mod tests {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
+    }
+
+    #[test]
+    fn independent_symbol_supplies_cannot_cancel() {
+        let mut original = AffineCtx::new();
+        let mut fork = original.clone();
+        let x = original.from_interval(Interval::new(1.0, 2.0));
+        for supply in [&mut AffineCtx::new(), &mut fork] {
+            let y = supply.from_interval(Interval::new(1.0, 2.0));
+            assert!((&x - &y).to_interval().encloses(Interval::new(-1.0, 1.0)));
+            let z = &Affine::constant(3.0) + &y.scale(-1.0);
+            // x and 3-y vary independently over [1,2].
+            assert!((&x * &z).to_interval().encloses(Interval::new(1.0, 4.0)));
+        }
+        assert!((&x - &x.clone()).to_interval().width() < 1e-13);
     }
 
     #[test]

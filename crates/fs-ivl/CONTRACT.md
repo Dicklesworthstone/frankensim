@@ -112,6 +112,10 @@ mechanism and is likewise absent from the production dependency graph.
   (rad·rad) are absorbed into `err` with upward rounding. Reference
   operator impls (`&x + &y`), `scale`, `to_interval` (rigorous collapse),
   `radius`. Symbol ids are deterministic (context counter — replay-stable).
+  Independent contexts, including cloned supplies, have distinct symbol
+  ownership. Arithmetic across supplies collapses their uncertainty into
+  outward anonymous slack. Cloning a value preserves its correlations.
+  Symbol ownership never selects the order of floating-point operations.
 
 - `expansion` — Shewchuk floating-point expansion arithmetic (exact sums,
   scaled products, expansion×expansion products, exact-diff two-component
