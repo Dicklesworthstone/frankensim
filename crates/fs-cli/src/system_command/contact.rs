@@ -5,8 +5,10 @@
 //! closure `x`, the displacement of end `a` towards end `b`, and the start
 //! of `x`. The owner steps the reaction as the discrete gradient of the
 //! law's potential over each step's move and settles it on the load line by
-//! bracketed bisection, inside the budgets the scene gives. Nothing here
-//! evaluates the law or solves anything.
+//! bracketed bisection, inside the budgets the scene gives. An optional
+//! Hunt–Crossley loss uses the same owner's native law and exports the lost
+//! mechanical energy through its heat port. Nothing here evaluates the law
+//! or solves anything.
 
 use fs_dcontact::Obstacle;
 use fs_dcontact::component::{ContactInterface, ContactSolve, ContactState};
@@ -86,6 +88,7 @@ pub(super) fn interface(
             "kind",
             "stiffness",
             "exponent",
+            "internal_loss_s_per_m",
             "gap_m",
             "closure_m",
             "solve",
@@ -96,6 +99,7 @@ pub(super) fn interface(
     let ends = reads_ends(definition, what)?;
     let gap_m = number_or(definition, "gap_m", 0.0, what)?;
     let closure_m = number_or(definition, "closure_m", 0.0, what)?;
+    let internal_loss = number_or(definition, "internal_loss_s_per_m", 0.0, what)?;
     if !closure_m.is_finite() {
         return Err(format!("{what}: closure_m must be finite").into());
     }
@@ -110,6 +114,7 @@ pub(super) fn interface(
         number(definition, "exponent", what)?,
         format!("frankensim system scene element {name}: an authored power law"),
     )
+    .and_then(|law| law.with_internal_loss(internal_loss))
     .map_err(|error| format!("{what}: {error}"))?;
     let mut component = ContactInterface::new(law, solve(definition, what)?)
         .map_err(|error| format!("{what}: {error}"))?;

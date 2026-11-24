@@ -235,3 +235,80 @@ fn contact_interface_scenes_refuse_bad_laws_budgets_and_ends_by_name() {
         assert!(stderr.contains(reason), "{name}: {stderr}");
     }
 }
+
+#[test]
+fn lossy_contact_scene_turns_missing_rebound_energy_into_heat_and_replays() {
+    let path = example("lossy_impact.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    scene_context(|cx, _| {
+        let mut scene = SystemScene::from_text(&text, &path).unwrap();
+        while scene.time_s() < 0.05 {
+            assert!(scene.advance(f64::MAX, cx).unwrap());
+        }
+        assert!(probe(&scene, "tip.closure_m") > 0.0);
+        let (bytes, root) = scene.checkpoint().unwrap();
+        let mut resumed = SystemScene::from_text(&text, &path).unwrap();
+        resumed.resume_checkpoint(&bytes, root).unwrap();
+        assert_eq!(resumed.render_json(), scene.render_json());
+
+        scene.run(cx).unwrap();
+        resumed.run(cx).unwrap();
+        assert_eq!(resumed.render_json(), scene.render_json());
+        let rebound = probe(&scene, "ball.velocity_m_s");
+        let heat_j = 2.0 * (probe(&scene, "body.temperature_k") - 300.0);
+        assert!(rebound > 0.0 && rebound < 1.0, "{rebound}");
+        assert!(probe(&scene, "tip.closure_m") < 0.0);
+        assert!(heat_j > 0.0, "{heat_j}");
+        // The wall is stationary and supplies no work. Contact potential
+        // vanishes after separation; only kinetic and thermal energy remain.
+        assert!((0.5 * rebound * rebound + heat_j - 0.5).abs() < 5e-9);
+        assert!(scene.ledger().energy_residual_j().abs() < 5e-9);
+
+        let changed = text.replace(
+            "\"internal_loss_s_per_m\": 0.3",
+            "\"internal_loss_s_per_m\": 0.4",
+        );
+        assert_ne!(changed, text);
+        let mut incompatible = SystemScene::from_text(&changed, &path).unwrap();
+        assert!(incompatible.resume_checkpoint(&bytes, root).is_err());
+    });
+    let (code, json, stderr) = run_binary(&["--json", "system", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    let rebound = value(&json, &element("ball"), "velocity_m_s");
+    let heat_j = 2.0 * (value(&json, &element("body"), "temperature_k") - 300.0);
+    assert!(rebound > 0.0 && rebound < 1.0);
+    assert!(heat_j > 0.0);
+    assert!((0.5 * rebound * rebound + heat_j - 0.5).abs() < 5e-9);
+}
+
+#[test]
+fn zero_contact_loss_keeps_elastic_scene_bytes_and_negative_loss_refuses() {
+    let base = bounce_scene(1.0e-6, 1.0e-4);
+    let explicit = base.replace(
+        "\"closure_m\": ",
+        "\"internal_loss_s_per_m\": 0.0, \"closure_m\": ",
+    );
+    assert_ne!(base, explicit);
+    scene_context(|cx, _| {
+        let mut original = SystemScene::from_text(&base, "bounce.json").unwrap();
+        let mut zero = SystemScene::from_text(&explicit, "bounce.json").unwrap();
+        original.run(cx).unwrap();
+        zero.run(cx).unwrap();
+        assert_eq!(original.render_json(), zero.render_json());
+    });
+    let negative = base.replace(
+        "\"closure_m\": ",
+        "\"internal_loss_s_per_m\": -0.1, \"closure_m\": ",
+    );
+    let (code, error) = refused("negative_contact_loss", &negative);
+    assert_eq!(code, 3, "{error}");
+    assert!(error.contains("Hunt-Crossley chi"), "{error}");
+    let unconnected = base.replace(
+        "\"closure_m\": ",
+        "\"internal_loss_s_per_m\": 0.1, \"closure_m\": ",
+    );
+    let error = SystemScene::from_text(&unconnected, "unconnected-contact-heat.json")
+        .err()
+        .expect("dissipation needs a declared heat destination");
+    assert!(error.message.contains("heat"), "{}", error.message);
+}

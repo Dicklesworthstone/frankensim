@@ -386,7 +386,7 @@ Elements (ports in brackets; physical fields use SI units):
                  displacement and velocity, each attachment's flow at the
                  end of the last step, and heat_w; requires fixed step_s.)
   contact_interface stiffness, exponent, gap_m = 0, closure_m = 0, solve,
-                 reads_ends = []                                     [a, b]
+                 internal_loss_s_per_m = 0, reads_ends = []     [a, b, heat*]
                  (fs-dcontact's one-point normal contact on the load line:
                  the reaction R = stiffness [x - gap_m]_+^exponent pushes a
                  and b apart, where the closure x is the displacement of a
@@ -394,7 +394,11 @@ Elements (ports in brackets; physical fields use SI units):
                  closure_m. exponent >= 1 (1.5 is Hertz); stiffness in
                  N/m^exponent. Each step's reaction is the secant of the
                  law's potential over the step's move, so a lossless
-                 contact gives back the work it takes. solve holds the
+                 contact gives back the work it takes. Positive
+                 internal_loss_s_per_m adds Hunt–Crossley damping and a
+                 required heat port; connect it to a thermal receiver or
+                 prescribe its positive temperature. Zero loss retains
+                 the original two mechanical ports. solve holds the
                  search budgets: maximum_force_n and maximum_penetration_m
                  (required ceilings), max_iterations 100 (1 to 128),
                  force_absolute_tolerance_n 1e-9, force_relative_tolerance

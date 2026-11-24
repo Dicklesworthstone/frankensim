@@ -1270,7 +1270,14 @@ ceilings `maximum_force_n` and `maximum_penetration_m` (required) and
 optionally `max_iterations` (1 to 128, default 100) and the residual
 tolerances (default 1e-9 N and 1e-12). The owner steps the reaction as the
 secant of the law's potential over the step's move and settles it on the
-load line by bisection; the lowering evaluates no law. Beside a neighbour
+load line by bisection; the lowering evaluates no law. Optional
+`internal_loss_s_per_m` authors the native Hunt–Crossley coefficient
+chi [s/m], finite and nonnegative. Its default is zero, retaining the
+original elastic ports and arithmetic. A positive value adds the owner's
+`heat` port, which must be connected to a thermal receiver or prescribed
+at a positive temperature. The owner exports its native nonnegative
+mechanical loss as heat, including its no-attraction release cap; the CLI
+adds no damping formula or fitted restitution. Beside a neighbour
 that tells the end of its flow, such as a `modal_structure`, the end named
 in `reads_ends` reads it. Reports expose `closure_m` and the last step's
 `reaction_n`. `adaptive` refuses it. Its state has fs-dcontact's codec,
@@ -1299,9 +1306,15 @@ Tests in `tests/system_command/contact.rs`:
   a missing `solve`, a missing ceiling, 200 iterations, a relative
   tolerance of 1.5, an unknown end and an unsupported field.
 
+The dissipative example `examples/system/lossy_impact.json` joins a mass,
+one normal contact and one heat capacity. Focused scene regressions check
+that rebound kinetic energy plus measured thermal storage equals the
+opening kinetic energy, replay an in-contact checkpoint, reject a changed
+loss coefficient on resume, and retain byte-identical zero-loss behavior.
+
 No claim: one contact point on one closure, authored law and stiffness (no
-contact geometry or material card), no contact loss, and no event at touch:
-a step that enters or leaves contact is not shortened.
+contact geometry or material card), no calibrated restitution, and no
+event at touch: a step that enters or leaves contact is not shortened.
 
 `conduction_body` lowers to `fs_conduction::component::ConductionBody`, the
 owner's backward-Euler finite-element body, with one heat port per named box

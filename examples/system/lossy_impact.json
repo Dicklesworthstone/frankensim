@@ -1,0 +1,23 @@
+{
+  "schema": "frankensim.system.v0",
+  "duration_s": 0.5,
+  "step_s": 0.0005,
+  "sample_every_s": 0.01,
+  "elements": {
+    "ball": {"kind": "mass", "mass_kg": 1.0, "velocity_m_s": -1.0},
+    "tip": {
+      "kind": "contact_interface",
+      "stiffness": 100.0,
+      "exponent": 1.0,
+      "internal_loss_s_per_m": 0.3,
+      "closure_m": 0.0,
+      "solve": {"maximum_force_n": 100.0, "maximum_penetration_m": 0.2}
+    },
+    "body": {"kind": "heat_capacity", "capacity_j_k": 2.0, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"join": ["ball.p", "tip.a"]},
+    {"prescribe": "tip.b", "velocity_m_s": 0.0},
+    {"join": ["body.heat", "tip.heat"]}
+  ]
+}
