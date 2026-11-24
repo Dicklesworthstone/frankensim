@@ -8,6 +8,31 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## Recovery from a refused smooth Newton update
+
+For a feedback block containing a `Smooth` component and otherwise only
+`Smooth` or `ExactLinear` components, the driver may retract a Newton update
+that a component refuses. It retains the preceding valid input vector and
+halves the same correction until every proposal succeeds or the existing
+`max_iterations` budget is exhausted. Every retry counts against that budget;
+rounding that would return every input to its starting value stops the search.
+An exhausted search returns the full update's original typed owner error.
+
+This recovery starts only after a valid initial proposal. Starting-input
+refusals, cancellation, tangent failures, malformed shortening requests and
+`Proposal::Shorten` keep their existing meanings. Load-line blocks and scalar
+bracket plans retain their own policies. A successful full Newton update keeps
+its original arithmetic. The ordinary residual, conservation, admission and
+atomic publication checks still decide whether a candidate can be accepted.
+
+The extra numeric workspace is allocated at sealing. A recovered owner error
+still uses the existing boxed error representation, so recovery from a typed
+refusal is not claimed to allocate nothing. This is domain recovery, not a
+residual-decrease line search or a global convergence guarantee.
+`tests/smooth_support.rs` compares a positive-domain logarithmic feedback root
+with independent bisection and exercises declared/differenced tangents,
+budget exhaustion, rollback, checkpoint replay, cancellation and shortening.
+
 ## Scalar monotone feedback
 
 A `Class::Monotone1d` component without `PortTangent` can close a feedback loop

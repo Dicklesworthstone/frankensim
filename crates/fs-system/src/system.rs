@@ -172,7 +172,8 @@ pub struct SolveConfig {
     pub relative_tolerance: f64,
     /// Interface residual always allowed, in the unknown's own unit.
     pub absolute_tolerance: f64,
-    /// Scalar bracket probes and Newton iterations allowed per block and trial.
+    /// Scalar bracket probes, Newton updates and domain backtracks allowed per
+    /// block and trial.
     pub max_iterations: u32,
     /// Times one step may be shortened at a component's request.
     pub max_shortenings: u32,
@@ -2137,6 +2138,10 @@ struct BlockWork {
     /// evaluated in dependency order before the ordinary convergence audit.
     scalar: Option<ScalarPlan>,
     residual: Vec<f64>,
+    /// Valid inputs before a Newton update. A smooth block can retract a
+    /// refused update along this same correction without changing the state
+    /// from which any component proposes.
+    update_start: Vec<f64>,
     /// First-order size of the rounding in each residual: how strongly its
     /// driver's sources depend on the block's inputs, times the size of
     /// those inputs. Known after a tangent assembly.
@@ -2288,6 +2293,7 @@ impl BlockWork {
         Self {
             scalar: None,
             residual: vec![0.0; m],
+            update_start: vec![0.0; m],
             rounding: vec![0.0; m],
             allowance: vec![0.0; m],
             group_scale: Vec::new(),
@@ -3213,6 +3219,35 @@ impl System {
         }
     }
 
+    /// Halve a refused numerical update toward the valid iterate it came
+    /// from. Each retry consumes the same block budget as a Newton update;
+    /// stop before rounding turns the retry into no update at all.
+    fn backtrack_update(
+        &mut self,
+        unknowns: &[usize],
+        start: &[f64],
+        correction: &[f64],
+        fraction: &mut f64,
+        iterations: &mut u32,
+    ) -> bool {
+        if *iterations >= self.config.max_iterations {
+            return false;
+        }
+        *fraction *= 0.5;
+        if start
+            .iter()
+            .zip(correction)
+            .all(|(&from, &step)| from + *fraction * step == from)
+        {
+            return false;
+        }
+        for ((&index, &from), &step) in unknowns.iter().zip(start).zip(correction) {
+            self.inputs[index] = from + *fraction * step;
+        }
+        *iterations += 1;
+        true
+    }
+
     /// Solve one looped block by Newton iteration on its interface inputs.
     fn solve_block(
         &mut self,
@@ -3275,9 +3310,21 @@ impl System {
         } else {
             0
         };
+        // Load-line and monotone blocks keep their own search/event policy.
+        // Only a smooth Newton block retracts its generated update; an
+        // owner's refusal at the starting iterate remains authoritative.
+        let can_backtrack = self.lines[block].is_empty()
+            && work.scalar.is_none()
+            && nodes
+                .iter()
+                .any(|&node| self.nodes[node].class() == Class::Smooth)
+            && nodes.iter().all(|&node| {
+                matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth)
+            });
         let BlockWork {
             scalar,
             residual,
+            update_start,
             rounding,
             allowance,
             group_scale,
@@ -3309,6 +3356,9 @@ impl System {
         // Whether this step has assembled the block's Jacobian yet, so that
         // `slopes` are this step's own.
         let mut assembled = false;
+        // Zero until the block has a valid iterate and a Newton correction.
+        // `residual` holds that correction until the next proposals succeed.
+        let mut update_fraction = 0.0;
         // A trial starts from the values the last step ended with. For the
         // component on a load line those are the flows of the last step, not
         // the released flows of this one, and whatever it answers there is
@@ -3324,26 +3374,65 @@ impl System {
             self.release(block, unknowns, residual, condensed)?;
         }
         loop {
-            cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
-            for (position, &node) in nodes.iter().enumerate() {
-                // In the first pass, a component that finding the line
-                // proposed, at bit for bit the inputs it holds now, is not
-                // proposed again: its accepted state and the step are the
-                // same (states change only when a step is published), and a
-                // proposal is pure (fs-ports: equal arguments give
-                // bitwise-equal results), so its candidate, outputs and
-                // receipt are already this proposal's. Only a component
-                // that declares its tangent: differencing a component
-                // overwrites its candidate. The line component's inputs
-                // were moved by `release`; it was not proposed there.
-                if first_pass
-                    && !found.proposed.is_empty()
-                    && found.repeats(position, &self.inputs[self.node_inputs(node)])
-                {
-                    continue;
+            let mut first_refusal = None;
+            loop {
+                cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
+                let mut refused = None;
+                for (position, &node) in nodes.iter().enumerate() {
+                    // In the first pass, a component that finding the line
+                    // proposed, at bit for bit the inputs it holds now, is not
+                    // proposed again: its accepted state and the step are the
+                    // same (states change only when a step is published), and a
+                    // proposal is pure (fs-ports: equal arguments give
+                    // bitwise-equal results), so its candidate, outputs and
+                    // receipt are already this proposal's. Only a component
+                    // that declares its tangent: differencing a component
+                    // overwrites its candidate. The line component's inputs
+                    // were moved by `release`; it was not proposed there.
+                    if first_pass
+                        && !found.proposed.is_empty()
+                        && found.repeats(position, &self.inputs[self.node_inputs(node)])
+                    {
+                        continue;
+                    }
+                    match self.propose(node, dt_s, cx) {
+                        Ok(Some(shorter)) => return Ok(Err(shorter)),
+                        Ok(None) => {}
+                        Err(error) => {
+                            refused = Some(error);
+                            break;
+                        }
+                    }
                 }
-                if let Some(shorter) = self.propose(node, dt_s, cx)? {
-                    return Ok(Err(shorter));
+                let Some(error) = refused else {
+                    break;
+                };
+                if !can_backtrack
+                    || update_fraction == 0.0
+                    || !matches!(
+                        error,
+                        SystemError::Component {
+                            phase: Phase::Propose,
+                            ..
+                        }
+                    )
+                {
+                    return Err(error);
+                }
+                // Keep the full update's typed refusal if no shorter update
+                // works. Cancellation and invalid shortening requests take
+                // the immediate error path above, never this recovery path.
+                if first_refusal.is_none() {
+                    first_refusal = Some(error);
+                }
+                if !self.backtrack_update(
+                    unknowns,
+                    update_start,
+                    residual,
+                    &mut update_fraction,
+                    &mut iterations,
+                ) {
+                    return Err(first_refusal.expect("a refused update started backtracking"));
                 }
             }
             // The scale of an unknown is the size of the terms its driver
@@ -3658,8 +3747,12 @@ impl System {
                 });
             }
             for (row, &index) in unknowns.iter().enumerate() {
+                if can_backtrack {
+                    update_start[row] = self.inputs[index];
+                }
                 self.inputs[index] += residual[row];
             }
+            update_fraction = 1.0;
         }
     }
 
