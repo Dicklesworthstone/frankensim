@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="16" fill="#080605"/>
+  <rect x="2" y="2" width="60" height="60" rx="14" stroke="#f59e0b" stroke-opacity="0.35" stroke-width="2"/>
+  <circle cx="32" cy="34" r="19" stroke="#22d3ee" stroke-opacity="0.45" stroke-width="2" stroke-dasharray="5 4"/>
+  <path d="M32 13c4.2 6.8 11.5 11.1 11.5 20.5a11.5 11.5 0 1 1-23 0c0-5.4 2.7-9.6 5.6-13.2.5 3.6 2.1 5.8 4.4 6.6-1.2-4.8-.6-9.5 1.5-13.9Z" fill="url(#flame)"/>
+  <path d="M32 28c2.2 3.4 5.2 5.7 5.2 9.8a5.2 5.2 0 1 1-10.4 0c0-2.8 1.5-5.3 5.2-9.8Z" fill="#fef3c7"/>
+  <defs>
+    <linearGradient id="flame" x1="32" y1="13" x2="32" y2="45" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fde047"/>
+      <stop offset="0.48" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+  </defs>
+</svg>

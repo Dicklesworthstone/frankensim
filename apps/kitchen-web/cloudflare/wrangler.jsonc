@@ -1,0 +1,17 @@
+// FrankenSim Kitchen Lab under frankensim.org/kitchen-lab, served by an assets-only Worker.
+// Build first:  bun --cwd apps/kitchen-web run build:cf
+// then:         npx wrangler deploy --config apps/kitchen-web/cloudflare/wrangler.jsonc
+// Everything outside /kitchen-lab keeps going to its existing origin (the site, /music, /instrument-tests).
+{
+  "name": "frankensim-kitchen-lab",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist-cf",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "frankensim.org/kitchen-lab", "zone_name": "frankensim.org" },
+    { "pattern": "frankensim.org/kitchen-lab/*", "zone_name": "frankensim.org" }
+  ]
+}
