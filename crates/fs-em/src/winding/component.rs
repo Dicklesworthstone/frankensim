@@ -17,14 +17,26 @@
 //!
 //! The receipt takes the owner's stored change, its numerical (backward
 //! Euler) dissipation and the heat that leaves through the heat ports. A
-//! step with magnetic parameter work or mechanical work refuses: the receipt
-//! has no term for either. The temperatures the heat ports receive enter
+//! step with mechanical work refuses, and so does one with magnetic
+//! parameter work outside the magnetic lane below: the receipt has no term
+//! for either. The temperatures the heat ports receive enter
 //! the generated entropy and, with laws, the conductors and graph resistors
 //! of the step: a [`ConductorLaw`] per receiver for its triangles, and a
 //! [`ResistorLaw`] per graph resistor through the owner's
 //! `with_graph_resistors`, or none, keeping the circuit's own resistors. A
 //! law with no answer refuses the step; the Component never clamps a
 //! temperature.
+//!
+//! In the magnetic lane ([`PlanarWinding::magnetic_at_port_temperatures`]),
+//! each triangle with a [`MagneticLaw`] also takes its law's linear material
+//! at the temperature its receiver's port gives, at the end of the step as
+//! the conductors do, and the state carries those temperatures
+//! ([`PlanarWindingState::at_temperatures`]). A port's heat is then its Joule
+//! and field heat less `T dS` of its law triangles, and may be negative; the
+//! stored energy adds `T s`; the numerical loss adds each law triangle's
+//! `-(P + (T1 - T0) s0)`, second order in the step's change of temperature,
+//! with `P` the owner's parameter work. Only the saturating owner has this
+//! lane, and only for linear materials.
 //!
 //! With the `magnetic-hysteresis` feature, the owner can also be the
 //! play-memory circuit (`HystereticWindingCircuit`). Its field heats every
@@ -47,7 +59,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::conductor::{ResolvedConductor, ResolvedConductorState};
+use fs_material::field_storage::thermal::FieldThermalState;
+use fs_material::field_storage::thermal::magnetic::{
+    ResolvedThermalMagneticMaterial, ThermalMagneticMaterial,
+};
+use fs_material::field_storage::{
+    admit_magnetic_temperature_refresh, linear_magnetic_permeability,
+};
 use fs_phs::arithmetic_rounding_floor;
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_ports::component::{
@@ -64,7 +84,8 @@ use super::nonlinear::{
 };
 use super::ohmic::WindingConductor;
 use crate::planar::eddy::EddyConductor;
-use crate::planar::eddy::nonlinear::NonlinearEddyControls;
+use crate::planar::eddy::nonlinear::{NonlinearEddyControls, NonlinearEddyMagneticCell};
+use crate::planar::nonlinear::IsotropicMagneticMaterial;
 
 /// One thermal receiver: the dissipating elements whose heat leaves through
 /// one heat port.
@@ -106,6 +127,31 @@ pub trait ResistorLaw: fmt::Debug + Send + Sync {
     fn identity_words(&self, words: &mut Vec<u64>);
 }
 
+/// One mesh triangle whose permeability follows the temperature its
+/// receiver's heat port gives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MagneticLaw {
+    /// The mesh triangle.
+    pub triangle: usize,
+    /// fs-material's linear magnetic law, affine in temperature. Its source
+    /// is the field's own material in the triangle.
+    pub law: ThermalMagneticMaterial,
+}
+
+/// The laws of [`PlanarWinding::magnetic_at_port_temperatures`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MagneticLaws {
+    /// One per triangle that follows its temperature; every other triangle
+    /// keeps the circuit's own material.
+    pub triangles: Vec<MagneticLaw>,
+    /// The bounds of each step's refreshed field assembly.
+    pub assembly: WeightedAssemblyLimits,
+}
+
+/// A step's refreshed field materials, one per mesh triangle, and the bounds
+/// of their assembly.
+type Refresh = (Vec<IsotropicMagneticMaterial>, WeightedAssemblyLimits);
+
 /// The element whose law had no answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LawElement {
@@ -115,6 +161,9 @@ pub enum LawElement {
     Resistor(usize),
     /// A play-memory field triangle, whose magnetic fit does not hold there.
     Field(usize),
+    /// A [`MagneticLaw`]'s triangle: the law has no answer at the
+    /// temperature, or its free energy there is not the field's.
+    Permeability(usize),
 }
 
 /// Refusal of the winding owner or of its Component boundary.
@@ -131,8 +180,9 @@ pub enum PlanarWindingError {
         /// What was refused.
         what: &'static str,
     },
-    /// The step did magnetic parameter work or mechanical work, which the
-    /// receipt has no term for.
+    /// The step did mechanical work, or magnetic parameter work outside the
+    /// magnetic lane or in a triangle without a law, which the receipt has
+    /// no term for.
     UnaccountedWork {
         /// Signed magnetic parameter work \[J\].
         parameter_j: f64,
@@ -149,8 +199,9 @@ pub enum PlanarWindingError {
         /// The allowance \[J\].
         tolerance_j: f64,
     },
-    /// A law had no answer at the temperature its port received, or a
-    /// play-memory triangle's magnetic fit does not hold there.
+    /// A law had no answer at the temperature its port received, a
+    /// play-memory triangle's magnetic fit does not hold there, or a
+    /// magnetic law's free energy is not the field's.
     Law {
         /// The heat receiver whose port gave the temperature.
         receiver: usize,
@@ -229,9 +280,9 @@ mod owner {
     #[cfg(feature = "magnetic-hysteresis")]
     use super::HystereticWindingCircuit;
     use super::{
-        CircuitGraph, EddyConductor, GraphResistorMaterial, NonlinearWindingCircuit,
-        NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep, Range,
-        WindingConductor, fmt,
+        CircuitGraph, EddyConductor, GraphResistorMaterial, IsotropicMagneticMaterial,
+        NonlinearEddyMagneticCell, NonlinearWindingCircuit, NonlinearWindingControls,
+        NonlinearWindingError, NonlinearWindingStep, Range, Refresh, WindingConductor, fmt,
     };
     #[cfg(feature = "magnetic-hysteresis")]
     use crate::planar::eddy::hysteretic::{HystereticEddyControls, HystereticEddyStep};
@@ -256,10 +307,13 @@ mod owner {
         /// saturating owner, whose words came first.
         const LANE_WORDS: &'static [u64];
 
-        /// The owner's `step_to_candidate` to `target_s`, in parts.
+        /// The owner's `step_to_candidate` to `target_s`, in parts; with
+        /// `materials`, its `step_with_materials_candidate`.
+        #[allow(clippy::too_many_arguments)]
         fn step(
             &self,
             target_s: f64,
+            materials: Option<Refresh>,
             core: Vec<EddyConductor>,
             windings: Vec<WindingConductor>,
             inputs: &[f64],
@@ -293,6 +347,23 @@ mod owner {
         /// `stored_before_j`.
         fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError>;
 
+        /// The field's materials, one per mesh triangle, when the owner
+        /// refreshes them with temperature; none for the play-memory owner.
+        fn magnetic_materials(&self) -> Option<&[IsotropicMagneticMaterial]>;
+
+        /// Each mesh triangle's flux density \[T\] and volume \[m³\],
+        /// recovered from the accepted field's potential.
+        fn flux_densities(&self) -> Result<Vec<([f64; 2], f64)>, NonlinearWindingError>;
+
+        /// A step's magnetic cell records, in mesh order; none for the
+        /// play-memory owner.
+        fn magnetic_cells(step: &Self::FieldStep) -> &[NonlinearEddyMagneticCell];
+
+        /// Whether two states' problems hold the same mesh, thickness and
+        /// materials. A step that refreshes the materials builds its own
+        /// problem.
+        fn same_problem(&self, other: &Self) -> bool;
+
         fn graph(&self) -> &CircuitGraph;
         fn time_s(&self) -> f64;
         fn state(&self) -> &[f64];
@@ -317,15 +388,22 @@ mod owner {
         fn step(
             &self,
             target_s: f64,
+            materials: Option<Refresh>,
             core: Vec<EddyConductor>,
             windings: Vec<WindingConductor>,
             inputs: &[f64],
             controls: NonlinearWindingControls,
             cancelled: &mut impl FnMut() -> bool,
         ) -> Result<(Self, NonlinearWindingStep), NonlinearWindingError> {
-            Ok(self
-                .step_to_candidate(target_s, core, windings, inputs, controls, cancelled)?
-                .into_parts())
+            let candidate = match materials {
+                Some((materials, assembly)) => self.step_with_materials_candidate(
+                    target_s, materials, core, windings, inputs, assembly, controls, cancelled,
+                )?,
+                None => {
+                    self.step_to_candidate(target_s, core, windings, inputs, controls, cancelled)?
+                }
+            };
+            Ok(candidate.into_parts())
         }
 
         fn rebind_graph_resistors(
@@ -361,6 +439,46 @@ mod owner {
                 .stored_energy_j(self.currents_a())
                 .map_err(NonlinearWindingError::from)?;
             Ok(self.dae().system.hamiltonian(self.state()) + self.field().energy_j() + end)
+        }
+
+        fn magnetic_materials(&self) -> Option<&[IsotropicMagneticMaterial]> {
+            Some(self.field().problem().materials())
+        }
+
+        fn flux_densities(&self) -> Result<Vec<([f64; 2], f64)>, NonlinearWindingError> {
+            let field = self.field().field(&mut || false)?;
+            let mesh = self.field().problem().mesh();
+            field
+                .magnetic_flux_density_t()
+                .iter()
+                .enumerate()
+                .map(|(triangle, &b)| {
+                    mesh.face_measure(triangle)
+                        .map(|volume| (b, volume))
+                        .ok_or(NonlinearWindingError::Invalid("missing magnetic volume"))
+                })
+                .collect()
+        }
+
+        fn magnetic_cells(step: &NonlinearEddyStep) -> &[NonlinearEddyMagneticCell] {
+            &step.magnetic_cells
+        }
+
+        fn same_problem(&self, other: &Self) -> bool {
+            let (a, b) = (self.field().problem(), other.field().problem());
+            let (x, y) = (a.mesh(), b.mesh());
+            core::ptr::eq(a, b)
+                || (a.materials() == b.materials()
+                    && a.thickness_m().to_bits() == b.thickness_m().to_bits()
+                    && x.lineage() == y.lineage()
+                    && x.metric() == y.metric()
+                    && x.faces() == y.faces()
+                    && x.vertex_keys() == y.vertex_keys()
+                    && x.vertices().len() == y.vertices().len()
+                    && x.vertices()
+                        .iter()
+                        .zip(y.vertices())
+                        .all(|(p, q)| super::same_bits(p, q)))
         }
 
         fn graph(&self) -> &CircuitGraph {
@@ -423,6 +541,7 @@ mod owner {
         fn step(
             &self,
             target_s: f64,
+            materials: Option<Refresh>,
             core: Vec<EddyConductor>,
             windings: Vec<WindingConductor>,
             inputs: &[f64],
@@ -430,6 +549,11 @@ mod owner {
             cancelled: &mut impl FnMut() -> bool,
         ) -> Result<(Self, NonlinearWindingStep<HystereticEddyStep>), NonlinearWindingError>
         {
+            if materials.is_some() {
+                return Err(NonlinearWindingError::Invalid(
+                    "the play-memory field has no temperature refresh",
+                ));
+            }
             Ok(self
                 .step_to_candidate(target_s, core, windings, inputs, controls, cancelled)?
                 .into_parts())
@@ -511,6 +635,26 @@ mod owner {
             Ok(self.dae().system.hamiltonian(self.state()) + self.field().energy_j() + end)
         }
 
+        fn magnetic_materials(&self) -> Option<&[IsotropicMagneticMaterial]> {
+            None
+        }
+
+        fn flux_densities(&self) -> Result<Vec<([f64; 2], f64)>, NonlinearWindingError> {
+            Err(NonlinearWindingError::Invalid(
+                "the play-memory field has no temperature refresh",
+            ))
+        }
+
+        fn magnetic_cells(_: &HystereticEddyStep) -> &[NonlinearEddyMagneticCell] {
+            &[]
+        }
+
+        /// Never asked: no state of the play-memory owner carries
+        /// temperatures.
+        fn same_problem(&self, other: &Self) -> bool {
+            core::ptr::eq(self.problem(), other.problem())
+        }
+
         fn graph(&self) -> &CircuitGraph {
             Self::graph(self)
         }
@@ -587,15 +731,38 @@ mod owner {
     }
 }
 
-/// The accepted state: the owner's circuit, which carries the field history.
+/// The accepted state: the owner's circuit, which carries the field history,
+/// and, in the magnetic lane, the temperatures \[K\] its materials were
+/// evaluated at, one per heat receiver.
 #[derive(Clone)]
-pub struct PlanarWindingState<'m, C = NonlinearWindingCircuit<'m>>(C, PhantomData<&'m ()>);
+pub struct PlanarWindingState<'m, C = NonlinearWindingCircuit<'m>>(
+    C,
+    Option<Vec<f64>>,
+    PhantomData<&'m ()>,
+);
 
 impl<'m, C: WindingOwner<'m>> PlanarWindingState<'m, C> {
     /// The state of an accepted circuit.
     #[must_use]
     pub const fn new(circuit: C) -> Self {
-        Self(circuit, PhantomData)
+        Self(circuit, None, PhantomData)
+    }
+
+    /// The magnetic lane's state of an accepted circuit whose field
+    /// materials were evaluated at `temperatures` \[K\], one per heat
+    /// receiver. A step refuses a state whose temperatures do not fit its
+    /// Component, and one whose law triangles' free energy at them is not
+    /// the field's.
+    #[must_use]
+    pub const fn at_temperatures(circuit: C, temperatures: Vec<f64>) -> Self {
+        Self(circuit, Some(temperatures), PhantomData)
+    }
+
+    /// The temperatures \[K\] the field materials were evaluated at, in the
+    /// magnetic lane.
+    #[must_use]
+    pub fn temperatures(&self) -> Option<&[f64]> {
+        self.1.as_deref()
     }
 
     /// The accepted circuit.
@@ -620,12 +787,20 @@ fn same_bits(a: &[f64], b: &[f64]) -> bool {
 /// state, currents, linkages, resistances, conductors and field potential,
 /// energy and clock, and the owner's field memory (for the play-memory
 /// owner, every cell's vector history). The graph is compared by value: a
-/// step with resistor laws builds a new one.
+/// step with resistor laws builds a new one. In the magnetic lane, each step
+/// builds its own problem too, so there the problems are compared by mesh,
+/// thickness and materials, and the temperatures by their bits; a state
+/// with temperatures never equals one without.
 impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
+        let problem = match (&self.1, &other.1) {
+            (None, None) => core::ptr::eq(a.problem(), b.problem()),
+            (Some(x), Some(y)) => same_bits(x, y) && a.same_problem(b),
+            _ => false,
+        };
         a.graph() == b.graph()
-            && core::ptr::eq(a.problem(), b.problem())
+            && problem
             && a.time_s().to_bits() == b.time_s().to_bits()
             && same_bits(a.state(), b.state())
             && same_bits(a.currents_a(), b.currents_a())
@@ -646,6 +821,7 @@ impl<'m, C: WindingOwner<'m>> fmt::Debug for PlanarWindingState<'m, C> {
             .field("time_s", &self.0.time_s())
             .field("currents_a", &self.0.currents_a())
             .field("state", &self.0.state())
+            .field("temperatures_k", &self.1)
             .finish_non_exhaustive()
     }
 }
@@ -691,6 +867,11 @@ pub struct PlanarWinding<'m, C = NonlinearWindingCircuit<'m>, F = NonlinearEddyC
     controls: NonlinearWindingControls<F>,
     energy_tolerance_j: f64,
     ports: Vec<PortSpec>,
+    /// The magnetic lane's laws, by triangle, and its assembly bounds.
+    magnetic: Option<(
+        BTreeMap<usize, ThermalMagneticMaterial>,
+        WeightedAssemblyLimits,
+    )>,
     problem: PhantomData<&'m ()>,
     owner: PhantomData<fn() -> C>,
 }
@@ -778,7 +959,86 @@ where
         controls: NonlinearWindingControls<F>,
         energy_tolerance_j: f64,
     ) -> Result<Self, PlanarWindingError> {
-        if conductor_laws.len() != receivers.len() {
+        let (supply, triangles) =
+            Self::laws(circuit, conductor_laws, resistor_laws, receivers.len())?;
+        Self::build(
+            circuit,
+            &triangles,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )
+    }
+
+    /// [`Self::at_port_temperatures`] in the magnetic lane (module
+    /// documentation): the permeability of each triangle with a
+    /// [`MagneticLaw`] also follows the temperature its receiver's port
+    /// gives. Each law triangle maps to a receiver, conducting or not. The
+    /// Component steps states made by [`PlanarWindingState::at_temperatures`].
+    ///
+    /// # Errors
+    /// As [`Self::at_port_temperatures`]; the owner refreshes no field
+    /// materials with temperature (the play-memory owner); there is no law;
+    /// two laws name one triangle; a law names a triangle whose field
+    /// material is not linear, or whose material is not the law's source
+    /// (its card, claims and other coordinates); a law triangle maps to no
+    /// receiver.
+    pub fn magnetic_at_port_temperatures(
+        circuit: &C,
+        conductor_laws: Vec<Arc<dyn ConductorLaw>>,
+        resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+        magnetic: MagneticLaws,
+        receivers: Vec<HeatReceiver>,
+        controls: NonlinearWindingControls<F>,
+        energy_tolerance_j: f64,
+    ) -> Result<Self, PlanarWindingError> {
+        let materials = circuit
+            .magnetic_materials()
+            .ok_or_else(|| invalid("this owner refreshes no field materials with temperature"))?;
+        let mut laws = BTreeMap::new();
+        for MagneticLaw { triangle, law } in magnetic.triangles {
+            let Some(IsotropicMagneticMaterial::Linear(material)) = materials.get(triangle) else {
+                return Err(invalid(
+                    "a magnetic law names a triangle whose field material is not linear",
+                ));
+            };
+            if admit_magnetic_temperature_refresh(material, law.material()).is_err() {
+                return Err(invalid(
+                    "a magnetic law's source is not its triangle's field material",
+                ));
+            }
+            if laws.insert(triangle, law).is_some() {
+                return Err(invalid("two magnetic laws name one triangle"));
+            }
+        }
+        if laws.is_empty() {
+            return Err(invalid("the magnetic lane has no law"));
+        }
+        let (supply, mut triangles) =
+            Self::laws(circuit, conductor_laws, resistor_laws, receivers.len())?;
+        triangles.extend(laws.keys().copied());
+        let mut component = Self::build(
+            circuit,
+            &triangles,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )?;
+        component.magnetic = Some((laws, magnetic.assembly));
+        Ok(component)
+    }
+
+    /// The supply of [`Self::at_port_temperatures`], and the triangles its
+    /// receivers must map.
+    fn laws(
+        circuit: &C,
+        conductor_laws: Vec<Arc<dyn ConductorLaw>>,
+        resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+        receivers: usize,
+    ) -> Result<(Supply, Vec<usize>), PlanarWindingError> {
+        if conductor_laws.len() != receivers {
             return Err(invalid("one conductor law per heat receiver required"));
         }
         let cells: BTreeMap<usize, Option<u32>> = circuit
@@ -797,16 +1057,10 @@ where
             conductors: conductor_laws,
             resistors: resistor_laws,
         };
-        Self::build(
-            circuit,
-            &triangles,
-            supply,
-            receivers,
-            controls,
-            energy_tolerance_j,
-        )
+        Ok((supply, triangles))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build(
         circuit: &C,
         triangles: &[usize],
@@ -913,6 +1167,7 @@ where
             controls,
             energy_tolerance_j,
             ports,
+            magnetic: None,
             problem: PhantomData,
             owner: PhantomData,
         })
@@ -947,6 +1202,19 @@ where
         if !same || old.0.field_triangles() != self.field {
             return Err(invalid(
                 "the state's circuit is not this Component's topology",
+            ));
+        }
+        let lane = self.magnetic.as_ref().map(|_| self.receivers.len());
+        if old.1.as_ref().map(Vec::len) != lane
+            || old
+                .1
+                .iter()
+                .flatten()
+                .any(|&kelvin| !(kelvin.is_finite() && kelvin > 0.0))
+        {
+            return Err(invalid(
+                "a state carries temperatures in the magnetic lane only, one positive \
+                 temperature per receiver",
             ));
         }
         let target_s = old.0.time_s() + dt_s;
@@ -1059,6 +1327,175 @@ where
     pub fn receivers(&self) -> &[HeatReceiver] {
         &self.receivers
     }
+
+    /// In the magnetic lane, the field materials of a step whose heat ports
+    /// received `kelvin`: each law triangle's law there, and every other
+    /// triangle's material as `old` holds it.
+    fn materials_at(&self, old: &C, kelvin: &[f64]) -> Result<Option<Refresh>, PlanarWindingError> {
+        let Some((laws, assembly)) = &self.magnetic else {
+            return Ok(None);
+        };
+        let mut materials = old
+            .magnetic_materials()
+            .ok_or_else(|| invalid("this owner refreshes no field materials with temperature"))?
+            .to_vec();
+        for (&triangle, law) in laws {
+            let receiver = self.triangle_port[&triangle];
+            let kelvin = kelvin[receiver];
+            let at = law
+                .at_temperature(kelvin)
+                .map_err(|error| PlanarWindingError::Law {
+                    receiver,
+                    element: LawElement::Permeability(triangle),
+                    kelvin,
+                    message: error.to_string(),
+                })?;
+            *materials
+                .get_mut(triangle)
+                .ok_or_else(|| invalid("the state's field has no such law triangle"))? =
+                IsotropicMagneticMaterial::Linear(at.material().clone());
+        }
+        Ok(Some((materials, *assembly)))
+    }
+
+    /// The magnetic lane's terms of a step from `old`'s temperatures to the
+    /// ports' (`kelvin`), read from the owner's magnetic cell records. Each
+    /// law's free energy must be the field's at both ends of the step, within
+    /// the energy tolerance; a triangle without a law must do no parameter
+    /// work.
+    fn reversible(
+        &self,
+        old: &PlanarWindingState<'m, C>,
+        cells: &[NonlinearEddyMagneticCell],
+        kelvin: &[f64],
+    ) -> Result<Option<Reversible>, PlanarWindingError> {
+        let Some((laws, _)) = &self.magnetic else {
+            return Ok(None);
+        };
+        let before = old
+            .1
+            .as_deref()
+            .ok_or_else(|| invalid("a state of the magnetic lane carries its temperatures"))?;
+        if laws.keys().any(|&triangle| triangle >= cells.len()) {
+            return Err(invalid("the owner's magnetic records omit a law triangle"));
+        }
+        let mut terms = Reversible {
+            entropy_j_per_k: vec![0.0; self.receivers.len()],
+            stored_change_j: 0.0,
+            numerical_loss_j: 0.0,
+            magnitude_j: 0.0,
+        };
+        for (triangle, cell) in cells.iter().enumerate() {
+            if cell.triangle != triangle {
+                return Err(invalid(
+                    "the owner's magnetic records are not in mesh order",
+                ));
+            }
+            let Some(law) = laws.get(&triangle) else {
+                if cell.parameter_work_j != 0.0 {
+                    return Err(PlanarWindingError::UnaccountedWork {
+                        parameter_j: cell.parameter_work_j,
+                        mechanical_j: 0.0,
+                    });
+                }
+                continue;
+            };
+            let receiver = self.triangle_port[&triangle];
+            let end = |end: usize, kelvin: f64| -> Result<FieldThermalState, PlanarWindingError> {
+                let refuse = |message| PlanarWindingError::Law {
+                    receiver,
+                    element: LawElement::Permeability(triangle),
+                    kelvin,
+                    message,
+                };
+                let state = law_state(law, kelvin, cell.flux_density_t[end], cell.volume_m3)
+                    .map_err(refuse)?;
+                let field_j = cell.free_energy_j[end];
+                let gap_j = (state.free_energy_j - field_j).abs();
+                if gap_j.is_nan() || gap_j > self.energy_tolerance_j {
+                    return Err(refuse(format!(
+                        "its free energy {} J is not the field's {field_j} J",
+                        state.free_energy_j
+                    )));
+                }
+                Ok(state)
+            };
+            let (t0, t1) = (before[receiver], kelvin[receiver]);
+            let (s0, s1) = (end(0, t0)?.entropy_j_k, end(1, t1)?.entropy_j_k);
+            terms.entropy_j_per_k[receiver] += s1 - s0;
+            let (ts0, ts1) = (t0 * s0, t1 * s1);
+            terms.stored_change_j += ts1 - ts0;
+            // -(P + dT s0), with P = psi(T1, B0) - psi(T0, B0) = -s0 dT + O(dT^2).
+            let loss = -(cell.parameter_work_j + (t1 - t0) * s0);
+            terms.numerical_loss_j += loss;
+            terms.magnitude_j += ts0.abs() + ts1.abs() + cell.parameter_work_j.abs() + loss.abs();
+        }
+        Ok(Some(terms))
+    }
+
+    /// In the magnetic lane, a state's sum of `T s` \[J\] over the law
+    /// triangles, measured from the state alone: each law at its receiver's
+    /// temperature, at the flux density the field's potential gives.
+    fn stored_reversible(
+        &self,
+        state: &PlanarWindingState<'m, C>,
+    ) -> Result<Option<f64>, PlanarWindingError> {
+        let Some((laws, _)) = &self.magnetic else {
+            return Ok(None);
+        };
+        let temperatures = state
+            .1
+            .as_deref()
+            .filter(|t| t.len() == self.receivers.len())
+            .ok_or_else(|| invalid("a state of the magnetic lane carries its temperatures"))?;
+        let cells = state.0.flux_densities()?;
+        let mut energy = 0.0;
+        for (&triangle, law) in laws {
+            let receiver = self.triangle_port[&triangle];
+            let kelvin = temperatures[receiver];
+            let &(b, volume_m3) = cells
+                .get(triangle)
+                .ok_or_else(|| invalid("the state's field has no such law triangle"))?;
+            let s = law_state(law, kelvin, b, volume_m3)
+                .map_err(|message| PlanarWindingError::Law {
+                    receiver,
+                    element: LawElement::Permeability(triangle),
+                    kelvin,
+                    message,
+                })?
+                .entropy_j_k;
+            energy += kelvin * s;
+        }
+        if !energy.is_finite() {
+            return Err(invalid("the magnetic lane's stored energy is not finite"));
+        }
+        Ok(Some(energy))
+    }
+}
+
+/// The magnetic lane's terms of one step.
+struct Reversible {
+    /// The entropy change of each receiver's law triangles \[J/K\].
+    entropy_j_per_k: Vec<f64>,
+    /// The change of `T s` over the law triangles \[J\].
+    stored_change_j: f64,
+    /// The sum of `-(P + dT s0)` over the law triangles \[J\].
+    numerical_loss_j: f64,
+    /// The size of the terms above, for the rounding floor \[J\].
+    magnitude_j: f64,
+}
+
+/// A magnetic law's field state at `kelvin`, for flux density `b` in
+/// `volume_m3`, or why it has none.
+fn law_state(
+    law: &ThermalMagneticMaterial,
+    kelvin: f64,
+    b: [f64; 2],
+    volume_m3: f64,
+) -> Result<FieldThermalState, String> {
+    law.at_temperature(kelvin)
+        .and_then(|at: ResolvedThermalMagneticMaterial| at.state(b[0].hypot(b[1]), volume_m3))
+        .map_err(|error| error.to_string())
 }
 
 /// Circuit, field and end-mode storage of an accepted state, summed as the
@@ -1083,6 +1520,30 @@ fn conductor_words(
         bytes.copy_from_slice(chunk);
         words.push(u64::from_le_bytes(bytes));
     }
+}
+
+/// Bytes as little-endian words, the last one padded with zeros.
+fn byte_words(bytes: &[u8], words: &mut Vec<u64>) {
+    for chunk in bytes.chunks(8) {
+        let mut word = [0_u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        words.push(u64::from_le_bytes(word));
+    }
+}
+
+/// A magnetic law's card identity, temperature axis (preceded by its
+/// length), range and slope, and its source's permeability.
+fn magnetic_words(law: &ThermalMagneticMaterial, words: &mut Vec<u64>) {
+    byte_words(&law.material().card_identity().0, words);
+    words.push(law.temperature_axis().len() as u64);
+    byte_words(law.temperature_axis().as_bytes(), words);
+    let [low, high] = law.temperature_range_k();
+    words.extend([
+        low.to_bits(),
+        high.to_bits(),
+        law.permeability_slope_h_m_k().to_bits(),
+        linear_magnetic_permeability(law.material()).map_or(u64::MAX, f64::to_bits),
+    ]);
 }
 
 /// A law's words, preceded by their count.
@@ -1132,8 +1593,10 @@ where
     /// the controls by their `Debug` text (which prints each `f64` so that it
     /// parses back to the same bits); the energy tolerance; then the
     /// owner's lane words (none for the saturating owner, `b"vecplay1"` read
-    /// little-endian for the play-memory owner). Each list is preceded by its
-    /// length.
+    /// little-endian for the play-memory owner); then, in the magnetic lane
+    /// only, `b"magtemp1"`, each law's triangle and words (its card identity,
+    /// temperature axis, range and slope, and its source's permeability), and
+    /// the assembly bounds. Each list is preceded by its length.
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.extend([
             self.graph.node_count as u64,
@@ -1202,6 +1665,18 @@ where
         }
         words.push(self.energy_tolerance_j.to_bits());
         words.extend_from_slice(C::LANE_WORDS);
+        if let Some((laws, assembly)) = &self.magnetic {
+            words.extend([u64::from_le_bytes(*b"magtemp1"), laws.len() as u64]);
+            for (&triangle, law) in laws {
+                words.push(triangle as u64);
+                law_words(words, |words| magnetic_words(law, words));
+            }
+            words.extend([
+                assembly.max_cells as u64,
+                assembly.max_dofs as u64,
+                assembly.max_triplets as u64,
+            ]);
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -1218,13 +1693,20 @@ where
         EndOfStep::Untold
     }
 
+    /// With the magnetic lane's `T s` of each law triangle, measured from
+    /// the state.
     fn stored_energy_j(
         &self,
         state: &PlanarWindingState<'m, C>,
     ) -> Result<f64, PlanarWindingError> {
-        energy(state)
+        let total = energy(state)?;
+        match self.stored_reversible(state)? {
+            None => Ok(total),
+            Some(reversible) => Ok(total + reversible),
+        }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn propose(
         &self,
         old: &PlanarWindingState<'m, C>,
@@ -1252,8 +1734,11 @@ where
         }
         let (driven, core, windings) =
             self.supply_at(&old.0, &inputs[sources..], &mut || cx.checkpoint().is_err())?;
+        let materials = self.materials_at(&old.0, &inputs[sources..])?;
+        let lane = materials.is_some();
         let (circuit, step) = driven.as_ref().unwrap_or(&old.0).step(
             target_s,
+            materials,
             core,
             windings,
             &inputs[..sources],
@@ -1261,7 +1746,7 @@ where
             &mut || cx.checkpoint().is_err(),
         )?;
         let step = &step;
-        if step.parameter_work_j != 0.0 || step.mechanical_work_j != 0.0 {
+        if (step.parameter_work_j != 0.0 && !lane) || step.mechanical_work_j != 0.0 {
             return Err(PlanarWindingError::UnaccountedWork {
                 parameter_j: step.parameter_work_j,
                 mechanical_j: step.mechanical_work_j,
@@ -1275,13 +1760,33 @@ where
             .zip(&inputs[sources..])
             .map(|(q, t)| q / t)
             .sum();
-        let numerical_loss_j = step.supplied_work_j - step.stored_change_j - heat_j;
-        let magnitude = step.stored_before_j.abs()
+        let kelvin = &inputs[sources..];
+        let reversible = self.reversible(old, C::magnetic_cells(&step.field), kelvin)?;
+        // In the magnetic lane the heat that leaves through each port is less
+        // `T dS` of its law triangles, and may be negative.
+        let net: Option<Vec<f64>> = reversible.as_ref().map(|terms| {
+            heat.iter()
+                .zip(&terms.entropy_j_per_k)
+                .zip(kelvin)
+                .map(|((q, ds), t)| q - t * ds)
+                .collect()
+        });
+        let out = net.as_deref().unwrap_or(&heat);
+        let out_j = net.as_ref().map_or(heat_j, |net| net.iter().sum());
+        let stored_change_j = reversible.as_ref().map_or(step.stored_change_j, |terms| {
+            step.stored_change_j + terms.stored_change_j
+        });
+        let numerical_loss_j = step.supplied_work_j - stored_change_j - out_j;
+        let mut magnitude = step.stored_before_j.abs()
             + step.stored_after_j.abs()
             + step.supplied_work_j.abs()
             + step.numerical_dissipation_j.abs()
             + heat_j;
-        let elements = step.cells.len() + field.len() + step.graph_resistors.len();
+        let mut elements = step.cells.len() + field.len() + step.graph_resistors.len();
+        if let Some(terms) = &reversible {
+            magnitude += terms.magnitude_j + out.iter().map(|q| q.abs()).sum::<f64>();
+            elements += 2 * self.magnetic.as_ref().map_or(0, |(laws, _)| laws.len());
+        }
         let rounding = arithmetic_rounding_floor(
             64_usize
                 .saturating_add(8_usize.saturating_mul(old.0.state().len()))
@@ -1290,7 +1795,12 @@ where
             magnitude,
         );
         let allowance = rounding + self.energy_tolerance_j;
-        let defect_j = numerical_loss_j - step.numerical_dissipation_j;
+        let expected_j = reversible
+            .as_ref()
+            .map_or(step.numerical_dissipation_j, |terms| {
+                step.numerical_dissipation_j + terms.numerical_loss_j
+            });
+        let defect_j = numerical_loss_j - expected_j;
         if ![rounding, numerical_loss_j, entropy, defect_j]
             .iter()
             .all(|value| value.is_finite())
@@ -1315,11 +1825,11 @@ where
             .max(self.controls.newton.relative_tolerance * initial);
         cx.checkpoint().map_err(|_| PlanarWindingError::Cancelled)?;
         outputs[..sources].copy_from_slice(&step.native.y[..sources]);
-        for (rate, q) in outputs[sources..].iter_mut().zip(&heat) {
+        for (rate, q) in outputs[sources..].iter_mut().zip(out) {
             *rate = -q / dt_s;
         }
         let receipt = Receipt {
-            stored_change_j: step.stored_change_j,
+            stored_change_j,
             dissipated_j: heat_j,
             numerical_loss_j,
             entropy_generated_j_per_k: entropy,
@@ -1327,7 +1837,11 @@ where
             residual: report.residual_norm,
             tolerance,
         };
-        *new = PlanarWindingState::new(circuit);
+        *new = if lane {
+            PlanarWindingState::at_temperatures(circuit, kelvin.to_vec())
+        } else {
+            PlanarWindingState::new(circuit)
+        };
         Ok(Proposal::Step(receipt))
     }
 }

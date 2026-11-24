@@ -3,7 +3,9 @@
 //! ports as the owner books it, the kernel's audit, conformance, refusals
 //! and identity; then the same with conductor and resistor laws at the
 //! temperatures the heat ports receive. With `magnetic-hysteresis`, the
-//! play-memory owner in `winding_component/hysteretic.rs`.
+//! play-memory owner in `winding_component/hysteretic.rs`. The magnetic lane,
+//! whose permeability also follows the temperatures, in
+//! `winding_component/magnetic.rs`.
 #![cfg(feature = "component")]
 
 #[path = "nonlinear_winding_circuit/common.rs"]
@@ -11,6 +13,8 @@ mod common;
 #[cfg(feature = "magnetic-hysteresis")]
 #[path = "winding_component/hysteretic.rs"]
 mod hysteretic;
+#[path = "winding_component/magnetic.rs"]
+mod magnetic;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

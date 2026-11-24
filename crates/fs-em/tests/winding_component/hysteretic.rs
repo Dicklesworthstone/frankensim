@@ -3,7 +3,7 @@
 //! triangle's pinning and viscous heat at its own receiver, conducting or
 //! not; steps whose ports leave the fits' temperature support refuse;
 //! refused and cancelled steps leave the vector memory as it was; the lane
-//! has a word of its own.
+//! has a word of its own; the magnetic lane refuses the play-memory owner.
 
 #[path = "../hysteretic_eddy/common.rs"]
 mod fixture;
@@ -594,4 +594,27 @@ fn laws_that_answer_the_owners_conductors_step_as_fixed_conductors_do() {
         assert_eq!(out_a.map(f64::to_bits), out_b.map(f64::to_bits));
         (a, b) = (next_a, next_b);
     }
+}
+
+#[test]
+fn the_play_memory_owner_has_no_magnetic_lane() {
+    let (owner, all) = problem(Some(SUPPORT));
+    let circuit = circuit(&owner, &all);
+    let laws = super::magnetic::laws(&super::magnetic::card(0.002));
+    let refused = PlayWinding::magnetic_at_port_temperatures(
+        &circuit,
+        vec![],
+        BTreeMap::new(),
+        laws,
+        receivers(),
+        terminal_controls(),
+        TOLERANCE_J,
+    );
+    let Err(PlanarWindingError::Invalid { what }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(
+        what,
+        "this owner refreshes no field materials with temperature"
+    );
 }

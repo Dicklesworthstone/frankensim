@@ -2941,6 +2941,8 @@ Its stored energy, measured from the state alone, is:
 
 The owner sums `stored_before_j` the same way. Two states are equal when they
 share the owner's topology and hold the same bits in every accepted coordinate.
+In the magnetic lane each step builds its own problem, so states there compare
+problems by mesh, thickness and materials, and temperatures by bits.
 
 A proposal steps the owner once, with `step_to_candidate`:
 - from the accepted state, to its clock plus the step;
@@ -2959,9 +2961,9 @@ heat. The step refuses (`Balance`) when this differs from the owner's
 backward-Euler `numerical_dissipation_j` by more than the arithmetic rounding
 floor plus the caller's energy tolerance. The receipt's `energy_tolerance_j` is
 that floor. Its residual and tolerance are the interface Newton solve's final
-residual and its own convergence target. A step with magnetic parameter work or
-mechanical work refuses (`UnaccountedWork`): the receipt has no term for
-either. No fixture here produces either.
+residual and its own convergence target. A step with mechanical work, or with
+magnetic parameter work outside the magnetic lane's law triangles, refuses
+(`UnaccountedWork`): the receipt has no term for either.
 
 The Component borrows the owner's problem for `'m` and leaks nothing. A
 kernel `System` holds `'static` members, so a caller that adds this Component
@@ -2979,7 +2981,8 @@ name the same types as before. The owner gives the Component:
   in each holds at a temperature;
 - its stored energy and the coordinates that state equality reads, its
   field memory included;
-- its lane words.
+- its lane words;
+- for the magnetic lane, its materials, flux densities and cell records.
 
 No field reaches `C` through an associated type, so the Component and its
 state stay covariant in `'m`.
@@ -3027,7 +3030,9 @@ The identity words bind:
   parses back to the same bits;
 - the energy tolerance;
 - the owner's lane words: none for the saturating owner, whose words are as
-  they were.
+  they were;
+- in the magnetic lane, `b"magtemp1"`, each law's triangle and words, and the
+  assembly bounds.
 
 With the `magnetic-hysteresis` feature, the owner can also be the
 play-memory circuit `winding::hysteretic::HystereticWindingCircuit`
@@ -3055,6 +3060,36 @@ play-memory circuit `winding::hysteretic::HystereticWindingCircuit`
 - Its identity words end with one lane word, `b"vecplay1"` read
   little-endian.
 - Parameter work stays refused; this owner books none.
+
+#### The magnetic lane
+
+`PlanarWinding::magnetic_at_port_temperatures` adds `MagneticLaws`: per law
+triangle, fs-material's linear `ThermalMagneticMaterial` (affine in absolute
+temperature) at its receiver's port temperature, and the bounds of each
+refreshed assembly. The state carries the temperatures its materials were
+evaluated at (`PlanarWindingState::at_temperatures`).
+
+Construction refuses an owner without temperature refresh (the play-memory
+owner), no law, two laws on one triangle, a law on a nonlinear triangle or
+beyond the mesh, a law whose source is not its triangle's material, and a law
+triangle mapped to no receiver; only a law triangle may be a receiver's triangle
+without a conductor. A step refuses a lane state without temperatures or with
+another count, temperatures outside the lane, a law with no answer at its port's
+temperature (`Law`, `Permeability`; never clamped), and a law whose free energy
+at either end differs from the field's beyond the energy tolerance.
+
+A step from `T0` to the ports' `T1` steps the owner with
+`step_with_materials_candidate`, each law triangle at its law at `T1`. With
+`s = -dpsi/dT` from the law at the cell records' flux densities:
+- each port returns its Joule and field heat less `T1 dS` of its law
+  triangles. Only this reversible part may make it negative: the Joule and
+  field heat alone is `dissipated_j`, refused when negative, and generates
+  entropy over `T1`;
+- the stored change adds the change of `T s` (`U = psi + T s`), and the
+  stored energy adds `T s` measured from the state;
+- parameter work `P` is allowed in law triangles only; the expected numerical
+  loss adds each one's computed `-(P + (T1 - T0) s0)`, second order in the
+  change of temperature (`fs_couple::circuit_enthalpy` deposits it as heat).
 
 `tests/winding_component.rs` (11 tests). With fixed conductors:
 - the ports of a graph with a voltage source, and of one with a current source
@@ -3141,7 +3176,7 @@ Nineteen in the laws' paths each did too:
 18. the fixed topology check dropped;
 19. with no resistor laws, the topology check ignoring resistor values.
 
-With `magnetic-hysteresis`, `tests/winding_component/hysteretic.rs` (5
+With `magnetic-hysteresis`, `tests/winding_component/hysteretic.rs` (6
 tests) steps the play-memory owner on the paired squares of
 `tests/hysteretic_eddy/common.rs`, the fixture it shares with
 `hysteretic_eddy.rs`. The fits switch with pinning and viscosity in every
@@ -3172,7 +3207,8 @@ resolved at 300 K:
   tolerance, and swapping the two magnetic-only triangles between receivers
   changes them;
 - conductor laws that answer the owner's own conductors step as fixed
-  conductors do, bit for bit.
+  conductors do, bit for bit;
+- the magnetic lane refuses this owner.
 
 Seven defects in the play-memory paths, planted one at a time, each failed
 at least one of these tests:
@@ -3183,6 +3219,22 @@ at least one of these tests:
 5. the check that the state's field has the Component's triangles dropped;
 6. the lane word dropped;
 7. the candidate published before the balance check.
+
+`tests/winding_component/magnetic.rs` (6 tests): copper in triangles 0, 1, 4 and
+5 of the two-square mesh, and a permeability of `1 + 0.002 (T - 300)` H/m in
+every triangle. Every step passes `audit_step`. Held at 300 K, a step is the
+owner's own, bit for bit; each port's heat is Joule less `T dS`. One step raised
+by 16, 8, 4 and 2 K books -2.98e-4, -7.56e-5, -1.90e-5 and -4.78e-6 J, each
+`-(P + dT s0)` by hand within 1e-12 J; halving the rise divides it by 3.94, 3.97
+and 3.98. From rest, a rising field draws 2.13 W from each half. Twenty defects,
+planted one at a time, each failed a test: parameter work refused in the lane;
+the reversible heat dropped or of the wrong sign; `T s` dropped from the stored
+change or energy; the second-order term dropped or at the end entropy; the
+free-energy, temperature-count, source and one-law checks off; law triangles
+refused as receivers'; states or problems compared by address, or temperatures
+ignored; the assembly bounds dropped from the identity; the stored readings at
+300 K; the materials not refreshed; the next state without temperatures; the
+play-memory owner admitted.
 
 No test builds two states that differ in vector memory alone: their field
 energies or potentials always differed too.
