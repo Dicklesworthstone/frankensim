@@ -1,8 +1,8 @@
 //! The magnetic lane: each triangle's permeability follows the temperature
-//! its receiver's port gives (fs-material's affine `ThermalMagneticMaterial`)
-//! and the state carries the temperatures its materials were evaluated at.
-//! Synthetic constitutive data test the discrete accounts; they are not a
-//! measured core.
+//! its receiver's port gives (fs-material's affine `ThermalMagneticMaterial`),
+//! the state carries the temperatures its materials were evaluated at, and
+//! the Component declares its stored entropy. Synthetic constitutive data
+//! test the discrete accounts; they are not a measured core.
 
 #[path = "../winding_ohmic/common.rs"]
 mod source;
@@ -25,6 +25,7 @@ use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductorState};
 use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_phs::circuit::{Branch, CircuitGraph};
+use fs_ports::component::conformance::{Case, Observed, check_component};
 use fs_ports::component::{Component, PortLayout, Proposal, Receipt, audit_step};
 
 use super::{DT, GRAPH_OHM, HeatReceiver, TOLERANCE_J, VOLTS, booked, common, receivers, with_cx};
@@ -264,6 +265,22 @@ fn audited<'m>(
     )
     .expect("audited");
     (new, outputs, receipt)
+}
+
+/// The conformance kit's case from `state`, with a stale candidate slot;
+/// its energy and entropy audits run inside.
+fn kit(winding: &PlanarWinding<'_>, state: &PlanarWindingState<'_>, inputs: &[f64]) -> Receipt {
+    let (stale, _, _) = proposed(winding, state, inputs).unwrap();
+    let case = Case {
+        state,
+        stale: &stale,
+        dt_s: DT,
+        inputs,
+    };
+    match with_cx(|cx| check_component(winding, &case, cx)).expect("component conformance") {
+        Observed::Stepped { receipt, .. } => receipt,
+        Observed::Shortened { dt_s } => panic!("the winding shortened the step to {dt_s} s"),
+    }
 }
 
 fn bits(values: &[f64]) -> Vec<u64> {
@@ -554,5 +571,66 @@ fn the_lane_has_words_of_its_own() {
             lane,
             words(&lane_of(&circuit, &card, laws, receivers).unwrap())
         );
+    }
+}
+
+#[test]
+fn the_lane_declares_the_stored_entropy_of_its_state_and_other_lanes_none() {
+    let card = card(SLOPE);
+    let problem = problem(&card);
+    let circuit = circuit(&problem, &card, 1.0);
+    let winding = lane(&circuit, &card);
+    let kelvin = [310.0, 320.0, START_K];
+    let state = PlanarWindingState::at_temperatures(circuit.clone(), vec![START_K; 3]);
+    let inputs = [VOLTS, kelvin[0], kelvin[1], kelvin[2]];
+    let (new, _, _) = proposed(&winding, &state, &inputs).unwrap();
+    // Measured from each state alone, it is the sum of `s` by hand from the
+    // owner's own step and the card's law, at the state's temperatures.
+    let owner = owner_at(&circuit, &card, kelvin);
+    let cells = &owner.step().field.magnetic_cells;
+    let measured = |state: &PlanarWindingState<'_>| {
+        winding
+            .stored_entropy_j_per_k(state)
+            .unwrap()
+            .expect("declared")
+    };
+    let s0 = entropy(&card, cells, 0, [START_K; 3]);
+    let s1 = entropy(&card, cells, 1, kelvin);
+    close(measured(&state), s0.iter().sum(), 1e-15);
+    close(measured(&new), s1.iter().sum(), 1e-15);
+    invalid(
+        winding.stored_entropy_j_per_k(&PlanarWindingState::new(circuit)),
+        "a state of the magnetic lane carries its temperatures",
+    );
+    // The saturating lanes declare no stored entropy.
+    let card = common::source(true, 18.0);
+    let problem = common::problem(&card, 0.3);
+    let circuit = super::series(&problem, &card);
+    let state = PlanarWindingState::new(circuit.clone());
+    for winding in [
+        super::component(&circuit, &card),
+        super::following(&circuit, &card),
+    ] {
+        assert_eq!(winding.stored_entropy_j_per_k(&state).unwrap(), None);
+    }
+}
+
+#[test]
+fn the_lane_passes_the_conformance_kit_and_its_entropy_audit() {
+    let card = card(SLOPE);
+    let problem = problem(&card);
+    // Held, rising 2 K per step, and from rest: ten steps each, the kit's
+    // energy and entropy audits closing at every one.
+    for (amperes, rise) in [(1.0, 0.0_f64), (1.0, 2.0), (0.0, 0.0)] {
+        let circuit = circuit(&problem, &card, amperes);
+        let winding = lane(&circuit, &card);
+        let mut state = PlanarWindingState::at_temperatures(circuit, vec![START_K; 3]);
+        for k in 1..=10 {
+            let t = rise.mul_add(f64::from(k), START_K);
+            let inputs = [VOLTS, t, t, START_K];
+            let receipt = kit(&winding, &state, &inputs);
+            assert!(receipt.entropy_generated_j_per_k > 0.0);
+            state = proposed(&winding, &state, &inputs).unwrap().0;
+        }
     }
 }

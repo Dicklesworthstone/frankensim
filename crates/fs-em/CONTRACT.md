@@ -3091,6 +3091,15 @@ A step from `T0` to the ports' `T1` steps the owner with
   loss adds each one's computed `-(P + (T1 - T0) s0)`, second order in the
   change of temperature (`fs_couple::circuit_enthalpy` deposits it as heat).
 
+The Component declares its stored entropy (`stored_entropy_j_per_k`): the sum
+of `s` over the law triangles, measured from the state alone, each law at its
+receiver's stored temperature and at the flux density recovered from the
+potential. It and the stored `T s` are summed with fs-math's `two_sum`. The
+other lanes declare none. The kernel's entropy audit then checks each step's
+arithmetic against that reading: the entropy in through the ports,
+`-sum (Q_r - T1 dS_r) / T1`, plus the generation, `sum Q_r / T1`, is the
+measured `sum dS_r`.
+
 `tests/winding_component.rs` (11 tests). With fixed conductors:
 - the ports of a graph with a voltage source, and of one with a current source
   driving a resistor of its own (`FlowIn`; 1.5 A into 2 ohm returns 3 V and
@@ -3220,21 +3229,24 @@ at least one of these tests:
 6. the lane word dropped;
 7. the candidate published before the balance check.
 
-`tests/winding_component/magnetic.rs` (6 tests): copper in triangles 0, 1, 4 and
+`tests/winding_component/magnetic.rs` (8 tests): copper in triangles 0, 1, 4 and
 5 of the two-square mesh, and a permeability of `1 + 0.002 (T - 300)` H/m in
-every triangle. Every step passes `audit_step`. Held at 300 K, a step is the
-owner's own, bit for bit; each port's heat is Joule less `T dS`. One step raised
-by 16, 8, 4 and 2 K books -2.98e-4, -7.56e-5, -1.90e-5 and -4.78e-6 J, each
-`-(P + dT s0)` by hand within 1e-12 J; halving the rise divides it by 3.94, 3.97
-and 3.98. From rest, a rising field draws 2.13 W from each half. Twenty defects,
-planted one at a time, each failed a test: parameter work refused in the lane;
-the reversible heat dropped or of the wrong sign; `T s` dropped from the stored
-change or energy; the second-order term dropped or at the end entropy; the
-free-energy, temperature-count, source and one-law checks off; law triangles
-refused as receivers'; states or problems compared by address, or temperatures
-ignored; the assembly bounds dropped from the identity; the stored readings at
-300 K; the materials not refreshed; the next state without temperatures; the
-play-memory owner admitted.
+every triangle. Every step passes `audit_step`. Ten steps each held, rising 2 K
+per step, and from rest pass `check_component`, its entropy audit included, and
+the stored entropy of a state is the hand sum within 1e-15 J/K. Held at 300 K, a
+step is the owner's own, bit for bit; each port's heat is Joule less `T dS`. One
+step raised by 16, 8, 4 and 2 K books -2.98e-4, -7.56e-5, -1.90e-5 and -4.78e-6
+J, each `-(P + dT s0)` by hand within 1e-12 J; halving the rise divides it by
+3.94, 3.97 and 3.98. From rest, a rising field draws 2.13 W from each half.
+Twenty-two defects, planted one at a time, each failed a test: parameter work
+refused in the lane; the reversible heat dropped or of the wrong sign; `T s`
+dropped from the stored change or energy; the second-order term dropped or at
+the end entropy; the free-energy, temperature-count, source and one-law checks
+off; law triangles refused as receivers'; states or problems compared by
+address, or temperatures ignored; the assembly bounds dropped from the identity;
+the stored readings at 300 K; the materials not refreshed; the next state
+without temperatures; the play-memory owner admitted; the stored entropy
+undeclared, or summed as `T s`.
 
 No test builds two states that differ in vector memory alone: their field
 energies or potentials always differed too.

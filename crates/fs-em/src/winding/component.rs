@@ -36,7 +36,9 @@
 //! stored energy adds `T s`; the numerical loss adds each law triangle's
 //! `-(P + (T1 - T0) s0)`, second order in the step's change of temperature,
 //! with `P` the owner's parameter work. Only the saturating owner has this
-//! lane, and only for linear materials.
+//! lane, and only for linear materials. The Component declares its stored
+//! entropy: the sum of `s = -dpsi/dT` over the law triangles, measured from
+//! the state.
 //!
 //! With the `magnetic-hysteresis` feature, the owner can also be the
 //! play-memory circuit (`HystereticWindingCircuit`). Its field heats every
@@ -68,6 +70,7 @@ use fs_material::field_storage::thermal::magnetic::{
 use fs_material::field_storage::{
     admit_magnetic_temperature_refresh, linear_magnetic_permeability,
 };
+use fs_math::eft::two_sum;
 use fs_phs::arithmetic_rounding_floor;
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_ports::component::{
@@ -1433,13 +1436,14 @@ where
         Ok(Some(terms))
     }
 
-    /// In the magnetic lane, a state's sum of `T s` \[J\] over the law
-    /// triangles, measured from the state alone: each law at its receiver's
-    /// temperature, at the flux density the field's potential gives.
+    /// In the magnetic lane, a state's `(sum of T s [J], sum of s [J/K])`
+    /// over the law triangles, measured from the state alone: each law at
+    /// its receiver's temperature, at the flux density the field's potential
+    /// gives. Both sums are compensated (`two_sum`).
     fn stored_reversible(
         &self,
         state: &PlanarWindingState<'m, C>,
-    ) -> Result<Option<f64>, PlanarWindingError> {
+    ) -> Result<Option<(f64, f64)>, PlanarWindingError> {
         let Some((laws, _)) = &self.magnetic else {
             return Ok(None);
         };
@@ -1449,7 +1453,7 @@ where
             .filter(|t| t.len() == self.receivers.len())
             .ok_or_else(|| invalid("a state of the magnetic lane carries its temperatures"))?;
         let cells = state.0.flux_densities()?;
-        let mut energy = 0.0;
+        let (mut energy, mut entropy) = ([0.0; 2], [0.0; 2]);
         for (&triangle, law) in laws {
             let receiver = self.triangle_port[&triangle];
             let kelvin = temperatures[receiver];
@@ -1464,12 +1468,14 @@ where
                     message,
                 })?
                 .entropy_j_k;
-            energy += kelvin * s;
+            compensated(&mut energy, kelvin * s);
+            compensated(&mut entropy, s);
         }
-        if !energy.is_finite() {
-            return Err(invalid("the magnetic lane's stored energy is not finite"));
+        let (energy, entropy) = (energy[0] + energy[1], entropy[0] + entropy[1]);
+        if !(energy.is_finite() && entropy.is_finite()) {
+            return Err(invalid("the magnetic lane's stored entropy is not finite"));
         }
-        Ok(Some(energy))
+        Ok(Some((energy, entropy)))
     }
 }
 
@@ -1496,6 +1502,13 @@ fn law_state(
     law.at_temperature(kelvin)
         .and_then(|at: ResolvedThermalMagneticMaterial| at.state(b[0].hypot(b[1]), volume_m3))
         .map_err(|error| error.to_string())
+}
+
+/// Adds `value` to the compensated sum `(sum, error)`.
+fn compensated(total: &mut [f64; 2], value: f64) {
+    let (sum, error) = two_sum(total[0], value);
+    total[0] = sum;
+    total[1] += error;
 }
 
 /// Circuit, field and end-mode storage of an accepted state, summed as the
@@ -1702,8 +1715,18 @@ where
         let total = energy(state)?;
         match self.stored_reversible(state)? {
             None => Ok(total),
-            Some(reversible) => Ok(total + reversible),
+            Some((reversible, _)) => Ok(total + reversible),
         }
+    }
+
+    /// In the magnetic lane, the sum of `s = -dpsi/dT` over the law
+    /// triangles, measured from the state's own field and temperatures;
+    /// otherwise none.
+    fn stored_entropy_j_per_k(
+        &self,
+        state: &PlanarWindingState<'m, C>,
+    ) -> Result<Option<f64>, PlanarWindingError> {
+        Ok(self.stored_reversible(state)?.map(|(_, entropy)| entropy))
     }
 
     #[allow(clippy::too_many_lines)]
