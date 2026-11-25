@@ -25,6 +25,9 @@ use crate::rotordynamics::LateralRotorDynamics;
 use crate::stage_meanline::{StageMeanlineReport, TurbineDesignParams, solve_17_stage_meanline};
 use crate::steam::{eval_ph, eval_pt};
 
+/// Polar inertia of the generator field rotor and exciter [kg m^2] (H ~ 2.2 s with the turbine).
+pub const GENERATOR_ROTOR_INERTIA_KG_M2: f64 = 2_100.0;
+
 /// Live operator setpoints, boundary conditions, and injectable physical faults shared
 /// with the sealed `System` boundary closures.
 #[derive(Debug, Clone, Copy)]
@@ -219,7 +222,7 @@ impl AssembledTurbinePlant {
         let omega_init = ctrl.sampled_omega_rad_s;
         // Total shaft polar inertia = exact forged rotor + 17 NURBS blade rows (~515 kg·m²)
         // + 60 MVA 2-pole synchronous generator field rotor & exciter (~2,100 kg·m² -> H ≈ 2.2 s, textbook!).
-        let j_total = geom.rotor_props.polar_inertia_kg_m2 + 2_100.0;
+        let j_total = geom.rotor_props.polar_inertia_kg_m2 + GENERATOR_ROTOR_INERTIA_KG_M2;
 
         let hp_valve_c = SteamControlValveComponent::new(0.0078, 0.546);
         let hp_chest_c = SteamPlenumComponent::new(0.30);
@@ -242,7 +245,11 @@ impl AssembledTurbinePlant {
         let governor_c = GovernorControlComponent::new();
 
         let brg_init = bearings_c.initial_state(omega_init);
-        let gen_init = generator_c.initial_state(omega_init, if cold_start { 0.0 } else { 48.0e6 });
+        let gen_init = generator_c.initial_state(
+            omega_init,
+            if cold_start { 0.0 } else { 48.0e6 },
+            ctrl.excitation_pu,
+        );
         let th_init = if cold_start {
             TurbineCasingThermalComponent::cold_start_state()
         } else {

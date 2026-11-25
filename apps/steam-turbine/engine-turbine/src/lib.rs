@@ -697,7 +697,8 @@ impl SteamTurbineSim {
         let chp_eff_pct = ((gen_st.elec_power_w + ext_heat_w) / q_boiler_in_w * 100.0).clamp(0.0, 96.0);
 
         // Status code: 0 = SYNC_NOMINAL, 1 = ISLAND_OR_RUNUP, 2 = ALARM_VIB_OR_TEMP,
-        //              3 = TRIP_OVERSPEED, 4 = TRIP_THERMAL, 5 = TRIP_VIBRATION, 6 = TRIP_MANUAL
+        //              3 = TRIP_OVERSPEED, 4 = TRIP_THERMAL, 5 = TRIP_VIBRATION, 6 = TRIP_MANUAL,
+        //              7 = TRIP_POLE_SLIP (generator out of step, off the bus until the breaker is opened)
         let max_vib = lat.front_vib_um_pp.max(lat.rear_vib_um_pp);
         let max_brg_t = th.temps_k[TH_FRONT_BEARING].max(th.temps_k[TH_REAR_BEARING]);
         let status_code = if gov.overspeed_tripped {
@@ -708,6 +709,8 @@ impl SteamTurbineSim {
             5.0
         } else if gov.manual_trip_flag() {
             6.0
+        } else if gen_st.out_of_step_tripped {
+            7.0
         } else if max_vib > 140.0 || max_brg_t > 383.15 || lat.spectral_abscissa_per_s > 0.0 {
             2.0
         } else if !gen_st.breaker_closed || rpm < 2_850.0 {
@@ -1132,6 +1135,212 @@ mod tests {
         );
     }
 
+    /// Excitation moves reactive power, not real power: from the machine equations the generator
+    /// must absorb VArs under-excited and export them over-excited, its reactive power must match
+    /// the classical `(E V cos(delta) - V^2) / X`, and its line current must carry `|S|`.
+    #[test]
+    fn generator_reactive_power_and_current_follow_the_machine_equations() {
+        let gen_model = crate::components::SynchronousGeneratorComponent::new();
+        let x = gen_model.reactance_ohm();
+        let v = gen_model.nominal_voltage_v;
+        let mut rows = Vec::new();
+        for exc in [0.8, 1.3] {
+            let mut sim = SteamTurbineSim::new();
+            sim.set_excitation_pu(exc);
+            for _ in 0..60 {
+                assert!(sim.step(0.05), "{}", sim.last_error());
+            }
+            let g = sim.plant.generator_state();
+            let q_classical = (exc * v * v * g.load_angle_rad.cos() - v * v) / x;
+            let s_mag = g.elec_power_w.hypot(g.reactive_power_var);
+            let s_from_i = 3.0_f64.sqrt() * v * g.line_current_a;
+            eprintln!(
+                "exc {exc}: P {:.2} MW, Q {:.2} MVAr (classical {:.2}), delta {:.2} deg, |S| {:.2} vs sqrt3 V I {:.2} MVA",
+                g.elec_power_w * 1e-6,
+                g.reactive_power_var * 1e-6,
+                q_classical * 1e-6,
+                g.load_angle_rad.to_degrees(),
+                s_mag * 1e-6,
+                s_from_i * 1e-6
+            );
+            assert!(
+                (g.reactive_power_var - q_classical).abs() < 0.03 * q_classical.abs() + 0.5e6,
+                "Q {} vs classical {}",
+                g.reactive_power_var,
+                q_classical
+            );
+            assert!(
+                (s_mag - s_from_i).abs() < 0.015 * s_mag,
+                "|S| {s_mag} vs sqrt3 V I {s_from_i}"
+            );
+            rows.push((g.elec_power_w, g.reactive_power_var, g.load_angle_rad));
+        }
+        let ((p_lo, q_lo, d_lo), (p_hi, q_hi, d_hi)) = (rows[0], rows[1]);
+        assert!(
+            q_lo < -20.0e6 && q_hi > 20.0e6,
+            "Q under/over-excited: {q_lo} / {q_hi} VAr"
+        );
+        assert!(
+            (p_lo - p_hi).abs() < 0.01 * p_hi,
+            "real power must not follow excitation: {p_lo} vs {p_hi}"
+        );
+        assert!(
+            d_lo > d_hi,
+            "weaker field needs a larger load angle: {d_lo} vs {d_hi}"
+        );
+    }
+
+    /// After a step in excitation the whole plant must swing against the bus near the
+    /// electromechanical frequency sqrt(K_s / J), K_s = E V cos(delta) / (X omega_s), and the
+    /// swing must decay. The machine once had a 230 pu damper and could not swing at all.
+    /// In the plant the governor's 4% droop acts through the steam chest's lag (about 0.2 s),
+    /// which above its corner frequency works as an extra spring: the plant swings about 7%
+    /// faster than the bare machine, so the band is [0.97, 1.15] of sqrt(K_s / J). The bare
+    /// machine is held to 1% by `generator_alone_swings_and_decays_as_its_constants_predict`.
+    #[test]
+    fn generator_swings_at_the_electromechanical_frequency_and_decays() {
+        let mut sim = SteamTurbineSim::new();
+        for _ in 0..40 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+        }
+        let exc = 1.15;
+        sim.set_excitation_pu(exc);
+        let dt = 0.005;
+        let mut delta = Vec::new();
+        for _ in 0..600 {
+            assert!(sim.step(dt), "{}", sim.last_error());
+            delta.push(sim.plant.generator_state().load_angle_rad);
+        }
+        let peaks: Vec<usize> = (1..delta.len() - 1)
+            .filter(|&k| delta[k] > delta[k - 1] && delta[k] >= delta[k + 1])
+            .collect();
+        assert!(peaks.len() >= 4, "expected a swing, got peaks at {peaks:?}");
+        let period_s = (peaks[peaks.len() - 1] - peaks[0]) as f64 * dt / (peaks.len() - 1) as f64;
+        let gen_model = crate::components::SynchronousGeneratorComponent::new();
+        let v = gen_model.nominal_voltage_v;
+        let delta_eq = *delta.last().unwrap();
+        let k_s =
+            exc * v * v * delta_eq.cos() / (gen_model.reactance_ohm() * gen_model.sync_omega_rad_s);
+        let geom = crate::geometry_catalog();
+        let j = geom.rotor_props.polar_inertia_kg_m2
+            + crate::system_assembly::GENERATOR_ROTOR_INERTIA_KG_M2;
+        let f_expected = (k_s / j).sqrt() / (2.0 * std::f64::consts::PI);
+        let f_seen = 1.0 / period_s;
+        eprintln!(
+            "swing {f_seen:.3} Hz vs sqrt(K_s/J) {f_expected:.3} Hz (K_s {k_s:.3e} N m/rad, J {j:.0} kg m^2)"
+        );
+        assert!(
+            f_seen > 0.97 * f_expected && f_seen < 1.15 * f_expected,
+            "swing {f_seen} Hz vs {f_expected} Hz"
+        );
+        let amp = |k: usize| delta[k] - delta_eq;
+        assert!(
+            amp(peaks[3]) < 0.7 * amp(peaks[0]),
+            "swing must decay: {} -> {}",
+            amp(peaks[0]),
+            amp(peaks[3])
+        );
+    }
+
+    /// The generator alone on a rigid rotor of the plant's inertia, driven by a constant torque
+    /// that balances it at 50 MW: kicked 3 degrees off its operating point, the load angle must
+    /// ring at the damped frequency sqrt(K_s / J - sigma^2), K_s = E V cos(delta_0) / (X omega_s),
+    /// and decay at sigma = D / (2 J), D being the amortisseur coefficient.
+    #[test]
+    fn generator_alone_swings_and_decays_as_its_constants_predict() {
+        use crate::components::{GeneratorState, SynchronousGeneratorComponent};
+        use fs_ports::component::Component;
+        let g = SynchronousGeneratorComponent::new();
+        let (ws, v, exc, dt) = (g.sync_omega_rad_s, g.nominal_voltage_v, 1.05, 1.0e-3);
+        let j = geometry_catalog().rotor_props.polar_inertia_kg_m2
+            + crate::system_assembly::GENERATOR_ROTOR_INERTIA_KG_M2;
+        let step = |st: &GeneratorState, omega: f64| {
+            let inputs = [-omega, v, 308.15, 1.0, exc, 50.0];
+            let mut next = *st;
+            let mut out = [0.0; 3];
+            with_clock_free_cx(|cx| g.propose(st, dt, &inputs, &mut next, &mut out, cx))
+                .expect("generator step");
+            (next, out[0])
+        };
+        let st0 = g.initial_state(ws, 50.0e6, exc);
+        let delta0 = st0.load_angle_rad;
+        let tau_mech = -step(&st0, ws).1;
+        let mut st = st0;
+        st.load_angle_rad += 3.0_f64.to_radians();
+        let mut omega = ws;
+        let mut dev = Vec::new();
+        for _ in 0..4_000 {
+            let (next, tau_gen) = step(&st, omega);
+            omega += dt * (tau_mech + tau_gen) / j;
+            st = next;
+            dev.push(st.load_angle_rad - delta0);
+        }
+        let peaks: Vec<usize> = (1..dev.len() - 1)
+            .filter(|&k| dev[k] > dev[k - 1] && dev[k] >= dev[k + 1])
+            .collect();
+        assert!(peaks.len() >= 5, "expected a swing, got peaks at {peaks:?}");
+        let n = peaks.len() - 1;
+        let period_s = (peaks[n] - peaks[0]) as f64 * dt / n as f64;
+        let sigma_seen = (dev[peaks[0]] / dev[peaks[n]]).ln() / (n as f64 * period_s);
+
+        let k_s = exc * v * v * delta0.cos() / (g.reactance_ohm() * ws);
+        let sigma = g.amortisseur_damping_nm_s_per_rad / (2.0 * j);
+        let f_expected = (k_s / j - sigma * sigma).sqrt() / (2.0 * std::f64::consts::PI);
+        let f_seen = 1.0 / period_s;
+        eprintln!(
+            "bare machine: {f_seen:.4} Hz vs {f_expected:.4} Hz, decay {sigma_seen:.4} vs {sigma:.4} 1/s"
+        );
+        assert!(
+            (f_seen - f_expected).abs() < 0.01 * f_expected,
+            "swing {f_seen} Hz vs {f_expected} Hz"
+        );
+        assert!(
+            (sigma_seen - sigma).abs() < 0.10 * sigma,
+            "decay {sigma_seen} 1/s vs {sigma} 1/s"
+        );
+    }
+
+    /// A pole slip (|delta| > pi) trips the machine off the bus, it stays off while the breaker
+    /// stays closed, and opening the breaker clears the latch.
+    #[test]
+    fn generator_pole_slip_trips_until_the_breaker_is_opened() {
+        use crate::components::SynchronousGeneratorComponent;
+        use fs_ports::component::Component;
+        let g = SynchronousGeneratorComponent::new();
+        let ws = g.sync_omega_rad_s;
+        let mut st = g.initial_state(ws, 50.0e6, 1.05);
+        st.load_angle_rad = 3.0;
+        let run = |st: &crate::components::GeneratorState, omega: f64, breaker: f64| {
+            let inputs = [-omega, 11_000.0, 308.15, breaker, 1.05, 50.0];
+            let mut next = *st;
+            let mut out = [0.0; 3];
+            with_clock_free_cx(|cx| g.propose(st, 0.02, &inputs, &mut next, &mut out, cx))
+                .expect("generator step");
+            next
+        };
+        let st = run(&st, ws + 20.0, 1.0); // delta 3.0 + 0.4 rad: past pi
+        // Current flows during the slipping step itself; the trip takes effect at its end.
+        assert!(
+            st.out_of_step_tripped && !st.breaker_closed,
+            "slip must trip: {st:?}"
+        );
+        let st = run(&st, ws, 1.0);
+        assert!(
+            st.out_of_step_tripped && st.line_current_a == 0.0,
+            "trip must latch: {st:?}"
+        );
+        let st = run(&st, ws, 0.0);
+        assert!(
+            !st.out_of_step_tripped,
+            "opening the breaker must clear the trip: {st:?}"
+        );
+        let st = run(&st, ws, 1.0);
+        assert!(
+            st.breaker_closed && !st.out_of_step_tripped,
+            "re-closing must reconnect: {st:?}"
+        );
+    }
+
     #[test]
     fn load_rejection_triggers_speed_surge_and_governor_catch() {
         let mut sim = SteamTurbineSim::new();
@@ -1167,16 +1376,32 @@ mod tests {
     #[test]
     fn condenser_air_ingress_degrades_htc_raises_vacuum_pressure_and_cuts_power() {
         let mut sim = SteamTurbineSim::new();
-        for _ in 0..30 {
+        // MW is averaged over the last 0.5 s / 1 s: the generator swings against the bus (2.5 Hz,
+        // damping ratio ~0.12) as the warm start settles, so one instant is not the level.
+        let mut base_mw = 0.0;
+        for k in 0..30 {
             assert!(sim.step(0.05));
+            if k >= 20 {
+                base_mw += sim.snapshot()[5] / 10.0;
+            }
         }
-        let base = sim.snapshot();
+        let mut base = sim.snapshot();
+        base[5] = base_mw;
         // Inject 18% non-condensable air into the condenser shell (Colburn-Hougen blanketing!)
         sim.set_condenser_air_fraction(0.18);
-        for _ in 0..120 {
-            assert!(sim.step(0.10), "air ingress step failed: {}", sim.last_error());
+        let mut degraded_mw = 0.0;
+        for k in 0..120 {
+            assert!(
+                sim.step(0.10),
+                "air ingress step failed: {}",
+                sim.last_error()
+            );
+            if k >= 110 {
+                degraded_mw += sim.snapshot()[5] / 10.0;
+            }
         }
-        let degraded = sim.snapshot();
+        let mut degraded = sim.snapshot();
+        degraded[5] = degraded_mw;
         // Thresholds restated 2026-11-25 with the condenser energy fix (frankensim-89y9b.1): the
         // shell now rejects m (h_in - h_f), about 7% less than the old q = m h_fg, so the same
         // air raises the pressure less (8.8 -> 13.7 kPa) and costs 1.46 MW, not more.
@@ -1192,8 +1417,11 @@ mod tests {
             base[19],
             degraded[19]
         );
+        // Restated again with frankensim-89y9b.6/.9: the meanline's leaving loss falls as the exhaust
+        // densifies and offsets part of the lost isentropic drop (see the node test), so 18% air
+        // costs about 1.0 MW (51.34 -> 50.34 MW, window means).
         assert!(
-            degraded[5] < base[5] - 1.0,
+            degraded[5] < base[5] - 0.8,
             "Lost condenser vacuum must reduce emergent electrical MW: before={}, after={}",
             base[5],
             degraded[5]

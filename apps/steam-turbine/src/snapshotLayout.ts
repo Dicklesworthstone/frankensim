@@ -16,6 +16,7 @@ export const STATUS_LABELS: Record<number, { text: string; tone: "nominal" | "is
   4: { text: "TRIP: THERMAL", tone: "trip" },
   5: { text: "TRIP: VIBRATION", tone: "trip" },
   6: { text: "TRIP: MANUAL ESV", tone: "trip" },
+  7: { text: "TRIP: POLE SLIP", tone: "trip" },
 };
 
 export interface TurbineSnapshot {

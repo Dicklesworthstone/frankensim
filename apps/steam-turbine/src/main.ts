@@ -530,6 +530,7 @@ async function boot(): Promise<void> {
   bindSlider("sl-gain", "val-gain", (v) => `${v.toFixed(1)}×`, (v) => sim.set_mic_gain(v));
 
   let breakerClosed = true;
+  let breakerShowsTrip = false;
   const syncBreakerBtn = (closed: boolean) => {
     breakerClosed = closed;
     btnBreaker.textContent = closed ? "11 kV Breaker: CLOSED" : "11 kV Breaker: OPEN";
@@ -854,6 +855,15 @@ async function boot(): Promise<void> {
   };
 
   // ---------- Main Animation & Telemetry Loop ----------
+  // Reactive power delivered to the bus and the power factor: over-excited the machine exports
+  // VArs (lagging), under-excited it absorbs them (leading).
+  const reactiveText = (pMw: number, qMvar: number) => {
+    const sMva = Math.hypot(pMw, qMvar);
+    const q = `${qMvar >= 0 ? "+" : "−"}${Math.abs(qMvar).toFixed(1)} MVAr`;
+    if (sMva < 0.1) return `${q} · —`;
+    return `${q} · pf ${(Math.abs(pMw) / sMva).toFixed(3)} ${qMvar >= 0 ? "lag" : "lead"}`;
+  };
+
   const updateHud = (snap: TurbineSnapshot, stages: StageTelemetry[]) => {
     kpiRpm.innerHTML = `${Math.round(snap.rpm).toLocaleString()}<small>rpm</small>`;
     kpiMw.innerHTML = `${snap.elecMw.toFixed(1)}<small>MW</small>`;
@@ -869,6 +879,20 @@ async function boot(): Promise<void> {
     mkpiText.textContent = `${Math.round(snap.rpm).toLocaleString()} rpm · ${snap.elecMw.toFixed(1)} MW · ${snap.elecEffPct.toFixed(0)}% η · ${maxVib.toFixed(0)} µm`;
     mkpiStatus.textContent = st.text;
     mkpiStatus.className = `status-pill status-${st.tone}`;
+
+    // Out-of-step protection opens the generator breaker by itself; the operator clears the
+    // trip by opening the breaker, then closes it again to resynchronize.
+    const protectionOpen = breakerClosed && !snap.breakerClosed;
+    if (protectionOpen !== breakerShowsTrip) {
+      breakerShowsTrip = protectionOpen;
+      if (protectionOpen) {
+        btnBreaker.textContent = "11 kV Breaker: TRIPPED (pole slip)";
+        btnBreaker.classList.toggle("state-on", false);
+        btnBreaker.classList.toggle("state-off", true);
+      } else {
+        syncBreakerBtn(breakerClosed);
+      }
+    }
 
     if (activeRightTab === "thermo") {
       badgeMoisture.textContent = `x = ${snap.lpQualityX.toFixed(3)}`;
@@ -893,6 +917,7 @@ async function boot(): Promise<void> {
           v: `${(snap.cvLift * 100).toFixed(0)}% / ${(snap.esvOpen * 100).toFixed(0)}% / ${(snap.extLift * 100).toFixed(0)}%`,
         },
         { k: "Gen δ / Current", v: `${snap.loadAngleDeg.toFixed(1)}° · ${(snap.statorCurrentA / 1000).toFixed(2)} kA` },
+        { k: "Gen Q / Power Factor", v: reactiveText(snap.elecMw, snap.reactiveMvar) },
         { k: "Axial Thrust / Windage", v: `${snap.axialThrustKn.toFixed(1)} kN · ${snap.windageKw.toFixed(0)} kW` },
       ]);
     } else if (activeRightTab === "rotor") {

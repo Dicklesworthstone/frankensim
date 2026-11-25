@@ -40,10 +40,7 @@ use fs_exec::Cx;
 use fs_multiphase::condensation::{
     CondensationGeometryV1, CondensationModelV1, NonCondensableGasV1,
 };
-use fs_phs::SolveBudget;
-use fs_phs::circuit::synchronous::{
-    PreparedSynchronousMotor, SynchronousMotor, SynchronousMotorParameters,
-};
+use fs_phs::circuit::synchronous::{SynchronousMotor, SynchronousMotorParameters};
 use fs_ports::component::{
     Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, STREAM_CARRIED,
     STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, STREAM_PRESSURE, STREAM_SPECIFIC_ENTHALPY,
@@ -1419,25 +1416,53 @@ impl Component for JournalBearingComponent {
 // 7. SynchronousGeneratorComponent (fs-phs SynchronousMotor + M19 Steinmetz + IACS Cu)
 // ---------------------------------------------------------------------------
 
-/// 2-pole, 50 Hz, 11 kV / 60 MVA industrial synchronous turbo-generator.
+/// 2-pole, 50 Hz, 11 kV / 60 MVA synchronous turbo-generator on an infinite bus, in the
+/// classical stability model: a constant EMF `E'` behind the transient reactance `x'_d` plus
+/// the step-up transformer's `x_t`, with stator transients neglected (quasi-steady d-q).
 ///
-/// Uses FrankenSim's 5-state discrete-gradient [`fs_phs::circuit::synchronous::SynchronousMotor`]
-/// to evaluate electromagnetic flux linkage & d-q currents, coupled with M19 silicon steel
-/// Steinmetz core losses and IACS copper winding losses from `materials::library().generator`.
+/// The machine is an [`fs_phs::circuit::synchronous::SynchronousMotor`] whose field linkage is
+/// `psi = E' / omega_s` and whose (round-rotor) inductance is `(x'_d + x_t) / omega_s`. Each step
+/// solves the stator voltage equations against the bus phasor at the load angle `delta`,
+///   `v_d = R i_d - X i_q`,  `v_q = R i_q + X i_d + omega psi`,  `(v_d, v_q) = V (sin delta, cos delta)`,
+/// builds the machine state from the resulting flux linkages and takes the electromagnetic torque,
+/// currents and copper loss from `SynchronousMotor::operating_point`. Reactive power, line
+/// current and pull-out follow from the same equations; nothing is a fitted torque map. The
+/// amortisseur damping is the one lumped machine coefficient. A pole slip (`|delta| > pi`)
+/// trips the machine off the bus (out-of-step protection) until the breaker is opened and
+/// closed again.
 pub struct SynchronousGeneratorComponent {
     ports: [PortSpec; 4],
-    phs_machine: RefCell<PreparedSynchronousMotor>,
+    /// fs-phs machine for the last field linkage used, rebuilt when the excitation changes.
+    phs_machine: RefCell<Option<(f64, SynchronousMotor)>>,
     pub sync_omega_rad_s: f64,
     pub nominal_voltage_v: f64,
+    pub rated_va: f64,
+    /// Transient d-axis reactance [pu] (turbo-generators: 0.2..0.3).
+    pub x_d_transient_pu: f64,
+    /// Step-up transformer leakage reactance [pu].
+    pub x_transformer_pu: f64,
+    /// Armature resistance at `T_REF_K` [pu].
+    pub r_armature_pu: f64,
     pub stator_core_mass_kg: f64,
-    pub winding_resistance_ref_ohm: f64,
-    pub synchronizing_torque_nm_per_rad: f64,
     pub amortisseur_damping_nm_s_per_rad: f64,
+}
+
+/// Electrical solution of the generator at one load angle.
+#[derive(Debug, Clone, Copy)]
+struct GeneratorSolution {
+    /// Electromagnetic torque ON the rotor [N m] (negative while generating).
+    torque_nm: f64,
+    current_dq_a: [f64; 2],
+    flux_dq_wb: [f64; 2],
+    /// Reactive power delivered to the bus [VAr].
+    q_out_var: f64,
+    copper_loss_w: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct GeneratorState {
-    /// 5-state PHS synchronous machine coordinate `[lambda_alpha, lambda_beta, theta, p_r, p_s]`.
+    /// fs-phs machine state at the operating point, rotor-aligned (`theta = 0`):
+    /// `[lambda_d, lambda_q, 0, p_rotor, p_stator]`.
     pub phs_x: [f64; 5],
     /// Power/load angle `δ` relative to the 50 Hz infinite bus [rad].
     pub load_angle_rad: f64,
@@ -1453,26 +1478,13 @@ pub struct GeneratorState {
     pub copper_loss_w: f64,
     pub breaker_closed: bool,
     pub em_torque_nm: f64,
+    /// Latched by a pole slip (`|delta| > pi`); cleared when the breaker is opened.
+    pub out_of_step_tripped: bool,
 }
 
 impl SynchronousGeneratorComponent {
     #[must_use]
     pub fn new() -> Self {
-        // 2-pole (pole_pairs = 1) 50 Hz synchronous machine scaled to 11 kV / 60 MVA
-        let params = SynchronousMotorParameters {
-            d_inductance_h: 0.0085,
-            q_inductance_h: 0.0080,
-            winding_resistance_ohm: 0.012,
-            pm_flux_linkage_wb: 35.0, // power-invariant 11 kV / 314.16 rad/s ≈ 35 Wb!
-            pole_pairs: 1,
-            rotor_inertia_kg_m2: 180.0,
-            stator_inertia_kg_m2: 1.0e7,
-            bearing_drag_nm_s_per_rad: 0.0,
-        };
-        let motor = SynchronousMotor::new(params).expect("valid 2-pole synchronous generator");
-        let prepared = motor
-            .prepare_controlled(SolveBudget::default(), 6, || false)
-            .expect("prepared PHS synchronous generator");
         Self {
             ports: [
                 PortSpec::power(
@@ -1492,35 +1504,153 @@ impl SynchronousGeneratorComponent {
                 PortSpec::heat(sid("cooler_heat"), PortRole::EffortIn).expect("gen cooler port"),
                 PortSpec::signal_in(sid("controls"), nz(3)),
             ],
-            phs_machine: RefCell::new(prepared),
+            phs_machine: RefCell::new(None),
             sync_omega_rad_s: 100.0 * PI, // 3,000 rpm = 50 Hz 2-pole
             nominal_voltage_v: 11_000.0,
+            rated_va: 60.0e6,
+            x_d_transient_pu: 0.25,
+            x_transformer_pu: 0.10,
+            r_armature_pu: 0.003,
             stator_core_mass_kg: 14_500.0,
-            winding_resistance_ref_ohm: 0.012,
-            // Strong infinite-bus synchronizing torque (~180 MW/rad -> ~16° load angle at 50 MW!)
-            synchronizing_torque_nm_per_rad: 5.8e5,
-            amortisseur_damping_nm_s_per_rad: 1.4e5,
+            // Damper-winding torque coefficient D = 15 pu (P_pu per unit speed deviation; machines
+            // with amortisseurs: about 2..20), i.e. D_pu * S / omega_s^2. It was 1.4e5 N m s/rad
+            // (230 pu), which over-damped the electromechanical mode (damping ratio 1.85).
+            amortisseur_damping_nm_s_per_rad: 15.0 * 60.0e6 / (100.0 * PI * 100.0 * PI),
         }
     }
 
+    /// Excitation range the field system accepts [pu].
+    const EXCITATION_RANGE_PU: (f64, f64) = (0.4, 1.5);
+
+    /// M19 silicon-steel stator core loss [W] at shaft speed `omega_shaft` and field
+    /// `excitation_pu` (Steinmetz parameters from matdb).
+    fn core_loss_w(&self, omega_shaft: f64, excitation_pu: f64) -> f64 {
+        let f_elec = omega_shaft.abs() / (2.0 * PI);
+        let b_peak_t = (1.35 * excitation_pu).clamp(0.2, 1.75);
+        self.stator_core_mass_kg * library().generator.m19_specific_core_loss(f_elec, b_peak_t)
+    }
+
+    fn base_impedance_ohm(&self) -> f64 {
+        self.nominal_voltage_v * self.nominal_voltage_v / self.rated_va
+    }
+
+    /// Series reactance from the EMF to the bus at grid frequency [ohm].
     #[must_use]
-    pub fn initial_state(&self, omega_rad_s: f64, initial_power_w: f64) -> GeneratorState {
-        let delta = (initial_power_w / (self.synchronizing_torque_nm_per_rad * self.sync_omega_rad_s))
-            .clamp(-0.8, 0.8)
+    pub fn reactance_ohm(&self) -> f64 {
+        (self.x_d_transient_pu + self.x_transformer_pu) * self.base_impedance_ohm()
+    }
+
+    /// Field linkage giving an EMF of `excitation_pu` times the nominal bus voltage at
+    /// synchronous speed [Wb, power-invariant].
+    #[must_use]
+    pub fn field_linkage_wb(&self, excitation_pu: f64) -> f64 {
+        excitation_pu * self.nominal_voltage_v / self.sync_omega_rad_s
+    }
+
+    fn with_machine<R>(
+        &self,
+        psi_wb: f64,
+        f: impl FnOnce(&SynchronousMotor) -> R,
+    ) -> Result<R, TurbineComponentError> {
+        let mut slot = self.phs_machine.borrow_mut();
+        let stale = !matches!(&*slot, Some((psi, _)) if *psi == psi_wb);
+        if stale {
+            let l = self.reactance_ohm() / self.sync_omega_rad_s;
+            let params = SynchronousMotorParameters {
+                d_inductance_h: l,
+                q_inductance_h: l,
+                winding_resistance_ohm: self.r_armature_pu * self.base_impedance_ohm(),
+                pm_flux_linkage_wb: psi_wb,
+                pole_pairs: 1,
+                rotor_inertia_kg_m2: 180.0,
+                stator_inertia_kg_m2: 1.0e7,
+                bearing_drag_nm_s_per_rad: 0.0,
+            };
+            let motor = SynchronousMotor::new(params).map_err(|_| {
+                TurbineComponentError::InvalidState("fs-phs generator parameters refused")
+            })?;
+            *slot = Some((psi_wb, motor));
+        }
+        Ok(f(&slot.as_ref().expect("machine just built").1))
+    }
+
+    /// Quasi-steady stator solution at load angle `delta_rad`, shaft speed `omega_shaft`, bus
+    /// voltage `v_bus` and winding resistance `r_ohm`.
+    fn solve_electrical(
+        &self,
+        delta_rad: f64,
+        omega_shaft: f64,
+        v_bus: f64,
+        excitation_pu: f64,
+        r_ohm: f64,
+    ) -> Result<GeneratorSolution, TurbineComponentError> {
+        let x = self.reactance_ohm();
+        let l = x / self.sync_omega_rad_s;
+        let psi = self.field_linkage_wb(excitation_pu);
+        let e = omega_shaft * psi;
+        let (sd, cd) = delta_rad.sin_cos();
+        let (v_d, v_q) = (v_bus * sd, v_bus * cd);
+        let det = r_ohm * r_ohm + x * x;
+        let i_d = (r_ohm * v_d + x * (v_q - e)) / det;
+        let i_q = (r_ohm * (v_q - e) - x * v_d) / det;
+        let flux = [psi + l * i_d, l * i_q];
+        // Machine state at the rotor-aligned frame (theta = 0): [lambda_alpha, lambda_beta,
+        // theta, p_rotor, p_stator].
+        let state = [flux[0], flux[1], 0.0, 180.0 * omega_shaft, 0.0];
+        let op = self
+            .with_machine(psi, |m| m.operating_point(&state))?
+            .map_err(|_| {
+                TurbineComponentError::InvalidState("fs-phs generator operating point refused")
+            })?;
+        let [id, iq] = op.current_dq_a;
+        Ok(GeneratorSolution {
+            torque_nm: op.electromagnetic_torque_nm,
+            current_dq_a: op.current_dq_a,
+            flux_dq_wb: op.flux_dq_wb,
+            q_out_var: v_d * iq - v_q * id,
+            copper_loss_w: r_ohm * (id * id + iq * iq),
+        })
+    }
+
+    /// Steady operating state exporting `initial_power_w` at `excitation_pu` on the nominal bus.
+    #[must_use]
+    pub fn initial_state(
+        &self,
+        omega_rad_s: f64,
+        initial_power_w: f64,
+        excitation_pu: f64,
+    ) -> GeneratorState {
+        let (exc_lo, exc_hi) = Self::EXCITATION_RANGE_PU;
+        let excitation_pu = excitation_pu.clamp(exc_lo, exc_hi);
+        let v = self.nominal_voltage_v;
+        let e = excitation_pu * v;
+        let delta = (initial_power_w * self.reactance_ohm() / (e * v))
+            .clamp(-0.95, 0.95)
             .asin();
-        let i_q = -initial_power_w / (self.nominal_voltage_v.max(1.0));
-        let phs_x = [35.0, 0.008 * i_q, delta, 180.0 * omega_rad_s, 0.0];
+        let r = self.r_armature_pu * self.base_impedance_ohm();
+        let sol = self
+            .solve_electrical(delta, self.sync_omega_rad_s, v, excitation_pu, r)
+            .expect("generator initial operating point");
+        let [id, iq] = sol.current_dq_a;
+        let core_loss_w = self.core_loss_w(omega_rad_s, excitation_pu);
         GeneratorState {
-            phs_x,
+            phs_x: [
+                sol.flux_dq_wb[0],
+                sol.flux_dq_wb[1],
+                0.0,
+                180.0 * omega_rad_s,
+                0.0,
+            ],
             load_angle_rad: delta,
             elec_power_w: initial_power_w,
-            reactive_power_var: 0.25 * initial_power_w,
-            line_current_a: initial_power_w / (1.732 * self.nominal_voltage_v),
-            total_loss_w: 650_000.0,
-            core_loss_w: 220_000.0,
-            copper_loss_w: 430_000.0,
+            reactive_power_var: sol.q_out_var,
+            line_current_a: id.hypot(iq) / 3.0_f64.sqrt(),
+            total_loss_w: sol.copper_loss_w + core_loss_w,
+            core_loss_w,
+            copper_loss_w: sol.copper_loss_w,
             breaker_closed: true,
-            em_torque_nm: -initial_power_w / omega_rad_s.max(1.0),
+            em_torque_nm: sol.torque_nm,
+            out_of_step_tripped: false,
         }
     }
 }
@@ -1564,101 +1694,93 @@ impl Component for SynchronousGeneratorComponent {
         let v_bus = inputs[1].max(100.0);
         let t_cool = inputs[2].clamp(285.0, 500.0);
         let breaker_closed = inputs[3] >= 0.5;
-        let excitation_pu = inputs[4].clamp(0.4, 1.5);
+        let (exc_lo, exc_hi) = Self::EXCITATION_RANGE_PU;
+        let excitation_pu = inputs[4].clamp(exc_lo, exc_hi);
         let grid_omega = 2.0 * PI * inputs[5].clamp(45.0, 65.0);
 
         let lib = library();
-        let f_elec = omega_shaft.abs() / (2.0 * PI);
-        // M19 silicon steel stator core loss from matdb Steinmetz parameters!
-        let b_peak_t = (1.35 * excitation_pu).clamp(0.2, 1.75);
-        let core_loss_w =
-            self.stator_core_mass_kg * lib.generator.m19_specific_core_loss(f_elec, b_peak_t);
+        let core_loss_w = self.core_loss_w(omega_shaft, excitation_pu);
 
-        let synced = breaker_closed && omega_shaft > 20.0;
-        let (delta_new, tau_em_on_shaft, _elec_out_w, q_var, i_rms, cu_loss_w, phs_next) =
+        // Out-of-step protection: a pole slip latches the machine off the bus until the breaker
+        // is opened by the operator.
+        let tripped = breaker_closed && old.out_of_step_tripped;
+        let synced = breaker_closed && !tripped && omega_shaft > 20.0;
+        let r_cu = self.r_armature_pu
+            * self.base_impedance_ohm()
+            * (lib.generator.copper_resistivity(t_cool + 35.0)
+                / lib.generator.copper_resistivity(T_REF_K));
+        let (delta_new, tau_on_shaft, q_var, i_rms, cu_loss_w, damper_heat_w, phs_next, slipped) =
             if synced {
-                // Advance power angle δ relative to infinite bus (`dδ/dt = ω_shaft - ω_grid`)
-                let delta_new = (old.load_angle_rad + dt_s * (omega_shaft - grid_omega))
-                    .clamp(-1.35, 1.35);
+                // Load angle against the infinite bus: d(delta)/dt = omega_shaft - omega_grid.
+                let delta_new = old.load_angle_rad + dt_s * (omega_shaft - grid_omega);
                 let delta_mid = 0.5 * (old.load_angle_rad + delta_new);
-                // Classical synchronous synchronizing + damper-winding torque
-                let tau_sync = excitation_pu * self.synchronizing_torque_nm_per_rad * delta_mid.sin()
-                    + self.amortisseur_damping_nm_s_per_rad * (omega_shaft - grid_omega);
-                // Core loss also adds small braking drag on shaft
-                let tau_core = core_loss_w / omega_shaft;
-                let tau_total_mag = tau_sync + tau_core;
-                let tau_on_shaft = -tau_total_mag;
-                let p_mech_in = (-omega_shaft) * tau_on_shaft; // == tau_total_mag * omega_shaft
-
-                // Evaluate PHS synchronous machine operating point at current d-q flux & angle
-                let i_q_equiv = -(p_mech_in / v_bus.max(1_000.0)).clamp(-6_000.0, 6_000.0);
-                let i_d_equiv = ((excitation_pu - 1.0) * 1_800.0).clamp(-3_000.0, 3_000.0);
-                let phs_next = {
-                    let mach = self.phs_machine.borrow();
-                    let p = mach.parameters();
-                    let lam_d = p.pm_flux_linkage_wb + p.d_inductance_h * i_d_equiv;
-                    let lam_q = p.q_inductance_h * i_q_equiv;
-                    let (s, c) = delta_mid.sin_cos();
-                    let next = [
-                        c * lam_d - s * lam_q,
-                        s * lam_d + c * lam_q,
-                        delta_new,
-                        p.rotor_inertia_kg_m2 * omega_shaft,
+                let sol =
+                    self.solve_electrical(delta_mid, omega_shaft, v_bus, excitation_pu, r_cu)?;
+                // Amortisseur (damper-winding) torque on the slip; its slip power is heat.
+                let slip = omega_shaft - grid_omega;
+                let tau_damper = -self.amortisseur_damping_nm_s_per_rad * slip;
+                let tau_core = -core_loss_w / omega_shaft;
+                let [id, iq] = sol.current_dq_a;
+                (
+                    delta_new,
+                    sol.torque_nm + tau_damper + tau_core,
+                    sol.q_out_var,
+                    id.hypot(iq) / 3.0_f64.sqrt(),
+                    sol.copper_loss_w,
+                    self.amortisseur_damping_nm_s_per_rad * slip * slip,
+                    [
+                        sol.flux_dq_wb[0],
+                        sol.flux_dq_wb[1],
                         0.0,
-                    ];
-                    let _ = mach.operating_point(&next);
-                    next
-                };
-
-                // Temperature-dependent IACS copper I²R losses
-                let r_cu = self.winding_resistance_ref_ohm
-                    * (lib.generator.copper_resistivity(t_cool + 35.0)
-                        / lib.generator.copper_resistivity(T_REF_K));
-                let i_rms = ((p_mech_in.abs() / (1.732_05 * v_bus)).hypot(i_d_equiv * 0.5)).min(8_000.0);
-                let cu_loss = 3.0 * r_cu * i_rms * i_rms;
-
-                // Exact First-Law split: P_mech_in = P_elec_out + (core_loss + cu_loss)
-                let total_loss = (core_loss_w + cu_loss).min(p_mech_in.abs() + core_loss_w);
-                let p_elec = p_mech_in - total_loss;
-                let q_var = 1.732_05 * v_bus * i_d_equiv * 0.4;
-                (delta_new, tau_on_shaft, p_elec, q_var, i_rms, cu_loss, phs_next)
+                        180.0 * omega_shaft,
+                        0.0,
+                    ],
+                    delta_new.abs() > PI,
+                )
             } else {
-                // Grid breaker OPEN (Load Rejection!) or standstill: electrical current = 0, only open-circuit M19 core drag!
+                // Breaker open, tripped or standstill: no stator current, only open-circuit core drag.
                 let tau_core = if omega_shaft.abs() > 1.0 {
                     -core_loss_w / omega_shaft
                 } else {
                     0.0
                 };
-                (0.0, tau_core, 0.0, 0.0, 0.0, 0.0, old.phs_x)
+                let open_circuit = [
+                    self.field_linkage_wb(excitation_pu),
+                    0.0,
+                    0.0,
+                    180.0 * omega_shaft,
+                    0.0,
+                ];
+                (0.0, tau_core, 0.0, 0.0, 0.0, 0.0, open_circuit, false)
             };
 
-        let total_loss_w = (core_loss_w + cu_loss_w).max(0.0);
-        // Reconcile exact power: port_energy_in = dt * (omega_in * tau + v_bus * i_grid + q_cooler) == 0
-        // Note: power into generator from shaft = omega_in * tau_em_on_shaft
-        let p_shaft_in = omega_in * tau_em_on_shaft;
+        // Exact power balance: shaft power in = grid export + heat to the cooler.
+        let p_shaft_in = omega_in * tau_on_shaft;
         let p_heat_out = if synced {
-            total_loss_w
+            cu_loss_w + core_loss_w + damper_heat_w
         } else {
             p_shaft_in.max(0.0)
         };
-        let p_grid_export = p_shaft_in - p_heat_out; // Positive when generating electricity into grid!
+        let p_grid_export = p_shaft_in - p_heat_out; // Positive when generating into the grid
         let i_grid_into_gen = -p_grid_export / v_bus;
 
-        outputs[0] = tau_em_on_shaft;
+        outputs[0] = tau_on_shaft;
         outputs[1] = i_grid_into_gen;
         outputs[2] = -p_heat_out;
 
+        let out_of_step = breaker_closed && (tripped || slipped);
         *new = GeneratorState {
             phs_x: phs_next,
-            load_angle_rad: delta_new,
+            load_angle_rad: if out_of_step { 0.0 } else { delta_new },
             elec_power_w: p_grid_export,
             reactive_power_var: q_var,
             line_current_a: i_rms,
             total_loss_w: p_heat_out,
             core_loss_w,
             copper_loss_w: cu_loss_w,
-            breaker_closed,
-            em_torque_nm: tau_em_on_shaft,
+            breaker_closed: breaker_closed && !out_of_step,
+            em_torque_nm: tau_on_shaft,
+            out_of_step_tripped: out_of_step,
         };
 
         let s_gen = dt_s * p_heat_out / t_cool;
