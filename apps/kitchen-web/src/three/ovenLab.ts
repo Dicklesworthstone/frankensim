@@ -15,7 +15,7 @@
 
 import * as THREE from "three";
 import { createInitialOvenState, stepOvenKernel, type OvenConfig, type OvenState } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
+import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, glOf, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Ext, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { combiCavity, vessel } from "./models/ovens";
@@ -111,7 +111,7 @@ function darkStudio(r: THREE.WebGLRenderer): THREE.Texture {
   panel(1.2, 6, 0x9fc0ff, 1.1, [-6.5, 2, -4]);
   panel(9, 1.2, 0xffb070, 0.9, [0, 1.2, -8]);
   panel(14, 14, 0x2a1d14, 1, [0, -6, 0]);
-  const pm = new THREE.PMREMGenerator(r);
+  const pm = new THREE.PMREMGenerator(glOf(r));
   const t = pm.fromScene(env, 0.02).texture;
   pm.dispose();
   return t;

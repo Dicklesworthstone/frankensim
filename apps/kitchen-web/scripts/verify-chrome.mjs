@@ -181,26 +181,35 @@ async function main() {
     for (let i = 0; i < sectionIds.length; i += 1) {
       const sid = sectionIds[i];
       const sel = canvasSelectors[i];
-      await page.evaluate((id) => {
-        document.getElementById(id)?.scrollIntoView({ behavior: "instant", block: "center" });
-      }, sid);
+      // The canvas itself, centred: a chapter can hold several figures (06 has three), so centring the section can
+      // leave its canvas off screen, where the view does not draw.
+      await page.evaluate((s) => {
+        document.querySelector(s)?.scrollIntoView({ behavior: "instant", block: "center" });
+      }, sel);
       await sleep(1400);
 
       // Verify non-blank painted pixels inside each canvas bounding box via real compositor screenshot clip
+      // In page coordinates, which a screenshot clip is in (a viewport box clipped the top of the page instead).
       const box = await page.$eval(sel, (el) => {
         const r = el.getBoundingClientRect();
-        return { x: Math.max(0, r.x), y: Math.max(0, r.y), width: r.width, height: r.height };
+        return { x: Math.max(0, r.x + window.scrollX), y: Math.max(0, r.y + window.scrollY), width: r.width, height: r.height };
       });
       if (box.width < 120 || box.height < 120) {
         throw new Error(`Canvas ${sel} collapsed: ${JSON.stringify(box)}`);
       }
-      const hasGl = await page.$eval(sel, (c) => {
-        const ctx = c.getContext("webgl2") || c.getContext("webgl");
-        return Boolean(ctx && !ctx.isContextLost());
-      });
+      // A view draws through the page's shared WebGL renderer (src/three/kit.ts), which marks its canvas live and
+      // marks it lost if the context is lost.
+      const hasGl = await page.$eval(sel, (c) => c.dataset.view === "webgl");
       if (!hasGl) {
         throw new Error(`Canvas ${sel} missing live WebGL context`);
       }
+      // Its first frame: a view waits for its shaders before drawing, and an undrawn stage would pass the clip test.
+      await page
+        .waitForFunction((s) => document.querySelector(s)?.dataset.drawn === "1", { timeout: 20000 }, sel)
+        .catch(() => {
+          throw new Error(`Canvas ${sel} never drew a frame`);
+        });
+      await sleep(400);
       const clipPng = await page.screenshot({
         clip: {
           x: Math.round(box.x),
@@ -209,6 +218,7 @@ async function main() {
           height: Math.min(300, Math.round(box.height)),
         },
       });
+      fs.writeFileSync(path.join(VERIFY_DIR, `clip-${sid}.png`), clipPng);
       if (clipPng.byteLength < 2500) {
         throw new Error(`Canvas ${sel} appears blank (PNG clip only ${clipPng.byteLength} bytes)`);
       }

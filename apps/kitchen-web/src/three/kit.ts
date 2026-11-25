@@ -10,23 +10,195 @@ import { getWispyCloudTexture } from "./textures";
 
 export const ASSET_BASE = `${import.meta.env.BASE_URL}kitchen-assets`;
 
-/** Create an ACESFilmic PBR WebGLRenderer with crisp PCFSoftShadowMap shadows. */
-export function createStudioRenderer(canvas: HTMLCanvasElement, alpha = true): THREE.WebGLRenderer | null {
+/* ------------------------------------------------------------------------------------------------------------ */
+/* One WebGL context for the page                                                                               */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * Every 3D view on the page draws with one WebGLRenderer. With a context each, the nine views linked their own copies
+ * of the shaders they share (355 programs for 220 distinct), uploaded the same textures again (78 of 134 Mpx), built
+ * the studio environment nine times and waited on the GPU to set up each context. A view keeps its own canvas, a 2D
+ * one: its frame is drawn in the lower-left corner of the shared drawing buffer (viewport and scissor at its size)
+ * and copied across unchanged. Its settings (tone mapping, exposure, colour space, shadows, clipping, clear colour,
+ * size, pixel ratio) stay its own and are set on the shared renderer before each of its draws.
+ *
+ * `?gl=each` gives every view its own context again, for comparison.
+ */
+let shared: THREE.WebGLRenderer | null | undefined;
+let bufW = 0;
+let bufH = 0;
+const ownGl = new WeakMap<object, THREE.WebGLRenderer>();
+const EACH = typeof location !== "undefined" && new URLSearchParams(location.search).get("gl") === "each";
+
+function sharedRenderer(): THREE.WebGLRenderer | null {
+  if (shared !== undefined) return shared;
   try {
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha,
-      powerPreference: "high-performance",
-    });
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.06;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    return renderer;
+    shared = new THREE.WebGLRenderer({ canvas: document.createElement("canvas"), antialias: true, alpha: true, powerPreference: "high-performance" });
+    shared.setPixelRatio(1);
   } catch {
+    shared = null;
+  }
+  return shared;
+}
+
+/** The renderer holding a view's GPU state: for passes of its own (an environment map) that must not be copied out. */
+export function glOf(r: THREE.WebGLRenderer): THREE.WebGLRenderer {
+  return ownGl.get(r) ?? r;
+}
+
+/**
+ * A view on `canvas` drawn by the page's shared renderer, standing in for a WebGLRenderer of its own: `render`,
+ * sizing, clear colour and the settings above are the view's; anything else is the shared renderer's.
+ */
+function viewRenderer(canvas: HTMLCanvasElement, alpha: boolean, exposure: number, shadows: boolean): THREE.WebGLRenderer | null {
+  const gl = sharedRenderer();
+  const ctx = gl && canvas.getContext("2d", { alpha });
+  if (!gl || !ctx) return null;
+  let cssW = canvas.clientWidth || canvas.width;
+  let cssH = canvas.clientHeight || canvas.height;
+  let ratio = 1;
+  const clear = new THREE.Color(0x000000);
+  let clearA = alpha ? 0 : 1;
+  const counts = { calls: 0, triangles: 0, points: 0, lines: 0, frame: 0 };
+  const view: Record<string | symbol, unknown> = {
+    domElement: canvas,
+    toneMapping: THREE.ACESFilmicToneMapping,
+    toneMappingExposure: exposure,
+    outputColorSpace: THREE.SRGBColorSpace,
+    localClippingEnabled: false,
+    shadowMap: { enabled: shadows, type: THREE.PCFSoftShadowMap },
+    info: {
+      render: counts,
+      get memory() {
+        return gl.info.memory;
+      },
+      get programs() {
+        return gl.info.programs;
+      },
+    },
+    setPixelRatio(v: number) {
+      ratio = v;
+      size(cssW, cssH, false);
+    },
+    getPixelRatio: () => ratio,
+    setSize: (w: number, h: number, style = true) => size(w, h, style),
+    getSize: (t: THREE.Vector2) => t.set(cssW, cssH),
+    getDrawingBufferSize: (t: THREE.Vector2) => t.set(canvas.width, canvas.height),
+    setClearColor(c: THREE.ColorRepresentation, a = 1) {
+      clear.set(c);
+      clearA = a;
+    },
+    getClearColor: (t: THREE.Color) => t.copy(clear),
+    getClearAlpha: () => clearA,
+    setClearAlpha(a: number) {
+      clearA = a;
+    },
+    compile(scene: THREE.Object3D, camera: THREE.Camera, target?: THREE.Scene | null) {
+      apply();
+      return gl.compile(scene, camera, target);
+    },
+    compileAsync(scene: THREE.Object3D, camera: THREE.Camera, target?: THREE.Scene | null) {
+      apply();
+      return gl.compileAsync(scene, camera, target);
+    },
+    render(scene: THREE.Object3D, camera: THREE.Camera) {
+      const w = canvas.width;
+      const h = canvas.height;
+      if (!w || !h) return;
+      // The shared buffer only grows, to the largest view drawn: resizing it on every switch would reallocate it.
+      if (w > bufW || h > bufH) {
+        bufW = Math.max(bufW, w);
+        bufH = Math.max(bufH, h);
+        gl.setSize(bufW, bufH, false);
+      }
+      apply();
+      gl.setViewport(0, 0, w, h);
+      gl.setScissor(0, 0, w, h);
+      gl.setScissorTest(true);
+      gl.render(scene, camera);
+      const r = gl.info.render;
+      counts.calls = r.calls;
+      counts.triangles = r.triangles;
+      counts.points = r.points;
+      counts.lines = r.lines;
+      counts.frame = r.frame;
+      // "copy": the view's pixels become the frame's exactly (no blending over the last one), alpha and all.
+      ctx.globalCompositeOperation = "copy";
+      ctx.drawImage(gl.domElement, 0, bufH - h, w, h, 0, 0, w, h);
+      // For checks by script: the view has drawn a frame.
+      if (canvas.dataset.drawn !== "1") canvas.dataset.drawn = "1";
+    },
+    dispose() {},
+  };
+  const shadow = view.shadowMap as { enabled: boolean; type: THREE.ShadowMapType };
+  const apply = () => {
+    gl.toneMapping = view.toneMapping as THREE.ToneMapping;
+    gl.toneMappingExposure = view.toneMappingExposure as number;
+    gl.outputColorSpace = view.outputColorSpace as THREE.ColorSpace;
+    gl.localClippingEnabled = view.localClippingEnabled as boolean;
+    gl.shadowMap.enabled = shadow.enabled;
+    gl.shadowMap.type = shadow.type;
+    gl.setClearColor(clear, clearA);
+  };
+  function size(w: number, h: number, style: boolean): void {
+    cssW = w;
+    cssH = h;
+    canvas.width = Math.floor(w * ratio);
+    canvas.height = Math.floor(h * ratio);
+    if (style) {
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+    }
+  }
+  const proxy = new Proxy(view, {
+    get(t, k) {
+      if (k in t) return t[k];
+      const v = (gl as unknown as Record<string | symbol, unknown>)[k];
+      return typeof v === "function" ? v.bind(gl) : v;
+    },
+    set(t, k, v) {
+      if (k in t) t[k] = v;
+      else (gl as unknown as Record<string | symbol, unknown>)[k] = v;
+      return true;
+    },
+  }) as unknown as THREE.WebGLRenderer;
+  ownGl.set(proxy, gl);
+  canvas.dataset.view = "webgl";
+  gl.domElement.addEventListener("webglcontextlost", () => (canvas.dataset.view = "lost"));
+  return proxy;
+}
+
+/**
+ * A view's renderer: the page's shared one (above), or with `?gl=each` a WebGLRenderer of its own. ACES filmic tone
+ * mapping at `exposure`, sRGB output, PCF soft shadows, pixel ratio up to 2.
+ */
+export function viewGl(canvas: HTMLCanvasElement, opts: { alpha?: boolean; exposure?: number; shadows?: boolean } = {}): THREE.WebGLRenderer | null {
+  const alpha = opts.alpha ?? true;
+  const exposure = opts.exposure ?? 1.06;
+  const shadows = opts.shadows ?? true;
+  let r: THREE.WebGLRenderer | null = null;
+  if (!EACH) r = viewRenderer(canvas, alpha, exposure, shadows);
+  else
+    try {
+      r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha, powerPreference: "high-performance" });
+      r.outputColorSpace = THREE.SRGBColorSpace;
+      r.toneMapping = THREE.ACESFilmicToneMapping;
+      r.toneMappingExposure = exposure;
+      r.shadowMap.enabled = shadows;
+      r.shadowMap.type = THREE.PCFSoftShadowMap;
+      canvas.dataset.view = "webgl";
+    } catch {
+      r = null;
+    }
+  r?.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  return r;
+}
+
+/** Create an ACESFilmic PBR renderer for a view, with crisp PCFSoftShadowMap shadows (see viewGl). */
+export function createStudioRenderer(canvas: HTMLCanvasElement, alpha = true): THREE.WebGLRenderer | null {
+  const renderer = viewGl(canvas, { alpha });
+  if (renderer) return renderer;
+  {
     // Each chapter's model runs inside its 3D loop, so without WebGL its status line would wait forever: say why.
     canvas
       .closest("section")

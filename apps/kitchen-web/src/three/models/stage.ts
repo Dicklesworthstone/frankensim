@@ -5,26 +5,18 @@
  */
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { glOf, viewGl } from "../kit";
 
 export function makeRenderer(canvas: HTMLCanvasElement, opts: { alpha?: boolean; shadows?: boolean } = {}): THREE.WebGLRenderer | null {
-  try {
-    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: opts.alpha ?? true, powerPreference: "high-performance", preserveDrawingBuffer: false });
-    r.outputColorSpace = THREE.SRGBColorSpace;
-    r.toneMapping = THREE.ACESFilmicToneMapping;
-    r.toneMappingExposure = 1.0;
-    r.shadowMap.enabled = opts.shadows ?? true;
-    r.shadowMap.type = THREE.PCFSoftShadowMap;
-    r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    return r;
-  } catch {
-    return null;
-  }
+  return viewGl(canvas, { alpha: opts.alpha ?? true, exposure: 1.0, shadows: opts.shadows ?? true });
 }
 
 const envCache = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
 
 /** A studio room to reflect: RoomEnvironment's soft boxes, warmed on one side and cooled on the other. */
-export function studioEnvironment(r: THREE.WebGLRenderer): THREE.Texture {
+export function studioEnvironment(view: THREE.WebGLRenderer): THREE.Texture {
+  // Built once by the renderer that holds the GPU state, for every view it draws.
+  const r = glOf(view);
   const hit = envCache.get(r);
   if (hit) return hit;
   const room = new RoomEnvironment();

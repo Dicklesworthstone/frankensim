@@ -28,7 +28,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { FLAGSHIP_EQUIPMENT, categorizeCatalogEntry, type CatalogEntry, type EquipmentTabId } from "../sim/exemplars";
-import { createScrollSafeOrbit, observeInView, shaderGate } from "./kit";
+import { createScrollSafeOrbit, glOf, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import "./models/electricHob";
 import { palette } from "./models/materials";
@@ -331,7 +331,7 @@ function showroomEnvironment(r: THREE.WebGLRenderer): THREE.Texture {
   panel(11, 1.3, 0xffb072, 1.0, [0, 1.4, -8.5]);
   panel(5, 2.6, 0xfff6ec, 0.55, [-1, 1.6, 9]);
   panel(18, 18, 0x231a13, 1, [0, -7, 0]);
-  const pm = new THREE.PMREMGenerator(r);
+  const pm = new THREE.PMREMGenerator(glOf(r));
   const t = pm.fromScene(env, 0.025).texture;
   pm.dispose();
   for (const g of geos) g.dispose();
