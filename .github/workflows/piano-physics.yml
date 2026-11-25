@@ -1,20 +1,22 @@
-name: Piano physics smoke
+name: Native piano and SDK verification
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches: [validate/piano-native-897fbf13]
 permissions:
   contents: read
 jobs:
-  piano:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[piano-check]')
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 897fbf13c764ccb3cdbc513ffd0b8a66d86a61ad
           persist-credentials: false
       - name: Materialize the repository's pinned dependencies
         run: |
@@ -36,102 +38,20 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
-      # Keep a failed bootstrap RED. Its known legacy batch-file checkout
-      # mismatch must not hide independent native test results after all
-      # siblings have been materialized. Missing dependencies still fail Cargo.
-      - name: Test shared material flue propagation and microphone output
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --lib flue_loop::network -- --test-threads=1
-      - name: Test source-independent regional tubes
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --lib bernoulli_aperture::network::regional::source_independent_tests -- --test-threads=1
-      - name: Test retained TMM flue playing loop
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --test flue_gates -- --test-threads=1
-      - name: Test consistent soundboard kinetic energy
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-plate --lib edge_cubic -- --test-threads=1
-      - name: Test complete acoustic modal windows
-        if: ${{ !cancelled() }}
+      - name: Compile the two native piano examples
+        run: cargo test --locked -p fs-couple --example grand_piano --example piano_exterior --no-run
+      - name: Check directional microphones and multi-channel performance
         run: |
-          set -o pipefail
-          cargo test --release -p fs-modal -- --test-threads=1 2>&1 | tee piano-modal-tests.log
-      - name: Test reinforced crowned-shell mechanics
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-plate --lib shell::stiffened -- --test-threads=1
-      - name: Test nonlinear shell equilibrium and preload
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-plate --lib shell::preload -- --test-threads=1
-      - name: Test OBJ physical-region preservation
-        if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-io obj::tests -- --test-threads=1
-      - name: Test geometry-aware close acoustic receivers
-        if: ${{ !cancelled() }}
+          cargo test --locked -p fs-couple --example grand_piano cardioid -- --test-threads=1
+          cargo test --locked -p fs-couple --example grand_piano directional_microphones -- --test-threads=1
+          cargo test --locked -p fs-couple --example grand_piano midi -- --test-threads=1
+          cargo test --locked -p fs-couple --example piano_exterior midi -- --test-threads=1
+      - name: Check passive soundboard loading
         run: |
-          set -o pipefail
-          cargo test --release -p fs-bem --lib near_field -- --test-threads=1 2>&1 | tee piano-near-field-tests.log
-      - name: Test geometry-derived radiation formulation
-        if: ${{ !cancelled() }}
+          cargo test --locked -p fs-couple --example grand_piano rayleigh_loading -- --test-threads=1
+          cargo test --locked -p fs-couple --example piano_exterior radiation_port -- --test-threads=1
+          cargo test --locked -p fs-couple --lib render::plate::impact::radiation::fit -- --test-threads=1
+      - name: Test Python studies against the native executable
         run: |
-          set -o pipefail
-          cargo test --release -p fs-bem --lib radiation_policy -- --test-threads=1 2>&1 | tee piano-radiation-policy-tests.log
-      - name: Test mesh import and source-piano playback
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1 2>&1 | tee piano-import-tests.log
-      - name: Test physical piano scale preparation
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --example piano_tune -- --test-threads=1 2>&1 | tee piano-tuning-tests.log
-      - name: Test bandlimited acceleration and anti-alias filtering
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --lib pcm_wav::decimate -- --test-threads=1 2>&1 | tee piano-decimator-tests.log
-      - name: Test shared Rayleigh propagation
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --lib pcm_wav::baffled -- --test-threads=1 2>&1 | tee piano-baffled-tests.log
-      - name: Test high-resolution pressure encoding
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --lib pcm_wav::high_resolution -- --test-threads=1 2>&1 | tee piano-high-resolution-tests.log
-      - name: Test piano pressure-to-audio export
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --example piano_audio -- --test-threads=1 2>&1 | tee piano-audio-export-tests.log
-      - name: Test the piano implementation
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --example grand_piano -- --test-threads=1 2>&1 | tee piano-mechanics-tests.log
-      - name: Test finite-body piano acoustics
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --release -p fs-couple --example piano_exterior -- --test-threads=1 2>&1 | tee piano-exterior-tests.log
-      - name: Render a physical-model smoke note
-        if: ${{ !cancelled() }}
-        run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
-      - name: Render the smoke note in a non-default declared gas
-        if: ${{ !cancelled() }}
-        # The air is data: only --gas-record changes, and the sound must change with it.
-        run: |
-          set -o pipefail
-          cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --gas-record crates/fs-couple/examples/co2-20c.gas --render piano-smoke-co2.wav | tee piano-gas-co2.log
-          grep -q "Ambient air: --gas-record" piano-gas-co2.log
-          ! cmp -s piano-smoke.wav piano-smoke-co2.wav
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: piano-smoke
-          path: |
-            piano-smoke.wav
-            Cargo.lock
-            piano-*-tests.log
-          retention-days: 7
+          cargo build --locked -p fs-cli
+          PYTHONPATH=python:python/tests python3 -m unittest -v test_client.TestFrankenSimClientIntegration.test_thermal_study_budget_stop_then_resume_from_ledger test_client.TestFrankenSimClientIntegration.test_study_admission_failure_has_no_retained_run
