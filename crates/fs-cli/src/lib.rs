@@ -21,6 +21,7 @@ mod network_command;
 mod package;
 mod report;
 mod solve;
+mod stage_driver;
 mod study;
 mod system_command;
 mod uq_command;

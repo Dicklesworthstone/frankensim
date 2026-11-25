@@ -52,7 +52,7 @@ use fs_airflow::requirement_composition::{
     ComplianceOutcome, ThermalLimitSpec, compose_thermal_limits,
 };
 use fs_blake3::identity::ContentId;
-use fs_blake3::{DomainHasher, hash_bytes, hash_domain};
+use fs_blake3::{DomainHasher, hash_bytes};
 use fs_evidence::ColorRank;
 use fs_evidence::uncertainty::{BudgetTotal, EngineeringUncertaintyKind, TermValue};
 use fs_exec::CancelGate;
@@ -63,9 +63,9 @@ use fs_exec::solver::{
 use fs_io::{MESH_ASSIGNMENT_SEMANTICS_VERSION, MeshSelector, NamedFaceGroup};
 use fs_ledger::{
     ArtifactInfo, BoundedOpArtifactEdges, CONTROLLED_ARTIFACT_TILE_LEN, ContentHash,
-    ControlledOpRead, ControlledVisibleOpPage, EdgeRole, ExecMode, FiveExplicits, Ledger,
-    LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
-    OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
+    ControlledOpRead, ControlledVisibleOpPage, EdgeRole, ExecMode, Ledger, LedgerError,
+    MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpRow, OpVariableField,
+    PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
 use fs_matdb::{ClaimId, SelectionPolicy};
 use fs_project::spec::{
@@ -77,10 +77,17 @@ use fs_project::{
     resolve_conduction_interface_pairs, resolve_geometry_assignments,
 };
 use fs_rep_mesh::{Soup, TetComplex};
-use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
+use fs_session::CapabilityToken;
 
 use crate::cards::{CardPackKind, CardPackSet, CardPackSetBuilder, RawCardPack};
 use crate::import::{explicits, json_string};
+use crate::stage_driver::{
+    DurableStageSession, PipelineSchema, ResumeAttestor, RetainedSideArtifact, SessionExplicits,
+    StageDescriptor, StageExecution, StagePipeline, StageSessionView,
+    derive_pipeline_capability_token, derive_run_id_bytes, discover_and_attest_resume,
+    envelope_provenance, format_run_receipt_json, format_stage_ir, ledger_refusal,
+    validate_checkpoint_prefix_for, validate_state_shape_for,
+};
 
 mod input_propagation;
 mod joint_parameters;
@@ -492,7 +499,7 @@ const MAX_SOLVE_INVOCATION_WORK_BYTES: u64 = 1024 * 1024 * 1024;
 #[doc(hidden)]
 pub const MAX_SOLVE_VISIBLE_OP_IDS: usize = 8192;
 /// Maximum fixed-size descending pages consumed before an explicit refusal.
-const MAX_SOLVE_VISIBLE_OP_PAGES: usize =
+pub(crate) const MAX_SOLVE_VISIBLE_OP_PAGES: usize =
     MAX_SOLVE_VISIBLE_OP_IDS.div_ceil(MAX_VISIBLE_OP_PAGE_ROWS);
 /// Byte-equivalent work charged for one fixed-size operation id.
 const OP_ID_WORK_BYTES: u64 = 8;
@@ -503,7 +510,7 @@ const EDGE_ITEM_WORK_BYTES: u64 = 33;
 /// Byte-equivalent work charged for one bounded project/assignment item.
 const DERIVATION_ITEM_WORK_BYTES: u64 = 64;
 /// Edge scan cap per operation while locating retained evidence.
-const EDGE_SCAN_CAP: usize = 1024;
+pub(crate) const EDGE_SCAN_CAP: usize = 1024;
 const QOI_REGION_POLL_ITEMS: usize = 1024;
 /// Largest distinct claim-usage receipt set one `material-resolve` operation
 /// retains. Together with the card-pack ceiling this keeps the stage's typed
@@ -695,14 +702,14 @@ impl SolveCancellationPlan {
 struct EvidenceCancelled;
 
 #[derive(Debug, Clone, Copy)]
-enum InvocationWorkExceeded {
+pub(crate) enum InvocationWorkExceeded {
     CumulativeBytes { attempted: u64 },
     VisibleIds { limit: usize },
     VisiblePages { limit: usize },
 }
 
 #[derive(Debug, Default)]
-struct InvocationWorkLedger {
+pub(crate) struct InvocationWorkLedger {
     used: Cell<u64>,
 }
 
@@ -724,14 +731,14 @@ impl InvocationWorkLedger {
 }
 
 #[derive(Clone, Copy)]
-struct EvidenceWork<'a> {
+pub(crate) struct EvidenceWork<'a> {
     gate: &'a CancelGate,
     plan: Option<&'a SolveCancellationPlan>,
     invocation: Option<&'a InvocationWorkLedger>,
 }
 
 impl<'a> EvidenceWork<'a> {
-    const fn new(
+    pub(crate) const fn new(
         gate: &'a CancelGate,
         plan: Option<&'a SolveCancellationPlan>,
         invocation: &'a InvocationWorkLedger,
@@ -779,7 +786,7 @@ impl<'a> EvidenceWork<'a> {
 }
 
 #[derive(Debug)]
-enum EvidenceReadError {
+pub(crate) enum EvidenceReadError {
     Cancelled,
     WorkEnvelope(InvocationWorkExceeded),
     Ledger(LedgerError),
@@ -806,14 +813,14 @@ enum ProjectRenderError {
 }
 
 #[derive(Debug)]
-enum CandidateOpReadError {
+pub(crate) enum CandidateOpReadError {
     Cancelled,
     WorkEnvelope(InvocationWorkExceeded),
     Ledger(LedgerError),
 }
 
 #[derive(Debug)]
-enum VisibleOpScanError {
+pub(crate) enum VisibleOpScanError {
     Cancelled,
     WorkEnvelope(InvocationWorkExceeded),
     Ledger(LedgerError),
@@ -844,15 +851,12 @@ impl CandidateOpFields {
     }
 }
 
-struct ControlledCandidateOp {
-    row: OpRow,
-    branch: i64,
-    exec_mode: ExecMode,
+pub(crate) struct ControlledCandidateOp {
+    pub(crate) row: OpRow,
+    pub(crate) branch: i64,
+    pub(crate) exec_mode: ExecMode,
     prehashed_content: PrehashedOpContent,
 }
-
-/// Warn when consumed wall budget crosses these fractions of the grant.
-const BUDGET_WARN_FRACTIONS: [f64; 2] = [0.5, 0.9];
 
 /// Cores leased by the slice-1 driver. The pipeline is single-threaded and
 /// deterministic; the core-second grant is derived as `wall * CORES`.
@@ -952,6 +956,48 @@ impl SolveStage {
         SolveStage::ALL.get(ordinal as usize).copied()
     }
 }
+
+impl StageDescriptor for SolveStage {
+    fn all() -> &'static [Self] {
+        &SolveStage::ALL
+    }
+    fn ordinal(self) -> u32 {
+        SolveStage::ordinal(self)
+    }
+    fn name(self) -> &'static str {
+        SolveStage::name(self)
+    }
+    fn verb(self) -> &'static str {
+        SolveStage::verb(self)
+    }
+    fn gap_dependency(self) -> Option<&'static str> {
+        SolveStage::gap_dependency(self)
+    }
+}
+
+const THERMAL_PIPELINE_SCHEMA: PipelineSchema = PipelineSchema {
+    driver_version: SOLVE_DRIVER_VERSION,
+    stage_ir_schema: SOLVE_STAGE_SCHEMA,
+    run_receipt_schema: SOLVE_RUN_RECEIPT_SCHEMA,
+    progress_schema: "frankensim.cli.solve-progress.v1",
+    refusal_schema: "frankensim.cli.solve-refusal.v1",
+    source_artifact_kind: PROJECT_SOURCE_KIND,
+    stage_state_kind: STAGE_STATE_KIND,
+    stage_receipt_kind: STAGE_RECEIPT_KIND,
+    run_receipt_kind: RUN_RECEIPT_KIND,
+    refusal_artifact_kind: "solve-refusal",
+    cores: SOLVE_CORES,
+    terminal_verb: "solve.terminal",
+    ledger_scope_prefix: "solve",
+    session_open_prefix: "solve-open",
+    meter_prefix: "solve-meter",
+    resume_command_prefix: "frankensim solve --resume",
+    budget_resume_hint: "raising budgets changes the project identity and starts a fresh                          run `frankensim solve <project> <ledger>`; completed artifacts                          deduplicate by content",
+    incompatible_run_hint: "the run was retained by a different driver or stage-receipt schema; re-run the                             solve with this binary (the retained run stays in the ledger) or export it with                             the binary that produced it",
+    unknown_run_hint: "pass the run id printed by `frankensim solve` and the same ledger path",
+    run_noun: "solve run",
+    terminal_fallback_stage: "qoi",
+};
 
 /// A stage whose producer exists but whose INPUTS the project does not
 /// declare: `(code, what, fix)`. This is a refusal of the project (exit 4),
@@ -1161,24 +1207,30 @@ impl SolveRunId {
         Self::derive_with_project_hash(project, project_hash, cards.root())
     }
 
+    #[cfg(test)]
+    pub(crate) const fn from_content_hash(hash: ContentHash) -> SolveRunId {
+        SolveRunId(hash)
+    }
+
     fn derive_with_project_hash(
         project: &DecodedProject,
         project_hash: ContentHash,
         cards_root: ContentHash,
     ) -> SolveRunId {
         let spec = &project.spec;
-        let mut preimage = Vec::with_capacity(160);
-        preimage.extend_from_slice(project_hash.as_bytes());
         let (constellation, workspace) = spec.versions.as_ref().map_or(("", ""), |v| {
             (v.constellation.as_str(), v.workspace.as_str())
         });
-        push_framed(&mut preimage, constellation.as_bytes());
-        push_framed(&mut preimage, workspace.as_bytes());
         let seed = spec.seeds.as_ref().map_or(0, |s| s.root);
-        preimage.extend_from_slice(&seed.to_le_bytes());
-        push_framed(&mut preimage, cards_root.as_bytes());
-        preimage.extend_from_slice(&SOLVE_DRIVER_VERSION.to_le_bytes());
-        SolveRunId(hash_domain(SOLVE_RUN_IDENTITY_DOMAIN, &preimage))
+        SolveRunId(derive_run_id_bytes(
+            SOLVE_RUN_IDENTITY_DOMAIN,
+            project_hash,
+            constellation,
+            workspace,
+            seed,
+            cards_root,
+            SOLVE_DRIVER_VERSION,
+        ))
     }
 
     /// Parse the 64-hex user-facing run id.
@@ -1200,7 +1252,7 @@ impl SolveRunId {
     }
 
     /// Session identity for the governor: first eight identity bytes.
-    fn session_u64(self) -> u64 {
+    pub(crate) fn session_u64(self) -> u64 {
         let bytes = self.0.as_bytes();
         u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -1223,31 +1275,12 @@ pub(crate) fn derive_capability_token(
             "run strict project validation before solve",
         )
     })?;
-    let wall_s = budgets.solve_time.value;
-    if !wall_s.is_finite() || wall_s <= 0.0 {
-        return Err(SolveRefusal::plain(
-            "cli-solve-budget",
-            format!("project solve-time budget `{wall_s}` is not a positive finite second count"),
-            "declare a positive finite `:solve-time` budget",
-        ));
-    }
-    let mut ops: Vec<String> = SolveStage::ALL
-        .iter()
-        .map(|stage| stage.verb().to_string())
-        .collect();
-    ops.push("solve.terminal".to_string());
-    #[allow(clippy::cast_precision_loss)]
-    let core_s = wall_s * SOLVE_CORES as f64;
-    let token = CapabilityToken {
-        session: SessionId(run.session_u64()),
-        ops,
-        core_s,
-        mem_bytes: budgets.memory_bytes,
-        wall_s,
-        cores: SOLVE_CORES,
-        ledger_scope: format!("solve-{}", &run.to_hex()[..16]),
-    };
-    Ok(token)
+    derive_pipeline_capability_token::<SolveStage>(
+        run,
+        budgets.solve_time.value,
+        budgets.memory_bytes,
+        &THERMAL_PIPELINE_SCHEMA,
+    )
 }
 
 /// One completed stage retained inside the driver state.
@@ -1366,7 +1399,11 @@ pub struct SolveRefusal {
 }
 
 impl SolveRefusal {
-    fn plain(code: &'static str, what: impl Into<String>, fix: impl Into<String>) -> SolveRefusal {
+    pub(crate) fn plain(
+        code: &'static str,
+        what: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> SolveRefusal {
         SolveRefusal {
             code,
             stage: None,
@@ -2526,27 +2563,25 @@ impl ResumeImportCache {
     }
 }
 
-/// Everything a running or resumed solve needs in one place.
-struct SolveEngine<'a> {
+/// Thermal solve pipeline hooks supplied to [`DurableStageSession`].
+struct ThermalSolvePipeline<'a> {
     ledger: &'a Ledger,
     work: EvidenceWork<'a>,
-    clock: &'a mut dyn FnMut() -> f64,
     spec: &'a ProjectSpec,
     canonical_source: &'a str,
     /// The admitted card packs backing this run. On a fresh run these are the
     /// caller's inputs; on resume they are recovered from the ledger and
-    /// re-attested against the run identity before the engine opens.
+    /// re-attested against the run identity before the session opens.
     cards: &'a CardPackSet,
     project_hash: ContentHash,
     run: SolveRunId,
-    governor: Governor,
-    session: SessionId,
-    token: CapabilityToken,
-    versions_json: String,
-    budget_json: String,
-    capability_json: String,
-    seed: [u8; 8],
-    progress: Vec<String>,
+    wall_budget_s: f64,
+}
+
+#[derive(Default)]
+struct ThermalStageCommit {
+    qoi_inputs: Option<QoiStageInputs>,
+    qoi_progress: Option<QoiProgressSummary>,
 }
 
 /// The terminal run-receipt bytes: a pure function of the run, its project,
@@ -2559,28 +2594,13 @@ fn run_receipt_json(
     detail: &str,
     state: &SolveDriverState,
 ) -> String {
-    let mut stages_json = String::new();
-    for (index, stage) in state.completed.iter().enumerate() {
-        if index > 0 {
-            stages_json.push(',');
-        }
-        let name = SolveStage::from_ordinal(stage.ordinal).map_or("unknown", SolveStage::name);
-        let _ = write!(
-            stages_json,
-            "{{\"stage\":{},\"op\":{},\"receipt\":{}}}",
-            json_string(name),
-            stage.op_id,
-            json_string(&stage.receipt.to_hex()),
-        );
-    }
-    format!(
-        "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"status\":{}{detail},\"stages\":[{stages_json}],\"consumed_wall_s\":{},\"consumed_core_s\":{},\"no_claim\":\"stage receipts carry their own authority; this record is run bookkeeping\"}}",
-        json_string(SOLVE_RUN_RECEIPT_SCHEMA),
-        json_string(&run.to_hex()),
-        json_string(&project_hash.to_hex()),
-        json_string(status_name),
-        state.consumed_wall_s,
-        state.consumed_core_s,
+    format_run_receipt_json::<SolveStage>(
+        SOLVE_RUN_RECEIPT_SCHEMA,
+        run,
+        project_hash,
+        status_name,
+        detail,
+        state,
     )
 }
 
@@ -2705,17 +2725,27 @@ fn run_solve_inner<'a>(
             run_receipt: retained_receipt.then(|| receipt.to_hex()),
         });
     }
-    let mut engine =
-        SolveEngine::open(ledger, work, clock, project, cards, project_hash, run, None)?;
+    let (mut session, wall_budget_s) =
+        open_thermal_session(ledger, work, clock, project, project_hash, run, None)?;
+    let mut pipeline = ThermalSolvePipeline {
+        ledger,
+        work,
+        spec: &project.spec,
+        canonical_source: &project.canonical,
+        cards,
+        project_hash,
+        run,
+        wall_budget_s,
+    };
     let state = SolveDriverState {
         run: *run.as_bytes(),
-        project: *engine.project_hash.as_bytes(),
+        project: *project_hash.as_bytes(),
         consumed_core_s: 0.0,
         consumed_wall_s: 0.0,
         completed: Vec::new(),
     };
-    let outcome = engine.drive(state, StageContext::default(), None);
-    progress_sink.append(&mut engine.progress);
+    let outcome = session.drive(&mut pipeline, state, StageContext::default(), None);
+    session.drain_progress(progress_sink);
     outcome
 }
 
@@ -2797,452 +2827,340 @@ fn resume_solve_inner<'a>(
             "export it with `frankensim report <run-id> <ledger>` or `frankensim package <run-id> <ledger>`",
         ));
     }
-    let mut engine = SolveEngine::open(
+    let (mut session, wall_budget_s) = open_thermal_session(
         ledger,
         work,
         clock,
         &project,
-        &cards,
         project_hash,
         run,
         Some(rendered_explicits),
     )?;
-    // Restore budget continuity: re-charge the recorded consumption so the
-    // resumed run continues under the same grant instead of resetting it.
-    if state.consumed_core_s > 0.0 || state.consumed_wall_s > 0.0 {
-        let enforcement = engine.charge(
-            "resume-restore",
-            Charge {
-                core_s: state.consumed_core_s,
-                mem_peak_bytes: 0,
-                wall_s: state.consumed_wall_s,
-            },
-        )?;
-        if !matches!(enforcement, Enforcement::Ok) {
-            return Err(SolveRefusal {
-                code: "cli-solve-resume-budget",
-                stage: None,
-                what: format!(
-                    "the recorded consumption already exhausts the project budget \
-                     (state artifact {})",
-                    state_artifact.to_hex()
-                ),
-                fix: "raise the project budgets; the changed project starts a fresh run whose \
-                      completed artifacts deduplicate by content"
-                    .to_string(),
-                dependency: None,
-                run: Some(run.to_hex()),
-                recorded_op: None,
-            });
-        }
-    }
-    let outcome = engine.drive(state, context, Some(state_artifact));
-    progress_sink.append(&mut engine.progress);
+    session.restore_budget(&state, state_artifact)?;
+    let mut pipeline = ThermalSolvePipeline {
+        ledger,
+        work,
+        spec: &project.spec,
+        canonical_source: &project.canonical,
+        cards: &cards,
+        project_hash,
+        run,
+        wall_budget_s,
+    };
+    let outcome = session.drive(&mut pipeline, state, context, Some(state_artifact));
+    session.drain_progress(progress_sink);
     outcome
 }
 
-impl<'a> SolveEngine<'a> {
-    fn open(
-        ledger: &'a Ledger,
-        work: EvidenceWork<'a>,
-        clock: &'a mut dyn FnMut() -> f64,
-        project: &'a DecodedProject,
-        cards: &'a CardPackSet,
-        project_hash: ContentHash,
-        run: SolveRunId,
-        rendered_explicits: Option<(String, String, String, [u8; 8])>,
-    ) -> Result<SolveEngine<'a>, SolveRefusal> {
-        if ledger.in_transaction() {
-            return Err(SolveRefusal::plain(
-                "cli-solve-ledger-transaction",
-                "the ledger connection is already inside a caller-owned transaction",
-                "commit or roll back before solve so stage groups stay atomic",
-            ));
-        }
-        let (versions_json, budget_json, capability_json, seed) =
-            if let Some(rendered_explicits) = rendered_explicits {
-                rendered_explicits
-            } else {
-                work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 0)
-                    .map_err(|_| cancelled_fresh_refusal(run, None))?;
-                let rendered_explicits = explicits(&project.spec);
-                work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 1)
-                    .map_err(|_| cancelled_fresh_refusal(run, None))?;
-                let rendered_explicits = rendered_explicits.map_err(|refusal| SolveRefusal {
-                    code: "cli-solve-project-invalid",
-                    stage: None,
-                    what: refusal.what,
-                    fix: refusal.fix,
-                    dependency: None,
-                    run: Some(run.to_hex()),
-                    recorded_op: None,
+fn open_thermal_session<'a>(
+    ledger: &'a Ledger,
+    work: EvidenceWork<'a>,
+    clock: &'a mut dyn FnMut() -> f64,
+    project: &'a DecodedProject,
+    project_hash: ContentHash,
+    run: SolveRunId,
+    rendered_explicits: Option<(String, String, String, [u8; 8])>,
+) -> Result<(DurableStageSession<'a>, f64), SolveRefusal> {
+    if ledger.in_transaction() {
+        return Err(SolveRefusal::plain(
+            "cli-solve-ledger-transaction",
+            "the ledger connection is already inside a caller-owned transaction",
+            "commit or roll back before solve so stage groups stay atomic",
+        ));
+    }
+    let (versions_json, budget_json, capability_json, seed) =
+        if let Some(rendered_explicits) = rendered_explicits {
+            rendered_explicits
+        } else {
+            work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 0)
+                .map_err(|_| cancelled_fresh_refusal(run, None))?;
+            let rendered_explicits = explicits(&project.spec);
+            work.checkpoint(SolveEvidencePhase::FiveExplicitsRender, None, 1)
+                .map_err(|_| cancelled_fresh_refusal(run, None))?;
+            let rendered_explicits = rendered_explicits.map_err(|refusal| SolveRefusal {
+                code: "cli-solve-project-invalid",
+                stage: None,
+                what: refusal.what,
+                fix: refusal.fix,
+                dependency: None,
+                run: Some(run.to_hex()),
+                recorded_op: None,
+            })?;
+            let explicit_bytes = rendered_explicits
+                .0
+                .len()
+                .checked_add(rendered_explicits.1.len())
+                .and_then(|bytes| bytes.checked_add(rendered_explicits.2.len()))
+                .and_then(|bytes| bytes.checked_add(rendered_explicits.3.len()))
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(|| {
+                    invocation_work_refusal(
+                        Some(run),
+                        None,
+                        InvocationWorkExceeded::CumulativeBytes {
+                            attempted: u64::MAX,
+                        },
+                    )
                 })?;
-                let explicit_bytes = rendered_explicits
-                    .0
-                    .len()
-                    .checked_add(rendered_explicits.1.len())
-                    .and_then(|bytes| bytes.checked_add(rendered_explicits.2.len()))
-                    .and_then(|bytes| bytes.checked_add(rendered_explicits.3.len()))
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .ok_or_else(|| {
-                        invocation_work_refusal(
-                            Some(run),
-                            None,
-                            InvocationWorkExceeded::CumulativeBytes {
-                                attempted: u64::MAX,
-                            },
-                        )
-                    })?;
-                work.charge(explicit_bytes)
-                    .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
-                rendered_explicits
-            };
-        let token = derive_capability_token(&project.spec, run)?;
-        let governor = Governor::new();
-        let session = token.session;
-        let open_id = governor
-            .session_open_id(session, &format!("solve-open-{}", run.to_hex()))
-            .map_err(|error| session_refusal(run, &error))?;
-        governor
-            .open_session_declared(open_id, token.clone())
-            .map_err(|error| session_refusal(run, &error))?;
-        Ok(SolveEngine {
-            ledger,
-            work,
-            clock,
-            spec: &project.spec,
-            canonical_source: &project.canonical,
-            cards,
-            project_hash,
-            run,
-            governor,
-            session,
-            token,
+            work.charge(explicit_bytes)
+                .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
+            rendered_explicits
+        };
+    let token = derive_capability_token(&project.spec, run)?;
+    let wall_budget_s = token.wall_s;
+    let session = DurableStageSession::open(
+        ledger,
+        clock,
+        run,
+        project_hash,
+        &THERMAL_PIPELINE_SCHEMA,
+        token,
+        SessionExplicits {
+            seed,
             versions_json,
             budget_json,
             capability_json,
-            seed,
-            progress: Vec::new(),
-        })
+        },
+    )?;
+    Ok((session, wall_budget_s))
+}
+
+impl StagePipeline for ThermalSolvePipeline<'_> {
+    type Stage = SolveStage;
+    type Context = StageContext;
+    type StageCommit = ThermalStageCommit;
+
+    fn schema(&self) -> &'static PipelineSchema {
+        &THERMAL_PIPELINE_SCHEMA
     }
 
-    // The stage loop reads as one narrative: gate poll, gap check,
-    // capability check, body, measure, persist, charge, enforce. Splitting
-    // it would scatter the invariant ordering the CONTRACT documents.
-    #[allow(clippy::too_many_lines)]
-    fn drive(
+    fn canonical_source(&self) -> &[u8] {
+        self.canonical_source.as_bytes()
+    }
+
+    fn seal_state(&self, run: SolveRunId, state: &SolveDriverState) -> Vec<u8> {
+        LegacySnapshotV1Adapter::<SolveDriverState>::seal(state, envelope_provenance(run))
+    }
+
+    fn declaration_gap(&self, stage: Self::Stage) -> Option<(&'static str, String, String)> {
+        declaration_gap(stage, self.spec)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.work.is_requested()
+    }
+
+    fn pre_publish_checkpoint(&self, stage: Self::Stage) -> Result<(), ()> {
+        self.work
+            .checkpoint(
+                SolveEvidencePhase::PrePublication,
+                None,
+                u64::from(stage.ordinal()),
+            )
+            .map_err(|_| ())
+    }
+
+    fn execute_stage(
         &mut self,
-        mut state: SolveDriverState,
-        mut context: StageContext,
-        mut predecessor_state: Option<ContentHash>,
-    ) -> Result<SolveOutcome, SolveRefusal> {
-        let prior_stages = u32::try_from(state.completed.len()).expect("stage count fits u32");
-        let mut summaries = Vec::new();
-        // A resumed run re-warns only fractions it has not yet crossed.
-        let mut warned = [false; BUDGET_WARN_FRACTIONS.len()];
-        for (index, &fraction) in BUDGET_WARN_FRACTIONS.iter().enumerate() {
-            warned[index] = state.consumed_wall_s >= self.token.wall_s * fraction;
-        }
-        for stage in SolveStage::ALL.into_iter().skip(state.completed.len()) {
-            if self.work.is_requested() {
-                return Err(self.cancelled_refusal(&state));
-            }
-            if let Some(dependency) = stage.gap_dependency() {
-                let refusal = SolveRefusal {
-                    code: "cli-solve-stage-gap",
-                    stage: Some(stage.name()),
-                    what: format!(
-                        "stage `{}` is reserved but cannot execute until `{dependency}` \
-                         supplies its authoritative producer",
-                        stage.name()
-                    ),
-                    fix: format!(
-                        "complete and verify `{dependency}`; do not substitute a skeleton \
-                         stage or placeholder artifact"
-                    ),
-                    dependency: Some(dependency),
-                    run: Some(self.run.to_hex()),
-                    recorded_op: None,
-                };
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            if let Some((code, what, fix)) = declaration_gap(stage, self.spec) {
-                let refusal = SolveRefusal {
-                    code,
-                    stage: Some(stage.name()),
-                    what,
-                    fix,
-                    dependency: None,
-                    run: Some(self.run.to_hex()),
-                    recorded_op: None,
-                };
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            if !self.token.grants_op(stage.verb()) {
-                let refusal = SolveRefusal::staged(
-                    "cli-solve-capability",
-                    stage,
-                    format!("the session token does not grant `{}`", stage.verb()),
-                    "derive the token from project budgets through the solve driver",
-                );
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            let started = (self.clock)();
-            if !started.is_finite() {
-                let refusal = SolveRefusal::staged(
-                    "cli-solve-budget",
-                    stage,
-                    "the solve clock returned a non-finite stage start",
-                    "supply a finite monotonic clock; no checkpoint was sealed",
-                );
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            // Stages that retain no side evidence yield an empty list;
-            // material resolution retains replayable usage receipts and
-            // conduction retains its temperature field.
-            let mut pending_qoi_inputs = None;
-            let mut pending_qoi_progress = None;
-            let body = match stage {
-                SolveStage::ImportVerify => self
-                    .stage_import_verify(&mut context)
-                    .map(|receipt| (receipt, Vec::new())),
-                SolveStage::Assign => self
-                    .stage_assign(&context)
-                    .map(|receipt| (receipt, Vec::new())),
-                SolveStage::MaterialResolve => self.stage_material_resolve(),
-                SolveStage::FlowNetwork => self
-                    .stage_flow_network(&mut context)
-                    .map(|receipt| (receipt, Vec::new())),
-                SolveStage::Conduction => self.stage_conduction(&context, &state).map(|product| {
-                    pending_qoi_inputs = Some(product.qoi_inputs);
-                    (product.receipt, product.artifacts)
-                }),
-                SolveStage::Qoi => self.stage_qoi(&context, &state).map(|product| {
-                    pending_qoi_progress = Some(product.progress);
-                    (product.receipt, Vec::new())
-                }),
-                SolveStage::Report => self
-                    .stage_report(&state)
-                    .map(|product| (product.receipt, product.artifacts)),
-            };
-            let (receipt_json, usages) = match body {
-                Ok(produced) => produced,
-                Err(refusal) if refusal.code == "cli-solve-cancelled" => {
-                    return Err(self.cancelled_refusal(&state));
+        stage: Self::Stage,
+        session: &StageSessionView<'_>,
+        state: &SolveDriverState,
+        context: &mut Self::Context,
+    ) -> Result<StageExecution<Self::StageCommit>, SolveRefusal> {
+        match stage {
+            SolveStage::ImportVerify => self.stage_import_verify(session, context).map(|receipt| {
+                StageExecution {
+                    receipt_json: receipt,
+                    side_artifacts: Vec::new(),
+                    on_commit: ThermalStageCommit::default(),
                 }
-                Err(refusal) if refusal.code == "cli-solve-work-envelope" => return Err(refusal),
-                Err(refusal) => return Err(self.record_refusal(&state, stage, refusal)),
-            };
-            if self
-                .work
-                .checkpoint(
-                    SolveEvidencePhase::PrePublication,
-                    None,
-                    u64::from(stage.ordinal()),
-                )
-                .is_err()
-            {
-                return Err(self.cancelled_refusal(&state));
-            }
-            let finished = (self.clock)();
-            let elapsed = finished - started;
-            if !finished.is_finite() || !elapsed.is_finite() || elapsed < 0.0 {
-                let refusal = SolveRefusal::staged(
-                    "cli-solve-budget",
-                    stage,
-                    format!(
-                        "the solve clock did not produce a finite monotonic interval \
-                         (start={started}, finish={finished})"
-                    ),
-                    "supply a finite monotonic clock; no checkpoint was sealed",
-                );
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            let qoi_elapsed_ms = if pending_qoi_progress.is_some() {
-                let elapsed_ms = elapsed * 1000.0;
-                if !elapsed_ms.is_finite() {
-                    let refusal = SolveRefusal::staged(
-                        "cli-solve-budget",
-                        stage,
-                        "the finite QoI wall interval overflowed its millisecond progress field",
-                        "supply a bounded monotonic clock interval; no checkpoint was sealed",
-                    );
-                    return Err(self.record_refusal(&state, stage, refusal));
-                }
-                Some(elapsed_ms)
-            } else {
-                None
-            };
-            #[allow(clippy::cast_precision_loss)]
-            let charge = Charge {
-                core_s: elapsed * SOLVE_CORES as f64,
-                mem_peak_bytes: 0,
-                wall_s: elapsed,
-            };
-            let consumed_core_s = state.consumed_core_s + charge.core_s;
-            let consumed_wall_s = state.consumed_wall_s + charge.wall_s;
-            if !consumed_core_s.is_finite()
-                || consumed_core_s < 0.0
-                || !consumed_wall_s.is_finite()
-                || consumed_wall_s < 0.0
-            {
-                let refusal = SolveRefusal::staged(
-                    "cli-solve-budget",
-                    stage,
-                    "the accumulated solve consumption is non-finite or negative",
-                    "repair the clock/budget source; no checkpoint was sealed",
-                );
-                return Err(self.record_refusal(&state, stage, refusal));
-            }
-            state.consumed_core_s = consumed_core_s;
-            state.consumed_wall_s = consumed_wall_s;
-            let (op_id, receipt_hash, state_hash) = self
-                .persist_stage(
-                    &state,
-                    stage,
-                    &receipt_json,
-                    &usages,
-                    &context,
-                    predecessor_state,
-                )
-                .map_err(|error| self.ledger_refusal(stage, &error))?;
-            if let Some(inputs) = pending_qoi_inputs {
-                context.qoi_inputs = Some(inputs);
-            }
-            state.completed.push(CompletedStage {
-                ordinal: stage.ordinal(),
-                op_id,
-                receipt: receipt_hash,
-            });
-            predecessor_state = Some(state_hash);
-            // Re-seal the state WITH the new stage and persist it in a second
-            // small transaction bound to the same op via a follow-up link is
-            // impossible (lineage seals at finish); instead the state sealed
-            // inside persist_stage already includes this stage. Nothing to do
-            // here; the push above mirrors what persist_stage encoded.
-            summaries.push(StageSummary {
-                stage: stage.name(),
-                op_id,
-                receipt: receipt_hash.to_hex(),
-                wall_s: elapsed,
-            });
-            self.progress.push(if let Some(qoi) = pending_qoi_progress {
-                qoi_progress_line(
-                    &self.run.to_hex(),
-                    stage.ordinal(),
-                    "ok",
-                    elapsed,
-                    qoi_elapsed_ms.expect("QoI progress has a prevalidated millisecond interval"),
-                    qoi,
-                )
-            } else {
-                progress_line(
-                    &self.run.to_hex(),
-                    stage.name(),
-                    stage.ordinal(),
-                    "ok",
-                    elapsed,
-                )
-            });
-            let enforcement = self.charge(stage.verb(), charge)?;
-            match enforcement {
-                Enforcement::Ok => {
-                    for (index, &fraction) in BUDGET_WARN_FRACTIONS.iter().enumerate() {
-                        if !warned[index] && state.consumed_wall_s >= self.token.wall_s * fraction {
-                            warned[index] = true;
-                            self.progress.push(budget_warning_line(
-                                &self.run.to_hex(),
-                                fraction,
-                                state.consumed_wall_s,
-                                self.token.wall_s,
-                            ));
-                        }
+            }),
+            SolveStage::Assign => self.stage_assign(context).map(|receipt| StageExecution {
+                receipt_json: receipt,
+                side_artifacts: Vec::new(),
+                on_commit: ThermalStageCommit::default(),
+            }),
+            SolveStage::MaterialResolve => {
+                self.stage_material_resolve().map(|(receipt, side_artifacts)| {
+                    StageExecution {
+                        receipt_json: receipt,
+                        side_artifacts,
+                        on_commit: ThermalStageCommit::default(),
                     }
-                }
-                Enforcement::Throttled {
-                    resource,
-                    used,
-                    granted,
-                }
-                | Enforcement::Paused {
-                    resource,
-                    used,
-                    granted,
-                    ..
-                } => {
-                    let status = SolveRunStatus::BudgetExceeded {
-                        resource,
-                        used,
-                        granted,
-                    };
-                    let receipt = self
-                        .persist_terminal(&state, &status)
-                        .map_err(|error| self.ledger_refusal(stage, &error))?;
-                    return Ok(SolveOutcome {
-                        run: self.run.to_hex(),
-                        status,
-                        stages: summaries,
-                        prior_stages,
-                        run_receipt: Some(receipt.to_hex()),
-                    });
-                }
+                })
+            }
+            SolveStage::FlowNetwork => {
+                self.stage_flow_network(context).map(|receipt| StageExecution {
+                    receipt_json: receipt,
+                    side_artifacts: Vec::new(),
+                    on_commit: ThermalStageCommit::default(),
+                })
+            }
+            SolveStage::Conduction => {
+                self.stage_conduction(context, state).map(|product| StageExecution {
+                    receipt_json: product.receipt,
+                    side_artifacts: product.artifacts,
+                    on_commit: ThermalStageCommit {
+                        qoi_inputs: Some(product.qoi_inputs),
+                        qoi_progress: None,
+                    },
+                })
+            }
+            SolveStage::Qoi => self.stage_qoi(context, state).map(|product| StageExecution {
+                receipt_json: product.receipt,
+                side_artifacts: Vec::new(),
+                on_commit: ThermalStageCommit {
+                    qoi_inputs: None,
+                    qoi_progress: Some(product.progress),
+                },
+            }),
+            SolveStage::Report => self.stage_report(state).map(|product| StageExecution {
+                receipt_json: product.receipt,
+                side_artifacts: product.artifacts,
+                on_commit: ThermalStageCommit::default(),
+            }),
+        }
+    }
+
+    fn format_stage_progress(
+        &self,
+        run_hex: &str,
+        stage: Self::Stage,
+        commit: &Self::StageCommit,
+        elapsed_s: f64,
+    ) -> Result<Option<String>, SolveRefusal> {
+        let Some(qoi) = commit.qoi_progress else {
+            return Ok(None);
+        };
+        let elapsed_ms = elapsed_s * 1000.0;
+        if !elapsed_ms.is_finite() {
+            return Err(SolveRefusal::staged(
+                "cli-solve-budget",
+                stage,
+                "the finite QoI wall interval overflowed its millisecond progress field",
+                "supply a bounded monotonic clock interval; no checkpoint was sealed",
+            ));
+        }
+        Ok(Some(qoi_progress_line(
+            run_hex,
+            stage.ordinal(),
+            "ok",
+            elapsed_s,
+            elapsed_ms,
+            qoi,
+        )))
+    }
+
+    fn commit_stage(&mut self, context: &mut Self::Context, commit: Self::StageCommit) {
+        if let Some(inputs) = commit.qoi_inputs {
+            context.qoi_inputs = Some(inputs);
+        }
+    }
+
+    fn link_initial_extra_inputs(&self, _ledger: &Ledger, op: i64) -> Result<(), LedgerError> {
+        // Card packs are run inputs, so they are retained against the
+        // run's first operation exactly as the project source is.
+        // Retaining them here rather than at `material-resolve` is
+        // what lets a run cancelled during an earlier stage resume at
+        // all: the recovered set is re-attested against the run
+        // identity, which binds its canonical root.
+        for pack in self.cards.iter() {
+            let retained = self.ledger.put_artifact(
+                pack.kind().artifact_kind(),
+                pack.bytes(),
+                None,
+            )?;
+            self.ledger.link(op, &retained.hash, EdgeRole::In)?;
+        }
+        Ok(())
+    }
+
+    fn link_stage_in_edges(
+        &self,
+        _ledger: &Ledger,
+        op: i64,
+        stage: Self::Stage,
+        state_before: &SolveDriverState,
+        context: &Self::Context,
+    ) -> Result<(), LedgerError> {
+        if stage == SolveStage::MaterialResolve {
+            for pack in self.cards.iter() {
+                self.ledger.link(op, &pack.artifact(), EdgeRole::In)?;
             }
         }
-        let status = SolveRunStatus::Completed;
-        let receipt = self
-            .persist_terminal(&state, &status)
-            .map_err(|error| self.ledger_refusal(SolveStage::Qoi, &error))?;
-        Ok(SolveOutcome {
-            run: self.run.to_hex(),
-            status,
-            stages: summaries,
-            prior_stages,
-            run_receipt: Some(receipt.to_hex()),
-        })
-    }
-
-    fn charge(&self, meter_key: &str, charge: Charge) -> Result<Enforcement, SolveRefusal> {
-        let report_id = self
-            .governor
-            .meter_report_id(
-                self.session,
-                &format!("solve-meter-{}-{meter_key}", self.run.to_hex()),
-            )
-            .map_err(|error| session_refusal(self.run, &error))?;
-        let receipt = self
-            .governor
-            .charge(report_id, charge)
-            .map_err(|error| session_refusal(self.run, &error))?;
-        Ok(receipt.enforcement().clone())
-    }
-
-    fn cancelled_refusal(&self, state: &SolveDriverState) -> SolveRefusal {
-        if state.completed.is_empty() {
-            return cancelled_fresh_refusal(self.run, SolveStage::from_ordinal(0));
+        if stage == SolveStage::Qoi {
+            for required in [SolveStage::Conduction] {
+                let completed = state_before
+                    .completed
+                    .get(required.ordinal() as usize)
+                    .filter(|completed| completed.ordinal == required.ordinal())
+                    .ok_or_else(|| LedgerError::Invalid {
+                        field: "solve_qoi_prerequisite_receipt".to_string(),
+                        problem: format!(
+                            "QoI requires the completed {} stage receipt",
+                            required.name()
+                        ),
+                    })?;
+                self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
+            }
+            let qoi_inputs =
+                context
+                    .qoi_inputs
+                    .as_ref()
+                    .ok_or_else(|| LedgerError::Invalid {
+                        field: "solve_qoi_inputs".to_string(),
+                        problem: "QoI publication has no attested conduction solution input"
+                            .to_string(),
+                    })?;
+            self.ledger
+                .link(op, &qoi_inputs.solution_artifact, EdgeRole::In)?;
         }
-        SolveRefusal {
-            code: "cli-solve-cancelled",
-            stage: SolveStage::from_ordinal(
-                u32::try_from(state.completed.len()).expect("stage count fits u32"),
-            )
-            .map(SolveStage::name),
-            what: format!(
-                "cancellation observed after {} completed stage(s); the completed prefix \
-                 is durable",
-                state.completed.len()
-            ),
-            fix: format!(
-                "resume with `frankensim solve --resume {} <ledger>`",
-                self.run.to_hex()
-            ),
-            dependency: None,
-            run: Some(self.run.to_hex()),
-            recorded_op: None,
+        if stage == SolveStage::Report {
+            // The report projects every earlier receipt; link each as an
+            // input so lineage queries reach the numbers it displays.
+            for required in SolveStage::ALL
+                .into_iter()
+                .filter(|candidate| *candidate != SolveStage::Report)
+            {
+                let completed = state_before
+                    .completed
+                    .get(required.ordinal() as usize)
+                    .filter(|completed| completed.ordinal == required.ordinal())
+                    .ok_or_else(|| LedgerError::Invalid {
+                        field: "solve_report_prerequisite_receipt".to_string(),
+                        problem: format!(
+                            "report requires the completed {} stage receipt",
+                            required.name()
+                        ),
+                    })?;
+                self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
+            }
         }
+        if stage == SolveStage::ImportVerify {
+            let import_summary =
+                context.import_summary.ok_or_else(|| LedgerError::Invalid {
+                    field: "solve_import_summary".to_string(),
+                    problem: "import verification did not retain its exact summary input"
+                        .to_string(),
+                })?;
+            self.ledger.link(op, &import_summary, EdgeRole::In)?;
+            for entry in &context.verified_imports {
+                self.ledger.link(op, &entry.promoted_mesh, EdgeRole::In)?;
+                self.ledger
+                    .link(op, &entry.assignment_report, EdgeRole::In)?;
+            }
+        }
+        Ok(())
     }
+}
 
+impl ThermalSolvePipeline<'_> {
     /// Verify retained import evidence against the pinned project.
-    fn stage_import_verify(&mut self, context: &mut StageContext) -> Result<String, SolveRefusal> {
+    fn stage_import_verify(
+        &mut self,
+        session: &StageSessionView<'_>,
+        context: &mut StageContext,
+    ) -> Result<String, SolveRefusal> {
         let stage = SolveStage::ImportVerify;
         let geometry = self.spec.geometry.as_deref().unwrap_or(&[]);
         if geometry.is_empty() {
@@ -3267,10 +3185,10 @@ impl<'a> SolveEngine<'a> {
                 ),
             })?;
         let expectations = RenderedExplicitsRef {
-            seed: &self.seed,
-            versions: &self.versions_json,
-            budget: &self.budget_json,
-            capability: &self.capability_json,
+            seed: session.seed,
+            versions: session.versions_json,
+            budget: session.budget_json,
+            capability: session.capability_json,
             canonical_project_json: &canonical_project_json,
         };
         let summary = match find_import_summary(
@@ -3304,7 +3222,7 @@ impl<'a> SolveEngine<'a> {
                 return Err(invocation_work_refusal(Some(self.run), Some(stage), error));
             }
             Err(ImportSummaryError::Ledger(error)) => {
-                return Err(self.ledger_refusal(stage, &error));
+                return Err(ledger_refusal(self.run, stage.name(), &error));
             }
             Err(ImportSummaryError::Invalid(what)) => {
                 return Err(SolveRefusal::staged(
@@ -3381,7 +3299,7 @@ impl<'a> SolveEngine<'a> {
             self.run,
             self.work,
             false,
-            self.token.wall_s - state.consumed_wall_s,
+            self.wall_budget_s - state.consumed_wall_s,
         )
     }
 
@@ -3417,367 +3335,10 @@ impl<'a> SolveEngine<'a> {
         )
     }
 
-    /// Persist one completed stage as a ledgered op: stage receipt, sealed
-    /// driver state (including this stage), and lineage links, atomically.
-    fn persist_stage(
-        &mut self,
-        state_before: &SolveDriverState,
-        stage: SolveStage,
-        receipt_json: &str,
-        usages: &[RetainedSideArtifact],
-        context: &StageContext,
-        predecessor_state: Option<ContentHash>,
-    ) -> Result<(i64, ContentHash, ContentHash), LedgerError> {
-        let ordinal = stage.ordinal();
-        if state_before.completed.len() != ordinal as usize {
-            return Err(LedgerError::Invalid {
-                field: "solve_stage_prefix".to_string(),
-                problem: format!(
-                    "stage `{}` ordinal {ordinal} received a {}-stage prefix",
-                    stage.name(),
-                    state_before.completed.len()
-                ),
-            });
-        }
-        if predecessor_state.is_some() != (ordinal > 0) {
-            return Err(LedgerError::Invalid {
-                field: "solve_stage_predecessor".to_string(),
-                problem: format!(
-                    "stage `{}` ordinal {ordinal} has the wrong predecessor-state presence",
-                    stage.name()
-                ),
-            });
-        }
-        let ir = solve_stage_ir(stage, self.run, self.project_hash);
-        self.ledger.begin()?;
-        let result = (|| -> Result<(i64, ContentHash, ContentHash), LedgerError> {
-            let op = self.ledger.begin_op(
-                Some(self.run.as_bytes()),
-                &ir,
-                &FiveExplicits {
-                    seed: &self.seed,
-                    versions: &self.versions_json,
-                    budget: &self.budget_json,
-                    capability: &self.capability_json,
-                },
-                i64::from(ordinal) * 2,
-            )?;
-            if let Some(predecessor) = predecessor_state {
-                self.ledger.link(op, &predecessor, EdgeRole::In)?;
-            }
-            if ordinal == 0 {
-                let source = self.ledger.put_artifact(
-                    PROJECT_SOURCE_KIND,
-                    self.canonical_source.as_bytes(),
-                    None,
-                )?;
-                self.ledger.link(op, &source.hash, EdgeRole::In)?;
-                // Card packs are run inputs, so they are retained against the
-                // run's first operation exactly as the project source is.
-                // Retaining them here rather than at `material-resolve` is
-                // what lets a run cancelled during an earlier stage resume at
-                // all: the recovered set is re-attested against the run
-                // identity, which binds its canonical root.
-                for pack in self.cards.iter() {
-                    let retained = self.ledger.put_artifact(
-                        pack.kind().artifact_kind(),
-                        pack.bytes(),
-                        None,
-                    )?;
-                    self.ledger.link(op, &retained.hash, EdgeRole::In)?;
-                }
-            }
-            if stage == SolveStage::MaterialResolve {
-                for pack in self.cards.iter() {
-                    self.ledger.link(op, &pack.artifact(), EdgeRole::In)?;
-                }
-            }
-            if stage == SolveStage::Qoi {
-                for required in [SolveStage::Conduction] {
-                    let completed = state_before
-                        .completed
-                        .get(required.ordinal() as usize)
-                        .filter(|completed| completed.ordinal == required.ordinal())
-                        .ok_or_else(|| LedgerError::Invalid {
-                            field: "solve_qoi_prerequisite_receipt".to_string(),
-                            problem: format!(
-                                "QoI requires the completed {} stage receipt",
-                                required.name()
-                            ),
-                        })?;
-                    self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
-                }
-                let qoi_inputs =
-                    context
-                        .qoi_inputs
-                        .as_ref()
-                        .ok_or_else(|| LedgerError::Invalid {
-                            field: "solve_qoi_inputs".to_string(),
-                            problem: "QoI publication has no attested conduction solution input"
-                                .to_string(),
-                        })?;
-                self.ledger
-                    .link(op, &qoi_inputs.solution_artifact, EdgeRole::In)?;
-            }
-            if stage == SolveStage::Report {
-                // The report projects every earlier receipt; link each as an
-                // input so lineage queries reach the numbers it displays.
-                for required in SolveStage::ALL
-                    .into_iter()
-                    .filter(|candidate| *candidate != SolveStage::Report)
-                {
-                    let completed = state_before
-                        .completed
-                        .get(required.ordinal() as usize)
-                        .filter(|completed| completed.ordinal == required.ordinal())
-                        .ok_or_else(|| LedgerError::Invalid {
-                            field: "solve_report_prerequisite_receipt".to_string(),
-                            problem: format!(
-                                "report requires the completed {} stage receipt",
-                                required.name()
-                            ),
-                        })?;
-                    self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
-                }
-            }
-            for usage in usages {
-                let retained = self.ledger.put_artifact(usage.kind, &usage.bytes, None)?;
-                if retained.hash != usage.artifact {
-                    return Err(LedgerError::Invalid {
-                        field: "solve_stage_side_artifact".to_string(),
-                        problem: format!(
-                            "stage `{}` precomputed artifact {} but ledger retained {}",
-                            stage.name(),
-                            usage.artifact.to_hex(),
-                            retained.hash.to_hex()
-                        ),
-                    });
-                }
-                self.ledger.link(op, &retained.hash, EdgeRole::Out)?;
-            }
-            if stage == SolveStage::ImportVerify {
-                let import_summary =
-                    context.import_summary.ok_or_else(|| LedgerError::Invalid {
-                        field: "solve_import_summary".to_string(),
-                        problem: "import verification did not retain its exact summary input"
-                            .to_string(),
-                    })?;
-                self.ledger.link(op, &import_summary, EdgeRole::In)?;
-                for entry in &context.verified_imports {
-                    self.ledger.link(op, &entry.promoted_mesh, EdgeRole::In)?;
-                    self.ledger
-                        .link(op, &entry.assignment_report, EdgeRole::In)?;
-                }
-            }
-            let receipt =
-                self.ledger
-                    .put_artifact(STAGE_RECEIPT_KIND, receipt_json.as_bytes(), None)?;
-            self.ledger.link(op, &receipt.hash, EdgeRole::Out)?;
-            let mut sealed_state = state_before.clone();
-            sealed_state.completed.push(CompletedStage {
-                ordinal,
-                op_id: op,
-                receipt: receipt.hash,
-            });
-            let envelope = LegacySnapshotV1Adapter::<SolveDriverState>::seal(
-                &sealed_state,
-                envelope_provenance(self.run),
-            );
-            let state_artifact = self
-                .ledger
-                .put_artifact(STAGE_STATE_KIND, &envelope, None)?;
-            self.ledger.link(op, &state_artifact.hash, EdgeRole::Out)?;
-            let edges = self.ledger.op_artifact_edges_bounded(op, EDGE_SCAN_CAP)?;
-            if edges.truncated {
-                return Err(LedgerError::Invalid {
-                    field: "solve_stage_edges".to_string(),
-                    problem: format!(
-                        "stage `{}` exceeds the {EDGE_SCAN_CAP}-edge verification cap",
-                        stage.name()
-                    ),
-                });
-            }
-            self.ledger.seal_op_artifact_edges(op, edges.edges.len())?;
-            self.ledger
-                .finish_op(op, OpOutcome::Ok, None, i64::from(ordinal) * 2 + 1)?;
-            Ok((op, receipt.hash, state_artifact.hash))
-        })();
-        finish_solve_transaction(self.ledger, result)
-    }
-
-    /// Persist the run terminal receipt as its own ledgered op.
-    fn persist_terminal(
-        &mut self,
-        state: &SolveDriverState,
-        status: &SolveRunStatus,
-    ) -> Result<ContentHash, LedgerError> {
-        let (status_name, detail) = match status {
-            SolveRunStatus::Completed => ("completed", String::new()),
-            SolveRunStatus::BudgetExceeded {
-                resource,
-                used,
-                granted,
-            } => (
-                "budget-exceeded",
-                format!(
-                    ",\"resource\":{},\"used\":{used},\"granted\":{granted},\"resume\":{}",
-                    json_string(resource),
-                    json_string(
-                        "raising budgets changes the project identity and starts a fresh \
-                         run `frankensim solve <project> <ledger>`; completed artifacts \
-                         deduplicate by content"
-                    ),
-                ),
-            ),
-            SolveRunStatus::Cancelled => ("cancelled", String::new()),
-        };
-        let receipt_json =
-            run_receipt_json(self.run, self.project_hash, status_name, &detail, state);
-        let ir = format!(
-            "{{\"schema\":{},\"stage\":\"terminal\",\"ordinal\":{},\"run\":{},\"project\":{},\"driver_version\":{}}}",
-            json_string(SOLVE_STAGE_SCHEMA),
-            SolveStage::ALL.len(),
-            json_string(&self.run.to_hex()),
-            json_string(&self.project_hash.to_hex()),
-            SOLVE_DRIVER_VERSION,
-        );
-        self.ledger.begin()?;
-        let result = (|| -> Result<ContentHash, LedgerError> {
-            let op = self.ledger.begin_op(
-                Some(self.run.as_bytes()),
-                &ir,
-                &FiveExplicits {
-                    seed: &self.seed,
-                    versions: &self.versions_json,
-                    budget: &self.budget_json,
-                    capability: &self.capability_json,
-                },
-                100,
-            )?;
-            let receipt =
-                self.ledger
-                    .put_artifact(RUN_RECEIPT_KIND, receipt_json.as_bytes(), None)?;
-            self.ledger.link(op, &receipt.hash, EdgeRole::Out)?;
-            self.ledger.finish_op(op, OpOutcome::Ok, None, 101)?;
-            Ok(receipt.hash)
-        })();
-        finish_solve_transaction(self.ledger, result)
-    }
-
-    /// Retain a stage refusal as a ledgered error op, mirroring the import
-    /// verb's durable-refusal doctrine.
-    fn record_refusal(
-        &mut self,
-        state: &SolveDriverState,
-        stage: SolveStage,
-        mut refusal: SolveRefusal,
-    ) -> SolveRefusal {
-        refusal.run = Some(self.run.to_hex());
-        let diagnostic = format!(
-            "{{\"schema\":\"frankensim.cli.solve-refusal.v1\",\"run\":{},\"stage\":{},\"code\":{},\"what\":{},\"fix\":{}{}}}",
-            json_string(&self.run.to_hex()),
-            json_string(stage.name()),
-            json_string(refusal.code),
-            json_string(&refusal.what),
-            json_string(&refusal.fix),
-            refusal.dependency.map_or(String::new(), |dependency| {
-                format!(",\"dependency\":{}", json_string(dependency))
-            }),
-        );
-        let ir = solve_stage_ir(stage, self.run, self.project_hash);
-        self.ledger.begin().ok();
-        let recorded = (|| -> Result<i64, LedgerError> {
-            let op = self.ledger.begin_op(
-                Some(self.run.as_bytes()),
-                &ir,
-                &FiveExplicits {
-                    seed: &self.seed,
-                    versions: &self.versions_json,
-                    budget: &self.budget_json,
-                    capability: &self.capability_json,
-                },
-                i64::from(stage.ordinal()) * 2,
-            )?;
-            let artifact =
-                self.ledger
-                    .put_artifact("solve-refusal", diagnostic.as_bytes(), None)?;
-            self.ledger.link(op, &artifact.hash, EdgeRole::Out)?;
-            if stage.ordinal() == 0 && state.completed.is_empty() {
-                let source = self.ledger.put_artifact(
-                    PROJECT_SOURCE_KIND,
-                    self.canonical_source.as_bytes(),
-                    None,
-                )?;
-                self.ledger.link(op, &source.hash, EdgeRole::In)?;
-            }
-            self.ledger.finish_op(
-                op,
-                OpOutcome::Error,
-                Some(&diagnostic),
-                i64::from(stage.ordinal()) * 2 + 1,
-            )?;
-            Ok(op)
-        })();
-        match finish_solve_transaction(self.ledger, recorded) {
-            Ok(op) => refusal.recorded_op = Some(op),
-            Err(ledger_error) => {
-                refusal.what = format!(
-                    "{}; durable refusal recording also failed: {ledger_error}",
-                    refusal.what
-                );
-            }
-        }
-        refusal
-    }
-
-    fn ledger_refusal(&self, stage: SolveStage, error: &LedgerError) -> SolveRefusal {
-        SolveRefusal {
-            code: "cli-solve-ledger",
-            stage: Some(stage.name()),
-            what: format!("ledger transaction failed: {error}"),
-            fix: "repair the ledger or contention failure, verify ledger lint/integrity, \
-                  and retry"
-                .to_string(),
-            dependency: None,
-            run: Some(self.run.to_hex()),
-            recorded_op: None,
-        }
-    }
-}
-
-fn session_refusal(run: SolveRunId, error: &SessionError) -> SolveRefusal {
-    SolveRefusal {
-        code: "cli-solve-session",
-        stage: None,
-        what: format!("the session governor refused: {error:?}"),
-        fix: "the capability token derivation and governor wiring disagree; this is a \
-              driver defect"
-            .to_string(),
-        dependency: None,
-        run: Some(run.to_hex()),
-        recorded_op: None,
-    }
-}
-
-fn envelope_provenance(run: SolveRunId) -> u64 {
-    run.session_u64()
-}
-
-fn push_framed(preimage: &mut Vec<u8>, bytes: &[u8]) {
-    preimage.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    preimage.extend_from_slice(bytes);
 }
 
 fn solve_stage_ir(stage: SolveStage, run: SolveRunId, project_hash: ContentHash) -> String {
-    format!(
-        "{{\"schema\":{},\"stage\":{},\"ordinal\":{},\"run\":{},\"project\":{},\"driver_version\":{}}}",
-        json_string(SOLVE_STAGE_SCHEMA),
-        json_string(stage.name()),
-        stage.ordinal(),
-        json_string(&run.to_hex()),
-        json_string(&project_hash.to_hex()),
-        SOLVE_DRIVER_VERSION,
-    )
+    format_stage_ir(&THERMAL_PIPELINE_SCHEMA, stage, run, project_hash)
 }
 
 fn import_verify_receipt(
@@ -3866,19 +3427,6 @@ fn import_verify_receipt(
     work.checkpoint(phase, None, u64::MAX)
         .map_err(|_| EvidenceCompareError::Cancelled)?;
     Ok(receipt)
-}
-
-/// One replayable claim-usage receipt retained as its own ledger artifact.
-///
-/// The stage receipt carries semantic identities such as the `fs-matdb`
-/// receipt hash; `artifact` is independently the ledger content address of
-/// the exact retained bytes. `kind` keeps heterogeneous stage side outputs
-/// explicit rather than treating a temperature field as a usage receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RetainedSideArtifact {
-    kind: &'static str,
-    artifact: ContentHash,
-    bytes: Vec<u8>,
 }
 
 /// Canonical finite `f64` spelling, or `None` for a non-finite value.
@@ -8586,15 +8134,6 @@ fn assignment_receipt(
     Ok(receipt)
 }
 
-fn progress_line(run: &str, stage: &str, ordinal: u32, status: &str, wall_s: f64) -> String {
-    format!(
-        "{{\"schema\":\"frankensim.cli.solve-progress.v1\",\"run\":{},\"stage\":{},\"ordinal\":{ordinal},\"status\":{},\"wall_s\":{wall_s}}}",
-        json_string(run),
-        json_string(stage),
-        json_string(status),
-    )
-}
-
 fn qoi_progress_line(
     run: &str,
     ordinal: u32,
@@ -8616,32 +8155,6 @@ fn qoi_progress_line(
         summary.budget_terms_measured,
         summary.budget_terms_total,
     )
-}
-
-fn budget_warning_line(run: &str, fraction: f64, used: f64, granted: f64) -> String {
-    format!(
-        "{{\"schema\":\"frankensim.cli.solve-progress.v1\",\"run\":{},\"stage\":\"budget\",\"status\":\"warning\",\"fraction\":{fraction},\"used_wall_s\":{used},\"granted_wall_s\":{granted}}}",
-        json_string(run),
-    )
-}
-
-fn finish_solve_transaction<T>(
-    ledger: &Ledger,
-    result: Result<T, LedgerError>,
-) -> Result<T, LedgerError> {
-    match result {
-        Ok(value) => match ledger.commit() {
-            Ok(()) => Ok(value),
-            Err(error) => {
-                let _ = ledger.rollback();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            let _ = ledger.rollback();
-            Err(error)
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -9046,7 +8559,7 @@ fn controlled_candidate_text(
     })
 }
 
-fn read_visible_op_page(
+pub(crate) fn read_visible_op_page(
     ledger: &Ledger,
     cursor: Option<VisibleOpCursor>,
     work: EvidenceWork<'_>,
@@ -9105,7 +8618,7 @@ fn read_visible_op_page(
     }
 }
 
-fn read_op_edges_controlled(
+pub(crate) fn read_op_edges_controlled(
     ledger: &Ledger,
     op: i64,
     work: EvidenceWork<'_>,
@@ -9135,7 +8648,7 @@ fn read_op_edges_controlled(
     Ok(page)
 }
 
-fn read_artifact_info_controlled(
+pub(crate) fn read_artifact_info_controlled(
     ledger: &Ledger,
     artifact: &ContentHash,
     work: EvidenceWork<'_>,
@@ -9178,7 +8691,7 @@ fn read_artifact_info_controlled(
     Ok(info)
 }
 
-fn read_candidate_op(
+pub(crate) fn read_candidate_op(
     ledger: &Ledger,
     op: i64,
     work: EvidenceWork<'_>,
@@ -9524,7 +9037,7 @@ impl Drop for TraceSpan {
     }
 }
 
-fn dump_trace_spans() {
+pub(crate) fn dump_trace_spans() {
     TRACE_SPANS.with(|spans| {
         for (name, (calls, secs)) in spans.borrow().iter() {
             eprintln!("TRACE span {name}: {calls} calls, {secs:.3}s");
@@ -9539,342 +9052,68 @@ fn dump_trace_spans() {
 /// grants no authority. Resume eligibility comes exclusively from
 /// [`validate_resume_candidate`], which re-attests the complete canonical
 /// operation and checkpoint chain before a governor is opened.
-fn load_latest_state(
-    ledger: &Ledger,
-    run: SolveRunId,
-    work: EvidenceWork<'_>,
+struct ThermalResumeAttestor {
+    import_cache: Option<Rc<ResumeImportCache>>,
     proof: ResumeProof,
-) -> Result<VerifiedResume, SolveRefusal> {
-    let mut cursor = None;
-    let mut page_index = 0usize;
-    let mut candidate_index = 0usize;
-    let mut visible_ids = 0usize;
-    let mut best: Option<VerifiedResume> = None;
-    let mut best_is_ambiguous = false;
-    let mut import_cache = None;
-    let mut candidates: Vec<(SolveDriverState, ContentHash, i64)> = Vec::new();
-    let trace_export = std::env::var_os("FS_CLI_TRACE_EXPORT").is_some();
-    let t_scan = std::time::Instant::now();
-    // Ops that belong to this run but were not admissible, by reason, so a
-    // run retained under another driver or receipt schema is reported as
-    // incompatible rather than nonexistent.
-    let run_bytes: &[u8] = run.as_bytes().as_slice();
-    let mut seen_for_run = 0usize;
-    let mut rejections: BTreeMap<String, usize> = BTreeMap::new();
-    loop {
-        if page_index >= MAX_SOLVE_VISIBLE_OP_PAGES {
-            return Err(invocation_work_refusal(
-                Some(run),
-                Some(SolveStage::ImportVerify),
-                InvocationWorkExceeded::VisiblePages {
-                    limit: MAX_SOLVE_VISIBLE_OP_PAGES,
-                },
-            ));
-        }
-        let page =
-            read_visible_op_page(ledger, cursor, work, page_index).map_err(
-                |error| match error {
-                    VisibleOpScanError::Cancelled => cancelled_resume_refusal(run),
-                    VisibleOpScanError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
-                    }
-                    VisibleOpScanError::Ledger(error) => {
-                        resume_ledger("scanning the ledger for the run failed", error)
-                    }
-                },
-            )?;
-        page_index = page_index.saturating_add(1);
-        if page.truncated != page.next_cursor.is_some() {
-            return Err(resume_ledger(
-                "scanning the ledger for the run failed",
-                LedgerError::Invalid {
-                    field: "visible_op_page".to_string(),
-                    problem: "controlled page truncation and continuation disagree".to_string(),
-                },
-            ));
-        }
-        for id in page.op_ids {
-            if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
-                return Err(invocation_work_refusal(
-                    Some(run),
-                    Some(SolveStage::ImportVerify),
-                    InvocationWorkExceeded::VisibleIds {
-                        limit: MAX_SOLVE_VISIBLE_OP_IDS,
-                    },
-                ));
-            }
-            visible_ids = visible_ids.saturating_add(1);
-            let this_candidate = candidate_index;
-            candidate_index = candidate_index.saturating_add(1);
-            let Some(candidate) = read_candidate_op(ledger, id, work, this_candidate).map_err(
-                |error| match error {
-                    CandidateOpReadError::Cancelled => cancelled_resume_refusal(run),
-                    CandidateOpReadError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
-                    }
-                    CandidateOpReadError::Ledger(error) => {
-                        resume_ledger("scanning the ledger for the run failed", error)
-                    }
-                },
-            )?
-            else {
-                continue;
-            };
-            let this_run = candidate.row.session.as_deref() == Some(run_bytes);
-            if this_run {
-                seen_for_run = seen_for_run.saturating_add(1);
-            }
-            let rejection = if candidate.branch != MAIN_BRANCH {
-                Some("op is not on the main branch".to_string())
-            } else if candidate.exec_mode != ExecMode::Deterministic {
-                Some("op did not execute deterministically".to_string())
-            } else {
-                stage_discovery_rejection(&candidate.row, run).err()
-            };
-            if let Some(reason) = rejection {
-                if this_run {
-                    *rejections.entry(reason).or_insert(0) += 1;
-                }
-                continue;
-            }
-            let mut saw_state = false;
-            let edges = resume_edges(
-                ledger,
-                run,
-                SolveStage::ImportVerify,
-                id,
-                work,
-                this_candidate,
-            )?;
-            for (descriptor_index, edge) in edges.iter().enumerate() {
-                if edge.role != EdgeRole::Out {
-                    continue;
-                }
-                let Some(info) =
-                    read_artifact_info_controlled(ledger, &edge.artifact, work, descriptor_index)
-                        .map_err(|error| match error {
-                        EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
-                        EvidenceReadError::WorkEnvelope(error) => invocation_work_refusal(
-                            Some(run),
-                            Some(SolveStage::ImportVerify),
-                            error,
-                        ),
-                        EvidenceReadError::Ledger(error) => resume_ledger(
-                            "reading a retained driver-state descriptor failed",
-                            error,
-                        ),
-                    })?
-                else {
-                    continue;
-                };
-                if info.kind != STAGE_STATE_KIND {
-                    continue;
-                }
-                saw_state = true;
-                let state = decode_driver_state(ledger, run, edge.artifact, work)?;
-                validate_state_shape(&state, run)?;
-                // Collect now, validate later: every retained state of the run
-                // is a candidate, but validating each one re-reads and re-hashes
-                // its whole prefix (bridge plan B8a measured 60-130 s exports on
-                // a 7-stage ledger from exactly this). The longest prefix is
-                // validated first below; shorter ones only if it fails.
-                candidates.push((state, edge.artifact, id));
-            }
-            if !saw_state {
-                *rejections
-                    .entry("op retains no driver-state artifact".to_string())
-                    .or_insert(0) += 1;
-            }
-        }
-        match page.next_cursor {
-            Some(next) => {
-                if visible_ids >= MAX_SOLVE_VISIBLE_OP_IDS {
-                    return Err(invocation_work_refusal(
-                        Some(run),
-                        Some(SolveStage::ImportVerify),
-                        InvocationWorkExceeded::VisibleIds {
-                            limit: MAX_SOLVE_VISIBLE_OP_IDS,
-                        },
-                    ));
-                }
-                cursor = Some(next);
-            }
-            None => break,
-        }
+}
+
+impl ResumeAttestor for ThermalResumeAttestor {
+    type Stage = SolveStage;
+    type Verified = VerifiedResume;
+
+    fn schema(&self) -> &'static PipelineSchema {
+        &THERMAL_PIPELINE_SCHEMA
     }
-    if trace_export {
-        eprintln!(
-            "TRACE export: op scan {:.3}s ({visible_ids} ops, {} candidates)",
-            t_scan.elapsed().as_secs_f64(),
-            candidates.len()
-        );
+
+    fn decode_state(
+        &self,
+        ledger: &Ledger,
+        run: SolveRunId,
+        artifact: ContentHash,
+        work: EvidenceWork<'_>,
+    ) -> Result<SolveDriverState, SolveRefusal> {
+        decode_driver_state(ledger, run, artifact, work)
     }
-    // Longest prefix first (ties in op order so the ambiguity refusal is
-    // deterministic); stop as soon as a strictly shorter prefix would follow
-    // an accepted one. Validation errors still refuse, as before.
-    candidates.sort_by(|left, right| {
-        right
-            .0
-            .completed
-            .len()
-            .cmp(&left.0.completed.len())
-            .then_with(|| left.2.cmp(&right.2))
-    });
-    for (state, state_artifact, discovery_op) in candidates {
-        if let Some(existing) = best.as_ref()
-            && existing.state.completed.len() > state.completed.len()
-        {
-            break;
-        }
-        let t_validate = std::time::Instant::now();
-        let prefix_len = state.completed.len();
-        let verified = validate_resume_candidate(
+
+    fn validate_candidate(
+        &mut self,
+        ledger: &Ledger,
+        run: SolveRunId,
+        state: SolveDriverState,
+        state_artifact: ContentHash,
+        discovery_op: i64,
+        work: EvidenceWork<'_>,
+    ) -> Result<Self::Verified, SolveRefusal> {
+        validate_resume_candidate(
             ledger,
             run,
             state,
             state_artifact,
             discovery_op,
             work,
-            &mut import_cache,
-            proof,
-        )?;
-        if trace_export {
-            eprintln!(
-                "TRACE export: validate prefix {prefix_len} {:.3}s",
-                t_validate.elapsed().as_secs_f64()
-            );
-        }
-        match best.as_ref() {
-            Some(existing) if existing.state.completed.len() == verified.state.completed.len() => {
-                best_is_ambiguous = true;
-            }
-            Some(_) => {}
-            None => {
-                best = Some(verified);
-                best_is_ambiguous = false;
-            }
-        }
-    }
-    let best = best.ok_or_else(|| {
-        if seen_for_run > 0 {
-            let mut reasons: Vec<String> = rejections
-                .iter()
-                .map(|(reason, count)| format!("{count} x {reason}"))
-                .collect();
-            if reasons.is_empty() {
-                reasons.push("no candidate op carried an admissible driver state".to_string());
-            }
-            return SolveRefusal::plain(
-                "cli-solve-run-incompatible",
-                format!(
-                    "solve run `{}` has {seen_for_run} retained operation(s) in this ledger but \
-                     none is admissible under driver version {SOLVE_DRIVER_VERSION}: {}",
-                    run.to_hex(),
-                    reasons.join("; ")
-                ),
-                "the run was retained by a different driver or stage-receipt schema; re-run the \
-                 solve with this binary (the retained run stays in the ledger) or export it with \
-                 the binary that produced it",
-            );
-        }
-        SolveRefusal::plain(
-            "cli-solve-unknown-run",
-            format!("no solve run `{}` exists in this ledger", run.to_hex()),
-            "pass the run id printed by `frankensim solve` and the same ledger path",
+            &mut self.import_cache,
+            self.proof,
         )
-    })?;
-    if best_is_ambiguous {
-        return Err(resume_identity(format!(
-            "the ledger carries competing independently valid {}-stage checkpoints for run `{}`",
-            best.state.completed.len(),
-            run.to_hex()
-        )));
     }
-    drop(import_cache);
-    if trace_export {
-        dump_trace_spans();
+
+    fn completed_len(verified: &Self::Verified) -> usize {
+        verified.state.completed.len()
     }
+}
+
+fn load_latest_state(
+    ledger: &Ledger,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    proof: ResumeProof,
+) -> Result<VerifiedResume, SolveRefusal> {
+    let mut attestor = ThermalResumeAttestor {
+        import_cache: None,
+        proof,
+    };
+    let best = discover_and_attest_resume(ledger, run, work, &mut attestor)?;
+    drop(attestor.import_cache);
     Ok(best)
-}
-
-/// Why an op row is NOT a discovery candidate for `run` (or the stage it
-/// names when it is). Every predicate names itself so the loader can tell
-/// "no op for this run" from "ops exist, none admissible" — the latter was
-/// reported as `cli-solve-unknown-run` until 2026-09-02, which blamed the
-/// user for a run their previous binary retained (bridge plan A13).
-fn stage_discovery_rejection(row: &OpRow, run: SolveRunId) -> Result<SolveStage, String> {
-    if row.id <= 0 {
-        return Err("op id is not positive".to_string());
-    }
-    if row.session.as_deref() != Some(run.as_bytes().as_slice()) {
-        return Err("op belongs to another run".to_string());
-    }
-    if row.outcome.as_deref() != Some("ok") {
-        return Err(format!(
-            "op outcome is {}, not ok",
-            row.outcome.as_deref().unwrap_or("absent")
-        ));
-    }
-    if row.diag.is_some() {
-        return Err("op carries a diagnostic".to_string());
-    }
-    if row.ir.len() > 512 {
-        return Err("op IR exceeds the discovery size cap".to_string());
-    }
-    let stage = parse_stage_discovery_ir(&row.ir, run)
-        .map_err(|error| format!("discovery IR rejected ({error})"))?;
-    // Conduction and the request-selective QoI are conditional on the retained
-    // project. Discovery cannot inspect that project yet, so admit every
-    // producing stage's candidates here and let `validate_resume_candidate`
-    // re-attest the project and enforce `declaration_gap`. Report is an
-    // unconditional projection of the retained producer prefix.
-    if stage.gap_dependency().is_some() {
-        return Err(format!(
-            "stage `{}` has no producer under this driver",
-            stage.name()
-        ));
-    }
-    if row.t_start != i64::from(stage.ordinal()) * 2
-        || row.t_end != Some(i64::from(stage.ordinal()) * 2 + 1)
-    {
-        return Err(format!(
-            "stage `{}` timing slots do not match its ordinal",
-            stage.name()
-        ));
-    }
-    Ok(stage)
-}
-
-fn parse_stage_discovery_ir(ir: &str, run: SolveRunId) -> Result<SolveStage, String> {
-    let mut cursor = JsonCursor::new(ir);
-    cursor.expect("{\"schema\":")?;
-    if cursor.parse_string()? != SOLVE_STAGE_SCHEMA {
-        return Err("solve-stage discovery schema does not match the driver".to_string());
-    }
-    cursor.expect(",\"stage\":")?;
-    let stage_name = cursor.parse_string()?;
-    let stage = SolveStage::ALL
-        .iter()
-        .copied()
-        .find(|stage| stage.name() == stage_name)
-        .ok_or_else(|| "solve-stage discovery names an unknown stage".to_string())?;
-    cursor.expect(",\"ordinal\":")?;
-    if cursor.parse_u64()? != u64::from(stage.ordinal()) {
-        return Err("solve-stage discovery ordinal does not match its stage".to_string());
-    }
-    cursor.expect(",\"run\":")?;
-    if cursor.parse_string()? != run.to_hex() {
-        return Err("solve-stage discovery run does not match the requested run".to_string());
-    }
-    cursor.expect(",\"project\":")?;
-    let _ = parse_hash_string(&mut cursor, "project")?;
-    cursor.expect(",\"driver_version\":")?;
-    if cursor.parse_u64()? != u64::from(SOLVE_DRIVER_VERSION) {
-        return Err("solve-stage discovery driver version is unsupported".to_string());
-    }
-    cursor.expect("}")?;
-    cursor.finish()?;
-    Ok(stage)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -10955,44 +10194,7 @@ fn validate_resume_candidate(
 
 fn validate_state_shape(state: &SolveDriverState, run: SolveRunId) -> Result<(), SolveRefusal> {
     let _span = TraceSpan::new("validate_state_shape");
-    if state.run != *run.as_bytes() {
-        return Err(resume_identity(
-            "the retained driver state carries a different run identity",
-        ));
-    }
-    if !state.consumed_core_s.is_finite()
-        || state.consumed_core_s < 0.0
-        || !state.consumed_wall_s.is_finite()
-        || state.consumed_wall_s < 0.0
-        || state.consumed_core_s != state.consumed_wall_s
-    {
-        return Err(resume_identity(
-            "the retained driver state carries non-finite or negative consumption",
-        ));
-    }
-    if state.completed.is_empty() || state.completed.len() > SolveStage::ALL.len() {
-        return Err(resume_identity(format!(
-            "the retained driver state has an impossible {}-stage prefix",
-            state.completed.len()
-        )));
-    }
-    let mut previous_op = 0i64;
-    for (index, completed) in state.completed.iter().enumerate() {
-        if completed.ordinal as usize != index {
-            return Err(resume_identity(format!(
-                "completed stage index {index} carries ordinal {}",
-                completed.ordinal
-            )));
-        }
-        if completed.op_id <= 0 || completed.op_id <= previous_op {
-            return Err(resume_identity(format!(
-                "completed stage index {index} carries non-positive or non-increasing operation id {}",
-                completed.op_id
-            )));
-        }
-        previous_op = completed.op_id;
-    }
-    Ok(())
+    validate_state_shape_for::<SolveStage>(state, run, SOLVE_CORES)
 }
 
 fn validate_stage_row(
@@ -11067,29 +10269,7 @@ fn validate_checkpoint_prefix(
     predecessor: Option<&SolveDriverState>,
 ) -> Result<(), SolveRefusal> {
     let _span = TraceSpan::new("validate_checkpoint_prefix");
-    if checkpoint.run != final_state.run
-        || checkpoint.project != final_state.project
-        || checkpoint.completed.as_slice() != &final_state.completed[..=index]
-        || !checkpoint.consumed_core_s.is_finite()
-        || checkpoint.consumed_core_s < 0.0
-        || !checkpoint.consumed_wall_s.is_finite()
-        || checkpoint.consumed_wall_s < 0.0
-        || checkpoint.consumed_core_s != checkpoint.consumed_wall_s
-    {
-        return Err(resume_identity(format!(
-            "stage {index} checkpoint does not encode the exact trusted prefix"
-        )));
-    }
-    if let Some(predecessor) = predecessor {
-        if checkpoint.consumed_core_s < predecessor.consumed_core_s
-            || checkpoint.consumed_wall_s < predecessor.consumed_wall_s
-        {
-            return Err(resume_identity(format!(
-                "stage {index} checkpoint consumption regresses from its predecessor"
-            )));
-        }
-    }
-    Ok(())
+    validate_checkpoint_prefix_for(checkpoint, final_state, index, predecessor, SOLVE_CORES)
 }
 
 fn resume_edges(
@@ -11351,7 +10531,7 @@ fn attest_retained_project(
     })
 }
 
-fn resume_identity(what: impl Into<String>) -> SolveRefusal {
+pub(crate) fn resume_identity(what: impl Into<String>) -> SolveRefusal {
     SolveRefusal::plain(
         "cli-solve-resume-identity",
         what,
@@ -11368,10 +10548,13 @@ fn cancelled_before_run_refusal() -> SolveRefusal {
     )
 }
 
-fn cancelled_fresh_refusal(run: SolveRunId, stage: Option<SolveStage>) -> SolveRefusal {
+pub(crate) fn cancelled_fresh_refusal_named(
+    run: SolveRunId,
+    stage: Option<&'static str>,
+) -> SolveRefusal {
     SolveRefusal {
         code: "cli-solve-cancelled",
-        stage: stage.map(SolveStage::name),
+        stage,
         what: "cancellation observed during bounded solve derivation; no new solve publication \
                was made"
             .to_string(),
@@ -11382,9 +10565,13 @@ fn cancelled_fresh_refusal(run: SolveRunId, stage: Option<SolveStage>) -> SolveR
     }
 }
 
-fn invocation_work_refusal(
+fn cancelled_fresh_refusal(run: SolveRunId, stage: Option<SolveStage>) -> SolveRefusal {
+    cancelled_fresh_refusal_named(run, stage.map(SolveStage::name))
+}
+
+pub(crate) fn invocation_work_refusal_named(
     run: Option<SolveRunId>,
-    stage: Option<SolveStage>,
+    stage: Option<&'static str>,
     exceeded: InvocationWorkExceeded,
 ) -> SolveRefusal {
     let what = match exceeded {
@@ -11403,7 +10590,7 @@ fn invocation_work_refusal(
     };
     SolveRefusal {
         code: "cli-solve-work-envelope",
-        stage: stage.map(SolveStage::name),
+        stage,
         what,
         fix: "compact or split unrelated ledger history, or reduce retained candidate evidence, \
               then retry; the driver will not report a false not-found result"
@@ -11414,21 +10601,42 @@ fn invocation_work_refusal(
     }
 }
 
-fn cancelled_resume_refusal(run: SolveRunId) -> SolveRefusal {
+fn invocation_work_refusal(
+    run: Option<SolveRunId>,
+    stage: Option<SolveStage>,
+    exceeded: InvocationWorkExceeded,
+) -> SolveRefusal {
+    invocation_work_refusal_named(run, stage.map(SolveStage::name), exceeded)
+}
+
+pub(crate) fn cancelled_resume_refusal_named(
+    run: SolveRunId,
+    stage: Option<&'static str>,
+    schema: &PipelineSchema,
+) -> SolveRefusal {
     SolveRefusal {
         code: "cli-solve-cancelled",
-        stage: Some(SolveStage::ImportVerify.name()),
+        stage,
         what: "cancellation observed while re-attesting retained solve evidence; no new solve \
                publication was made"
             .to_string(),
         fix: format!(
-            "retry `frankensim solve --resume {} <ledger>` with a fresh cancellation gate",
+            "retry `{} {} <ledger>` with a fresh cancellation gate",
+            schema.resume_command_prefix,
             run.to_hex()
         ),
         dependency: None,
         run: Some(run.to_hex()),
         recorded_op: None,
     }
+}
+
+fn cancelled_resume_refusal(run: SolveRunId) -> SolveRefusal {
+    cancelled_resume_refusal_named(
+        run,
+        Some(SolveStage::ImportVerify.name()),
+        &THERMAL_PIPELINE_SCHEMA,
+    )
 }
 
 fn resume_import_envelope(run: SolveRunId, what: impl Into<String>) -> SolveRefusal {
@@ -11445,7 +10653,7 @@ fn resume_import_envelope(run: SolveRunId, what: impl Into<String>) -> SolveRefu
     }
 }
 
-fn resume_ledger(context: &str, error: LedgerError) -> SolveRefusal {
+pub(crate) fn resume_ledger(context: &str, error: LedgerError) -> SolveRefusal {
     SolveRefusal::plain(
         "cli-solve-ledger",
         format!("{context}: {error}"),
@@ -14222,7 +13430,7 @@ fn parse_verified_import_entry(cursor: &mut JsonCursor<'_>) -> Result<VerifiedIm
     })
 }
 
-fn parse_hash_string(cursor: &mut JsonCursor<'_>, field: &str) -> Result<ContentHash, String> {
+pub(crate) fn parse_hash_string(cursor: &mut JsonCursor<'_>, field: &str) -> Result<ContentHash, String> {
     let value = cursor.parse_string()?;
     let hash = ContentHash::from_hex(&value)
         .ok_or_else(|| format!("field `{field}` is not a 64-hex content hash"))?;
@@ -14234,7 +13442,7 @@ fn parse_hash_string(cursor: &mut JsonCursor<'_>, field: &str) -> Result<Content
     Ok(hash)
 }
 
-struct JsonCursor<'a> {
+pub(crate) struct JsonCursor<'a> {
     input: &'a str,
     pos: usize,
     poll: Option<JsonPoll<'a>>,
@@ -14250,7 +13458,7 @@ struct JsonPoll<'a> {
 }
 
 impl<'a> JsonCursor<'a> {
-    fn new(input: &'a str) -> Self {
+    pub(crate) fn new(input: &'a str) -> Self {
         Self {
             input,
             pos: 0,
@@ -14289,7 +13497,7 @@ impl<'a> JsonCursor<'a> {
         format!("{what} at byte {}", self.pos)
     }
 
-    fn expect(&mut self, expected: &str) -> Result<(), String> {
+    pub(crate) fn expect(&mut self, expected: &str) -> Result<(), String> {
         if self.cancelled {
             return Err("solve evidence parsing stopped at phase entry".to_string());
         }
@@ -14300,7 +13508,7 @@ impl<'a> JsonCursor<'a> {
         }
     }
 
-    fn finish(&mut self) -> Result<(), String> {
+    pub(crate) fn finish(&mut self) -> Result<(), String> {
         if self.cancelled {
             return Err("solve evidence parsing stopped at phase entry".to_string());
         }
@@ -14384,7 +13592,7 @@ impl<'a> JsonCursor<'a> {
         self.checkpoint_current("at completion")
     }
 
-    fn parse_string(&mut self) -> Result<String, String> {
+    pub(crate) fn parse_string(&mut self) -> Result<String, String> {
         self.expect("\"")?;
         let mut value = String::new();
         loop {
@@ -14480,7 +13688,7 @@ impl<'a> JsonCursor<'a> {
             .map_err(|_| self.problem("JSON integer is outside i64"))
     }
 
-    fn parse_u64(&mut self) -> Result<u64, String> {
+    pub(crate) fn parse_u64(&mut self) -> Result<u64, String> {
         let start = self.pos;
         match self.peek() {
             Some(b'0') => {

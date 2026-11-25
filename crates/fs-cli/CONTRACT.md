@@ -1,5 +1,33 @@
 # CONTRACT: fs-cli
 
+## Reusable durable stage driver (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 1)
+
+`crates/fs-cli/src/stage_driver.rs` factors the durable multi-stage orchestration
+loop out of `crates/fs-cli/src/solve.rs` into crate-internal traits
+(`StageDescriptor`, `StagePipeline`, `ResumeAttestor`) and a shared runner
+(`DurableStageSession`, `discover_and_attest_resume`). The shared loop owns
+content-derived run identity framing, capability-token derivation and `fs-session`
+`Governor` metering (including 50% / 90% wall-budget warnings, honest
+`BudgetExceeded` terminal stops, and `resume-restore` consumption continuity),
+cancellation gates and pre-publication checkpoints, gap / declaration-gap /
+capability checks with durable error-op refusal recording, atomic per-stage
+ledger persistence with sealed `LegacySnapshotV1Adapter` checkpoints and exact
+artifact-edge seals, terminal receipt persistence, and controlled visible-op
+resume discovery with ambiguity and incompatible-driver refusals.
+
+No public `fs-cli` symbol, signature, wire schema, or thermal driver version
+(`SOLVE_DRIVER_VERSION = 137`) changes. Thermal `solve` / `resume_solve`
+implements `StagePipeline` and `ResumeAttestor`, reproducing the heatsink
+example's `run` id, `report_content_hash`, exported report HTML/JSON bytes, and
+evidence package Merkle root bit for bit (`tests/stage_driver.rs`). A synthetic
+three-stage non-thermal implementor (`stage_driver::tests`) proves fresh execution,
+kill/resume at every stage boundary, budget stops, durable refusals, and
+competing-checkpoint refusal independently of cooling physics.
+
+No-claim boundary: Stage 1 factors the durable stage driver only; assembly
+lowering/execution stages (`admit -> lower -> plan -> run -> probe -> report`)
+and CLI/FrankenScript assembly verbs remain subsequent stages of `.11.7`.
+
 ## Live scalar dissipation on system graphs
 
 The scalar `damper`, `rotary_damper` and non-material `resistor` may declare
