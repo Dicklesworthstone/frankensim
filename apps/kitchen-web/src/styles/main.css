@@ -1377,8 +1377,48 @@ a:hover > .joint,
   font-size: 0.8rem;
   color: var(--faint);
 }
+/* The method under each figure, folded to one line until it is opened. */
+.fig-foot.how {
+  display: block;
+  padding-block: 0;
+}
+.fig-foot.how summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: fit-content;
+  margin: 0;
+  padding: 0.95rem 0;
+  cursor: pointer;
+  list-style: none;
+  transition: color 0.15s ease;
+}
+.fig-foot.how summary::-webkit-details-marker {
+  display: none;
+}
+.fig-foot.how summary::after {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid var(--chapter);
+  border-bottom: 1.5px solid var(--chapter);
+  transform: translateY(-0.12rem) rotate(45deg);
+  transition: transform 0.2s ease;
+}
+.fig-foot.how details[open] > summary::after {
+  transform: translateY(0.12rem) rotate(225deg);
+}
+.fig-foot.how summary:hover,
+.fig-foot.how summary:focus-visible {
+  color: var(--text);
+}
+.how-body {
+  display: grid;
+  gap: 0.9rem 3rem;
+  padding-bottom: 1.3rem;
+}
 @media (min-width: 1000px) {
-  .fig-foot.how {
+  .how-body {
     grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
     align-items: start;
   }

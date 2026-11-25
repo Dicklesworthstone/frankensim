@@ -165,6 +165,22 @@ function initRangeTrackFills(): void {
   document.addEventListener("click", () => requestAnimationFrame(() => sliders.forEach(syncSlider)));
 }
 
+/** A link to a figure's method (a chapter head's "How it's computed", or the page's address) opens it where it is
+ * folded under the figure. */
+function initHowLinks(): void {
+  const open = (id: string) => {
+    const el = id ? document.getElementById(id) : null;
+    const d = el?.matches(".fig-foot.how") ? el.querySelector<HTMLDetailsElement>(":scope > details") : null;
+    if (d) d.open = true;
+  };
+  document.querySelectorAll<HTMLAnchorElement>('a[href^="#"]').forEach((a) => a.addEventListener("click", () => open(a.hash.slice(1))));
+  const fromAddress = () => {
+    if (location.hash) open(decodeURIComponent(location.hash.slice(1)));
+  };
+  window.addEventListener("hashchange", fromAddress);
+  fromAddress();
+}
+
 /** Mount one 3D chapter. A chapter that fails (no WebGL, a lost context) leaves its section's text and controls in
  * place and never stops the rest of the page from starting. */
 function tryMount<T>(id: string, mount: () => T): T | null {
@@ -192,6 +208,7 @@ function bootstrap(): void {
   initScrollChrome();
   initReveal();
   initRangeTrackFills();
+  initHowLinks();
   // The stove chapter's ribeye texture is the heaviest single build on the page: start it on another thread now,
   // while the hero kitchen builds, and mount the stove once it has arrived. The oven's loaf crust is the next
   // heaviest; the oven waits for it only to build the loaf, after its own mount.

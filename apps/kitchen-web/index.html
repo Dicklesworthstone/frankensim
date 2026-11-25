@@ -520,14 +520,18 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="equipment-how">
+              <details>
+                <summary class="how-title">How it's made</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's made</p>
                 <p>Each piece is built in code with three.js, part by part, to the catalogue's width, depth and height. The size box shows those measurements in millimetres. Its material card gives the surface's emissivity and heat capacity, which the stove and oven models use.</p>
               </div>
               <div>
                 <p class="how-title">In the files</p>
                 <p>Moving parts are named joints, such as an oven door's hinge or a fryer basket's lift. Grip points are named sockets that the cooks' hands attach to. The catalogue lists all 79 pieces with their sizes, triangle counts and joints.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
@@ -607,8 +611,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="stove-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>The steak is eight layers that pass heat to one another. The pan is two thermal masses, and how much burner power reaches it depends on its metal: induction barely heats aluminum. When the wine goes in, the heat it takes to boil comes out of the pan.</p>
                 <p>The steak on screen is drawn from the model every frame. It shrinks as it cooks, browns with the crust and changes colour inside with its core temperature.</p>
               </div>
@@ -616,6 +622,8 @@
                 <code class="formula">C_pan · dT_pan/dt = η(source, pan) · P_in − q_steak − ṁ_vap · h_fg − q_loss</code>
                 <p class="model">Model: <code>stepStoveKernel</code>, matching FrankenSim's <code>engine-stove</code> reference to one part in a million. Fitted values: each fat's smoke point and contact factor.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
@@ -676,8 +684,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="oven-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>Heat reaches the loaf three ways: the fan's moving air, radiation from the hot walls, and steam condensing on the surface while the dough is below the dew point. Condensing steam gives up 2.26 MJ for every kilogram of water. Browning follows an Arrhenius rate.</p>
                 <p>The loaf's height and colour on screen come from the computed rise and browning.</p>
               </div>
@@ -685,6 +695,8 @@
                 <code class="formula">h_eff = h_conv(fan) + h_rad(T_cavity, T_crust) + h_cond(RH, T_dew − T_crust)</code>
                 <p class="model">Model: <code>stepOvenKernel</code>, matching FrankenSim's <code>engine-oven</code> reference to one part in a million.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
@@ -761,8 +773,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="cold-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>In an open doorway, warm air flows in at the top while cold air drains out at the bottom, faster for a taller door and a bigger temperature difference. Frost on the coil lowers how much heat it can take out. In the delivery box, the crust goes soft when steam lowers its glass transition below the food's temperature.</p>
                 <p>A design check against the food-safety limits.</p>
               </div>
@@ -770,6 +784,8 @@
                 <code class="formula">Q_door ∝ A · √(g · H · Δρ / ρ) · f_open<br />T_g = (w_s · T_gs + k · w_w · T_gw) / (w_s + k · w_w)</code>
                 <p class="model">Models: <code>stepWalkinKernel</code> and <code>stepCarrierKernel</code>; the fast estimate is a table of <code>stepCarrierKernel</code> runs with its error measured against more of them. Doorway exchange after Gosney and Olama; crust glass transition by Gordon-Taylor with a fitted k = 4.6.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
@@ -830,8 +846,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="brigade-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>The motion is a kinematic illustration: each pose is solved for reach and joint range, not from forces. The load on the lower back is then computed from the pose you see. The cooks are synthetic and modelled on no real person, sized to the 5th, 50th and 95th percentiles of ISO 7250.</p>
                 <p>An ergonomics screening tool for layouts.</p>
               </div>
@@ -839,6 +857,8 @@
                 <code class="formula">τ_L5/S1 = m_upper · g · L_torso · sin θ_lean + m_pan · g · d_reach</code>
                 <p class="model">Aisle presets and the rack clearance come from the kitchens' build manifests.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
@@ -910,8 +930,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="week-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>Each morning the day's orders are known and the rest of the week is a forecast. Every dish costs the crew minutes per meal. To cook ahead, the planner takes the time left after the day's own work and cooks dishes that keep for the days the forecast says will run over, as close to that day as each dish allows. It works within the blast chiller's 75 pans a day and the racks in the walk-in. Chilled food goes out oldest first and is thrown out once it passes its keeping time.</p>
                 <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes. The quiet-day-to-busy-day slider keeps the week's 4,630 meals and moves every day toward the average, or away from it.</p>
                 <p>The plan map runs all 240 plans over the same 400 weeks: two, three or four cooks, cooking on the day or ahead, one to five racks, and any of the three swaps. Crew-hours count every shift plus a middle week's overtime; meals late are as many as 1 week in 10 sends out late.</p>
@@ -920,6 +942,8 @@
                 <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − cooks × 8 h)</code>
                 <p class="model">Model: <code>runCommissary</code>. Minutes per meal, keeping times and pan yields are set for a catering commissary.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
 
@@ -964,8 +988,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="floor-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>The room is the commissary's own plan, with every fixture where its build manifest puts it. The pans are the forecast week's cooked-ahead batches from the model above, with three racks and a ±10% forecast error, every one chilled. Each is carried from the kettle, the skillet, a combi or a prep table to the chiller, one at a time, and the cook walks back. Each 15-pan chiller load goes to the walk-in on a rack, and the rack comes back.</p>
                 <p>Every walk is measured on the free floor round the fixtures, for a cook carrying a pan. A chiller may stand on any wall where it fits, clear of the site plan's corridors and out from under the hoods. The cook on screen is a kinematic illustration, walking at the 0.9 m/s the times are quoted at.</p>
               </div>
@@ -973,6 +999,8 @@
                 <code class="formula">walk = Σ_source 2 · pans_source · d(source, chiller) + 2 · loads · d(chiller, walk-in)</code>
                 <p class="model">Model: <code>placeChiller</code>. Distance fields over the free floor rank every spot; the routes and totals are A* paths with the chiller in place.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
 
@@ -1035,8 +1063,10 @@
               </div>
             </div>
             <figcaption class="fig-foot how" id="rush-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
               <div>
-                <p class="how-title">How it's computed</p>
                 <p>The service is stepped every 15 seconds from 10:00. Orders come in at random from 11:00 to 14:00 around a peak at 12:20, and the forecast error moves both the day's size and the peak's time. Each cook runs one station. A free cook starts a batch for the guests waiting, then plates the oldest order whose food is ready, then tops up the held dishes. A held dish is cooked to cover most of its holding time's forecast orders while the cabinet has room; it is boxed with its batch and only bagged at the order. Held food past its time, and whatever is left at close, is thrown out.</p>
                 <p>The tiles are the middle of 120 simulated days. The line plays one of them: the tickets are the orders waiting, the pans are the portions held, and the cooks act out each ten minutes of computed work. The map runs all 128 plans the controls allow over the same days, and joins up the ones no other plan beats on both counts.</p>
               </div>
@@ -1044,6 +1074,8 @@
                 <code class="formula">wait = plated − ordered<br />short_dish(t) = forecast orders in [t, done + 0.7 · hold] − held − cooking + waiting</code>
                 <p class="model">Model: <code>runRush</code>. Batch sizes, cook and hands-on minutes and holding times are set for a fast-casual lunch line.</p>
               </div>
+                </div>
+              </details>
             </figcaption>
           </figure>
         </div>
