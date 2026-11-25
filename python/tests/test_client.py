@@ -62,6 +62,42 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
         # Build frankensim binary if needed or locate
         cls.client = FrankenSimClient()
 
+    def test_thermal_study_budget_stop_then_resume_from_ledger(self):
+        fixture = self.repo_root / "examples" / "marquee" / "thermal-2d.fsim"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "thermal study.fsim"
+            ledger = Path(tmpdir) / "study ledger.db"
+            source.write_text(
+                fixture.read_text().replace(":steps 8", ":steps 2")
+                .replace(":mesh-level 4", ":mesh-level 3")
+            )
+            with self.assertRaises(BudgetExceededError) as stopped:
+                self.client.study(source, ledger, budget=1)
+            first = stopped.exception.study_outcome
+            self.assertEqual(first.status, "budget-exhausted")
+            self.assertTrue(first.run_id.startswith("study-"))
+            self.assertEqual(first.receipt["iterations_completed"], 1)
+
+            source.unlink()  # Resume must use the retained source.
+            last = self.client.resume_study(first.run_id, ledger)
+            self.assertEqual(last.exit_code, ExitCode.SUCCESS)
+            self.assertEqual(last.status, "completed")
+            self.assertNotEqual(last.run_id, first.run_id)
+            self.assertEqual(last.receipt["iterations_completed"], 2)
+            self.assertTrue(self.client.package(last.run_id, ledger).is_verified)
+
+    def test_study_admission_failure_has_no_retained_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "invalid.fsim"
+            ledger = Path(tmpdir) / "never-created.db"
+            source.write_text("(study)")
+            result = self.client.study(source, ledger, strict=False)
+            self.assertNotEqual(result.exit_code, ExitCode.SUCCESS)
+            self.assertIsNone(result.run_id)
+            self.assertIsNone(result.receipt)
+            self.assertTrue(result.diagnostics)
+            self.assertFalse(ledger.exists())
+
     def test_validate_success(self):
         if not self.fsim.exists():
             self.skipTest("heatsink-fan.fsim not found")

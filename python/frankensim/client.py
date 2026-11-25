@@ -35,6 +35,7 @@ from .models import (
     RunOutcome,
     SolveOutcome,
     SolveStageReceipt,
+    StudyOutcome,
     ValidationFinding,
     ValidationResult,
 )
@@ -333,6 +334,60 @@ class FrankenSimClient:
         if strict and exit_code != ExitCode.SUCCESS:
             self._raise_for_exit_code(exit_code, diagnostics, stderr_raw)
 
+        return result
+
+    def study(
+        self,
+        study_path: Union[str, Path],
+        ledger_path: Union[str, Path],
+        *,
+        budget: Optional[int] = None,
+        strict: bool = True,
+        timeout_s: Optional[float] = None,
+    ) -> StudyOutcome:
+        """Run a declared thermal, elasticity or uncertainty study.
+
+        budget limits native work for this invocation. A retained partial
+        run carries its ledger pointer and producer receipt in the returned
+        outcome, or on the typed exception as study_outcome in strict mode.
+        """
+        return self._execute_study(
+            ["study", str(study_path), str(ledger_path)], budget, strict, timeout_s
+        )
+
+    def resume_study(
+        self,
+        run_id: str,
+        ledger_path: Union[str, Path],
+        *,
+        budget: Optional[int] = None,
+        strict: bool = True,
+        timeout_s: Optional[float] = None,
+    ) -> StudyOutcome:
+        """Continue from a retained study pointer using its original ledger."""
+        return self._execute_study(
+            ["study", "--resume", run_id, str(ledger_path)], budget, strict, timeout_s
+        )
+
+    def _execute_study(
+        self, args: List[str], budget: Optional[int], strict: bool, timeout_s: Optional[float]
+    ) -> StudyOutcome:
+        if budget is not None:
+            args.extend(["--budget", str(budget)])
+        exit_code, data, diagnostics, _, stderr = self._execute(args, timeout_s=timeout_s)
+        result = StudyOutcome(
+            status=data.get("status", "unknown"),
+            run_id=data.get("run_id"),
+            receipt=data.get("receipt"),
+            exit_code=exit_code,
+            diagnostics=diagnostics,
+        )
+        if strict and exit_code != ExitCode.SUCCESS:
+            try:
+                self._raise_for_exit_code(exit_code, diagnostics, stderr or result.status)
+            except FrankenSimError as exc:
+                exc.study_outcome = result
+                raise
         return result
 
     def report(

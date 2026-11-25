@@ -30,6 +30,7 @@ from .models import (
     RunOutcome,
     SolveOutcome,
     SolveStageReceipt,
+    StudyOutcome,
     ValidationFinding,
     ValidationResult,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "RunOutcome",
     "SolveOutcome",
     "SolveStageReceipt",
+    "StudyOutcome",
     "ValidationFinding",
     "ValidationResult",
 ]

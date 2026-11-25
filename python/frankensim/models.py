@@ -157,6 +157,17 @@ class SolveOutcome:
 
 
 @dataclass(frozen=True)
+class StudyOutcome:
+    """A native study result and, when retained, its durable ledger pointer."""
+    status: str
+    run_id: Optional[str]
+    # Each producer has its own work, stop-reason and evidence fields.
+    receipt: Optional[Dict[str, Any]]
+    exit_code: int
+    diagnostics: List[Diagnostic] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class QoiItem:
     """Quantity of Interest report record."""
     name: str

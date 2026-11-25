@@ -7,7 +7,7 @@ actionable Python exception classes.
 
 from __future__ import annotations
 from typing import List, Optional
-from .models import Diagnostic, ExitCode
+from .models import Diagnostic, ExitCode, StudyOutcome
 
 
 class FrankenSimError(Exception):
@@ -22,6 +22,7 @@ class FrankenSimError(Exception):
         self.message = message
         self.exit_code = exit_code
         self.diagnostics = diagnostics or []
+        self.study_outcome: Optional[StudyOutcome] = None
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(exit_code={self.exit_code}, message={self.message!r})"

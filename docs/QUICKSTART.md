@@ -201,6 +201,24 @@ val = client.validate("examples/heatsink-fan/heatsink-fan.fsim")
 print(f"Validation: {val.status}, Project hash: {val.project_hash}")
 ```
 
+You can run optimization studies against a durable ledger from the same client.
+For example, the first invocation below allows one thermal design iteration.
+The second reads the retained study and its accepted iterate from the ledger.
+
+```python
+from frankensim import ExitCode
+
+ledger = "thermal-study.db"
+first = client.study("examples/marquee/thermal-2d.fsim", ledger, budget=1, strict=False)
+if first.exit_code == ExitCode.BUDGET and first.run_id:
+    last = client.resume_study(first.run_id, ledger)
+    print(last.status, last.receipt["iterations_completed"])
+```
+
+With the default `strict=True`, a budget stop raises `BudgetExceededError`.
+Its `study_outcome` carries the same pointer and receipt. The separate
+`timeout_s` argument controls how long Python waits for the child process.
+
 See `examples/notebooks/cooling_reference.ipynb` for the full worked notebook.
 
 ## 8. Where to go next
