@@ -2774,6 +2774,11 @@ button.wk-dish[aria-pressed="true"] {
   color: #d3f0fc;
   background: rgb(94 200 242 / 0.2);
 }
+.rs-legend {
+  text-shadow:
+    0 1px 2px rgb(0 0 0 / 0.95),
+    0 0 8px rgb(0 0 0 / 0.8);
+}
 .rs-legend .new {
   --k: #f1ece2;
 }

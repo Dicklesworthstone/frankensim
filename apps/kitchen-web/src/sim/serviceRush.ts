@@ -132,13 +132,22 @@ const CURVE = (() => {
 })();
 const FORECAST = CURVE(0);
 
+/** The forecast's running total: FORECAST_SUM[m] is its share before minute m. */
+const FORECAST_SUM = (() => {
+  const c = new Float64Array(SERVICE.end + 1);
+  for (let m = 0; m < SERVICE.end; m++) c[m + 1] = c[m]! + FORECAST[m]!;
+  return c;
+})();
+/** The forecast's share up to time x (minutes, fractional), flat within each minute. */
+const forecastTo = (x: number) => {
+  if (x <= 0) return 0;
+  if (x >= SERVICE.end) return FORECAST_SUM[SERVICE.end]!;
+  const m = Math.floor(x);
+  return FORECAST_SUM[m]! + FORECAST[m]! * (x - m);
+};
 /** Expected orders of a dish between minute a and b on the forecast (fractional minutes allowed). */
 function forecastBetween(meals: number, share: number, a: number, b: number): number {
-  let s = 0;
-  const m0 = Math.max(0, Math.floor(a));
-  const m1 = Math.min(SERVICE.end, Math.ceil(b));
-  for (let m = m0; m < m1; m++) s += FORECAST[m]! * (Math.min(b, m + 1) - Math.max(a, m));
-  return meals * share * s;
+  return b > a ? meals * share * (forecastTo(b) - forecastTo(a)) : 0;
 }
 
 export interface Order {
@@ -227,8 +236,14 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
     for (let m = Math.floor(a); m < b && m < minutes; m++) into[c]![m]! += Math.min(b, m + 1) - Math.max(a, m);
   };
   /** Portions of a dish on the way: cooking for it, not yet promised to a guest waiting. */
-  const inOven = (d: number) => cooking.reduce((s, b) => s + (b.dish === d ? b.portions : 0), 0);
-  const pansHeld = () => menu.reduce((s, d, i) => s + (held[i] ? Math.ceil((shelf[i]!.length + inOven(i)) / d.perPan) : 0), 0);
+  /** Portions cooking, per dish: kept as batches go in and come out. */
+  const ovenN = menu.map(() => 0);
+  const inOven = (d: number) => ovenN[d]!;
+  const pansHeld = () => {
+    let n = 0;
+    for (let i = 0; i < menu.length; i++) if (held[i]) n += Math.ceil((shelf[i]!.length + ovenN[i]!) / menu[i]!.perPan);
+    return n;
+  };
   const giveFood = (oi: number, t: number) => {
     const o = orders[oi]!;
     o.food = t;
@@ -249,6 +264,7 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
     const load = loadOf(dish, portions) + (held[d] ? S.packMin * portions : 0);
     const done = t + load + dish.cookMin;
     cooking.push({ dish: d, portions, from: t, done });
+    ovenN[d]! += portions;
     stations[s]!.slots[slot] = done;
     cooked[d]! += portions;
     free[c] = t + load;
@@ -349,6 +365,7 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
       const b = cooking[i]!;
       if (b.done > t + 1e-9) continue;
       cooking.splice(i, 1);
+      ovenN[b.dish]! -= b.portions;
       let n = b.portions;
       const q = queue[b.dish]!;
       while (n > 0 && q.length) {
@@ -358,13 +375,14 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
       for (; n > 0; n--) shelf[b.dish]!.push(b.done);
     }
     // Held food past its time is thrown out.
-    menu.forEach((dish, d) => {
+    for (let d = 0; d < menu.length; d++) {
       const sh = shelf[d]!;
-      while (sh.length && t - sh[0]! > dish.holdMin) {
+      const life = menu[d]!.holdMin;
+      while (sh.length && t - sh[0]! > life) {
         sh.shift();
         wasted[d]!++;
       }
-    });
+    }
     // Guests arrive.
     const m = Math.floor(t);
     if (t >= S.open && t < S.lastOrder) {
@@ -400,7 +418,7 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
       }
     }
     if (m < minutes) {
-      menu.forEach((_, d) => (stock[d]![m] = shelf[d]!.length));
+      for (let d = 0; d < menu.length; d++) stock[d]![m] = shelf[d]!.length;
       // Batch-minutes a minute: each step adds its share, so a minute sums to the batches cooking through it.
       const mid = t + S.dt / 2;
       for (const b of cooking) if (b.from <= mid && b.done > mid) cookingAt[stIdx[b.dish]!]![m]! += S.dt;
