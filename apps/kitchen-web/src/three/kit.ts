@@ -44,6 +44,46 @@ export function createStudioRenderer(canvas: HTMLCanvasElement, alpha = true): T
 }
 
 /**
+ * Draw a scene only once its shaders are linked. The first draw of a new material otherwise waits on the GPU while
+ * its shader compiles, freezing the page (two seconds for the hero's first kitchen). `refresh()` compiles whatever
+ * the scene now holds in the background (KHR_parallel_shader_compile, where the browser has it) and `ready()` stays
+ * false until that is done, so the frame loop skips its draw and the canvas keeps its last frame meanwhile. A compile
+ * that has not finished in 4 s stops holding the draw, so a view can never stay blank.
+ */
+export interface ShaderGate {
+  ready(): boolean;
+  /** Compile what `scene` holds now. Resolves when linked or timed out. */
+  refresh(scene: THREE.Scene): Promise<void>;
+  /**
+   * Run `fn` now or, while a compile is in flight, once it is done (a later call with the same key replaces it).
+   * For calls that wait on the GPU, such as resizing the canvas, which would otherwise stall behind the compile.
+   */
+  defer(key: string, fn: () => void): void;
+}
+export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera): ShaderGate {
+  let pending = 0;
+  const queued = new Map<string, () => void>();
+  return {
+    ready: () => pending === 0,
+    refresh(scene) {
+      pending++;
+      const compiled = renderer.compileAsync(scene, camera).catch(() => undefined);
+      const timeout = new Promise((r) => setTimeout(r, 4000));
+      return Promise.race([compiled, timeout]).then(() => {
+        if (--pending > 0) return;
+        const fns = [...queued.values()];
+        queued.clear();
+        for (const fn of fns) fn();
+      });
+    },
+    defer(key, fn) {
+      if (pending === 0) fn();
+      else queued.set(key, fn);
+    },
+  };
+}
+
+/**
  * Scroll-safe OrbitControls: wheel zoom is OFF by default so normal vertical page
  * scrolling is NEVER hijacked; clicking/focusing the canvas unlocks zoom until blur/leave.
  */
@@ -123,10 +163,11 @@ export function bindCanvasResize(
   container: HTMLElement,
   renderer: THREE.WebGLRenderer,
   camera: THREE.PerspectiveCamera,
+  gate?: ShaderGate,
 ): () => void {
   let lastW = 0;
   let lastH = 0;
-  const resize = () => {
+  const apply = () => {
     const w = Math.max(1, Math.floor(container.clientWidth));
     const h = Math.max(1, Math.floor(container.clientHeight));
     if (Math.abs(w - lastW) <= 2 && Math.abs(h - lastH) <= 2) return;
@@ -136,6 +177,8 @@ export function bindCanvasResize(
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   };
+  // Resizing waits on the GPU: behind a shader compile it is held until the compile is done.
+  const resize = () => (gate ? gate.defer("resize", apply) : apply());
   resize();
   const ro = new ResizeObserver(resize);
   ro.observe(container);

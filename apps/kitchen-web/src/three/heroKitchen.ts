@@ -19,7 +19,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { EXEMPLARS, FLAGSHIP_EQUIPMENT, computeKitchenTelemetry, type CameraPresetId, type ExemplarId, type ExemplarSpec, type HeroMetrics } from "../sim/exemplars";
-import { ASSET_BASE, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, thermalColor, type Scene3dFixture } from "./kit";
+import { ASSET_BASE, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate, thermalColor, type Scene3dFixture } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { placeFixture } from "./models/shop";
@@ -4464,6 +4464,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
   camera.position.set(...initialSpec.cameras.isometric.pos);
   const controls = createScrollSafeOrbit(camera, canvas, initialSpec.cameras.isometric.target, { minDistance: 0.6, maxDistance: 46, maxPolarAngle: Math.PI * 0.485 });
   const lights = studioLights(scene, new THREE.Vector3(2.5, 0, -4), 6, 2048);
+  const gate = shaderGate(renderer, camera);
   lights.key.intensity = 2.3;
   lights.hemi.intensity = 0.42;
   lights.rim.intensity = 0.55;
@@ -4471,7 +4472,9 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
   // The stage fills the hero behind its copy: on wide screens the copy takes the left and the console the bottom,
   // so the picture's centre moves right and up.
   let wide = false;
-  const fit = () => {
+  // Resizing the canvas waits on the GPU, so behind a shader compile it is held until the compile is done.
+  const fit = () => gate.defer("fit", fitNow);
+  const fitNow = () => {
     const w = Math.max(1, Math.floor(stageEl.clientWidth));
     const h = Math.max(1, Math.floor(stageEl.clientHeight));
     renderer.setSize(w, h, false);
@@ -4659,7 +4662,12 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     scene.add(crew.group, crew.lines);
     presets = framePresets(K, crew, spec);
     simT = 0;
-    for (const a of crew.agents) void a.st.ready.then(() => applyOverlays());
+    // A detailed body swapped in brings its own shaders: compile them before the next draw.
+    for (const a of crew.agents)
+      void a.st.ready.then(() => {
+        applyOverlays();
+        void gate.refresh(scene);
+      });
     // Light the room: the key over its middle, its shadow covering it.
     const span = Math.max(K.W, K.D) * 0.62;
     const centre = new THREE.Vector3(K.W / 2, 0, -K.D / 2);
@@ -4680,6 +4688,10 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     scene.add(aisles);
     lerpToPreset(activeCameraPreset);
     syncTelemetryUI();
+    // The room's shaders compile in the background; until they are linked the frame loop holds its draw (the poster,
+    // or the last kitchen, stays on screen).
+    await gate.refresh(scene);
+    if (seq !== loadSeq) return;
     renderer.render(scene, camera);
     lastDraws = renderer.info.render.calls;
     // The draw-call count is refreshed every 60 frames from then on (it changes with the view, and counts the shadow
@@ -4832,7 +4844,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     const dt = Math.max(0, Math.min(0.05, (now - lastTs) / 1000));
     frameMs += now - lastTs;
     lastTs = now;
-    if (!inView || document.hidden) return;
+    if (!inView || document.hidden || !gate.ready()) return;
     const cpu0 = performance.now();
     if (camAnimT < 1) {
       camAnimT = Math.min(1, camAnimT + dt * 1.9);

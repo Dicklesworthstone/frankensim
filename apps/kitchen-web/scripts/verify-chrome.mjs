@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 6 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 8 WebGL canvases render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -164,8 +164,8 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 6 WebGL canvases render non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade"];
+    // 4. Mount all chapters cleanly by scrolling through each and verifying all 8 WebGL canvases render non-blank frames
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -173,6 +173,8 @@ async function main() {
       "[data-oven-canvas]",
       "[data-cold-canvas]",
       "[data-brigade-canvas]",
+      "[data-week-canvas]",
+      "[data-floor-canvas]",
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -291,11 +293,49 @@ async function main() {
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch5-brigade.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch5-brigade.png");
       }
+
+      if (sid === "week") {
+        // Cooking ahead must cut the median week's overtime against cooking on the day, and say so.
+        const otOf = () => page.$eval("[data-wk-ot]", (el) => parseFloat(el.textContent || "NaN"));
+        await page.click('[data-wk-plan="day"]');
+        await sleep(400);
+        const otDay = await otOf();
+        await page.click('[data-wk-plan="ahead"]');
+        await sleep(400);
+        const otAhead = await otOf();
+        const status = await page.$eval("[data-wk-status]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Week overtime: on the day ${otDay} h -> cooked ahead ${otAhead} h | ${status.slice(0, 90)}`);
+        if (!(otAhead < otDay)) {
+          throw new Error(`Cooking ahead did not cut overtime: ${otDay} -> ${otAhead}`);
+        }
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-week.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-week.png");
+      }
+
+      if (sid === "floor") {
+        // The shortest-walk spot must walk less than the chiller as drawn, for both menus.
+        const kmOf = () => page.$eval("[data-fl-km]", (el) => parseFloat(el.textContent || "NaN"));
+        for (const menu of ["written", "swapped"]) {
+          await page.click(`[data-fl-menu="${menu}"]`);
+          await page.click('[data-fl-spot="drawn"]');
+          await sleep(300);
+          const drawn = await kmOf();
+          await page.click('[data-fl-spot="best"]');
+          await sleep(300);
+          const best = await kmOf();
+          console.log(`[verify-chrome] Floor (${menu}): chiller as drawn ${drawn} km a week -> shortest walk ${best} km`);
+          if (!(best < drawn)) {
+            throw new Error(`The best chiller spot did not walk less (${menu}): ${drawn} -> ${best}`);
+          }
+        }
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-floor.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-floor.png");
+      }
     }
 
-    // 5. Verify ALL 6 WebGL canvases render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 8 WebGL canvases render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -303,13 +343,15 @@ async function main() {
         "[data-oven-canvas]",
         "[data-cold-canvas]",
         "[data-brigade-canvas]",
+        "[data-week-canvas]",
+        "[data-floor-canvas]",
       ];
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 6 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 8 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -347,7 +389,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 6/6 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 8/8 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

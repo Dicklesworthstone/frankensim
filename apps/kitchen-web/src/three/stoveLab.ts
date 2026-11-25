@@ -36,7 +36,7 @@ import {
   type StoveHeatSource,
   type StoveState,
 } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, observeInView } from "./kit";
+import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Ext, type Model } from "./models/all";
 import "./models/electricHob";
 import { palette } from "./models/materials";
@@ -709,7 +709,8 @@ export function mountStoveLab(root: HTMLElement): void {
   controls.addEventListener("start", () => {
     userMoved = true;
   });
-  bindCanvasResize(stageEl, renderer, camera);
+  const gate = shaderGate(renderer, camera);
+  bindCanvasResize(stageEl, renderer, camera, gate);
   /**
    * Frame the pan across the view, whatever the stage's shape; while the bottle pours (`wide` toward 1) ease back and
    * up so that the bottle and its stream are in the picture. Once the viewer orbits, the camera is theirs.
@@ -780,6 +781,7 @@ export function mountStoveLab(root: HTMLElement): void {
     });
     group.visible = false;
     scene.add(group);
+    void gate.refresh(scene);
     const r = { root: group, model, counterY };
     rigs.set(src, r);
     return r;
@@ -807,6 +809,7 @@ export function mountStoveLab(root: HTMLElement): void {
     group.rotation.y = -0.62;
     group.visible = false;
     panRoot.add(group);
+    void gate.refresh(scene);
     const out = { group, info };
     pans.set(id, out);
     return out;
@@ -1415,7 +1418,9 @@ export function mountStoveLab(root: HTMLElement): void {
     bubbles.update(dt);
 
     controls.update();
-    renderer.render(scene, camera);
+    // The sear runs on; the 3D view waits for its shaders.
+    if (gate.ready()) renderer.render(scene, camera);
   }
   requestAnimationFrame(animate);
+  void gate.refresh(scene);
 }

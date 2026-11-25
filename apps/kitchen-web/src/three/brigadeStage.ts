@@ -22,7 +22,7 @@
 
 import * as THREE from "three";
 import { estimateLumbarTorqueNm } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, observeInView } from "./kit";
+import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { wireShelving } from "./models/cold";
 import { palette } from "./models/materials";
@@ -534,7 +534,8 @@ export function mountBrigadeStage(root: HTMLElement): void {
     controls.target.copy(TARGET);
     controls.update();
   };
-  bindCanvasResize(stageEl, renderer, camera);
+  const gate = shaderGate(renderer, camera);
+  bindCanvasResize(stageEl, renderer, camera, gate);
   frame();
   new ResizeObserver(() => frame()).observe(stageEl);
 
@@ -725,10 +726,13 @@ export function mountBrigadeStage(root: HTMLElement): void {
   syncReach();
   pose();
   readouts();
-  // When a cook's detailed body arrives, measure the clearance again on its surface.
+  void gate.refresh(scene);
+  // When a cook's detailed body arrives, measure the clearance again on its surface (and compile its shaders before
+  // the next draw).
   for (const c of cooks)
     void c.st.ready.then(() => {
       if (c.st.body !== "detailed") return;
+      void gate.refresh(scene);
       c.skinBack = backVertices(c.st);
       measureRear(c);
       keepBoxes();
@@ -764,7 +768,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
       sinceReadout = 0;
       readouts();
     }
-    if (!inView) return;
+    if (!inView || !gate.ready()) return;
     for (const r of ranges) r.hooks.tick?.(now / 1000, dt, 1);
     controls.update();
     renderer.render(scene, camera);

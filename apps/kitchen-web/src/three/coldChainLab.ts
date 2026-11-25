@@ -42,7 +42,7 @@ import {
   type WalkinConfig,
   type WalkinState,
 } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView } from "./kit";
+import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Ext, type Model } from "./models/all";
 import { speedRackSlides } from "./models/cold";
 import { palette } from "./models/materials";
@@ -362,7 +362,8 @@ export function mountColdChainLab(root: HTMLElement): void {
 
   const camera = new THREE.PerspectiveCamera(36, 16 / 10, 0.03, 40);
   const controls = createScrollSafeOrbit(camera, canvas, [0, 1, 0], { minDistance: 0.6, maxDistance: 9, maxPolarAngle: Math.PI * 0.48 });
-  bindCanvasResize(stageEl, renderer, camera);
+  const gate = shaderGate(renderer, camera);
+  bindCanvasResize(stageEl, renderer, camera, gate);
   let userMoved = false;
   controls.addEventListener("start", () => {
     userMoved = true;
@@ -1141,7 +1142,10 @@ export function mountColdChainLab(root: HTMLElement): void {
     } else drawCarrier(tAnim, dt);
 
     controls.update();
-    renderer.render(mode === "walkin" ? wiScene : carScene, camera);
+    // The models run on; the 3D view waits for its shaders (both scenes are compiled at mount).
+    if (gate.ready()) renderer.render(mode === "walkin" ? wiScene : carScene, camera);
   }
   requestAnimationFrame(animate);
+  void gate.refresh(wiScene);
+  void gate.refresh(carScene);
 }

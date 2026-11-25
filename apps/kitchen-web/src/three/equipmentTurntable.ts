@@ -28,7 +28,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { FLAGSHIP_EQUIPMENT, categorizeCatalogEntry, type CatalogEntry, type EquipmentTabId } from "../sim/exemplars";
-import { createScrollSafeOrbit, observeInView } from "./kit";
+import { createScrollSafeOrbit, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import "./models/electricHob";
 import { palette } from "./models/materials";
@@ -783,6 +783,7 @@ export function mountEquipmentTurntable(root: HTMLElement): void {
   scene.environmentIntensity = envMode === "dark" ? 1.0 : 0.85;
   const camera = new THREE.PerspectiveCamera(30, 16 / 10, 0.01, 100);
   camera.position.set(0, 1.2, 3.4);
+  const gate = shaderGate(renderer, camera);
 
   const hemi = new THREE.HemisphereLight(0xfff1e2, 0x2a2018, 0.35);
   const key = new THREE.DirectionalLight(0xfff0de, 2.1);
@@ -1162,7 +1163,11 @@ export function mountEquipmentTurntable(root: HTMLElement): void {
     viewShiftPx = (H - free) / 2;
   }
 
+  /** Resizing waits on the GPU: behind a shader compile it is held until the compile is done. */
   function resize(): void {
+    gate.defer("resize", resizeNow);
+  }
+  function resizeNow(): void {
     const w = Math.max(1, Math.floor(stageEl!.clientWidth));
     const h = Math.max(1, Math.floor(stageEl!.clientHeight));
     renderer.setSize(w, h, false);
@@ -1468,7 +1473,12 @@ export function mountEquipmentTurntable(root: HTMLElement): void {
     }
   }
 
+  /** Dress the shown piece for the current view, then compile any shaders that brings before the next draw. */
   function applySurface(): void {
+    applySurfaceNow();
+    void gate.refresh(scene);
+  }
+  function applySurfaceNow(): void {
     const s = shown;
     if (!s) return;
     restoreMaterials(s);
@@ -2012,6 +2022,8 @@ export function mountEquipmentTurntable(root: HTMLElement): void {
       tmpM.copy(s.frame.matrixWorld).invert();
       for (const m of inspectMats) (m.uniforms.uRootInv!.value as THREE.Matrix4).copy(tmpM);
     }
+    // While a new piece's shaders compile the canvas keeps the last frame, and its labels stay with it.
+    if (!gate.ready()) return;
     updateOverlay();
     renderer.render(scene, camera);
     if (clock - memAt > 1) {

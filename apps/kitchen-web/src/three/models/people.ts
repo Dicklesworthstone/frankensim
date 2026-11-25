@@ -255,6 +255,16 @@ function frameQuat(a0: THREE.Vector3, b0: THREE.Vector3, a: THREE.Vector3, b: TH
   _fm1.multiply(_fm0);
   return out.setFromRotationMatrix(_fm1);
 }
+/** The fixed half of frameQuat for a pair (a0, b0) that does not change: its basis, transposed. */
+function basisT(a0: THREE.Vector3, b0: THREE.Vector3): THREE.Matrix4 {
+  return new THREE.Matrix4().makeBasis(a0, b0, V().crossVectors(a0, b0)).transpose();
+}
+/** frameQuat(a0, b0, a, b, out) with basisT(a0, b0) made beforehand: the same arithmetic. */
+function frameQuatT(m0T: THREE.Matrix4, a: THREE.Vector3, b: THREE.Vector3, out: THREE.Quaternion): THREE.Quaternion {
+  _fm1.makeBasis(a, b, _fc1.crossVectors(a, b));
+  _fm1.multiply(m0T);
+  return out.setFromRotationMatrix(_fm1);
+}
 /** Make b perpendicular to unit a and unit length (falling back to `alt`). */
 function orthoTo(b: THREE.Vector3, a: THREE.Vector3, alt: THREE.Vector3 = X): THREE.Vector3 {
   b.addScaledVector(a, -b.dot(a));
@@ -906,6 +916,60 @@ function layout(cohort: Cohort): Body {
 
 const BI: Record<string, number> = Object.fromEntries(ALL_BONES.map((b, i) => [b, i]));
 const rigid = (bone: string): Wts => [[BI[bone]!, 1]];
+/** Each bone's parent's index (-1 for the root), so posing never parses a name. */
+const PARENT_I: readonly number[] = ALL_BONES.map((b) => {
+  const p = parentOf(b);
+  return p ? BI[p]! : -1;
+});
+const SPINE_NAMES = ["spine_01", "spine_02", "spine_03"] as const;
+/** The spine's share of the trunk's flexion and twist, lumbar to thoracic. */
+const SPINE_FL = [0.48, 0.32, 0.2] as const;
+const SPINE_TW = [0.2, 0.35, 0.45] as const;
+/** The bones the motion layer poses, by index. */
+const BX = {
+  root: BI.root!,
+  pelvis: BI.pelvis!,
+  spine: [BI.spine_01!, BI.spine_02!, BI.spine_03!] as const,
+  neck: BI.neck!,
+  head: BI.head!,
+  gaze: BI.gaze_target!,
+  chest: BI.carry_chest!,
+};
+interface SideBones {
+  clavicle: number;
+  upper: number;
+  fore: number;
+  hand: number;
+  grip: number;
+  /** claw_grip_L or pinch_grip_R. */
+  socket: number;
+  thigh: number;
+  shin: number;
+  foot: number;
+  toe: number;
+  apron: number;
+  /** [finger in FINGERS order][joint 0..2]. */
+  digits: (readonly [number, number, number])[];
+}
+const SBX: Record<Side, SideBones> = Object.fromEntries(
+  SIDES.map((s) => [
+    s,
+    {
+      clavicle: BI[`clavicle_${s}`]!,
+      upper: BI[`upper_arm_${s}`]!,
+      fore: BI[`forearm_${s}`]!,
+      hand: BI[`hand_${s}`]!,
+      grip: BI[`grip_${s}`]!,
+      socket: BI[s === "L" ? "claw_grip_L" : "pinch_grip_R"]!,
+      thigh: BI[`thigh_${s}`]!,
+      shin: BI[`shin_${s}`]!,
+      foot: BI[`foot_${s}`]!,
+      toe: BI[`toe_${s}`]!,
+      apron: BI[`apron_${s}`]!,
+      digits: FINGERS.map((f) => [BI[`${f}_01_${s}`]!, BI[`${f}_02_${s}`]!, BI[`${f}_03_${s}`]!] as const),
+    },
+  ]),
+) as Record<Side, SideBones>;
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* The torso: the jacket's outer surface as horizontal superellipse sections, and how it follows the spine.       */
@@ -918,8 +982,18 @@ interface Sect {
   c: number;
   n: number;
 }
+/** Bounds on a section over the knot interval holding a height: the largest half-width and depths, the centre's range. */
+interface SectHull {
+  a: number;
+  f: number;
+  b: number;
+  cLo: number;
+  cHi: number;
+}
 interface Torso {
-  sect(y: number): Sect;
+  sect(y: number, out?: Sect): Sect;
+  /** Bounds on sect(y) (the sections are monotone between their keys, so each stays between the two around y). */
+  hull(y: number, out: SectHull): SectHull;
   /** Point on the jacket surface at height y, angle th (0 front, +pi/2 the person's left). */
   at(y: number, th: number, out?: THREE.Vector3): THREE.Vector3;
   /** Outward horizontal normal at that point (approximate). */
@@ -951,7 +1025,15 @@ function torsoModel(B: Body): Torso {
   ];
   const ys = keys.map((k) => k[0]);
   const sp = [1, 2, 3, 4, 5].map((c) => new Mono(ys, keys.map((k) => k[c]!)));
-  const sect = (y: number): Sect => ({ a: sp[0]!.at(y), f: sp[1]!.at(y), b: sp[2]!.at(y), c: sp[3]!.at(y), n: sp[4]!.at(y) });
+  const sect = (y: number, out?: Sect): Sect => {
+    if (!out) return { a: sp[0]!.at(y), f: sp[1]!.at(y), b: sp[2]!.at(y), c: sp[3]!.at(y), n: sp[4]!.at(y) };
+    out.a = sp[0]!.at(y);
+    out.f = sp[1]!.at(y);
+    out.b = sp[2]!.at(y);
+    out.c = sp[3]!.at(y);
+    out.n = sp[4]!.at(y);
+    return out;
+  };
   const at = (y: number, th: number, out = V()) => {
     const S = sect(y);
     const e = 2 / S.n;
@@ -971,7 +1053,24 @@ function torsoModel(B: Body): Torso {
     const r = clamp(Math.abs(x) / S.a, 0, 0.999);
     return Math.sign(x) * Math.asin(Math.pow(r, S.n / 2));
   };
-  return { sect, at, normal, angleAtX, hipHalf };
+  const hull = (y: number, out: SectHull): SectHull => {
+    let lo = 0;
+    let hi = ys.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (ys[mid]! <= y) lo = mid;
+      else hi = mid;
+    }
+    const k0 = keys[lo]!;
+    const k1 = keys[hi]!;
+    out.a = Math.max(k0[1], k1[1]);
+    out.f = Math.max(k0[2], k1[2]);
+    out.b = Math.max(k0[3], k1[3]);
+    out.cLo = Math.min(k0[4], k1[4]);
+    out.cHi = Math.max(k0[4], k1[4]);
+    return out;
+  };
+  return { sect, hull, at, normal, angleAtX, hipHalf };
 }
 
 /** How the trunk's skin and cloth follow the spine, the clavicles and (below the hips) the thighs. */
@@ -2383,6 +2482,154 @@ const _sw3 = V();
 const _q1 = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _q3 = new THREE.Quaternion();
+// Arm IK (Staff.arm, Staff.solveArm).
+const GRIP_KINDS: readonly GripKind[] = ["tool", "dagger", "bar", "hook", "palm"];
+/** An arm's constants (see Staff.armK). */
+interface ArmConst {
+  u0: THREE.Vector3;
+  f0: THREE.Vector3;
+  n0f: THREE.Vector3;
+  kw: THREE.Vector3;
+  /** basisT of the upper arm's and the forearm's bind frames. */
+  mUp: THREE.Matrix4;
+  mFo: THREE.Matrix4;
+  /** Per grip: its offset from the wrist and basisT of its canonical frame. */
+  grips: Record<GripKind, { off: THREE.Vector3; m: THREE.Matrix4 }>;
+  /** (sd, 0, 0). */
+  sdx: THREE.Vector3;
+  /** The shortest shoulder-wrist distance (the elbow's limit). */
+  dMin: number;
+}
+/** One arm solve's results. */
+interface ArmSolve {
+  Qup: THREE.Quaternion;
+  Qfo: THREE.Quaternion;
+  hl: THREE.Quaternion;
+  pole: THREE.Vector3;
+  cost: number;
+  flex: number;
+  dev: number;
+  rest: number;
+  tau: number;
+  want: number;
+  short: number;
+}
+const armSolve = (): ArmSolve => ({ Qup: new THREE.Quaternion(), Qfo: new THREE.Quaternion(), hl: new THREE.Quaternion(), pole: V(), cost: 0, flex: 0, dev: 0, rest: 0, tau: 0, want: 0, short: 0 });
+const ARM_TRY = armSolve();
+const ARM_BEST = armSolve();
+const ARM_ITER = armSolve();
+const ARM_OUT: [THREE.Quaternion, THREE.Quaternion, THREE.Quaternion] = [new THREE.Quaternion(), new THREE.Quaternion(), new THREE.Quaternion()];
+/** The wrist's flexion and deviation ranges, the forearm's twist limit (radians). */
+const ARM_FL: [number, number] = [-62 * DEG, 68 * DEG];
+const ARM_DV: [number, number] = [-32 * DEG, 18 * DEG];
+const ARM_TW = 85 * DEG;
+const overRange = (x: number, [lo, hi]: [number, number]) => (x < lo ? lo - x : x > hi ? x - hi : 0);
+/** A hand's rolls round a round handle, and the elbow's swivels, that the IK tries (degrees, in this order). */
+const ROLLS = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180] as const;
+const SWIVELS = [0, 12, -12, 25, -25, 40, -40, 55, -55, 70, -70, 90, -90, 110] as const;
+const SAMPLE_RD = new Float64Array(ROLLS.length * SWIVELS.length);
+const SAMPLE_DEG = new Float64Array(ROLLS.length * SWIVELS.length);
+const SAMPLE_C = new Float64Array(ROLLS.length * SWIVELS.length);
+const _aS = V();
+const _aT = V();
+const _abT = V();
+const _aP = V();
+const _adir = V();
+const _aW = V();
+const _aoff = V();
+const _aE = V();
+const _aX = V();
+const _aWc = V();
+const _au = V();
+const _af = V();
+const _an = V();
+const _aneg = V();
+const _av = V();
+const _aaxis = V();
+const _aaS = V();
+const _abS = V();
+const _aW0 = V();
+const _apole = V();
+const _aax = V();
+const _ae1 = V();
+const _ae2 = V();
+const _af2 = V();
+const _aZh = V();
+const _aYh = V();
+const _aQfo0 = new THREE.Quaternion();
+const _aq = new THREE.Quaternion();
+const _aQh0 = new THREE.Quaternion();
+const _aqs = new THREE.Quaternion();
+const _aHl = new THREE.Quaternion();
+const _aQhI = new THREE.Quaternion();
+const _aUpL = new THREE.Quaternion();
+const _aFoL = new THREE.Quaternion();
+const _aFkUp = new THREE.Quaternion();
+const _aFkFo = new THREE.Quaternion();
+const _aFkHa = new THREE.Quaternion();
+const _aQt = new THREE.Quaternion();
+const _aLocal = new THREE.Quaternion();
+const _aGt = new THREE.Quaternion();
+const _sect: Sect = { a: 0, f: 0, b: 0, c: 0, n: 0 };
+const _hull: SectHull = { a: 0, f: 0, b: 0, cLo: 0, cHi: 0 };
+// Leg IK (Staff.leg, legGeom, legMeasure, legApply).
+/** A leg's constants (see Staff.legK): basisT of the thigh's and the shin's bind frames, the hip off the pelvis. */
+interface LegConst {
+  mT: THREE.Matrix4;
+  mS: THREE.Matrix4;
+  hip: THREE.Vector3;
+}
+const _lBall = V();
+const _lAnk = V();
+const _lHp = V();
+const _ldir = V();
+const _lpole = V();
+const _lK = V();
+const _lAc = V();
+const _lt = V();
+const _lsv = V();
+const _ln = V();
+const _lneg = V();
+const _lfl = V();
+const _lfwdT = V();
+const _lplumb = V();
+const _lq = new THREE.Quaternion();
+// Scratch for Staff.grasp.
+const _gq1 = new THREE.Quaternion();
+const _gq2 = new THREE.Quaternion();
+const _gT = V();
+const _gtmp = V();
+const _gseg = [V(), V(), V(), V()];
+const _gsegI = [V(), V(), V(), V()];
+const _gqI = V();
+const _gmid = V();
+const _gdir = V();
+const _gq = V();
+const freeGrasps: [number, number, number][] = [];
+/**
+ * A grasp's digit angles when nothing is within its reach: the search's own steps, with no contact to stop them
+ * (the same for every finger, and for every thumb).
+ */
+function freeGrasp(thumb: boolean): [number, number, number] {
+  const i = thumb ? 1 : 0;
+  const hit = freeGrasps[i];
+  if (hit) return hit;
+  const max: [number, number, number] = thumb ? [0.75, 0.85, 0.95] : [1.45, 1.75, 1.25];
+  const a: [number, number, number] = thumb ? [0.3, 0.12, 0.1] : [0, 0.12, 0.08];
+  if (!thumb)
+    for (let v = 0; v < 60 && a[0] < max[0]; v++) {
+      a[0] += 0.025;
+      a[1] += 0.008;
+      a[2] += 0.005;
+    }
+  for (let v = 0; v < 60 && a[1] < max[1]; v++) {
+    a[1] += 0.03;
+    a[2] += 0.02;
+  }
+  for (let v = 0; v < 40 && a[2] < max[2]; v++) a[2] += 0.03;
+  freeGrasps[i] = a;
+  return a;
+}
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* Detailed bodies. Each cohort has a .glb (public/staff/<cohort>.glb) built in Blender from MakeHuman's CC0 assets */
@@ -2709,7 +2956,11 @@ export class Staff {
   private bonesArr: THREE.Bone[] = [];
   private Pw: THREE.Vector3[] = [];
   private Qw: THREE.Quaternion[] = [];
+  /** Whether setLocal has set each bone's rotation yet. */
+  private qSet = new Uint8Array(ALL_BONES.length);
+  private armKs: Partial<Record<Side, ArmConst>> = {};
   private wrapCache = new Map<string, Record<Finger, [number, number, number]>>();
+  private wrapLast: Partial<Record<Side, { kind: string; radius: number; out: Record<Finger, [number, number, number]> }>> = {};
   private placed = { x: 0, z: 0, yaw: 0 };
   private scratch = newPose();
   /** @internal Last arm solve: iteration, forearm twist, wrist flexion, deviation, residual twist (degrees). */
@@ -2879,26 +3130,29 @@ export class Staff {
   private idx(name: string): number {
     return BI[name]!;
   }
-  /** Set a bone's local rotation and update its body-space frame from its parent's. */
-  private setLocal(name: string, q: THREE.Quaternion): void {
-    const i = this.idx(name);
+  /** Set a bone's (by index) local rotation and update its body-space frame from its parent's. */
+  private setLocalI(i: number, q: THREE.Quaternion): void {
     const b = this.bonesArr[i]!;
-    b.quaternion.copy(q);
-    const p = parentOf(name);
-    if (!p) {
+    const bq = b.quaternion;
+    // A bone already set here to this very rotation is left alone: copying it again would only work out the same
+    // Euler angles from it again.
+    if (!(this.qSet[i] && Object.is(bq.x, q.x) && Object.is(bq.y, q.y) && Object.is(bq.z, q.z) && Object.is(bq.w, q.w))) {
+      bq.copy(q);
+      this.qSet[i] = 1;
+    }
+    const pi = PARENT_I[i]!;
+    if (pi < 0) {
       this.Pw[i]!.copy(b.position);
       this.Qw[i]!.copy(q);
       return;
     }
-    const pi = this.idx(p);
     this.Pw[i]!.copy(b.position).applyQuaternion(this.Qw[pi]!).add(this.Pw[pi]!);
     this.Qw[i]!.copy(this.Qw[pi]!).multiply(q);
   }
-  /** Set a bone's body-space rotation (its parent's frame must be current). */
-  private setWorld(name: string, q: THREE.Quaternion): void {
-    const p = parentOf(name)!;
-    _q3.copy(this.Qw[this.idx(p)]!).invert().multiply(q);
-    this.setLocal(name, _q3);
+  /** Set a bone's (by index) body-space rotation (its parent's frame must be current). */
+  private setWorldI(i: number, q: THREE.Quaternion): void {
+    _q3.copy(this.Qw[PARENT_I[i]!]!).invert().multiply(q);
+    this.setLocalI(i, _q3);
   }
   /** Body-space position of a bone's joint. */
   jointPos(name: string, out = V()): THREE.Vector3 {
@@ -2919,22 +3173,19 @@ export class Staff {
     if (p !== this.current) copyPose(this.current, p);
     for (const k of Object.keys(this.rom)) this.rom[k] = 0;
     // Root and pelvis.
-    this.setLocal("root", _q1.identity());
-    const pel = this.bones.get("pelvis")!;
+    this.setLocalI(BX.root, _q1.identity());
+    const pel = this.bonesArr[BX.pelvis]!;
     pel.position.copy(p.pelvis);
     _q1.setFromAxisAngle(Y, p.yaw).multiply(qAxis(X, p.tilt, _q2)).multiply(qAxis(Z, p.roll, _q3));
-    this.setLocal("pelvis", _q1);
+    this.setLocalI(BX.pelvis, _q1);
     // Spine: flexion mostly lumbar, twist mostly thoracic.
-    const fl = [0.48, 0.32, 0.2];
-    const tw = [0.2, 0.35, 0.45];
-    const names = ["spine_01", "spine_02", "spine_03"];
     for (let k = 0; k < 3; k++) {
-      _q1.setFromAxisAngle(Y, p.twist * tw[k]!).multiply(qAxis(X, p.flex * fl[k]!, _q2)).multiply(qAxis(Z, p.side / 3, _q3));
-      this.setLocal(names[k]!, _q1);
+      _q1.setFromAxisAngle(Y, p.twist * SPINE_TW[k]!).multiply(qAxis(X, p.flex * SPINE_FL[k]!, _q2)).multiply(qAxis(Z, p.side / 3, _q3));
+      this.setLocalI(BX.spine[k]!, _q1);
     }
     this.romNote("torso_flex", (p.flex + 0) / DEG);
     this.romNote("torso_yaw", p.twist / DEG);
-    this.setLocal("carry_chest", _q1.identity());
+    this.setLocalI(BX.chest, _q1.identity());
     // Neck and head turn towards the gaze point.
     this.look(p.gaze);
     // Arms.
@@ -2957,7 +3208,7 @@ export class Staff {
   private apronSwing(side: Side, hang: THREE.Vector3, fwdT: THREE.Vector3): THREE.Vector3 {
     const st = this.hem[side];
     const len = 0.3 * this.B.s;
-    const pivot = this.toWorld(this.Pw[this.idx(`apron_${side}`)]!, _sw1);
+    const pivot = this.toWorld(this.Pw[SBX[side].apron]!, _sw1);
     const yaw = this.placed.yaw;
     const goal = _sw2.copy(hang).applyAxisAngle(Y, yaw).multiplyScalar(len).add(pivot);
     const dt = this.dtNow;
@@ -3041,7 +3292,7 @@ export class Staff {
 
   private look(g: THREE.Vector3): void {
     // Gaze direction in the upper thorax's frame.
-    const i3 = this.idx("spine_03");
+    const i3 = BX.spine[2];
     const eye = _v1.set(0, this.B.eyeY, 0.08).sub(this.B.J.spine_03!).applyQuaternion(this.Qw[i3]!).add(this.Pw[i3]!);
     const dir = _v2.subVectors(g, eye).applyQuaternion(_q1.copy(this.Qw[i3]!).invert());
     const yaw = Math.atan2(dir.x, dir.z);
@@ -3049,9 +3300,9 @@ export class Staff {
     // The eyes take a share of the turn; the neck and head do the rest.
     const y = clamp(yaw * 0.85, -60 * DEG, 60 * DEG);
     const pt = clamp(pitch * 0.72, -35 * DEG, 50 * DEG);
-    this.setLocal("neck", _q1.setFromAxisAngle(Y, y * 0.45).multiply(qAxis(X, pt * 0.55, _q2)));
-    this.setLocal("head", _q1.setFromAxisAngle(Y, y * 0.55).multiply(qAxis(X, pt * 0.45, _q2)));
-    this.setLocal("gaze_target", _q1.identity());
+    this.setLocalI(BX.neck, _q1.setFromAxisAngle(Y, y * 0.45).multiply(qAxis(X, pt * 0.55, _q2)));
+    this.setLocalI(BX.head, _q1.setFromAxisAngle(Y, y * 0.55).multiply(qAxis(X, pt * 0.45, _q2)));
+    this.setLocalI(BX.gaze, _q1.identity());
     this.romNote("neck_yaw", (y * 0.45) / DEG);
     this.romNote("neck_pitch", (pt * 0.55) / DEG);
   }
@@ -3066,63 +3317,95 @@ export class Staff {
     return { off: H.palmPos, a0: H.da, b0: H.dn };
   }
 
-  private arm(side: Side, a: ArmPose, elev: number, prot: number): void {
+  /** An arm's constants: its bind directions and the frames its IK measures against, each worked out as the IK
+   *  always has (so every solve sees the same numbers). */
+  private armK(side: Side): ArmConst {
+    const hit = this.armKs[side];
+    if (hit) return hit;
     const B = this.B;
     const H = B.hands[side];
-    const sd = H.sd;
-    // Clavicle.
-    _q1.setFromAxisAngle(Z, sd * elev).multiply(qAxis(Y, -sd * prot, _q2));
-    this.setLocal(`clavicle_${side}`, _q1);
     const J = B.J;
     const u0 = _v1.subVectors(J[`forearm_${side}`]!, J[`upper_arm_${side}`]!).normalize().clone();
     const f0 = _v1.subVectors(J[`hand_${side}`]!, J[`forearm_${side}`]!).normalize().clone();
     const n0u = V().crossVectors(u0, Z).normalize();
     const n0f = V().crossVectors(f0, Z).normalize();
     const kw = V().crossVectors(H.da, H.dn).normalize();
+    const grips = {} as ArmConst["grips"];
+    for (const kind of GRIP_KINDS) {
+      const gf = this.gripFrame(side, kind);
+      const a0 = gf.a0.clone().normalize();
+      const b0 = orthoTo(gf.b0.clone(), a0);
+      grips[kind] = { off: gf.off, m: basisT(a0, b0) };
+    }
+    const lu = B.upper;
+    const lf = B.fore;
+    const k: ArmConst = {
+      u0,
+      f0,
+      n0f,
+      kw,
+      mUp: basisT(u0, orthoTo(n0u.clone(), u0)),
+      mFo: basisT(f0, orthoTo(n0f.clone(), f0)),
+      grips,
+      sdx: V(H.sd, 0, 0),
+      dMin: Math.sqrt(lu * lu + lf * lf - 2 * lu * lf * Math.cos(Math.PI - 140 * DEG)),
+    };
+    this.armKs[side] = k;
+    return k;
+  }
+
+  private arm(side: Side, a: ArmPose, elev: number, prot: number): void {
+    const B = this.B;
+    const H = B.hands[side];
+    const sd = H.sd;
+    const bx = SBX[side];
+    // Clavicle.
+    _q1.setFromAxisAngle(Z, sd * elev).multiply(qAxis(Y, -sd * prot, _q2));
+    this.setLocalI(bx.clavicle, _q1);
+    const K = this.armK(side);
     // Free swing (FK), as local rotations.
-    const fkUp = new THREE.Quaternion().setFromAxisAngle(X, -a.flex).multiply(qAxis(Z, sd * a.abd, _q2)).multiply(qAxis(u0, a.twist, _q3));
-    const fkFo = new THREE.Quaternion().setFromAxisAngle(n0f, a.elbow);
-    const fkHa = new THREE.Quaternion().setFromAxisAngle(kw, 0.12);
+    const fkUp = _aFkUp.setFromAxisAngle(X, -a.flex).multiply(qAxis(Z, sd * a.abd, _q2)).multiply(qAxis(K.u0, a.twist, _q3));
+    const fkFo = _aFkFo.setFromAxisAngle(K.n0f, a.elbow);
+    const fkHa = _aFkHa.setFromAxisAngle(K.kw, 0.12);
     let upL = fkUp;
     let foL = fkFo;
     let haL = fkHa;
     if (a.ik > 0) {
-      const ik = this.solveArm(side, a, u0, f0, n0u, n0f, kw);
+      const ik = this.solveArm(side, a, K);
       if (a.ik >= 1) {
         upL = ik[0];
         foL = ik[1];
         haL = ik[2];
       } else {
-        upL = fkUp.clone().slerp(ik[0], a.ik);
-        foL = fkFo.clone().slerp(ik[1], a.ik);
-        haL = fkHa.clone().slerp(ik[2], a.ik);
+        upL = fkUp.slerp(ik[0], a.ik);
+        foL = fkFo.slerp(ik[1], a.ik);
+        haL = fkHa.slerp(ik[2], a.ik);
       }
     }
-    this.setLocal(`upper_arm_${side}`, upL);
-    this.setLocal(`forearm_${side}`, foL);
-    this.setLocal(`hand_${side}`, haL);
+    this.setLocalI(bx.upper, upL);
+    this.setLocalI(bx.fore, foL);
+    this.setLocalI(bx.hand, haL);
     // ROM bookkeeping: shoulder flexion/abduction of the upper arm in the thorax, elbow flexion.
-    const i3 = this.idx("spine_03");
-    const ua = _v3.subVectors(this.Pw[this.idx(`forearm_${side}`)]!, this.Pw[this.idx(`upper_arm_${side}`)]!).normalize().applyQuaternion(_q1.copy(this.Qw[i3]!).invert());
+    const i3 = BX.spine[2];
+    const ua = _v3.subVectors(this.Pw[bx.fore]!, this.Pw[bx.upper]!).normalize().applyQuaternion(_q1.copy(this.Qw[i3]!).invert());
     this.romNote("shoulder_flex", Math.atan2(ua.z, -ua.y) / DEG);
     this.romNote("shoulder_abd", Math.max(0, Math.atan2(sd * ua.x, -ua.y) / DEG));
-    const fa = _v4.subVectors(this.Pw[this.idx(`hand_${side}`)]!, this.Pw[this.idx(`forearm_${side}`)]!).normalize();
-    const ub = _v3.subVectors(this.Pw[this.idx(`forearm_${side}`)]!, this.Pw[this.idx(`upper_arm_${side}`)]!).normalize();
+    const fa = _v4.subVectors(this.Pw[bx.hand]!, this.Pw[bx.fore]!).normalize();
+    const ub = _v3.subVectors(this.Pw[bx.fore]!, this.Pw[bx.upper]!).normalize();
     this.romNote("elbow_flex", Math.acos(clamp(ub.dot(fa), -1, 1)) / DEG);
     // Fingers.
     this.fingers(side, a.shape, a.close, a.radius);
     // The grip socket carries the tool: its +z is the handle's axis as the fist holds it (towards the working end),
     // its +y the tool's up as asked; a hand that rolled round a round handle does not roll the tool with it.
     if (a.ik > 0 && (a.grip === "tool" || a.grip === "dagger")) {
-      const Qhand = this.Qw[this.idx(`hand_${side}`)]!;
-      const zh = V(0, 0, a.grip === "dagger" ? -1 : 1).applyQuaternion(H.toolQ).applyQuaternion(Qhand);
-      const yh = orthoTo(a.b.clone(), zh);
-      const Qt = frameQuat(Z, Y, zh, yh, new THREE.Quaternion());
-      const local = Qhand.clone().invert().multiply(Qt);
-      this.setLocal(`grip_${side}`, a.ik >= 1 ? local : H.toolQ.clone().slerp(local, a.ik));
-    } else this.setLocal(`grip_${side}`, H.toolQ);
-    if (side === "L") this.setLocal("claw_grip_L", H.toolQ);
-    else this.setLocal("pinch_grip_R", H.toolQ);
+      const Qhand = this.Qw[bx.hand]!;
+      const zh = _aZh.set(0, 0, a.grip === "dagger" ? -1 : 1).applyQuaternion(H.toolQ).applyQuaternion(Qhand);
+      const yh = orthoTo(_aYh.copy(a.b), zh);
+      const Qt = frameQuat(Z, Y, zh, yh, _aQt);
+      const local = _aLocal.copy(Qhand).invert().multiply(Qt);
+      this.setLocalI(bx.grip, a.ik >= 1 ? local : _aGt.copy(H.toolQ).slerp(local, a.ik));
+    } else this.setLocalI(bx.grip, H.toolQ);
+    this.setLocalI(bx.socket, H.toolQ);
   }
 
   /**
@@ -3131,155 +3414,183 @@ export class Staff {
    * and the wrist's flexion and deviation inside their ranges and the elbow out of the trunk, as people do. What
    * still cannot be met is given up in the hand's orientation, never in the joints.
    */
-  private solveArm(side: Side, a: ArmPose, u0: THREE.Vector3, f0: THREE.Vector3, n0u: THREE.Vector3, n0f: THREE.Vector3, kw: THREE.Vector3): [THREE.Quaternion, THREE.Quaternion, THREE.Quaternion] {
+  private solveArm(side: Side, a: ArmPose, K: ArmConst): readonly [THREE.Quaternion, THREE.Quaternion, THREE.Quaternion] {
     const B = this.B;
     const H = B.hands[side];
     const sd = H.sd;
-    const gf = this.gripFrame(side, a.grip);
+    const G = K.grips[a.grip];
+    const off = G.off;
     // The shoulder joint as the clavicle now carries it (its own stored frame is from the last pose).
-    const ic = this.idx(`clavicle_${side}`);
-    const Qcl = this.Qw[ic]!.clone();
-    const S = this.bonesArr[this.idx(`upper_arm_${side}`)]!.position.clone().applyQuaternion(Qcl).add(this.Pw[ic]!);
+    const ic = SBX[side].clavicle;
+    const Qcl = this.Qw[ic]!;
+    const S = _aS.copy(this.bonesArr[SBX[side].upper]!.position).applyQuaternion(Qcl).add(this.Pw[ic]!);
     const lu = B.upper;
     const lf = B.fore;
-    const aT = a.a.clone().normalize();
-    const bT = orthoTo(a.b.clone(), aT);
-    const a0 = gf.a0.clone().normalize();
-    const b0 = orthoTo(gf.b0.clone(), a0);
-    const dMin = Math.sqrt(lu * lu + lf * lf - 2 * lu * lf * Math.cos(Math.PI - 140 * DEG));
-    const FL: [number, number] = [-62 * DEG, 68 * DEG];
-    const DV: [number, number] = [-32 * DEG, 18 * DEG];
-    const TW = 85 * DEG;
-    const over = (x: number, [lo, hi]: [number, number]) => (x < lo ? lo - x : x > hi ? x - hi : 0);
-    // One solve for a hand orientation and an elbow pole.
-    let P = a.pos.clone();
-    const solve = (Qh: THREE.Quaternion, poleIn: THREE.Vector3) => {
-      const W = P.clone().sub(gf.off.clone().applyQuaternion(Qh));
-      const dirV = V().subVectors(W, S);
-      const short = Math.max(0, dirV.length() - (lu + lf) * 0.9995);
-      const d = clamp(dirV.length(), dMin, (lu + lf) * 0.9995);
-      const dir = dirV.normalize();
-      const alpha = Math.acos(clamp((lu * lu + d * d - lf * lf) / (2 * lu * d), -1, 1));
-      let pole = orthoTo(poleIn.clone(), dir, V(sd, 0, 0));
-      let E = S.clone().addScaledVector(dir, lu * Math.cos(alpha)).addScaledVector(pole, lu * Math.sin(alpha));
+    const aT = _aT.copy(a.a).normalize();
+    const bT = orthoTo(_abT.copy(a.b), aT);
+    const dMin = K.dMin;
+    // The grip point for the spin being tried, and the shoulder-wrist line for the hand frame being tried.
+    const P = _aP;
+    const dir = _adir;
+    let short = 0;
+    let d = 0;
+    let alpha = 0;
+    // The reach for a hand orientation: the wrist that puts the grip on P, the line to it, the elbow's angle off it.
+    const reach = (Qh: THREE.Quaternion) => {
+      const W = _aW.copy(P).sub(_aoff.copy(off).applyQuaternion(Qh));
+      dir.subVectors(W, S);
+      short = Math.max(0, dir.length() - (lu + lf) * 0.9995);
+      d = clamp(dir.length(), dMin, (lu + lf) * 0.9995);
+      dir.normalize();
+      alpha = Math.acos(clamp((lu * lu + d * d - lf * lf) / (2 * lu * d), -1, 1));
+    };
+    // One solve for a hand orientation (whose reach was just taken) and an elbow pole; `full` adds the upper arm's
+    // frame (the cost does not need it).
+    const finish = (Qh: THREE.Quaternion, poleIn: THREE.Vector3, full: boolean, out: ArmSolve): ArmSolve => {
+      let pole = orthoTo(out.pole.copy(poleIn), dir, K.sdx);
+      const E = _aE.copy(S).addScaledVector(dir, lu * Math.cos(alpha)).addScaledVector(pole, lu * Math.sin(alpha));
       let inside = 0;
       for (let k = 0; k < 8 && this.insideTrunk(E, 0.052 * B.s); k++) {
         inside++;
-        pole = orthoTo(pole.lerp(orthoTo(V(sd, 0, 0), dir), 0.3), dir);
-        E = S.clone().addScaledVector(dir, lu * Math.cos(alpha)).addScaledVector(pole, lu * Math.sin(alpha));
+        pole = orthoTo(pole.lerp(orthoTo(_aX.set(sd, 0, 0), dir), 0.3), dir);
+        E.copy(S).addScaledVector(dir, lu * Math.cos(alpha)).addScaledVector(pole, lu * Math.sin(alpha));
       }
-      const Wc = S.clone().addScaledVector(dir, d);
-      const u = V().subVectors(E, S).normalize();
-      const f = V().subVectors(Wc, E).normalize();
-      let n = V().crossVectors(u, f);
-      if (n.lengthSq() < 1e-6) n = V().crossVectors(u, pole.clone().negate());
+      const Wc = _aWc.copy(S).addScaledVector(dir, d);
+      const u = _au.subVectors(E, S).normalize();
+      const f = _af.subVectors(Wc, E).normalize();
+      const n = _an.crossVectors(u, f);
+      if (n.lengthSq() < 1e-6) n.crossVectors(u, _aneg.copy(pole).negate());
       n.normalize();
-      const Qup = frameQuat(u0, orthoTo(n0u.clone(), u0), u, n, new THREE.Quaternion());
-      const Qfo0 = frameQuat(f0, orthoTo(n0f.clone(), f0), f, n, new THREE.Quaternion());
+      if (full) frameQuatT(K.mUp, u, n, out.Qup);
+      const Qfo0 = frameQuatT(K.mFo, f, n, _aQfo0);
       // The forearm takes the twist (pronation, supination) the hand needs; the wrist takes the rest.
-      const want = wrapPi(twistAngle(Qfo0.clone().invert().multiply(Qh), f0));
-      const tau = clamp(want, -TW, TW);
-      const Qfo = Qfo0.clone().multiply(qAxis(f0, tau));
-      const hl = Qfo.clone().invert().multiply(Qh);
-      const v = H.da.clone().applyQuaternion(hl);
+      const want = wrapPi(twistAngle(_aq.copy(Qfo0).invert().multiply(Qh), K.f0));
+      const tau = clamp(want, -ARM_TW, ARM_TW);
+      const Qfo = out.Qfo.copy(Qfo0).multiply(qAxis(K.f0, tau, _aq));
+      const hl = out.hl.copy(Qfo).invert().multiply(Qh);
+      const v = _av.copy(H.da).applyQuaternion(hl);
       const flex = Math.atan2(v.dot(H.dn), v.dot(H.da));
       // Deviation towards the thumb (radial) positive.
       const dev = Math.atan2(v.dot(H.dt), v.dot(H.da));
       const rest = wrapPi(twistAngle(hl, H.da));
-      const cost = over(flex, FL) + over(dev, DV) + Math.abs(want - tau) + Math.max(0, Math.abs(rest) - 10 * DEG) + inside * 0.3 + short * 12;
-      return { Qup, Qfo, hl, flex, dev, rest, cost, pole, tau, want, short };
+      out.cost = overRange(flex, ARM_FL) + overRange(dev, ARM_DV) + Math.abs(want - tau) + Math.max(0, Math.abs(rest) - 10 * DEG) + inside * 0.3 + short * 12;
+      out.flex = flex;
+      out.dev = dev;
+      out.rest = rest;
+      out.tau = tau;
+      out.want = want;
+      out.short = short;
+      return out;
     };
     // Swivel the elbow round the shoulder-wrist line, preferring the pose's own pole; on a round handle the hand
-    // may also roll round it.
-    let best: (ReturnType<typeof solve> & { Qh: THREE.Quaternion; P: THREE.Vector3 }) | null = null;
-    const rolls = a.roll > 0 ? [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].filter((r) => Math.abs(r) * DEG <= a.roll + 1e-6) : [0];
-    const swivels = [0, 12, -12, 25, -25, 40, -40, 55, -55, 70, -70, 90, -90, 110];
-    const trial = (rd: number, sp: number, deg: number) => {
-      const qs = qAxis(a.spinAxis, sp * DEG);
-      const aS = aT.clone().applyQuaternion(qs);
-      const bS = bT.clone().applyQuaternion(qs).applyAxisAngle(aS, rd * DEG);
-      P = a.pos.clone().sub(a.spinPivot).applyQuaternion(qs).add(a.spinPivot).addScaledVector(a.spinShift, Math.sin(sp * DEG));
-      const Qh0 = frameQuat(a0, b0, aS, bS, new THREE.Quaternion());
-      const W0 = P.clone().sub(gf.off.clone().applyQuaternion(Qh0));
-      const axis = V().subVectors(W0, S).normalize();
-      const r = solve(Qh0, a.pole.clone().applyAxisAngle(axis, sd * deg * DEG));
+    // may also roll round it. A roll and a spin fix the hand's frame, its grip point and the reach (`frame`); each
+    // swivel of the elbow is then a solve from there (`swivel`).
+    const axis = _aaxis;
+    const Qh0 = _aQh0;
+    const frame = (rd: number, sp: number) => {
+      const qs = qAxis(a.spinAxis, sp * DEG, _aqs);
+      const aS = _aaS.copy(aT).applyQuaternion(qs);
+      const bS = _abS.copy(bT).applyQuaternion(qs).applyAxisAngle(aS, rd * DEG);
+      P.copy(a.pos).sub(a.spinPivot).applyQuaternion(qs).add(a.spinPivot).addScaledVector(a.spinShift, Math.sin(sp * DEG));
+      frameQuatT(G.m, aS, bS, Qh0);
+      const W0 = _aW0.copy(P).sub(_aoff.copy(off).applyQuaternion(Qh0));
+      axis.subVectors(W0, S).normalize();
+      reach(Qh0);
+    };
+    const swivel = (rd: number, sp: number, deg: number, full: boolean, out: ArmSolve) => {
+      const r = finish(Qh0, _apole.copy(a.pole).applyAxisAngle(axis, sd * deg * DEG), full, out);
       r.cost += Math.abs(deg) * DEG * 0.08 + Math.abs(rd) * DEG * 0.03 + sp * DEG * 0.04;
-      return { ...r, Qh: Qh0, P: P.clone() };
+      return r;
     };
     // The spin, where allowed, lays the fingers along the forearm (a straight wrist): a smooth function of the
     // target, found by a few fixed-point passes, so the hand never flicks between samples.
     let spin = 0;
     if (a.spinMax > 0) {
-      const ax = a.spinAxis.clone().normalize();
-      const e1 = orthoTo(aT.clone(), ax);
-      const e2 = V().crossVectors(ax, e1);
+      const ax = _aax.copy(a.spinAxis).normalize();
+      const e1 = orthoTo(_ae1.copy(aT), ax);
+      const e2 = _ae2.crossVectors(ax, e1);
       for (let it = 0; it < 4; it++) {
-        const r = trial(0, spin, 0);
-        const f = f0.clone().applyQuaternion(r.Qfo);
+        frame(0, spin);
+        const r = swivel(0, spin, 0, false, ARM_TRY);
+        const f = _af2.copy(K.f0).applyQuaternion(r.Qfo);
         const fp = f.addScaledVector(ax, -f.dot(ax));
         spin = clamp(Math.atan2(fp.dot(e2), fp.dot(e1)) / DEG, 0, a.spinMax / DEG);
       }
     }
-    const spins = [spin];
     // Every roll and swivel sample is scored; the choice is their soft minimum (cost-weighted mean), so the elbow
     // and the hand move continuously as the target moves, never jumping between samples.
-    const samples: [number, number, number][] = [];
+    let ns = 0;
     let cMin = Infinity;
-    for (const rd of rolls)
-      for (const sp of spins)
-        for (const deg of swivels) {
-          const c = trial(rd, sp, deg).cost;
-          samples.push([rd, deg, c]);
-          cMin = Math.min(cMin, c);
-        }
+    for (const rd of ROLLS) {
+      if (a.roll > 0 ? !(Math.abs(rd) * DEG <= a.roll + 1e-6) : rd !== 0) continue;
+      frame(rd, spin);
+      for (const deg of SWIVELS) {
+        const c = swivel(rd, spin, deg, false, ARM_TRY).cost;
+        SAMPLE_RD[ns] = rd;
+        SAMPLE_DEG[ns] = deg;
+        SAMPLE_C[ns] = c;
+        ns++;
+        cMin = Math.min(cMin, c);
+      }
+    }
     const TEMP = 0.04;
     let wS = 0;
     let rS = 0;
     let dS = 0;
-    for (const [rd, deg, c] of samples) {
-      const w = Math.exp(-(c - cMin) / TEMP);
+    for (let i = 0; i < ns; i++) {
+      const w = Math.exp(-(SAMPLE_C[i]! - cMin) / TEMP);
       wS += w;
-      rS += w * rd;
-      dS += w * deg;
+      rS += w * SAMPLE_RD[i]!;
+      dS += w * SAMPLE_DEG[i]!;
     }
-    const bestAt: [number, number, number] = [rS / wS, spin, dS / wS];
-    best = trial(bestAt[0], spin, bestAt[2]);
-    P = best!.P;
+    const bestRd = rS / wS;
+    const bestDeg = dS / wS;
+    frame(bestRd, spin);
+    const best = swivel(bestRd, spin, bestDeg, true, ARM_BEST);
     this.reachTarget[side].copy(P);
-    const Qh0 = best!.Qh;
-    let { Qup, Qfo, hl } = best!;
-    const pole = best!.pole;
+    let Qup = best.Qup;
+    let Qfo = best.Qfo;
+    let hl = best.hl;
+    const pole = best.pole;
     // If the wrist is still out of range, bring it inside and let the hand follow; re-solve the reach.
     let Qh = Qh0;
     for (let iter = 0; iter < 6; iter++) {
-      const r = iter === 0 ? best! : solve(Qh, pole);
+      let r = best;
+      if (iter > 0) {
+        reach(Qh);
+        r = finish(Qh, pole, true, ARM_ITER);
+      }
       Qup = r.Qup;
       Qfo = r.Qfo;
       hl = r.hl;
-      const flexC = clamp(r.flex, FL[0], FL[1]);
-      const devC = clamp(r.dev, DV[0], DV[1]);
+      const flexC = clamp(r.flex, ARM_FL[0], ARM_FL[1]);
+      const devC = clamp(r.dev, ARM_DV[0], ARM_DV[1]);
       const restC = clamp(r.rest, -10 * DEG, 10 * DEG);
       if (flexC === r.flex && devC === r.dev && restC === r.rest) break;
-      hl = qAxis(kw, flexC).multiply(qAxis(H.dn, sd * devC)).multiply(qAxis(H.da, restC));
-      Qh = Qfo.clone().multiply(hl);
+      hl = _aHl.setFromAxisAngle(K.kw, flexC).multiply(qAxis(H.dn, sd * devC, _aq)).multiply(qAxis(H.da, restC, _aq));
+      Qh = _aQhI.copy(Qfo).multiply(hl);
     }
-    this.armDebug[side] = [best!.cost / DEG, best!.flex / DEG, best!.dev / DEG, best!.rest / DEG, best!.tau / DEG, best!.want / DEG, best!.short * 1000, bestAt[1], bestAt[2]];
-    const vf = H.da.clone().applyQuaternion(hl);
+    this.armDebug[side] = [best.cost / DEG, best.flex / DEG, best.dev / DEG, best.rest / DEG, best.tau / DEG, best.want / DEG, best.short * 1000, spin, bestDeg];
+    const vf = _av.copy(H.da).applyQuaternion(hl);
     this.romNote("wrist_flex", Math.atan2(vf.dot(H.dn), vf.dot(H.da)) / DEG);
-    const upL = Qcl.clone().invert().multiply(Qup);
-    const foL = Qup.clone().invert().multiply(Qfo);
-    return [upL, foL, hl];
+    ARM_OUT[0] = _aUpL.copy(Qcl).invert().multiply(Qup);
+    ARM_OUT[1] = _aFoL.copy(Qup).invert().multiply(Qfo);
+    ARM_OUT[2] = hl;
+    return ARM_OUT;
   }
 
   /** Is a body-space point within `r` of the trunk's surface or inside it? */
   insideTrunk(p: THREE.Vector3, r: number): boolean {
     // Bring the point into the bind frame of the nearest spine segment.
-    const seg = p.y > this.Pw[this.idx("spine_03")]!.y - 0.02 ? "spine_03" : p.y > this.Pw[this.idx("spine_02")]!.y ? "spine_02" : "spine_01";
-    const i = this.idx(seg);
+    const k = p.y > this.Pw[BX.spine[2]]!.y - 0.02 ? 2 : p.y > this.Pw[BX.spine[1]]!.y ? 1 : 0;
+    const i = BX.spine[k]!;
     const q = _q2.copy(this.Qw[i]!).invert();
-    const b = _v4.subVectors(p, this.Pw[i]!).applyQuaternion(q).add(this.B.J[seg]!);
+    const b = _v4.subVectors(p, this.Pw[i]!).applyQuaternion(q).add(this.B.J[SPINE_NAMES[k]!]!);
     if (b.y < this.B.hemY || b.y > this.B.neckBaseY) return false;
-    const S = this.torso.sect(b.y);
+    // Well clear of the widest and deepest the jacket is about this height (with a micron to spare): outside.
+    const Hl = this.torso.hull(b.y, _hull);
+    if (Math.abs(b.x) > Hl.a + r + 1e-6 || b.z - Hl.cHi > Hl.f + r + 1e-6 || b.z - Hl.cLo < -(Hl.b + r + 1e-6)) return false;
+    const S = this.torso.sect(b.y, _sect);
     const zz = b.z - S.c;
     const dz = zz >= 0 ? S.f + r : S.b + r;
     return Math.abs(b.x) ** S.n / (S.a + r) ** S.n + Math.abs(zz) ** S.n / dz ** S.n < 1;
@@ -3290,9 +3601,11 @@ export class Staff {
     // would pass it, the heel comes up and the foot turns on its ball joint, the toes staying down, as people do in
     // a deep crouch or a pivot.
     const lim = this.dims.joint_rom_deg.ankle_pitch[1] - 2;
-    const df = this.legSolve(side, f0, false);
+    // The measure and the solve to the same foot share one geometry.
+    this.legGeom(side, f0);
+    const df = this.legMeasure(side, f0);
     if (df <= lim) {
-      this.legSolve(side, f0, true);
+      this.legApply(side, f0);
       return;
     }
     const B = this.B;
@@ -3300,57 +3613,80 @@ export class Staff {
     // Raising the heel by an angle takes back about 0.6 of it at the ankle (the knee straightens a little too).
     const raise = ((df - lim) / 0.6) * DEG;
     // Ankle about the ball's contact on the floor (not the joint above it, which would drag the sole): in the foot's
-    // frame the ankle sits mtpFwd behind it and ankY above. The toes stay put (see legSolve).
-    const ball = V(0, -B.ankY, B.mtpFwd).applyQuaternion(f0.quat).add(f0.pos);
+    // frame the ankle sits mtpFwd behind it and ankY above. The toes stay put (see legApply).
+    const ball = _lBall.set(0, -B.ankY, B.mtpFwd).applyQuaternion(f0.quat).add(f0.pos);
     f.quat.copy(f0.quat).multiply(qAxis(X, raise, _q1));
-    f.pos.copy(V(0, B.ankY, -B.mtpFwd).applyQuaternion(f.quat)).add(ball);
+    f.pos.copy(_lAnk.set(0, B.ankY, -B.mtpFwd).applyQuaternion(f.quat)).add(ball);
     f.toe = f0.toe + raise;
-    this.legSolve(side, f, true);
+    this.legGeom(side, f);
+    this.legApply(side, f);
   }
   private liftHeel: FootPose = { pos: V(), quat: new THREE.Quaternion(), toe: 0 };
 
-  /** Two-bone leg to the foot; with `apply` false only measures the ankle's dorsiflexion it would need (degrees). */
-  private legSolve(side: Side, f: FootPose, apply: boolean): number {
-    const B = this.B;
-    const J = B.J;
-    const lt = B.thigh;
-    const ls = B.shin;
-    const ip = this.idx("pelvis");
-    const Hp = _v1.subVectors(J[`thigh_${side}`]!, J.pelvis!).applyQuaternion(this.Qw[ip]!).add(this.Pw[ip]!).clone();
-    const A = f.pos;
-    const dirV = V().subVectors(A, Hp);
-    let d = dirV.length();
-    const dir = dirV.normalize();
-    d = clamp(d, Math.abs(lt - ls) + 0.05, (lt + ls) * 0.99995);
-    const cosA = clamp((lt * lt + d * d - ls * ls) / (2 * lt * d), -1, 1);
-    const alpha = Math.acos(cosA);
-    // The knee tracks over the foot (a touch outward).
-    const fwd = Z.clone().applyQuaternion(f.quat);
-    const pole = orthoTo(fwd.addScaledVector(X, sgn(side) * 0.12), dir);
-    const K = Hp.clone().addScaledVector(dir, lt * Math.cos(alpha)).addScaledVector(pole, lt * Math.sin(alpha));
-    const Ac = Hp.clone().addScaledVector(dir, d);
-    const t = V().subVectors(K, Hp).normalize();
-    const sv = V().subVectors(Ac, K).normalize();
-    let n = V().crossVectors(t, sv);
-    if (n.lengthSq() < 1e-6) n = V().crossVectors(t, pole.clone().negate());
-    n.normalize();
+  /** A leg's constants: its bind directions and frames, each worked out as the solve always has. */
+  private legK(side: Side): LegConst {
+    const hit = this.legKs[side];
+    if (hit) return hit;
+    const J = this.B.J;
     const t0 = V().subVectors(J[`shin_${side}`]!, J[`thigh_${side}`]!).normalize();
     const s0 = V().subVectors(J[`foot_${side}`]!, J[`shin_${side}`]!).normalize();
     const nt0 = orthoTo(V().crossVectors(t0, Z.clone().negate()), t0);
     const ns0 = orthoTo(V().crossVectors(s0, Z.clone().negate()), s0);
-    if (!apply) {
-      const qs = frameQuat(s0, ns0, sv, n, new THREE.Quaternion()).invert();
-      const fl = Z.clone().applyQuaternion(f.quat).applyQuaternion(qs);
-      return Math.atan2(fl.y, fl.z) / DEG;
-    }
-    this.setWorld(`thigh_${side}`, frameQuat(t0, nt0, t, n, _q1));
-    this.setWorld(`shin_${side}`, frameQuat(s0, ns0, sv, n, _q1));
-    this.setWorld(`foot_${side}`, f.quat);
+    const k: LegConst = { mT: basisT(t0, nt0), mS: basisT(s0, ns0), hip: V().subVectors(J[`thigh_${side}`]!, J.pelvis!) };
+    this.legKs[side] = k;
+    return k;
+  }
+  private legKs: Partial<Record<Side, LegConst>> = {};
+
+  /** Two-bone leg to the foot: the hip, the knee, the thigh's and shin's directions and their plane (into _l*). */
+  private legGeom(side: Side, f: FootPose): void {
+    const B = this.B;
+    const lt = B.thigh;
+    const ls = B.shin;
+    const ip = BX.pelvis;
+    const Hp = _lHp.copy(this.legK(side).hip).applyQuaternion(this.Qw[ip]!).add(this.Pw[ip]!);
+    const A = f.pos;
+    const dir = _ldir.subVectors(A, Hp);
+    let d = dir.length();
+    dir.normalize();
+    d = clamp(d, Math.abs(lt - ls) + 0.05, (lt + ls) * 0.99995);
+    const cosA = clamp((lt * lt + d * d - ls * ls) / (2 * lt * d), -1, 1);
+    const alpha = Math.acos(cosA);
+    // The knee tracks over the foot (a touch outward).
+    const fwd = _lpole.copy(Z).applyQuaternion(f.quat);
+    const pole = orthoTo(fwd.addScaledVector(X, sgn(side) * 0.12), dir);
+    const K = _lK.copy(Hp).addScaledVector(dir, lt * Math.cos(alpha)).addScaledVector(pole, lt * Math.sin(alpha));
+    const Ac = _lAc.copy(Hp).addScaledVector(dir, d);
+    const t = _lt.subVectors(K, Hp).normalize();
+    const sv = _lsv.subVectors(Ac, K).normalize();
+    const n = _ln.crossVectors(t, sv);
+    if (n.lengthSq() < 1e-6) n.crossVectors(t, _lneg.copy(pole).negate());
+    n.normalize();
+  }
+
+  /** The ankle's dorsiflexion the leg just laid out (legGeom) needs for the foot (degrees). */
+  private legMeasure(side: Side, f: FootPose): number {
+    const qs = frameQuatT(this.legK(side).mS, _lsv, _ln, _lq).invert();
+    const fl = _lfl.copy(Z).applyQuaternion(f.quat).applyQuaternion(qs);
+    return Math.atan2(fl.y, fl.z) / DEG;
+  }
+
+  /** Pose the leg just laid out (legGeom) to the foot; returns the ankle's dorsiflexion (degrees). */
+  private legApply(side: Side, f: FootPose): number {
+    const LK = this.legK(side);
+    const bx = SBX[side];
+    const ip = BX.pelvis;
+    const t = _lt;
+    const sv = _lsv;
+    const n = _ln;
+    this.setWorldI(bx.thigh, frameQuatT(LK.mT, t, n, _q1));
+    this.setWorldI(bx.shin, frameQuatT(LK.mS, sv, n, _q1));
+    this.setWorldI(bx.foot, f.quat);
     // A planted toe stays where it is: with the heel up the foot turns about the floor under the ball, and the toe
     // joint is held straight above that point (the sole bends there) instead of swinging forward with the foot.
     {
       const J = this.B.J;
-      const tb = this.bonesArr[this.idx(`toe_${side}`)]!;
+      const tb = this.bonesArr[bx.toe]!;
       const rest = _tv1.copy(J[`toe_${side}`]!).sub(J[`foot_${side}`]!);
       const fw = _tv2.set(0, 0, 1).applyQuaternion(f.quat);
       const heelUp = Math.max(0, -Math.atan2(fw.y, Math.hypot(fw.x, fw.z)));
@@ -3362,19 +3698,19 @@ export class Staff {
       }
       tb.position.copy(rest);
     }
-    this.setLocal(`toe_${side}`, qAxis(X, -f.toe, _q1));
+    this.setLocalI(bx.toe, qAxis(X, -f.toe, _q1));
     // The apron's cloth bone: plumb from the knee, unless the shin swings forward of plumb and pushes the cloth.
-    const fwdT = Z.clone().applyQuaternion(this.Qw[this.idx(`thigh_${side}`)]!);
-    const plumb = V(0, -1, 0);
+    const fwdT = _lfwdT.copy(Z).applyQuaternion(this.Qw[bx.thigh]!);
+    const plumb = _lplumb.set(0, -1, 0);
     const push = smooth(-0.04, 0.04, sv.dot(fwdT) - plumb.dot(fwdT));
     const hang = this.apronSwing(side, plumb.lerp(sv, push).normalize(), fwdT);
-    _q1.setFromUnitVectors(t, hang).multiply(this.Qw[this.idx(`thigh_${side}`)]!);
-    this.setWorld(`apron_${side}`, _q1);
+    _q1.setFromUnitVectors(t, hang).multiply(this.Qw[bx.thigh]!);
+    this.setWorldI(bx.apron, _q1);
     // ROM: hip flexion against the pelvis, knee flexion, ankle pitch against the shin.
-    const tp = t.clone().applyQuaternion(_q2.copy(this.Qw[ip]!).invert());
+    const tp = _lfl.copy(t).applyQuaternion(_q2.copy(this.Qw[ip]!).invert());
     this.romNote("hip_flex", Math.atan2(tp.z, -tp.y) / DEG);
     this.romNote("knee_flex", Math.acos(clamp(t.dot(sv), -1, 1)) / DEG);
-    const fl = Z.clone().applyQuaternion(f.quat).applyQuaternion(_q2.copy(this.Qw[this.idx(`shin_${side}`)]!).invert());
+    const fl = _lfl.copy(Z).applyQuaternion(f.quat).applyQuaternion(_q2.copy(this.Qw[bx.shin]!).invert());
     const df = Math.atan2(fl.y, fl.z) / DEG;
     this.romNote("ankle_pitch", df);
     return df;
@@ -3389,20 +3725,34 @@ export class Staff {
     else if (shape === "tool" || shape === "bar" || shape === "hook") target = this.wrap(side, shape, radius);
     else if (shape === "grasp") target = this.grasp(side);
     const c = clamp(close, 0, 1);
-    for (const f of FINGERS) {
+    const grasp = shape === "grasp";
+    const digits = SBX[side].digits;
+    for (let fi = 0; fi < 5; fi++) {
+      const f = FINGERS[fi]!;
       const g = H.digits[f];
       const t = target[f];
-      // A grasp opens from its contact towards a flat hand, never bending past the contact (into the item).
-      const r = shape === "grasp" ? (FLAT[f].map((x, k) => Math.min(x, t[k]!)) as [number, number, number]) : RELAX[f];
-      for (let k = 0; k < 3; k++) this.setLocal(`${f}_0${k + 1}_${side}`, qAxis(g.k, lerp(r[k]!, t[k]!, c), _q1));
+      const flat = FLAT[f];
+      const relax = RELAX[f];
+      const bones = digits[fi]!;
+      for (let k = 0; k < 3; k++) {
+        // A grasp opens from its contact towards a flat hand, never bending past the contact (into the item).
+        const r = grasp ? Math.min(flat[k]!, t[k]!) : relax[k]!;
+        this.setLocalI(bones[k]!, qAxis(g.k, lerp(r, t[k]!, c), _q1));
+      }
     }
   }
 
   /** Close each digit round a cylinder until it touches, joint by joint (computed once per handle size). */
   private wrap(side: Side, kind: "tool" | "bar" | "hook", radius: number): Record<Finger, [number, number, number]> {
+    // The same handle as this hand's last: the same entry (its key is made from these).
+    const last = this.wrapLast[side];
+    if (last && last.kind === kind && Object.is(last.radius, radius)) return last.out;
     const key = `${side}${kind}${radius.toFixed(4)}`;
     const hit = this.wrapCache.get(key);
-    if (hit) return hit;
+    if (hit) {
+      this.wrapLast[side] = { kind, radius, out: hit };
+      return hit;
+    }
     const H = this.B.hands[side];
     const gf = this.gripFrame(side, kind);
     const O = H.wrist.clone().add(gf.off);
@@ -3472,37 +3822,87 @@ export class Staff {
     if (!sdf || !c.itemOn) return RELAX;
     const H = this.B.hands[side];
     const ih = this.idx(`hand_${side}`);
-    const qi = new THREE.Quaternion().copy(c.itemQuat).invert();
-    const R = qi.clone().multiply(this.Qw[ih]!);
-    const T = this.Pw[ih]!.clone().sub(c.itemPos).applyQuaternion(qi);
+    const qi = _gq1.copy(c.itemQuat).invert();
+    const R = _gq2.copy(qi).multiply(this.Qw[ih]!);
+    const T = _gT.copy(this.Pw[ih]!).sub(c.itemPos).applyQuaternion(qi);
     const Jh = this.B.J[`hand_${side}`]!;
-    const tmp = V();
-    const dist = (p: THREE.Vector3) => sdf(tmp.copy(p).sub(Jh).applyQuaternion(R).add(T));
+    const tmp = _gtmp;
+    // The item frame's point for a hand-bind point (as the search has always placed it).
+    const toItem = (p: THREE.Vector3) => tmp.copy(p).sub(Jh).applyQuaternion(R).add(T);
+    // A hotel pan (the usual item) answers "nearer than r?" without its exact distance unless it is close to r, and
+    // a whole stretch of the search at once when no curl of the digit could bring it near (see panNear, panClear).
+    const pan = sdf === hotelPanSdf;
+    const near = pan ? (p: THREE.Vector3, r: number) => panNear(toItem(p), r) : (p: THREE.Vector3, r: number) => sdf(toItem(p)) < r;
     const out = {} as Record<Finger, [number, number, number]>;
-    const seg = [V(), V(), V(), V()];
-    const dir = V();
-    const q = V();
+    const seg = _gseg;
+    const segI = _gsegI;
+    const dir = _gdir;
+    const q = _gq;
+    const qI = _gqI;
+    const mid = _gmid;
     for (const f of FINGERS) {
       const g = H.digits[f];
       const thumb = f === "thumb";
+      const len = g.len;
+      // Nothing within reach of the whole digit, however it curls: every contact test below fails.
+      if (pan && panClear(toItem(g.base), len[0] + len[1] + len[2], g.rad * 1.15)) {
+        out[f] = freeGrasp(thumb);
+        continue;
+      }
+      // The segments' ends, recomputed only from the first joint whose angle changed (the same arithmetic).
+      let ang0 = NaN;
+      let ang1 = NaN;
+      let ang2 = NaN;
       const place = (a: readonly number[]) => {
-        seg[0]!.copy(g.base);
-        let ang = 0;
-        for (let k = 0; k < 3; k++) {
-          ang += a[k]!;
-          dir.copy(g.dir).applyAxisAngle(g.k, ang);
-          seg[k + 1]!.copy(seg[k]!).addScaledVector(dir, g.len[k]!);
+        const A0 = 0 + a[0]!;
+        const A1 = A0 + a[1]!;
+        const A2 = A1 + a[2]!;
+        let k0 = 3;
+        if (A2 !== ang2) k0 = 2;
+        if (A1 !== ang1) k0 = 1;
+        if (A0 !== ang0) k0 = 0;
+        if (k0 === 0) {
+          seg[0]!.copy(g.base);
+          if (pan) segI[0]!.copy(seg[0]!).sub(Jh).applyQuaternion(R).add(T);
         }
+        for (let k = k0; k < 3; k++) {
+          dir.copy(g.dir).applyAxisAngle(g.k, k === 0 ? A0 : k === 1 ? A1 : A2);
+          seg[k + 1]!.copy(seg[k]!).addScaledVector(dir, len[k]!);
+          if (pan) segI[k + 1]!.copy(seg[k + 1]!).sub(Jh).applyQuaternion(R).add(T);
+        }
+        ang0 = A0;
+        ang1 = A1;
+        ang2 = A2;
       };
       // Does any part of the digit from segment `from` on come within its own radius of the surface?
+      let clear = 0;
       const touches = (a: readonly number[], from: number) => {
+        if (from >= clear && clear > 0) return false;
         place(a);
-        for (let k = from; k < 3; k++)
+        for (let k = from; k < 3; k++) {
+          if (pan) {
+            // On a pan the test points are taken between the segment's ends in the pan's frame, where they lie
+            // within a few ulps of the same points of the hand's frame carried over: a distance more than 1e-8 off
+            // the radius decides as theirs would, and only a closer call carries the point over itself. A segment
+            // with nothing in reach of its midpoint has none to test.
+            const s0 = segI[k]!;
+            const s1 = segI[k + 1]!;
+            if (panClear(mid.copy(s0).add(s1).multiplyScalar(0.5), len[k]! / 2, g.rad * 1.15)) continue;
+            for (let m = 1; m <= 6; m++) {
+              const r = g.rad * (k === 2 && m >= 5 ? (m === 6 ? 0.55 : 1.0) : 1.15);
+              const d = panDist(qI.copy(s0).lerp(s1, m / 6));
+              if (d < r - 1e-8) return true;
+              if (d >= r + 1e-8) continue;
+              if (near(q.copy(seg[k]!).lerp(seg[k + 1]!, m / 6), r)) return true;
+            }
+            continue;
+          }
           for (let m = 1; m <= 6; m++) {
             q.copy(seg[k]!).lerp(seg[k + 1]!, m / 6);
             // The skin stands about 1.05 radii off the bone line on the pad side (less at the domed tip).
-            if (dist(q) < g.rad * (k === 2 && m >= 5 ? (m === 6 ? 0.55 : 1.0) : 1.15)) return true;
+            if (near(q, g.rad * (k === 2 && m >= 5 ? (m === 6 ? 0.55 : 1.0) : 1.15))) return true;
           }
+        }
         return false;
       };
       const max: [number, number, number] = thumb ? [0.75, 0.85, 0.95] : [1.45, 1.75, 1.25];
@@ -3520,7 +3920,12 @@ export class Staff {
           a[2] += 0.005;
         }
       }
-      // The middle and end joints wrap on, then the tip curls in, each until it touches.
+      // The middle and end joints wrap on, then the tip curls in, each until it touches. Both turn about the middle
+      // joint, which stays put from here on: when nothing is within reach of it, no test can touch.
+      if (pan) {
+        place([a[0], a[1], a[2]]);
+        if (panClear(segI[1]!, len[1] + len[2], g.rad * 1.15)) clear = 1;
+      }
       for (let v = 0; v < 60 && a[1] < max[1] && !touches([a[0], a[1] + 0.03, a[2] + 0.02], 1); v++) {
         a[1] += 0.03;
         a[2] += 0.02;
@@ -3796,6 +4201,59 @@ export function hotelPanSdf(p: THREE.Vector3): number {
   const fy = Math.max(-K.lip - p.y, p.y);
   const flange = Math.hypot(Math.max(fx, 0), Math.max(fz, 0), Math.max(fy, 0)) + Math.min(Math.max(fx, fz, fy), 0);
   return Math.min(body, flange);
+}
+
+const PAN_CT = Math.cos(HOTEL_PAN.taper);
+const PAN_TAN = Math.tan(HOTEL_PAN.taper);
+/**
+ * `hotelPanSdf(p) < r`, answered without Math.hypot (slow) unless the distance is within a nanometre of r: the same
+ * arithmetic with a plain square root, which differs from hypot's by a few ulps at most (of each term, one of the two
+ * in a sum is always zero), so outside that band the comparison cannot come out otherwise.
+ */
+function panNear(p: THREE.Vector3, r: number): boolean {
+  const d = panDist(p);
+  if (d < r - 1e-9) return true;
+  if (d >= r + 1e-9) return false;
+  return hotelPanSdf(p) < r;
+}
+/** hotelPanSdf(p) with plain square roots (see panNear): within a few ulps of it. */
+function panDist(p: THREE.Vector3): number {
+  const K = HOTEL_PAN;
+  const inset = Math.max(0, -p.y) * PAN_TAN;
+  const dx = Math.abs(p.x) - (K.length / 2 - K.flange - inset);
+  const dz = Math.abs(p.z) - (K.width / 2 - K.flange - inset);
+  const dy = Math.max(-K.depth - p.y, p.y);
+  const ex = Math.max(dx * PAN_CT, 0);
+  const ez = Math.max(dz * PAN_CT, 0);
+  const ey = Math.max(dy, 0);
+  const body = Math.sqrt(ex * ex + ez * ez + ey * ey) + Math.min(Math.max(dx * PAN_CT, dz * PAN_CT, dy), 0);
+  const fx = Math.abs(p.x) - K.length / 2;
+  const fz = Math.abs(p.z) - K.width / 2;
+  const fy = Math.max(-K.lip - p.y, p.y);
+  const gx = Math.max(fx, 0);
+  const gz = Math.max(fz, 0);
+  const gy = Math.max(fy, 0);
+  const flange = Math.sqrt(gx * gx + gz * gz + gy * gy) + Math.min(Math.max(fx, fz, fy), 0);
+  return Math.min(body, flange);
+}
+/**
+ * Whether every point within `rho` of p (item frame) is at least `r` (> 0) from a hotel pan: `hotelPanSdf(q) >= r`
+ * for all of them. Each term under the square roots of `hotelPanSdf` (the walls' and the rim's excess) changes by at
+ * most the distance moved, so over the ball none falls below its value at p less rho; where those bounds still leave
+ * the point outside, the distance is at least their length.
+ */
+function panClear(p: THREE.Vector3, rho: number, r: number): boolean {
+  const K = HOTEL_PAN;
+  const m = rho * (1 + 1e-9) + 1e-7;
+  const inset = Math.max(0, -p.y) * PAN_TAN;
+  const ex = Math.max((Math.abs(p.x) - (K.length / 2 - K.flange - inset)) * PAN_CT - m, 0);
+  const ez = Math.max((Math.abs(p.z) - (K.width / 2 - K.flange - inset)) * PAN_CT - m, 0);
+  const ey = Math.max(Math.max(-K.depth - p.y, p.y) - m, 0);
+  const gx = Math.max(Math.abs(p.x) - K.length / 2 - m, 0);
+  const gz = Math.max(Math.abs(p.z) - K.width / 2 - m, 0);
+  const gy = Math.max(Math.max(-K.lip - p.y, p.y) - m, 0);
+  const lim = r + 1e-6;
+  return ex * ex + ez * ez + ey * ey > lim * lim && gx * gx + gz * gz + gy * gy > lim * lim;
 }
 
 function carryFrame(st: Staff, bob: number, pos: THREE.Vector3, q: THREE.Quaternion): void {

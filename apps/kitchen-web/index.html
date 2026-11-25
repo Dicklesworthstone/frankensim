@@ -72,6 +72,7 @@
           <a href="#oven" data-spy="oven" style="--chapter: #f2b134"><span class="joint" aria-hidden="true"></span>Oven</a>
           <a href="#cold" data-spy="cold" style="--chapter: #5ec8f2"><span class="joint" aria-hidden="true"></span>Cold chain</a>
           <a href="#brigade" data-spy="brigade" style="--chapter: #e0905f"><span class="joint" aria-hidden="true"></span>Crew</a>
+          <a href="#week" data-spy="week" style="--chapter: #86d39b"><span class="joint" aria-hidden="true"></span>Week</a>
           <a href="#fleet" data-spy="fleet" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>Kitchens</a>
           <a href="#architecture" data-spy="architecture" style="--chapter: #9fb3c8"><span class="joint" aria-hidden="true"></span>Engine</a>
         </nav>
@@ -90,6 +91,7 @@
               <a href="#oven" style="--chapter: #f2b134"><span class="joint on" aria-hidden="true"></span>Oven</a>
               <a href="#cold" style="--chapter: #5ec8f2"><span class="joint on" aria-hidden="true"></span>Cold chain</a>
               <a href="#brigade" style="--chapter: #e0905f"><span class="joint on" aria-hidden="true"></span>Crew</a>
+              <a href="#week" style="--chapter: #86d39b"><span class="joint on" aria-hidden="true"></span>The week</a>
               <a href="#fleet" style="--chapter: #f59e0b"><span class="joint on" aria-hidden="true"></span>All five kitchens</a>
               <a href="#architecture" style="--chapter: #9fb3c8"><span class="joint on" aria-hidden="true"></span>Engine</a>
               <a href="https://frankensim.org/" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>FrankenSim home</a>
@@ -762,7 +764,7 @@
               <div>
                 <p class="how-title">How it's computed</p>
                 <p>In an open doorway, warm air flows in at the top while cold air drains out at the bottom, faster for a taller door and a bigger temperature difference. Frost on the coil lowers how much heat it can take out. In the delivery box, the crust goes soft when steam lowers its glass transition below the food's temperature.</p>
-                <p>A design check, not a HACCP certification.</p>
+                <p>A design check against the food-safety limits.</p>
               </div>
               <div>
                 <code class="formula">Q_door ∝ A · √(g · H · Δρ / ρ) · f_open<br />T_g = (w_s · T_gs + k · w_w · T_gw) / (w_s + k · w_w)</code>
@@ -831,7 +833,7 @@
               <div>
                 <p class="how-title">How it's computed</p>
                 <p>The motion is a kinematic illustration: each pose is solved for reach and joint range, not from forces. The load on the lower back is then computed from the pose you see. The cooks are synthetic and modelled on no real person, sized to the 5th, 50th and 95th percentiles of ISO 7250.</p>
-                <p>An ergonomics screening tool, not a certification.</p>
+                <p>An ergonomics screening tool for layouts.</p>
               </div>
               <div>
                 <code class="formula">τ_L5/S1 = m_upper · g · L_torso · sin θ_lean + m_pan · g · d_reach</code>
@@ -842,12 +844,131 @@
         </div>
       </section>
 
-      <!-- ============================ 06 ALL FIVE KITCHENS ============================ -->
+      <!-- ============================ 06 THE WEEK ============================ -->
+      <section class="sec" id="week" aria-labelledby="week-title" style="--chapter: #86d39b">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>The week</p>
+              <h2 class="d3" id="week-title">Dead on Tuesday, slammed on Wednesday, <em class="g">one crew</em>.</h2>
+              <p class="kicker">
+                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste. Then find where the blast chiller should stand.
+              </p>
+            </div>
+            <a class="more" href="#week-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
+          </div>
+
+          <figure class="fig reveal">
+            <header class="fig-head">
+              <p class="todo">Pick a plan, then swap dishes on the menu</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+                  <div class="stage wk-stage" data-week-stage>
+                    <canvas data-week-canvas tabindex="0" aria-label="A commissary's packing line and cooking line, with six speed racks for the six days of the week filling with pans as each day's work is done. Drag to look around."></canvas>
+                    <div class="wk-hud" aria-hidden="true"><b data-wk-hud-day>Mon</b><span data-wk-hud-clock>06:00</span><em data-wk-hud-note>Crew working</em></div>
+                    <p class="wk-legend" aria-hidden="true"><span class="dayof">For the day</span><span class="ahead">Cooked ahead, chilled</span><span class="ot">Overtime</span><span class="unit">1 pan = 72 crew-minutes</span></p>
+                  </div>
+              <div class="lab wk-lab">
+                <div class="lab-view">
+                  <div class="wk-chart" data-week-chart role="group" aria-label="Crew hours each day of the forecast week"></div>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>Overtime</span><b><i data-wk-ot>…</i><em data-wk-ot-d hidden></em></b><small>1 week in 10: <i data-wk-ot-p90>…</i></small></div>
+                    <div class="wk-tile"><span>Idle crew time</span><b><i data-wk-idle>…</i><em data-wk-idle-d hidden></em></b><small>1 week in 10: <i data-wk-idle-p90>…</i></small></div>
+                    <div class="wk-tile"><span>Meals out late</span><b><i data-wk-late>…</i><em data-wk-late-d hidden></em></b><small>1 week in 10: <i data-wk-late-p90>…</i></small></div>
+                    <div class="wk-tile"><span>Portions thrown out</span><b><i data-wk-waste>…</i><em data-wk-waste-d hidden></em></b><small>1 week in 10: <i data-wk-waste-p90>…</i></small></div>
+                  </div>
+                </div>
+
+                <div class="lab-side">
+                  <div class="seg fill" role="group" aria-label="Plan">
+                    <button type="button" data-wk-plan="day" aria-pressed="true">Cook on the day</button>
+                    <button type="button" data-wk-plan="ahead" aria-pressed="false">Cook ahead</button>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish keeps chilled</p>
+                    <ul class="wk-menu" data-wk-menu></ul>
+                  </div>
+                  <label class="range"><span><b>Racks in the walk-in</b><output data-wk-racks-val>3 racks · 60 pans</output></span><input type="range" min="1" max="5" step="1" value="3" data-wk-racks aria-label="Speed racks in the walk-in" /></label>
+                  <label class="range"><span><b>Forecast error</b><output data-wk-err-val>±10%</output></span><input type="range" min="0" max="40" step="5" value="10" data-wk-err aria-label="Forecast error" /></label>
+                  <div class="status" data-wk-status data-state="warn">Planning the week…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="week-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>Each morning the day's orders are known and the rest of the week is a forecast. Every dish costs the crew minutes per meal. To cook ahead, the planner takes the time left after the day's own work and cooks dishes that keep for the days the forecast says will run over, as close to that day as each dish allows. It works within the blast chiller's 75 pans a day and the racks in the walk-in. Chilled food goes out oldest first and is thrown out once it passes its keeping time.</p>
+                <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes.</p>
+              </div>
+              <div>
+                <code class="formula">work_d = setup + packing + Σ_dish (portions_d − from stock_d) · min/portion<br />overtime_d = max(0, work_d − 3 cooks × 8 h)</code>
+                <p class="model">Model: <code>runCommissary</code>. Minutes per meal, keeping times and pan yields are set for a catering commissary.</p>
+              </div>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal fl-fig" id="floor">
+            <header class="fig-head">
+              <p class="todo">Pick a menu, then move the blast chiller</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage fl-stage" data-floor-stage>
+                <canvas data-floor-canvas tabindex="0" aria-label="The commissary's floor plan from above. Glowing routes run from the kettle, the skillet and the combi ovens to the blast chiller and on to the walk-in, and a coloured strip along the walls shows how far the week's pans would walk to a chiller at each spot. Drag to look around."></canvas>
+                <div class="wk-hud fl-hud" aria-hidden="true"><b data-fl-hud-spot>Chiller as drawn</b><em data-fl-hud-pan>…</em></div>
+                <p class="wk-legend fl-legend" aria-hidden="true"><span class="hot">Hot pan to the chiller</span><span class="ahead">Chilled load to the walk-in</span><span class="walls">Walls: short walk to long</span></p>
+              </div>
+              <div class="lab fl-lab">
+                <div class="lab-view">
+                  <div class="status" data-fl-status data-state="warn">Building the commissary…</div>
+                  <div class="wk-tiles fl-tiles">
+                    <div class="wk-tile"><span>Walked a week</span><b><i data-fl-km>…</i><em data-fl-km-d hidden></em></b><small>pans there, cook back</small></div>
+                    <div class="wk-tile"><span>Each hot pan</span><b><i data-fl-pan>…</i></b><small>to the chiller</small></div>
+                    <div class="wk-tile"><span>Crew time a week</span><b><i data-fl-time>…</i></b><small>at 0.9 m/s</small></div>
+                    <div class="wk-tile"><span>Pans chilled a week</span><b><i data-fl-pans>…</i></b><small>cooked ahead</small></div>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <div class="field">
+                    <p class="micro">The menu</p>
+                    <div class="seg fill" role="group" aria-label="Menu">
+                      <button type="button" data-fl-menu="written" aria-pressed="true">As written</button>
+                      <button type="button" data-fl-menu="swapped" aria-pressed="false">With the three swaps</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The blast chiller</p>
+                    <div class="seg fill" role="group" aria-label="Where the blast chiller stands">
+                      <button type="button" data-fl-spot="drawn" aria-pressed="true">As drawn</button>
+                      <button type="button" data-fl-spot="best" aria-pressed="false">Shortest walk</button>
+                    </div>
+                  </div>
+                  <p class="hint">Or click any spot on the coloured strip along the walls.</p>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="floor-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>The room is the commissary's own plan, with every fixture where its build manifest puts it. The pans are the forecast week's cooked-ahead batches from the model above. Each leaves the kettle, the skillet or a combi hot, one at a time, and the cook walks back. Each 15-pan chiller load goes to the walk-in on a rack, and the rack comes back.</p>
+                <p>Every walk is measured on the free floor round the fixtures, for a cook carrying a pan. A chiller may stand on any wall where it fits, clear of the site plan's corridors and out from under the hoods. The cook on screen is a kinematic illustration, walking at the 0.9 m/s the times are quoted at.</p>
+              </div>
+              <div>
+                <code class="formula">walk = Σ_source 2 · pans_source · d(source, chiller) + 2 · loads · d(chiller, walk-in)</code>
+                <p class="model">Model: <code>placeChiller</code>. Distance fields over the free floor rank every spot; the routes and totals are A* paths with the chiller in place.</p>
+              </div>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ============================ 07 ALL FIVE KITCHENS ============================ -->
       <section class="sec" id="fleet" aria-labelledby="fleet-title" style="--chapter: #f59e0b">
         <div class="wrap">
           <div class="sec-head reveal">
             <div>
-              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>All five kitchens</p>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>All five kitchens</p>
               <h2 class="d3" id="fleet-title">Five kitchens, <em class="g">side by side</em>.</h2>
               <p class="kicker">
                 Run every kitchen through the same model. Switch them all to induction, or to a 38 °C summer day, and compare the power, the exhaust, the cooling and the heat at the line.
@@ -939,7 +1060,7 @@
             </li>
             <li class="reveal">
               <h3>Clear about its limits</h3>
-              <p>The fast delivery-box estimate refuses questions outside the range its table covers, such as a 42 °C loading dock, and hands them to the full model. It quotes its worst error, measured against the full model, not a guess. Fitted numbers, like k = 4.6 for crust crispness, are named as fitted.</p>
+              <p>The fast delivery-box estimate refuses questions outside the range its table covers, such as a 42 °C loading dock, and hands them to the full model. It quotes its worst error as measured against the full model. Fitted numbers, like k = 4.6 for crust crispness, are named as fitted.</p>
               <p class="tags"><span>Refuses out of range</span><span>Fitted values named</span><span>No brand names</span></p>
             </li>
           </ul>

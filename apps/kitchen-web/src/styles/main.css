@@ -2321,3 +2321,440 @@ footer.end {
 .end a:hover {
   color: #fff;
 }
+
+/* ============================ The week ============================ */
+.wk-stage {
+  aspect-ratio: 21 / 9;
+  margin-bottom: 1.6rem;
+}
+.wk-hud {
+  position: absolute;
+  top: 0.8rem;
+  left: 0.9rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  pointer-events: none;
+  font-size: 0.8rem;
+  color: var(--soft);
+}
+.wk-hud b {
+  font: 700 1.35rem/1 var(--sans);
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+.wk-hud span {
+  font: 500 0.95rem/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.wk-hud em {
+  padding: 0.18rem 0.5rem;
+  border-radius: 99px;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 0.72rem;
+  color: #d8f5df;
+  background: rgb(134 211 155 / 0.16);
+}
+.wk-hud em[data-kind="idle"] {
+  color: var(--soft);
+  background: rgb(255 255 255 / 0.08);
+}
+.wk-hud em[data-kind="ot"] {
+  color: #fecdd3;
+  background: rgb(251 113 133 / 0.22);
+}
+.wk-legend {
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  bottom: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.85rem;
+  pointer-events: none;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.wk-legend span::before,
+.wk-keys span::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.35rem;
+  border-radius: 2px;
+  background: var(--k, transparent);
+  vertical-align: -0.02em;
+}
+.wk-legend .unit::before,
+.wk-keys .note::before {
+  display: none;
+}
+.wk-legend .unit {
+  margin-left: auto;
+  font-family: var(--mono);
+}
+:is(.wk-legend, .wk-keys) .dayof {
+  --k: var(--gold);
+}
+:is(.wk-legend, .wk-keys) .ahead {
+  --k: var(--ice);
+}
+:is(.wk-legend, .wk-keys) .ot {
+  --k: var(--bad);
+}
+.wk-keys .idle::before,
+.wk-keys .cap::before {
+  border: 1px dashed var(--line-3);
+}
+.wk-keys .cap::before {
+  height: 0;
+  width: 0.9rem;
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+.wk-chart {
+  padding: 0.7rem 0.8rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: rgb(0 0 0 / 0.24);
+}
+.wk-plot {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.5rem;
+  height: 9.4rem;
+  margin: 1.1rem 0 2.2rem;
+}
+.wk-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed var(--line-3);
+  pointer-events: none;
+  z-index: 1;
+}
+.wk-cap span {
+  position: absolute;
+  right: 0;
+  bottom: 0.2rem;
+  font: 500 0.66rem var(--mono);
+  color: var(--faint);
+}
+.wk-arcs {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 2;
+}
+.wk-arcs path {
+  fill: none;
+  stroke: var(--ice);
+  stroke-opacity: 0.85;
+  stroke-linecap: round;
+  stroke-dasharray: 1.5 5;
+  vector-effect: non-scaling-stroke;
+  animation: wk-flow 1.1s linear infinite;
+}
+@keyframes wk-flow {
+  to {
+    stroke-dashoffset: -6.5;
+  }
+}
+.wk-col {
+  position: relative;
+  display: block;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+.wk-col:hover,
+.wk-col.now {
+  background: rgb(255 255 255 / 0.04);
+}
+.wk-col:focus-visible {
+  outline: 2px solid var(--chapter);
+  outline-offset: 2px;
+}
+.wk-bar {
+  position: absolute;
+  inset: 0 18% 0;
+}
+.wk-bar i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0;
+  border-radius: 3px;
+  transition:
+    height 0.6s var(--ease),
+    bottom 0.6s var(--ease);
+}
+.wk-dayof {
+  background: var(--gold);
+}
+.wk-ahead {
+  background: var(--ice);
+}
+.wk-ot {
+  background: color-mix(in srgb, var(--bad) 70%, var(--gold));
+}
+.wk-ot.late {
+  background: var(--bad);
+}
+.wk-idle {
+  border: 1px dashed var(--line-3);
+  background: rgb(255 255 255 / 0.02);
+}
+.wk-col.now .wk-dayof {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--gold) 45%, transparent);
+}
+.wk-tag {
+  position: absolute;
+  left: -0.3rem;
+  right: -0.3rem;
+  text-align: center;
+  font: 600 0.68rem/1 var(--mono);
+  white-space: nowrap;
+  color: var(--faint);
+  transition: bottom 0.6s var(--ease);
+}
+.wk-tag[data-kind="ot"] {
+  color: #fda4af;
+}
+.wk-day {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2.1rem;
+  display: grid;
+  justify-items: center;
+  gap: 0.1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--soft);
+}
+.wk-day small {
+  font: 400 0.64rem var(--mono);
+  color: var(--faint);
+}
+.wk-col.now .wk-day {
+  color: #fff;
+}
+.wk-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.85rem;
+  margin-top: 0.65rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.wk-keys .note {
+  margin-left: auto;
+  color: var(--faint);
+}
+.wk-menu {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wk-dish {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.3rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  background: rgb(0 0 0 / 0.18);
+  color: var(--soft);
+  font: inherit;
+  font-size: 0.84rem;
+  text-align: left;
+}
+.wk-dish b {
+  flex: 1;
+  min-width: 0;
+  font-weight: 550;
+  color: var(--text);
+}
+button.wk-dish {
+  cursor: pointer;
+  border-color: var(--line-2);
+  transition:
+    border-color 0.2s,
+    background 0.2s;
+}
+button.wk-dish:hover {
+  border-color: var(--line-3);
+}
+button.wk-dish[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--ice) 55%, transparent);
+  background: rgb(94 200 242 / 0.08);
+}
+.wk-dish em {
+  flex: none;
+  padding: 0.12rem 0.45rem;
+  border-radius: 99px;
+  font-style: normal;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--chapter);
+  background: color-mix(in srgb, var(--chapter) 14%, transparent);
+}
+.wk-keeps {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.wk-keeps i {
+  width: 0.42rem;
+  height: 0.7rem;
+  border-radius: 1.5px;
+  background: rgb(255 255 255 / 0.1);
+}
+.wk-keeps i.on {
+  background: var(--ice);
+}
+.wk-keeps small {
+  min-width: 4.2em;
+  margin-left: 0.35rem;
+  font: 500 0.7rem var(--mono);
+  color: var(--muted);
+}
+.wk-lab .lab-view {
+  gap: 1rem;
+}
+.wk-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.wk-tile {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: rgb(0 0 0 / 0.2);
+}
+.wk-tile span {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.wk-tile b {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  font: 600 1.3rem/1.1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+.wk-tile b i,
+.wk-tile small i {
+  font-style: normal;
+}
+.wk-tile em {
+  font: 600 0.72rem var(--mono);
+  font-style: normal;
+  color: var(--bad);
+}
+.wk-tile em[data-good="true"] {
+  color: var(--ok);
+}
+.wk-tile small {
+  font: 400 0.68rem var(--mono);
+  color: var(--faint);
+}
+@media (max-width: 999px) {
+  .wk-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 600px) and (max-width: 999px) {
+  .wk-stage {
+    aspect-ratio: 16 / 9;
+  }
+}
+@media (max-width: 599px) {
+  .wk-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .wk-legend .unit {
+    display: none;
+  }
+  .wk-plot {
+    gap: 0.25rem;
+    height: 8.4rem;
+  }
+  .wk-tag {
+    font-size: 0.62rem;
+  }
+  .wk-tag .w {
+    display: none;
+  }
+}
+
+/* ============================ The floor ============================ */
+.fl-fig {
+  margin-top: 2.4rem;
+}
+.fl-hud em {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text);
+  background: rgb(255 255 255 / 0.08);
+}
+:is(.wk-legend, .wk-keys) .hot {
+  --k: #ffa24a;
+}
+.fl-legend .walls::before {
+  width: 1.5rem;
+  background: linear-gradient(90deg, #86d39b, #f5b942, #fb7185);
+}
+.fl-stage {
+  aspect-ratio: 16 / 9;
+  margin-bottom: 1.6rem;
+}
+.fl-lab .lab-view {
+  gap: 1rem;
+}
+.fl-hud b {
+  font-size: 1.05rem;
+}
+@media (max-width: 599px) {
+  .fl-stage {
+    aspect-ratio: 4 / 3;
+  }
+  .fl-hud {
+    top: 0.6rem;
+    left: 0.7rem;
+  }
+  .fl-hud b {
+    font-size: 0.85rem;
+  }
+  .fl-hud em {
+    display: none;
+  }
+  .fl-legend .walls {
+    display: none;
+  }
+}

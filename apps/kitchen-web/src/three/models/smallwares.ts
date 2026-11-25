@@ -58,12 +58,21 @@ function rng(seed: number): () => number {
   };
 }
 
+/** `n` values of rng(seed) in turn: the same sequence, without a call per value (noise lattices are 64 K long). */
+function lattice(seed: number, n: number): Float32Array {
+  const v = new Float32Array(n);
+  let s = seed >>> 0;
+  for (let i = 0; i < n; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    v[i] = s / 4294967296;
+  }
+  return v;
+}
+
 /** Smooth value noise on a 256-periodic lattice, 0..1. */
 function noise2(seed: number): (x: number, y: number) => number {
-  const r = rng(seed);
   const N = 256;
-  const v = new Float32Array(N * N);
-  for (let i = 0; i < v.length; i++) v[i] = r();
+  const v = lattice(seed, N * N);
   return (x, y) => {
     const xi = Math.floor(x);
     const yi = Math.floor(y);
@@ -112,18 +121,19 @@ function canvasTex(c: HTMLCanvasElement, srgb: boolean, wrap = false): THREE.Can
   return t;
 }
 
-/** A canvas filled pixel by pixel: `f(x, y)` returns [r, g, b] 0..255. */
-function paint(w: number, h: number, f: (x: number, y: number) => readonly [number, number, number]): HTMLCanvasElement {
+/** A canvas filled pixel by pixel: `f(x, y, o)` writes [r, g, b] 0..255 into `o` (no texel allocates). */
+function paint(w: number, h: number, f: (x: number, y: number, o: Float64Array) => void): HTMLCanvasElement {
   const [c, x] = canvas(w, h);
   const img = x.createImageData(w, h);
   const d = img.data;
+  const o = new Float64Array(3);
   for (let j = 0; j < h; j++)
     for (let i = 0; i < w; i++) {
-      const [r, g, b] = f(i, j);
+      f(i, j, o);
       const k = (j * w + i) * 4;
-      d[k] = r;
-      d[k + 1] = g;
-      d[k + 2] = b;
+      d[k] = o[0];
+      d[k + 1] = o[1];
+      d[k + 2] = o[2];
       d[k + 3] = 255;
     }
   x.putImageData(img, 0, 0);
@@ -132,9 +142,7 @@ function paint(w: number, h: number, f: (x: number, y: number) => readonly [numb
 
 /** Value noise that tiles every P lattice cells in x and in y, 0..1. */
 function pnoise(seed: number, P: number): (x: number, y: number) => number {
-  const r = rng(seed);
-  const v = new Float32Array(P * P);
-  for (let i = 0; i < v.length; i++) v[i] = r();
+  const v = lattice(seed, P * P);
   return (x, y) => {
     const xi = Math.floor(x);
     const yi = Math.floor(y);
@@ -155,9 +163,7 @@ function pnoise(seed: number, P: number): (x: number, y: number) => number {
 }
 /** Value noise that tiles every Px lattice cells in x and Py in y (for grain finer across than along), 0..1. */
 function apnoise(seed: number, Px: number, Py: number): (x: number, y: number) => number {
-  const r = rng(seed);
-  const v = new Float32Array(Px * Py);
-  for (let i = 0; i < v.length; i++) v[i] = r();
+  const v = lattice(seed, Px * Py);
   return (x, y) => {
     const xi = Math.floor(x);
     const yi = Math.floor(y);
@@ -286,16 +292,87 @@ interface Finishes {
   satin: THREE.MeshStandardMaterial;
 }
 let fin: Finishes | null = null;
+/** The cast-iron finish once it has been made (identity tests must not make it). */
+let ironMade: THREE.MeshStandardMaterial | null = null;
 
+/** A value made when first asked for, then kept. */
+function once<T>(make: () => T): () => T {
+  let v: T | undefined;
+  let made = false;
+  return () => {
+    if (!made) {
+      v = make();
+      made = true;
+    }
+    return v as T;
+  };
+}
+
+/** The finishes, each textured one made when first used (a hotel pan needs only satin; cast iron alone paints 512²). */
 function finishes(): Finishes {
   if (fin) return fin;
+  const iron = once(() => (ironMade = ironFinish()));
+  const carbon = once(carbonFinish);
+  const ptfe = once(ptfeFinish);
+  const blade = once(bladeFinish);
+  const label = once(labelFinish);
+  const spunMaps = once(spunFinishMaps);
+  const spun = once(() => std({ color: 0xc9cdd2, metalness: 1, roughness: 0.3, map: spunMaps()[0], roughnessMap: spunMaps()[1] }, "own", 1 / 0.05));
+  const spunBright = once(() => std({ color: 0xdde0e4, metalness: 1, roughness: 0.16, map: spunMaps()[0] }, "own", 1 / 0.05));
+  const spunAlu = once(() => std({ color: 0xc8ccd0, metalness: 0.92, roughness: 0.4, map: spunMaps()[0], roughnessMap: spunMaps()[1] }, "own", 1 / 0.05));
+  const satin = once(() => std({ color: 0xc2c6cb, metalness: 0.95, roughness: 0.36, map: spunMaps()[0], roughnessMap: spunMaps()[1] }, "own", 1 / 0.12));
+  const stock = once(() => phys({ color: 0xffffff, map: brothTexture(), metalness: 0, roughness: 0.04, transparent: true, opacity: 0.88, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.8, depthWrite: false }, "own"));
+  fin = {
+    get satin() {
+      return satin();
+    },
+    get spun() {
+      return spun();
+    },
+    get spunBright() {
+      return spunBright();
+    },
+    get spunAlu() {
+      return spunAlu();
+    },
+    get iron() {
+      return iron();
+    },
+    get carbon() {
+      return carbon();
+    },
+    get ptfe() {
+      return ptfe();
+    },
+    anod: std({ color: 0x45474b, metalness: 0.55, roughness: 0.48 }),
+    silicone: std({ color: 0x8e1914, metalness: 0, roughness: 0.6 }),
+    pom: std({ color: 0x151617, metalness: 0, roughness: 0.32 }),
+    get blade() {
+      return blade();
+    },
+    edge: std({ color: 0xe4e7ea, metalness: 1, roughness: 0.1 }),
+    bottle: phys({ color: 0x1b3916, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.4, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.5, side: THREE.DoubleSide, depthWrite: false }, "own"),
+    wine: phys({ color: 0x170306, metalness: 0, roughness: 0.1, clearcoat: 0.4, clearcoatRoughness: 0.08, sheen: 0.5, sheenColor: new THREE.Color(0.35, 0.02, 0.05) }, "own"),
+    foil: std({ color: 0x5a1220, metalness: 0.85, roughness: 0.32 }),
+    get label() {
+      return label();
+    },
+    bubble: phys({ color: 0xf4f8fa, metalness: 0, roughness: 0.04, transparent: true, opacity: 0.42, clearcoat: 1, depthWrite: false }, "own"),
+    get stock() {
+      return stock();
+    },
+  };
+  return fin;
+}
+
+function ironFinish(): THREE.MeshStandardMaterial {
   // Cast iron: dark speckled colour over a sand-cast grain (a normal map), tiling every 80 mm without a seam.
   const ni = pnoise(4401, 32);
   const nig = pnoise(4402, 192);
   const IW = 512;
   const ironH = new Float32Array(IW * IW);
   const ironR = new Float32Array(IW * IW);
-  const ironC = paint(IW, IW, (x, y) => {
+  const ironC = paint(IW, IW, (x, y, o) => {
     const n = tfbm(ni, (x / IW) * 32, (y / IW) * 32, 4);
     const g = tfbm(nig, (x / IW) * 192, (y / IW) * 192, 2);
     // The sand grain, and here and there a smoother polished patch where the seasoning has built up.
@@ -303,19 +380,27 @@ function finishes(): Finishes {
     ironH[y * IW + x] = (g - 0.5) * (1 - 0.7 * polish) + 0.4 * n;
     ironR[y * IW + x] = 0.58 - 0.2 * polish + (g - 0.5) * 0.12;
     const v = 24 + n * 12 + (g - 0.5) * 12 * (1 - 0.6 * polish);
-    return [v + 3, v + 1.5, v];
+    o[0] = v + 3;
+    o[1] = v + 1.5;
+    o[2] = v;
   });
-  const iron = std({ color: 0xffffff, metalness: 0.4, roughness: 1, map: canvasTex(ironC, true, true), roughnessMap: greyTex(ironR, IW, IW, true), normalMap: normalTex(ironH, IW, IW, 2.4, true) }, "box", 1 / 0.08);
+  return std({ color: 0xffffff, metalness: 0.4, roughness: 1, map: canvasTex(ironC, true, true), roughnessMap: greyTex(ironR, IW, IW, true), normalMap: normalTex(ironH, IW, IW, 2.4, true) }, "box", 1 / 0.08);
+}
+function carbonFinish(): THREE.MeshStandardMaterial {
   // Carbon steel's strap handle and rivets (box projected): blue-black with bronze where the oil was thinner.
   const nc = pnoise(9127, 16);
   const ncf = pnoise(9128, 128);
-  const carbC = paint(256, 256, (x, y) => {
+  const carbC = paint(256, 256, (x, y, o) => {
     const n = tfbm(nc, (x / 256) * 16, (y / 256) * 16, 4);
     const b = smooth(0.5, 0.78, n) * 0.7;
     const f = (tfbm(ncf, (x / 256) * 128, (y / 256) * 128, 2) - 0.5) * 7;
-    return [lerp(28, 74, b) + f, lerp(29, 52, b) + f, lerp(34, 32, b) + f];
+    o[0] = lerp(28, 74, b) + f;
+    o[1] = lerp(29, 52, b) + f;
+    o[2] = lerp(34, 32, b) + f;
   });
-  const carbon = std({ color: 0xffffff, metalness: 0.6, roughness: 0.44, map: canvasTex(carbC, true, true) }, "box", 1 / 0.16);
+  return std({ color: 0xffffff, metalness: 0.6, roughness: 0.44, map: canvasTex(carbC, true, true) }, "box", 1 / 0.16);
+}
+function ptfeFinish(): THREE.MeshStandardMaterial {
   // PTFE: charcoal with the light fleck of the reinforced coating.
   const r = rng(77);
   const [pc, px] = canvas(256, 256);
@@ -326,7 +411,9 @@ function finishes(): Finishes {
     px.fillStyle = `rgba(${v},${v},${v + 4},${(0.2 + r() * 0.5).toFixed(2)})`;
     px.fillRect(r() * 256, r() * 256, 0.6 + r(), 0.6 + r());
   }
-  const ptfe = std({ color: 0xffffff, metalness: 0.12, roughness: 0.36, map: canvasTex(pc, true, true) }, "box", 1 / 0.05);
+  return std({ color: 0xffffff, metalness: 0.12, roughness: 0.36, map: canvasTex(pc, true, true) }, "box", 1 / 0.05);
+}
+function bladeFinish(): THREE.MeshPhysicalMaterial {
   // Blade steel: fine lengthwise grind lines, its anisotropy along them (v in the box projection of the flats).
   const rb = rng(3133);
   const [bc, bx] = canvas(256, 256);
@@ -337,15 +424,21 @@ function finishes(): Finishes {
     bx.fillStyle = `rgba(${v},${v + 1},${v + 3},${(0.1 + rb() * 0.2).toFixed(2)})`;
     bx.fillRect(rb() * 256, rb() * 256, 1, 20 + rb() * 120);
   }
-  const blade = phys({ color: 0xd4d8dc, metalness: 1, roughness: 0.24, map: canvasTex(bc, true, true), anisotropy: 0.5, anisotropyRotation: PI / 2 }, "box", 1 / 0.2);
-  const bottle = phys({ color: 0x1b3916, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.4, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.5, side: THREE.DoubleSide, depthWrite: false }, "own");
-  const wine = phys({ color: 0x170306, metalness: 0, roughness: 0.1, clearcoat: 0.4, clearcoatRoughness: 0.08, sheen: 0.5, sheenColor: new THREE.Color(0.35, 0.02, 0.05) }, "own");
+  return phys({ color: 0xd4d8dc, metalness: 1, roughness: 0.24, map: canvasTex(bc, true, true), anisotropy: 0.5, anisotropyRotation: PI / 2 }, "box", 1 / 0.2);
+}
+function labelFinish(): THREE.MeshStandardMaterial {
   // Label paper: faint fibre.
   const nl = noise2(555);
-  const labC = paint(128, 128, (x, y) => {
+  const labC = paint(128, 128, (x, y, o) => {
     const v = (fbm(nl, x / 3, y / 3, 3) - 0.5) * 14;
-    return [236 + v, 226 + v, 200 + v];
+    o[0] = 236 + v;
+    o[1] = 226 + v;
+    o[2] = 200 + v;
   });
+  return std({ color: 0xffffff, metalness: 0, roughness: 0.86, map: canvasTex(labC, true, true) }, "box", 1 / 0.04);
+}
+/** The spun finishes' colour and roughness maps, shared by spun, spunBright, spunAlu and satin. */
+function spunFinishMaps(): [THREE.CanvasTexture, THREE.CanvasTexture] {
   // Spun finish: lines running all the way round (u), varying across them (v), 50 mm of profile per repeat.
   const rs = rng(4242);
   const [sc, sx] = canvas(16, 512);
@@ -358,33 +451,7 @@ function finishes(): Finishes {
     srx.fillStyle = `rgb(${q},${q},${q})`;
     srx.fillRect(0, y, 16, 1);
   }
-  const spunMap = canvasTex(sc, true, true);
-  const spunRough = canvasTex(sr, false, true);
-  const spun = std({ color: 0xc9cdd2, metalness: 1, roughness: 0.3, map: spunMap, roughnessMap: spunRough }, "own", 1 / 0.05);
-  const spunBright = std({ color: 0xdde0e4, metalness: 1, roughness: 0.16, map: spunMap }, "own", 1 / 0.05);
-  const spunAlu = std({ color: 0xc8ccd0, metalness: 0.92, roughness: 0.4, map: spunMap, roughnessMap: spunRough }, "own", 1 / 0.05);
-  const satin = std({ color: 0xc2c6cb, metalness: 0.95, roughness: 0.36, map: spunMap, roughnessMap: spunRough }, "own", 1 / 0.12);
-  fin = {
-    satin,
-    spun,
-    spunBright,
-    spunAlu,
-    iron,
-    carbon,
-    ptfe,
-    anod: std({ color: 0x45474b, metalness: 0.55, roughness: 0.48 }),
-    silicone: std({ color: 0x8e1914, metalness: 0, roughness: 0.6 }),
-    pom: std({ color: 0x151617, metalness: 0, roughness: 0.32 }),
-    blade,
-    edge: std({ color: 0xe4e7ea, metalness: 1, roughness: 0.1 }),
-    bottle,
-    wine,
-    foil: std({ color: 0x5a1220, metalness: 0.85, roughness: 0.32 }),
-    label: std({ color: 0xffffff, metalness: 0, roughness: 0.86, map: canvasTex(labC, true, true) }, "box", 1 / 0.04),
-    bubble: phys({ color: 0xf4f8fa, metalness: 0, roughness: 0.04, transparent: true, opacity: 0.42, clearcoat: 1, depthWrite: false }, "own"),
-    stock: phys({ color: 0xffffff, map: brothTexture(), metalness: 0, roughness: 0.04, transparent: true, opacity: 0.88, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.8, depthWrite: false }, "own"),
-  };
-  return fin;
+  return [canvasTex(sc, true, true), canvasTex(sr, false, true)];
 }
 
 /**
@@ -403,7 +470,7 @@ function carbonBody(): THREE.MeshStandardMaterial {
   const n3 = pnoise(9133, 96);
   const make = (inside: boolean) => {
     const rough = new Float32Array(S * S);
-    const c = paint(S, S, (i, j) => {
+    const c = paint(S, S, (i, j, o) => {
       const dx = (i + 0.5) / S - 0.5;
       const dy = 0.5 - (j + 0.5) / S;
       const rho = Math.hypot(dx, dy) / 0.47;
@@ -442,7 +509,9 @@ function carbonBody(): THREE.MeshStandardMaterial {
       }
       const g = 1 + (fine - 0.5) * 0.18;
       rough[j * S + i] = clamp(r + (fine - 0.5) * 0.08, 0.15, 0.9);
-      return [col[0] * g, col[1] * g, col[2] * g];
+      o[0] = col[0] * g;
+      o[1] = col[1] * g;
+      o[2] = col[2] * g;
     });
     return { c, rough };
   };
@@ -959,7 +1028,7 @@ function handleEye(s: Shop, mat: THREE.Material, at: V3, tilt: number, ro: numbe
   // Cast iron's grain takes turned UVs (a box projection tears across the ring's faces where its normal swings between
   // axes), as the body's do, so they merge; an unmapped metal or the strap's fine mottle needs none.
   const n = s.fine(2) ? 40 : 10;
-  if (mat === finishes().iron) {
+  if (mat === ironMade) {
     const m = own(mat);
     s.add(m, revolve(prof, n, undefined, m), at, [tilt, 0, 0]);
   } else s.add(mat, revolve(prof, n), at, [tilt, 0, 0]);
@@ -1148,7 +1217,7 @@ export function skillet(s: Shop, kind: SkilletKind, diameterM: number, opts: { h
       else s.add(hm, sweep(bentPath(loop, 0.012, 10), () => circleSec(0.0042, 6), [0, 1, 0]));
       for (const x of [-w2, w2]) {
         const pin = profileAt(b.inner.slice().reverse(), yH - 0.004);
-        rivet(s, hm === f.carbon ? f.carbon : p.ssBright, [x * 0.9, yH - 0.004, -pin.r + 0.0002], [0, 0.3, 1], 0.003, 0.001);
+        rivet(s, kind === "carbon_steel" ? f.carbon : p.ssBright, [x * 0.9, yH - 0.004, -pin.r + 0.0002], [0, 0.3, 1], 0.003, 0.001);
       }
     }
   }
@@ -1553,11 +1622,10 @@ let rippleTex: THREE.CanvasTexture | null = null;
 function rippleTexture(): THREE.CanvasTexture {
   if (rippleTex) return rippleTex;
   const n = noise2(1717);
-  const c = paint(256, 256, (x, y) => {
+  const c = paint(256, 256, (x, y, o) => {
     const a = fbm(n, x / 18, y / 18, 3);
     const cell = Math.abs(Math.sin(a * 22));
-    const v = 128 + (a - 0.5) * 120 + (cell - 0.5) * 50;
-    return [v, v, v];
+    o[0] = o[1] = o[2] = 128 + (a - 0.5) * 120 + (cell - 0.5) * 50;
   });
   rippleTex = canvasTex(c, false, true);
   rippleTex.repeat.set(3, 3);
@@ -1675,11 +1743,13 @@ function panFoods(): Record<string, THREE.Material> {
   if (foodCache) return foodCache;
   const n = noise2(808);
   // Sauce: a reduced braising liquid, glossy and nearly opaque, fat beads catching the light.
-  const sauceC = paint(256, 256, (x, y) => {
+  const sauceC = paint(256, 256, (x, y, o) => {
     const v = fbm(n, x / 50, y / 50, 3);
     // Beads of rendered fat, amber, on the reduced liquor.
     const fat = smooth(0.8, 0.86, fbm(n, x / 4 + 50, y / 4, 2)) * 0.45;
-    return [lerp(48, 66, v) + fat * 50, lerp(21, 28, v) + fat * 30, lerp(9, 12, v) + fat * 8];
+    o[0] = lerp(48, 66, v) + fat * 50;
+    o[1] = lerp(21, 28, v) + fat * 30;
+    o[2] = lerp(9, 12, v) + fat * 8;
   });
   // Braised meat, a 5 cm tile with u along the grain: bundles of fibre a millimetre or two across, wandering, split
   // apart into dark crevices; a mahogany glaze over most of it, torn patches showing the redder, matt strands.
@@ -1688,7 +1758,10 @@ function panFoods(): Record<string, THREE.Material> {
   const nBd = apnoise(8102, 5, 36);
   const nSt = apnoise(8103, 8, 140);
   const nTr = apnoise(8104, 6, 6);
-  const mC = new Uint8ClampedArray(MT * MT * 3);
+  // (Its colour goes straight into the canvas's pixels.)
+  const [meatC, meatX] = canvas(MT, MT);
+  const meatImg = meatX.createImageData(MT, MT);
+  const mC = meatImg.data;
   const mH = new Float32Array(MT * MT);
   const mR = new Float32Array(MT * MT);
   for (let j = 0; j < MT; j++)
@@ -1704,21 +1777,14 @@ function panFoods(): Record<string, THREE.Material> {
       mH[k] = 0.55 * bd + 0.3 * st * (0.4 + 0.6 * torn) - 0.45 * crev;
       const glaze = 1 - torn;
       const lv = 0.92 + 0.16 * st;
-      const c: [number, number, number] = [
-        lerp(lerp(90, 108, st), lerp(56, 74, bd), glaze) * lv,
-        lerp(lerp(46, 56, st), lerp(26, 34, bd), glaze) * lv,
-        lerp(lerp(28, 34, st), lerp(13, 17, bd), glaze) * lv,
-      ];
       const dk = 1 - 0.5 * crev;
-      mC[k * 3] = c[0] * dk;
-      mC[k * 3 + 1] = c[1] * dk;
-      mC[k * 3 + 2] = c[2] * dk;
+      mC[k * 4] = lerp(lerp(90, 108, st), lerp(56, 74, bd), glaze) * lv * dk;
+      mC[k * 4 + 1] = lerp(lerp(46, 56, st), lerp(26, 34, bd), glaze) * lv * dk;
+      mC[k * 4 + 2] = lerp(lerp(28, 34, st), lerp(13, 17, bd), glaze) * lv * dk;
+      mC[k * 4 + 3] = 255;
       mR[k] = clamp01(lerp(0.42, 0.7, torn) + 0.2 * crev + 0.08 * (st - 0.5));
     }
-  const meatC = paint(MT, MT, (i, j) => {
-    const k = (j * MT + i) * 3;
-    return [mC[k], mC[k + 1], mC[k + 2]];
-  });
+  meatX.putImageData(meatImg, 0, 0);
   // Steamed long-grain rice: grains drawn one by one, slightly translucent at their ends.
   const r = rng(616);
   const [rc, rx] = canvas(512, 512);
@@ -1747,18 +1813,22 @@ function panFoods(): Record<string, THREE.Material> {
     }
   }
   // Vegetables seen in the gaps: a green and orange medley under its butter gloss.
-  const vegC = paint(256, 256, (x, y) => {
+  const vegC = paint(256, 256, (x, y, o) => {
     const v = fbm(n, x / 6, y / 6, 3);
-    const o = fbm(n, x / 9 + 30, y / 9, 3) > 0.6;
-    return o ? [212, 112, 32] : [lerp(40, 96, v), lerp(80, 140, v), lerp(20, 40, v)];
+    const or = fbm(n, x / 9 + 30, y / 9, 3) > 0.6;
+    o[0] = or ? 212 : lerp(40, 96, v);
+    o[1] = or ? 112 : lerp(80, 140, v);
+    o[2] = or ? 32 : lerp(20, 40, v);
   });
   // Soup: a vegetable broth, golden and a little cloudy, small eyes of fat on it, each paler with a dark rim.
-  const soupC = paint(256, 256, (x, y) => {
+  const soupC = paint(256, 256, (x, y, o) => {
     const v = fbm(n, x / 24, y / 24, 3);
     const f = fbm(n, x / 2.6 + 70, y / 2.6, 2) * smooth(0.45, 0.65, fbm(n, x / 40 + 9, y / 40, 2));
     const eye = smooth(0.66, 0.69, f);
     const rim = smooth(0.62, 0.66, f) - eye;
-    return [lerp(160, 184, v) + eye * 34 - rim * 50, lerp(96, 116, v) + eye * 30 - rim * 36, lerp(30, 40, v) + eye * 8 - rim * 12];
+    o[0] = lerp(160, 184, v) + eye * 34 - rim * 50;
+    o[1] = lerp(96, 116, v) + eye * 30 - rim * 36;
+    o[2] = lerp(30, 40, v) + eye * 8 - rim * 12;
   });
   foodCache = {
     sauce: phys({ color: 0xffffff, map: canvasTex(sauceC, true, true), roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.3 }, "box", 1 / 0.16),
@@ -1792,7 +1862,16 @@ function panFoods(): Record<string, THREE.Material> {
  * An irregular braised chunk, w × h × d: a superellipsoid (a rounded block, as braised short rib sets) pushed about
  * by noise and slumped a little at the base, so that no two look cast from one mould.
  */
+const chunkCache = new Map<string, THREE.BufferGeometry>();
 function chunk(s: Shop, w: number, h: number, d: number, seed: number): THREE.BufferGeometry {
+  // Every hotel pan of a size lays the same pieces (its bed's seeds are fixed): each is made once, and a copy handed
+  // out, as the shop moves and merges what it is given.
+  const key = `${s.detail}|${w}|${h}|${d}|${seed}`;
+  let g = chunkCache.get(key);
+  if (!g) chunkCache.set(key, (g = makeChunk(s, w, h, d, seed)));
+  return g.clone();
+}
+function makeChunk(s: Shop, w: number, h: number, d: number, seed: number): THREE.BufferGeometry {
   // An icosphere has no poles to pinch; merged so that its normals are smooth.
   const ico = new THREE.IcosahedronGeometry(1, s.detail === 2 ? 3 : s.detail === 1 ? 1 : 0);
   ico.deleteAttribute("normal");
@@ -2024,6 +2103,38 @@ function ramp(at: readonly number[], c: readonly RGB[], k: number): [number, num
   const l = c[c.length - 1];
   return [l[0], l[1], l[2]];
 }
+/** `ramp` over fixed stops, flattened for per-texel loops: `into(k, out)` writes what ramp(at, c, k) returns. */
+class Ramp {
+  private readonly at: Float64Array;
+  private readonly c: Float64Array;
+  constructor(at: readonly number[], c: readonly RGB[]) {
+    this.at = Float64Array.from(at);
+    this.c = Float64Array.from(c.flat());
+  }
+  into(k: number, out: Float64Array): void {
+    const { at, c } = this;
+    const n = at.length;
+    if (k <= at[0]) {
+      out[0] = c[0];
+      out[1] = c[1];
+      out[2] = c[2];
+      return;
+    }
+    for (let i = 1; i < n; i++)
+      if (k <= at[i]) {
+        const t = (k - at[i - 1]) / (at[i] - at[i - 1]);
+        const o = (i - 1) * 3;
+        out[0] = lerp(c[o], c[o + 3], t);
+        out[1] = lerp(c[o + 1], c[o + 4], t);
+        out[2] = lerp(c[o + 2], c[o + 5], t);
+        return;
+      }
+    const o = (n - 1) * 3;
+    out[0] = c[o];
+    out[1] = c[o + 1];
+    out[2] = c[o + 2];
+  }
+}
 const adiff = (a: number, b: number) => {
   let d = (a - b) % TAU;
   if (d > PI) d -= TAU;
@@ -2108,28 +2219,32 @@ class Cells {
     const gz = (z - this.z0) / this.c + 1;
     const ix = Math.floor(gx);
     const iz = Math.floor(gz);
+    const { px, pz, nx, nz } = this;
+    const ids = this.id;
     let f1 = 1e9;
     let f2 = 1e9;
     let id = 0;
     let id2 = 0;
-    for (let dj = -1; dj <= 1; dj++) {
-      const jj = iz + dj;
-      if (jj < 0 || jj >= this.nz) continue;
-      for (let di = -1; di <= 1; di++) {
-        const ii = ix + di;
-        if (ii < 0 || ii >= this.nx) continue;
-        const k = jj * this.nx + ii;
-        const dx = this.px[k] - gx;
-        const dz = this.pz[k] - gz;
+    // The 3 × 3 cells round (ix, iz) that lie in the grid, row by row (the order decides ties).
+    const j0 = iz > 0 ? iz - 1 : 0;
+    const j1 = iz + 1 < nz ? iz + 1 : nz - 1;
+    const i0 = ix > 0 ? ix - 1 : 0;
+    const i1 = ix + 1 < nx ? ix + 1 : nx - 1;
+    for (let jj = j0; jj <= j1; jj++) {
+      const row = jj * nx;
+      for (let ii = i0; ii <= i1; ii++) {
+        const k = row + ii;
+        const dx = px[k] - gx;
+        const dz = pz[k] - gz;
         const d = dx * dx + dz * dz;
         if (d < f1) {
           f2 = f1;
           id2 = id;
           f1 = d;
-          id = this.id[k];
+          id = ids[k];
         } else if (d < f2) {
           f2 = d;
-          id2 = this.id[k];
+          id2 = ids[k];
         }
       }
     }
@@ -2226,7 +2341,15 @@ class Ribeye {
     }
   }
   private look(t: Float32Array, th: number): number {
-    const f = ((((th / TAU) % 1) + 1) % 1) * this.nT;
+    // ((v % 1) + 1) % 1, without the float remainders where v is known small: for |v| < 1, v % 1 is v, and w = v + 1
+    // (below 2 when v ≤ 0.5) leaves w - 1 (exact) or w itself as the remainder.
+    const v = th / TAU;
+    let fr: number;
+    if (v > -1 && v <= 0.5) {
+      const w = v + 1;
+      fr = w >= 1 ? w - 1 : w;
+    } else fr = ((v % 1) + 1) % 1;
+    const f = fr * this.nT;
     const i = Math.floor(f);
     return lerp(t[i % this.nT], t[(i + 1) % this.nT], f - i);
   }
@@ -2241,6 +2364,14 @@ class Ribeye {
     const Z = z / this.sz + this.oz;
     const th = Math.atan2(Z, X);
     return [th, this.look(this.Rt, th) - Math.hypot(X, Z)];
+  }
+  /** `polar`, written into out[0] (angle) and out[1] (depth). */
+  polarInto(x: number, z: number, out: Float64Array): void {
+    const X = x / this.sx + this.ox;
+    const Z = z / this.sz + this.oz;
+    const th = Math.atan2(Z, X);
+    out[0] = th;
+    out[1] = this.look(this.Rt, th) - Math.hypot(X, Z);
   }
   fatW(th: number): number {
     return this.look(this.fatT, th);
@@ -2548,27 +2679,84 @@ const steakBuilder: Builder = (s, e) => {
       sz0 = Math.min(sz0, z - 0.002);
       sz1 = Math.max(sz1, z + 0.002);
     }
-  const streakD = (x: number, z: number): [number, number] => {
-    let best = 1;
-    let along = 0;
-    if (x < sx0 || x > sx1 || z < sz0 || z > sz1) return [best, along];
-    for (const pts of streaks)
-      for (let k = 0; k < pts.length - 1; k++) {
+  // The streaks' segments, flattened, and each streak's box padded as the whole set's is.
+  const segN = streaks.reduce((n, pts) => n + pts.length - 1, 0);
+  const sgX = new Float64Array(segN);
+  const sgZ = new Float64Array(segN);
+  const sgDX = new Float64Array(segN);
+  const sgDZ = new Float64Array(segN);
+  const sgL2 = new Float64Array(segN);
+  const sgK = new Float64Array(segN);
+  const sgN = new Float64Array(segN);
+  const stEnd: number[] = [];
+  const stBox: number[] = [];
+  {
+    let o = 0;
+    for (const pts of streaks) {
+      let bx0 = Infinity;
+      let bx1 = -Infinity;
+      let bz0 = Infinity;
+      let bz1 = -Infinity;
+      for (let k = 0; k < pts.length - 1; k++, o++) {
         const [x0, z0] = pts[k];
         const [x1, z1] = pts[k + 1];
-        const dx = x1 - x0;
-        const dz = z1 - z0;
-        const t = clamp(((x - x0) * dx + (z - z0) * dz) / (dx * dx + dz * dz), 0, 1);
-        const dd = Math.hypot(x - x0 - dx * t, z - z0 - dz * t);
-        if (dd < best) {
-          best = dd;
-          along = (k + t) / (pts.length - 1);
+        sgX[o] = x0;
+        sgZ[o] = z0;
+        sgDX[o] = x1 - x0;
+        sgDZ[o] = z1 - z0;
+        sgL2[o] = sgDX[o] * sgDX[o] + sgDZ[o] * sgDZ[o];
+        sgK[o] = k;
+        sgN[o] = pts.length - 1;
+      }
+      for (const [x, z] of pts) {
+        bx0 = Math.min(bx0, x - 0.002);
+        bx1 = Math.max(bx1, x + 0.002);
+        bz0 = Math.min(bz0, z - 0.002);
+        bz1 = Math.max(bz1, z + 0.002);
+      }
+      stEnd.push(o);
+      stBox.push(bx0, bx1, bz0, bz1);
+    }
+  }
+  /**
+   * The nearest streak to (x, z): its distance and how far along it (0..1), into sdOut. Only a distance under the
+   * streak's width (at most 1.05 mm) is ever used; a streak whose box, padded by 2 mm, misses the point cannot be that
+   * near, nor nearer than one that is, so it is passed over (the nearest found is the same whenever it matters).
+   */
+  const sdOut = new Float64Array(2);
+  const streakD = (x: number, z: number): void => {
+    let best = 1;
+    let along = 0;
+    if (!(x < sx0 || x > sx1 || z < sz0 || z > sz1))
+      for (let s = 0, o = 0; s < stEnd.length; s++) {
+        const end = stEnd[s];
+        if (x < stBox[s * 4] || x > stBox[s * 4 + 1] || z < stBox[s * 4 + 2] || z > stBox[s * 4 + 3]) {
+          o = end;
+          continue;
+        }
+        for (; o < end; o++) {
+          const x0 = sgX[o];
+          const z0 = sgZ[o];
+          const dx = sgDX[o];
+          const dz = sgDZ[o];
+          const t = clamp(((x - x0) * dx + (z - z0) * dz) / sgL2[o], 0, 1);
+          const dd = Math.hypot(x - x0 - dx * t, z - z0 - dz * t);
+          if (dd < best) {
+            best = dd;
+            along = (sgK[o] + t) / sgN[o];
+          }
         }
       }
-    return [best, along];
+    sdOut[0] = best;
+    sdOut[1] = along;
   };
+  const cosTa = Math.cos(ta);
+  const sinTa = Math.sin(ta);
+  const po = new Float64Array(2);
   const tissue = (x: number, z: number, k: number) => {
-    const [th, d0] = rib.polar(x, z);
+    rib.polarInto(x, z, po);
+    const th = po[0];
+    const d0 = po[1];
     // Organic boundaries: each line between tissues wanders by a millimetre or so.
     const d = d0 + 0.0011 * (fbm(nEdge, x * 300, z * 300, 2) - 0.5);
     const fw = rib.fatW(th);
@@ -2585,14 +2773,19 @@ const steakBuilder: Builder = (s, e) => {
     // The kernel: a lens of fat in the seam; the complexus: a small muscle at the cap's end, rimmed with fat.
     const ux = x - kcx;
     const uz = z - kcz;
-    const al = ux * Math.cos(ta) + uz * Math.sin(ta);
-    const ac = -ux * Math.sin(ta) + uz * Math.cos(ta);
-    if ((al / 0.0125) ** 2 + (ac / 0.0058) ** 2 < 0.75 + 0.5 * fbm(nEdge, x * 160 + 40, z * 160, 2)) fat = 1;
-    const cpx = (((x - cxx) / 0.0078) ** 2 + ((z - cxz) / 0.0056) ** 2) / (0.7 + 0.6 * fbm(nEdge, x * 140, z * 140 + 70, 2));
-    if (cpx < 1) {
-      mus = 2;
-      fat = Math.max(0, fat - 0.6);
-    } else if (cpx < 1.22 && fat < 1) fat = Math.max(fat, 0.9 * smooth(0.3, 0.55, fbm(nEdge, x * 400, z * 400, 2)));
+    const al = ux * cosTa + uz * sinTa;
+    const ac = -ux * sinTa + uz * cosTa;
+    // (fbm is 0..1, so the lens's wander reaches 1.25 at most and the complexus's divisor 1.3: past those, no test.)
+    const kq = (al / 0.0125) ** 2 + (ac / 0.0058) ** 2;
+    if (kq < 1.3 && kq < 0.75 + 0.5 * fbm(nEdge, x * 160 + 40, z * 160, 2)) fat = 1;
+    const cq = ((x - cxx) / 0.0078) ** 2 + ((z - cxz) / 0.0056) ** 2;
+    if (cq < 1.6) {
+      const cpx = cq / (0.7 + 0.6 * fbm(nEdge, x * 140, z * 140 + 70, 2));
+      if (cpx < 1) {
+        mus = 2;
+        fat = Math.max(0, fat - 0.6);
+      } else if (cpx < 1.22 && fat < 1) fat = Math.max(fat, 0.9 * smooth(0.3, 0.55, fbm(nEdge, x * 400, z * 400, 2)));
+    }
     // Marbling: fat laid down in the walls between bundles of fibres, a lacy network, denser in the cap and toward
     // the eye's rim, the eye's heart leaner; flecks of fat cells between; a few long streaks.
     const wx = x + 0.0055 * (fbm(nWarp, x * 70, z * 70, 3) - 0.5) + 0.0016 * (fbm(nWarp, x * 260 + 9, z * 260, 2) - 0.5);
@@ -2615,9 +2808,11 @@ const steakBuilder: Builder = (s, e) => {
       if (p2 < dens * 0.35) marb = Math.max(marb, smooth(0.00014, 0.00004, e2) * smooth(0.35, 0.6, along) * 0.8);
       const rf = 0.00014 + 0.00055 * hash2(Math.round(wo[2] * 1e6), 3, 5) * (0.4 + dens);
       if (wo[2] < dens * 0.3) marb = Math.max(marb, smooth(rf, rf * 0.4, wo[0]) * 0.9);
-      const [sd, sa] = streakD(x, z);
-      const sw = 0.0009 * (1 - sa) + 0.00015;
-      if (mus === 0) marb = Math.max(marb, smooth(sw, sw * 0.5, sd));
+      if (mus === 0) {
+        streakD(x, z);
+        const sw = 0.0009 * (1 - sdOut[1]) + 0.00015;
+        marb = Math.max(marb, smooth(sw, sw * 0.5, sdOut[0]));
+      }
       fat = Math.max(fat, marb);
     }
     // The raw colour: cherry red, the cap a shade deeper and the complexus darker, each bundle a little different.
@@ -2629,26 +2824,29 @@ const steakBuilder: Builder = (s, e) => {
       fid = wo[2];
     }
     const lv = fbm(nFine, x * 60, z * 60, 3);
-    const base: RGB = mus === 1 ? [124, 20, 30] : mus === 2 ? [106, 17, 26] : [134, 22, 30];
+    const base0 = mus === 1 ? 124 : mus === 2 ? 106 : 134;
+    const base1 = mus === 1 ? 20 : mus === 2 ? 17 : 22;
+    const base2 = mus === 1 ? 30 : mus === 2 ? 26 : 30;
     const sh = (0.9 + 0.14 * lv + 0.04 * (fid - 0.5)) * (1 - 0.035 * fas);
     // Fat: creamy, layered in the cap's edge, pink where a thin fleck lets the lean show through.
     const fatTone = ef ? 1 - 0.04 * Math.sin(d * 2400 + 6 * fbm(nEdge, x * 90, z * 90, 2)) : 1;
-    const fatC: RGB = fw < 0.0016 && ef ? [220, 196, 196] : [240 * fatTone, 231 * fatTone, 212 * fatTone];
+    const pink = fw < 0.0016 && ef;
     const fa = fat;
-    fR[k] = clamp(lerp(base[0] * sh, fatC[0], fa), 0, 255);
-    fG[k] = clamp(lerp(base[1] * sh, fatC[1], fa), 0, 255);
-    fB[k] = clamp(lerp(base[2] * sh, fatC[2], fa), 0, 255);
+    fR[k] = clamp(lerp(base0 * sh, pink ? 220 : 240 * fatTone, fa), 0, 255);
+    fG[k] = clamp(lerp(base1 * sh, pink ? 196 : 231 * fatTone, fa), 0, 255);
+    fB[k] = clamp(lerp(base2 * sh, pink ? 196 : 212 * fatTone, fa), 0, 255);
     fF[k] = Math.round(fat * 255);
     fEF[k] = ef ? 255 : 0;
     const fine = fbm(nFine, x * 850, z * 850, 3);
-    fSpot[k] = Math.round(spotOf(x, z) * 255);
+    const spot = spotOf(x, z);
+    fSpot[k] = Math.round(spot * 255);
     fFine[k] = Math.round(fine * 255);
     // Relief: fat stands a hair proud of the lean, the bundles' walls are faint grooves. The crust: blistered and
     // craggy, its high spots where the pan touched hardest.
     hRaw[k] = 0.00006 * fat - 0.000018 * fas + 0.00005 * (lv - 0.5);
     if (cCr) cCr.at(x, z, wo);
     const blister = cCr ? smooth(0.0007, 0.0, wo[0]) * (wo[2] < 0.55 ? 1 : 0.3) : 0;
-    hCrust[k] = 0.00014 * (fine - 0.5) + 0.00009 * blister + 0.0001 * (spotOf(x, z) - 0.5);
+    hCrust[k] = 0.00014 * (fine - 0.5) + 0.00009 * blister + 0.0001 * (spot - 0.5);
   };
   for (let j = 0; j < FH; j++)
     for (let i = 0; i < FW; i++) tissue(-a + (i + 0.5) / pxm, -b + (1 - (j + 0.5) / FH) * 2 * b, j * FW + i);
@@ -2936,6 +3134,7 @@ const CRUST_C: RGB[] = [
   [80, 40, 17],
   [46, 24, 10],
 ];
+const CRUST_RAMP = new Ramp(CRUST_K, CRUST_C);
 
 const bouleBuilder: Builder = (s, e) => {
   // Material coordinates: s, arc length from the crown as a fraction of the meridian, and the azimuth θ. They are
@@ -2956,11 +3155,14 @@ const bouleBuilder: Builder = (s, e) => {
   const RS = 0.46;
   const PHI = 0.5;
   const PHIE = 0.44;
-  const score = (p: number, q: number): P2 => {
+  /** The score's (distance across it, angle along it) at material point (p, q), into out[0], out[1]. */
+  const score = (p: number, q: number, out: Float64Array): void => {
     const wx = p - C0 * cdx;
     const wz = q - C0 * cdz;
-    return [Math.hypot(wx, wz) - RS, Math.atan2(-cdx * wz + cdz * wx, -cdx * wx - cdz * wz)];
+    out[0] = Math.hypot(wx, wz) - RS;
+    out[1] = Math.atan2(-cdx * wz + cdz * wx, -cdx * wx - cdz * wz);
   };
+  const sc = new Float64Array(2);
   const gEnd = (phi: number) => {
     const t = Math.abs(phi) / PHI;
     return t >= 1 ? 0 : Math.sqrt(1 - t * t);
@@ -2985,8 +3187,9 @@ const bouleBuilder: Builder = (s, e) => {
     let h = 0.0011 * (fbm(nLump, p * 7 + 2, q * 7 + 5, 3) - 0.5) * smooth(0, 0.008, yb);
     const rf = ringFade(s0);
     if (rf > 0) h -= 0.00042 * (1 - 0.45 * f) * rf * (0.5 + 0.5 * Math.cos(TAU * ringPhase(s0, th)));
-    const [ds, phi] = score(p, q);
-    const g = gEnd(phi);
+    score(p, q, sc);
+    const ds = sc[0];
+    const g = gEnd(sc[1]);
     if (g > 0 && ds > -0.1 && ds < 0.2) {
       const d = ds * L;
       const W = (0.0016 + 0.017 * f) * g;
@@ -3226,7 +3429,9 @@ const bouleBuilder: Builder = (s, e) => {
       const s0 = Math.min(1, Math.hypot(p, q));
       const th = Math.atan2(q, p);
       lS[k] = s0;
-      const [ds, phi] = score(p, q);
+      score(p, q, sc);
+      const ds = sc[0];
+      const phi = sc[1];
       lD[k] = ds;
       lG[k] = phi;
       const rp = ringPhase(s0, th);
@@ -3243,12 +3448,12 @@ const bouleBuilder: Builder = (s, e) => {
       lTear[k] = Math.round(fbm(nSt, p * 95 + 40, q * 95, 2) * 255);
     }
   const tex = new LiveCanvas(TW, TW);
-  const bumpC = paint(TW, TW, (i, j) => {
+  const bumpC = paint(TW, TW, (i, j, o) => {
     const k = j * TW + i;
-    const b = 150 - lRing[k] * 0.22 + (lFine[k] - 128) * 0.35 - lBl[k] * 0.16 + (lFl[k] - 128) * 0.08;
-    return [b, b, b];
+    o[0] = o[1] = o[2] = 150 - lRing[k] * 0.22 + (lFine[k] - 128) * 0.35 - lBl[k] * 0.16 + (lFl[k] - 128) * 0.08;
   });
   const mat = phys({ map: tex.tex, bumpMap: canvasTex(bumpC, false), bumpScale: 1.3, roughness: 0.66, clearcoat: 0, clearcoatRoughness: 0.5, metalness: 0 }, "own");
+  const rc = new Float64Array(3);
   const repaint = () => {
     const f = fOf();
     const c = crust;
@@ -3256,16 +3461,16 @@ const bouleBuilder: Builder = (s, e) => {
     const d = tex.img.data;
     const flourT = 0.42 + 0.2 * f;
     const flourC: RGB = [lerp(242, 226, c), lerp(238, 206, c), lerp(228, 166, c)];
+    const col = rc;
     for (let k = 0; k < NP; k++) {
       const fine = lFine[k] / 255;
       const bl = lBl[k] / 255;
-      let col: [number, number, number];
       const z = zone[k];
       if (z) {
         const uu = lS[k];
         const g = gEnd(lG[k]);
         const kk = z === 1 ? c * (1.02 + 0.34 * uu * uu * g + 0.16 * (fine - 0.5) + 0.06 * bl) : c * (0.72 + 0.4 * uu * uu + 0.16 * (lSt[k] / 255 - 0.5));
-        col = ramp(CRUST_K, CRUST_C, kk);
+        CRUST_RAMP.into(kk, col);
       } else {
         const s0 = lS[k];
         const ring = lRing[k] / 255;
@@ -3285,13 +3490,16 @@ const bouleBuilder: Builder = (s, e) => {
             kk = lerp(kk, ko, open);
           } else kk += c * 0.2 * g * smooth(W + 0.004, W, dm);
         }
-        col = ramp(CRUST_K, CRUST_C, kk);
+        CRUST_RAMP.into(kk, col);
         // Rice flour from the banneton: in the cane's grooves and in patches, thinning as the dough stretches.
         // The spring tears the flour into dashes, the more the further down the sides the dough stretched.
-        const tear = smooth(0.3 + 0.25 * f * smooth(0.1, 0.5, s0), 0.5 + 0.25 * f * smooth(0.1, 0.5, s0), lTear[k] / 255);
+        const st = smooth(0.1, 0.5, s0);
+        const tear = smooth(0.3 + 0.25 * f * st, 0.5 + 0.25 * f * st, lTear[k] / 255);
         const fa = smooth(flourT, flourT + 0.22, ring * (0.35 + 0.9 * fl)) * 0.9 * tear * (1 - 0.45 * smooth(0.3, 0.58, s0)) + smooth(0.7, 0.86, fl) * 0.14 * smooth(0.04, 0.12, s0) * (1 - smooth(0.5, 0.62, s0));
         const a = clamp01(fa) * (1 - open) * (1 - 0.25 * c);
-        col = [lerp(col[0], flourC[0], a), lerp(col[1], flourC[1], a), lerp(col[2], flourC[2], a)];
+        col[0] = lerp(col[0], flourC[0], a);
+        col[1] = lerp(col[1], flourC[1], a);
+        col[2] = lerp(col[2], flourC[2], a);
       }
       d[k * 4] = clamp(col[0], 0, 255);
       d[k * 4 + 1] = clamp(col[1], 0, 255);
@@ -4050,12 +4258,14 @@ function knifeMats(): { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStan
     ph[j] = r() * 200;
   }
   const bR = new Float32Array(BW * BH);
-  const bc = paint(BW, BH, (i, j) => {
+  const bc = paint(BW, BH, (i, j, o) => {
     const fade = smooth(0.3, 0.7, fbm(nA, i / 90 + ph[j], j * 0.37, 2));
     const l = row[j] * fade + 0.25 * (fbm(nA, i / 200, j / 30 + 40, 2) - 0.5);
     bR[j * BW + i] = 0.2 + 0.08 * Math.abs(l) + 0.04 * (fbm(nA, i / 60 + 9, j / 60, 2) - 0.5);
     const v = 214 + 26 * l;
-    return [v, v + 2, v + 5];
+    o[0] = v;
+    o[1] = v + 2;
+    o[2] = v + 5;
   });
   const blade = phys(
     { color: 0xd8dce0, metalness: 1, roughness: 1, map: canvasTex(bc, true), roughnessMap: greyTex(bR, BW, BH, false), anisotropy: 0.6, anisotropyRotation: 0 },
@@ -4065,9 +4275,11 @@ function knifeMats(): { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStan
   const EW = 2048;
   const er: number[] = [];
   for (let i = 0; i < EW; i++) er.push((r() - 0.5) * (r() < 0.1 ? 2 : 1));
-  const ec = paint(EW, 8, (i, j) => {
+  const ec = paint(EW, 8, (i, j, o) => {
     const v = 226 + 22 * er[(i + j) % EW];
-    return [v, v + 1, v + 3];
+    o[0] = v;
+    o[1] = v + 1;
+    o[2] = v + 3;
   });
   const bevel = std({ color: 0xeceef0, metalness: 1, roughness: 0.3, map: canvasTex(ec, true) }, "own");
   knifeCache = { blade, bevel };

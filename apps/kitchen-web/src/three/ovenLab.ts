@@ -15,7 +15,7 @@
 
 import * as THREE from "three";
 import { createInitialOvenState, stepOvenKernel, type OvenConfig, type OvenState } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView } from "./kit";
+import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Ext, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { combiCavity, vessel } from "./models/ovens";
@@ -349,7 +349,8 @@ export function mountOvenLab(root: HTMLElement): void {
   controls.minAzimuthAngle = -Math.PI * 0.6;
   controls.maxAzimuthAngle = Math.PI * 0.6;
   controls.update();
-  bindCanvasResize(stageEl, renderer, camera);
+  const gate = shaderGate(renderer, camera);
+  bindCanvasResize(stageEl, renderer, camera, gate);
   // Swing round to the right and the right-hand wall and column come away, as a service manual's cutaway does, to
   // show the wheel and element side on behind the baffle; from the front the wall stays, reflecting the lamp.
   let cutOn = false;
@@ -542,14 +543,17 @@ export function mountOvenLab(root: HTMLElement): void {
     fitFov();
     controls.update();
     followCutaway();
-    renderer.render(scene, camera);
+    // The bake runs on; the 3D view waits for its shaders.
+    if (gate.ready()) renderer.render(scene, camera);
   }
   requestAnimationFrame(animate);
   const tMount = performance.now();
+  void gate.refresh(scene);
   // The chapter mounts well before it scrolls into view; the loaf is ready by the time it gets there.
   setTimeout(() => {
     if (!boule) buildBoule();
     showState();
+    void gate.refresh(scene);
   }, 0);
 
   if (import.meta.env.DEV) {

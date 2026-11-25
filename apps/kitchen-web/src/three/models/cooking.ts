@@ -982,12 +982,25 @@ function rippleNormal(): THREE.DataTexture {
   const S = 256;
   const r = rand(5150);
   const waves = Array.from({ length: 14 }, () => ({ kx: Math.round((r() - 0.5) * 12), ky: Math.round((r() - 0.5) * 12), ph: r() * 6.283, a: 0.4 + r() }));
-  const hgt = (x: number, y: number) => waves.reduce((acc, w) => acc + (w.a / (1 + Math.hypot(w.kx, w.ky))) * Math.sin(((w.kx * x + w.ky * y) / S) * 6.283 + w.ph), 0);
+  const amp = waves.map((w) => w.a / (1 + Math.hypot(w.kx, w.ky)));
+  const hgt = (x: number, y: number) => {
+    let acc = 0;
+    for (let k = 0; k < waves.length; k++) {
+      const w = waves[k]!;
+      acc = acc + amp[k]! * Math.sin(((w.kx * x + w.ky * y) / S) * 6.283 + w.ph);
+    }
+    return acc;
+  };
+  // The height at every whole texel from -1 to S, each read by up to four neighbours' slopes.
+  const W = S + 2;
+  const hg = new Float64Array(W * W);
+  for (let y = -1; y <= S; y++) for (let x = -1; x <= S; x++) hg[(y + 1) * W + x + 1] = hgt(x, y);
   const data = new Uint8Array(S * S * 4);
   for (let y = 0; y < S; y++)
     for (let x = 0; x < S; x++) {
-      const dx = (hgt(x + 1, y) - hgt(x - 1, y)) * 9;
-      const dy = (hgt(x, y + 1) - hgt(x, y - 1)) * 9;
+      const o = (y + 1) * W + x + 1;
+      const dx = (hg[o + 1]! - hg[o - 1]!) * 9;
+      const dy = (hg[o + W]! - hg[o - W]!) * 9;
       const l = Math.hypot(dx, dy, 1);
       const i = (y * S + x) * 4;
       data[i] = ((-dx / l) * 0.5 + 0.5) * 255;
