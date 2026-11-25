@@ -82,6 +82,32 @@ fn complete_loaded_projection_reaches_the_actual_passive_fit() {
 }
 
 #[test]
+fn relative_fit_resolves_weak_piston_resistance_on_the_played_board_basis() {
+    let (bank, surface) = fixture();
+    let options = Options::parse("1,40,500,65,relative").unwrap();
+    let refused = prepare(&surface, &bank, &options, medium(), 48_000, Some(1));
+    assert!(refused.err().unwrap().contains("complete board"));
+    let load = prepare(&surface, &bank, &options, medium(), 48_000, None).unwrap();
+    assert!(load.report.pointwise.complex.unwrap() <= 0.02);
+    assert!(load.report.pointwise.resistance.unwrap() <= 0.02);
+    let shape = bank.project_board_shape(&[1.0]).unwrap()[0];
+    let area = PI * 0.15 * 0.15;
+    // Compare both the load and the dissipative part against a continuous
+    // Bessel–Struve piston oracle. This log grid differs from the linear
+    // training/validation grid and resolves the weakest bass resistance.
+    let air = medium();
+    for i in 0..=64 {
+        let hz = 40.0 * (500.0_f64 / 40.0).powf(f64::from(i) / 64.0);
+        let oracle = fs_bem::helmholtz::baffled_piston_face_impedance(
+            0.15, TAU * hz / air.sound_speed, air).unwrap().scale(area * shape * shape);
+        let z = load.model.impedance(TAU * hz).unwrap()[0];
+        assert!((z - oracle).abs() < 0.04 * oracle.abs(), "complex load at {hz} Hz");
+        assert!((z.re - oracle.re).abs() < 0.04 * oracle.re, "radiation resistance at {hz} Hz");
+    }
+    eprintln!("{}", load.report);
+}
+
+#[test]
 fn two_half_spaces_add_reaction_without_changing_the_source_coordinates() {
     let (bank, surface) = fixture();
     let one = Options::parse("1,40,500,65").unwrap();
@@ -100,7 +126,8 @@ fn two_half_spaces_add_reaction_without_changing_the_source_coordinates() {
 #[test]
 fn loading_requires_explicit_sides_resolved_clocks_and_complete_reference_band() {
     for text in ["", "40,500,65", "0,40,500,65", "3,40,500,65", "1,0,500,65",
-        "1,500,40,65", "1,NaN,500,65", "1,40,inf,65", "1,40,500,64", "1,40,500,259"] {
+        "1,500,40,65", "1,NaN,500,65", "1,40,inf,65", "1,40,500,64", "1,40,500,259",
+        "1,40,500,65,", "1,40,500,65,local", "1,40,500,65,relative,relative"] {
         assert!(Options::parse(text).is_err(), "accepted {text}");
     }
     let options = Options::parse("1,40,500,65").unwrap();

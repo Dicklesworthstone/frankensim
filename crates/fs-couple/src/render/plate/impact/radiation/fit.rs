@@ -28,6 +28,33 @@ pub struct Fit {
     pub rms_error:f64,
     pub resistance_peak_error:f64,
     pub resistance_rms_error:f64,
+    pub pointwise:PointwiseErrors,
+}
+
+/// Largest sampled Frobenius error relative to the reference at the same
+/// frequency. A zero reference at any sample leaves its maximum undefined.
+#[derive(Clone, Copy, Debug)]
+pub struct PointwiseErrors {
+    pub complex: Option<f64>,
+    pub resistance: Option<f64>,
+}
+
+impl PointwiseErrors {
+    pub fn empty() -> Self {
+        Self { complex: Some(0.), resistance: Some(0.) }
+    }
+
+    pub fn observe(&mut self, reference: f64, error: f64, resistance: f64, resistance_error: f64) {
+        fn update(peak: &mut Option<f64>, reference: f64, error: f64) {
+            if reference == 0. {
+                *peak = None;
+            } else if let Some(value) = peak {
+                *value = value.max(error / reference);
+            }
+        }
+        update(&mut self.complex, reference, error);
+        update(&mut self.resistance, resistance, resistance_error);
+    }
 }
 
 /// The shared passive fit with frequency-local discrepancy limits. These
@@ -253,21 +280,9 @@ pub fn fit_resolved_relative(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f
         return Err("relative load fit exceeds the resolved dictionary ceiling".into());
     }
     let fit=fit_dictionary(omega,data,ports,&poles,true,true)?;
-    let mut complex=0.0_f64;let mut resistance=0.0_f64;
-    for (&w,reference) in omega.iter().zip(data) {
-        let actual=fit.model.impedance(w)?;
-        let error:Vec<_>=actual.iter().zip(reference).map(|(a,b)|*a-*b).collect();
-        let mut h=0.0_f64;let mut dh=0.0_f64;
-        for i in 0..ports {for j in 0..ports {
-            h=h.hypot((reference[i*ports+j]+reference[j*ports+i].conj()).scale(0.5).abs());
-            dh=dh.hypot((error[i*ports+j]+error[j*ports+i].conj()).scale(0.5).abs());
-        }}
-        if h==0. || norm(reference)==0. {
-            return Err("relative load fit needs nonzero complex and resistive references at every frequency".into());
-        }
-        complex=complex.max(norm(&error)/norm(reference));
-        resistance=resistance.max(dh/h);
-    }
+    let (Some(complex), Some(resistance)) = (fit.pointwise.complex, fit.pointwise.resistance) else {
+        return Err("relative load fit needs nonzero complex and resistive references at every frequency".into());
+    };
     if !complex.is_finite() || !resistance.is_finite() || complex>0.02 || resistance>0.02 {
         return Err(format!("relative passive load fit refused: pointwise complex/resistance={complex:.5}/{resistance:.5}; limits .02/.02"));
     }
@@ -304,7 +319,8 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
     if scale==0. {
         if data.iter().flatten().any(|z|z.abs()!=0.) {return Err("zero training load has a nonzero held-out response".into());}
         return Ok(Fit {model:Model {ports,poles:vec![Pole {omega:poles[0].0,zeta:poles[0].1,coupling:vec![0.;ports]}]},
-            peak_error:0.,rms_error:0.,resistance_peak_error:0.,resistance_rms_error:0.});
+            peak_error:0.,rms_error:0.,resistance_peak_error:0.,resistance_rms_error:0.,
+            pointwise:PointwiseErrors {complex:None,resistance:None}});
     }
     // Balance resistive and reactive error using TRAINING data only. A very
     // small physical radiation resistance must not disappear in an inertance-
@@ -399,6 +415,7 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
     }
     model.validate()?;
     let mut peak=0.0_f64;let mut rms=0.0_f64;let mut rp=0.0_f64;let mut rr=0.0_f64;
+    let mut pointwise = PointwiseErrors::empty();
     for offset in 0..2 {
         let mut max_reference=0.0_f64;let mut max_error=0.0_f64;
         let mut references=0.0_f64;let mut errors=0.0_f64;
@@ -418,6 +435,7 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
                 h=h.hypot((data[f][i*ports+j]+data[f][j*ports+i].conj()).scale(0.5).abs());
                 dh=dh.hypot((error[i*ports+j]+error[j*ports+i].conj()).scale(0.5).abs());
             }}
+            pointwise.observe(reference, delta, h, dh);
             real_max=real_max.max(h);real_error=real_error.max(dh);
             real_references=real_references.hypot(h);real_errors=real_errors.hypot(dh);
         }
@@ -428,7 +446,7 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
     if ![peak,rms,rp,rr].iter().all(|x|x.is_finite()) || peak>0.05 || rms>0.02 || rp>0.10 || rr>0.05 {
         return Err(format!("passive BEM load fit refused: complex peak/RMS={peak:.5}/{rms:.5}, power peak/RMS={rp:.5}/{rr:.5}; limits .05/.02/.10/.05"));
     }
-    Ok(Fit {model,peak_error:peak,rms_error:rms,resistance_peak_error:rp,resistance_rms_error:rr})
+    Ok(Fit {model,peak_error:peak,rms_error:rms,resistance_peak_error:rp,resistance_rms_error:rr,pointwise})
 }
 
 #[cfg(test)]

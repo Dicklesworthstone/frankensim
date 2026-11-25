@@ -6,7 +6,7 @@
 //! This is a coordinate map; only comparison with the complete physical load
 //! can establish whether a truncated acoustic space is adequate.
 use fs_math::c64::C64;
-use fs_couple::render::plate::impact::radiation::{MAX_PORTS, fit::Fit};
+use fs_couple::render::plate::impact::radiation::{MAX_PORTS, fit::{Fit,PointwiseErrors}};
 
 #[derive(Clone, Debug)]
 pub struct PortBasis {
@@ -200,6 +200,7 @@ pub(crate) fn validate_complete_fit(omega:&[f64],data:&[Vec<C64>],basis:&PortBas
         return Err("projected radiation validation requires the complete original BEM matrices".into());
     }
     let mut peak=0.0_f64;let mut rms=0.0_f64;let mut rp=0.0_f64;let mut rr=0.0_f64;
+    let mut pointwise = PointwiseErrors::empty();
     for offset in 0..2 {
         let mut max_reference=0.0_f64;let mut max_error=0.0_f64;
         let mut references=0.0_f64;let mut errors=0.0_f64;
@@ -217,6 +218,7 @@ pub(crate) fn validate_complete_fit(omega:&[f64],data:&[Vec<C64>],basis:&PortBas
                 h=h.hypot((data[f][i*ports+j]+data[f][j*ports+i].conj()).scale(0.5).abs());
                 dh=dh.hypot((error[i*ports+j]+error[j*ports+i].conj()).scale(0.5).abs());
             }}
+            pointwise.observe(reference, delta, h, dh);
             real_max=real_max.max(h);real_error=real_error.max(dh);
             real_references=real_references.hypot(h);real_errors=real_errors.hypot(dh);
         }
@@ -227,6 +229,7 @@ pub(crate) fn validate_complete_fit(omega:&[f64],data:&[Vec<C64>],basis:&PortBas
     if ![peak,rms,rp,rr].iter().all(|x|x.is_finite()) || peak>0.05 || rms>0.02 || rp>0.10 || rr>0.05 {
         return Err(format!("projected BEM load fit refused on the complete board: complex peak/RMS={peak:.5}/{rms:.5}, power peak/RMS={rp:.5}/{rr:.5}; limits .05/.02/.10/.05; supply more radiation ports or retain the complete load"));
     }
+    fitted.pointwise=pointwise;
     fitted.peak_error=peak;fitted.rms_error=rms;
     fitted.resistance_peak_error=rp;fitted.resistance_rms_error=rr;
     Ok(())

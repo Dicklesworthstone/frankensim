@@ -51,7 +51,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc] [--gas-record air.gas]
     [--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack ... --gas-water none|ID --gas-phase frozen|liquid-water]
-    [--rayleigh-loading sides,min_hz,max_hz,samples]
+    [--rayleigh-loading sides,min_hz,max_hz,samples[,relative]]
     [--radiation-ports 1..128]
     [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
@@ -293,6 +293,8 @@ resonators that resolve the board's own travel time (spacing c/6D, D its largest
 extent); training samples must be that close, so 90-2400 Hz on the concert
 grand's 2.36 m board needs at least 193 samples. It is coupled on the mechanics clock. Supplied wood damping is
 treated as intrinsic; the front microphone remains a one-side observation.
+Append ,relative to require at most 2% complex and resistance error at each
+sampled frequency of a complete board load. All fits report these local errors.
 Two-sided loading excludes a sealed --cavity below the board. Crowned shells,
 diagnostic-volume output and unsupported work/rate/fit budgets refuse.
 Absent this option, pressure observation has no air backreaction. See
@@ -587,6 +589,7 @@ impl Options {
             if !geometric || options.render.is_none() || options.diagnostic_volume {
                 return Err("--rayleigh-loading requires a flat geometric pressure --render".into());
             }
+            load.validate_projection(options.radiation_ports)?;
             load.validate_clock(options.sample_rate, options.sample_rate * options.substeps as u32)?;
             if load.sides == 2 && options.cavity.is_some() {
                 return Err("two-sided Rayleigh loading conflicts with a sealed cavity below the board; use one exterior side".into());

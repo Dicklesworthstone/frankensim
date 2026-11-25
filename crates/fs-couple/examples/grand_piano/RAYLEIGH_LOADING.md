@@ -15,6 +15,17 @@ cargo run --release -p fs-couple --example grand_piano -- \
 The four values specify the number of radiating half-spaces, the positive
 frequency-band endpoints in Hz, and an odd count of 33 through 257 frequency
 samples (linear for a complete load, logarithmic with `--radiation-ports`).
+Append a fifth value `relative` to fit the complete board with frequency-local
+weights, for example `--rayleigh-loading 2,90,2620,213,relative`. Weak bass
+radiation resistance controls energy loss through the bridge and can have a
+large relative error under the band-wide tolerances. All fits report the worst
+complex and resistance errors normalized at each frequency. For a projected
+fit these compare the lifted response to the complete board. The relative
+option requires both errors to stay within 2% on every training and withheld
+sample as well as satisfying the usual band-wide limits. It requires nonzero
+local references and excludes `--radiation-ports`. The errors refer to sampled
+matrix norms and do not bound individual modes or frequencies between samples.
+
 There is no inferred side count or separate fit-order knob.
 Without this option, the existing one-way receiver path is unchanged.
 

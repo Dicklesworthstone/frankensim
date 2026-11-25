@@ -19,6 +19,7 @@ pub struct Options {
     pub min_hz: f64,
     pub max_hz: f64,
     pub samples: usize,
+    pub relative: bool,
 }
 
 impl Options {
@@ -28,13 +29,18 @@ impl Options {
     /// fitting order or relaxed error gate.
     pub fn parse(text: &str) -> Result<Self, String> {
         let f: Vec<_> = text.split(',').map(str::trim).collect();
-        let error = || "--rayleigh-loading expects sides,min_hz,max_hz,samples; sides 1|2 and odd 33..257 samples".to_string();
-        if f.len() != 4 { return Err(error()); }
+        let error = || "--rayleigh-loading expects sides,min_hz,max_hz,samples[,relative]; sides 1|2 and odd 33..257 samples".to_string();
+        let relative = match f.as_slice() {
+            [_, _, _, _] => false,
+            [_, _, _, _, "relative"] => true,
+            _ => return Err(error()),
+        };
         let result = Self {
             sides: f[0].parse().map_err(|_| error())?,
             min_hz: f[1].parse().map_err(|_| error())?,
             max_hz: f[2].parse().map_err(|_| error())?,
             samples: f[3].parse().map_err(|_| error())?,
+            relative,
         };
         result.validate()?;
         Ok(result)
@@ -45,6 +51,13 @@ impl Options {
             || !self.max_hz.is_finite() || self.max_hz <= self.min_hz
             || !(33..=257).contains(&self.samples) || self.samples % 2 == 0 {
             return Err("Rayleigh loading needs 1 or 2 half-spaces, a finite increasing positive band and odd 33..257 frequencies".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_projection(&self, max_ports: Option<usize>) -> Result<(), String> {
+        if self.relative && max_ports.is_some() {
+            return Err("relative Rayleigh loading requires the complete board and excludes --radiation-ports".into());
         }
         Ok(())
     }
@@ -80,6 +93,8 @@ pub struct Report {
     pub resistance_peak_error: f64,
     pub resistance_rms_error: f64,
     pub acoustic_ports: usize,
+    pub pointwise: fit::PointwiseErrors,
+    pub relative: bool,
     pub surface_rms_error: Option<f64>,
     /// Largest cell-pair distance and the resonator spacing it sets, for a complete load.
     pub travel: Option<(f64, f64)>,
@@ -92,6 +107,11 @@ impl std::fmt::Display for Report {
             self.min_hz, self.max_hz, self.frequencies, self.peak_error, self.rms_error,
             self.resistance_peak_error, self.resistance_rms_error, self.reference_min_hz,
             self.reference_max_hz, self.minimum_equivalent_disc_ppw, self.sweep_terms)?;
+        let format_error = |error: Option<f64>| error.map_or_else(
+            || "undefined (zero reference)".into(), |value| format!("{value:.5}"));
+        write!(f, " Worst frequency-local complex/resistance errors {}/{} ({}).",
+            format_error(self.pointwise.complex), format_error(self.pointwise.resistance),
+            if self.relative { "2% pointwise limits" } else { "diagnostic" })?;
         write!(f, " Power-consistent area-point resistance; equivalent-disc self reactance.")?;
         if let Some((extent, spacing)) = self.travel {
             write!(f, " Linear frequency samples; the board's {extent:.3} m extent sets {spacing:.2} Hz resonator spacing (c/6D).")?;
@@ -114,6 +134,7 @@ pub struct PreparedLoad { pub model: Model, pub report: Report, pub basis: Optio
 pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium: Medium,
     output_rate: u32, max_ports: Option<usize>) -> Result<PreparedLoad, String> {
     options.validate_clock(output_rate, bank.rate)?;
+    options.validate_projection(max_ports)?;
     if max_ports.is_some_and(|ports| !(1..=MAX_PORTS).contains(&ports)) {
         return Err(format!("Rayleigh acoustic reduction needs an explicit ceiling of 1..{MAX_PORTS} ports"));
     }
@@ -187,6 +208,8 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
     let data = sample_impedances(&prepared, &omega, medium, options.sides)?;
     let fitted = if let Some((basis, _)) = &projection {
         radiation::fit_projected(&omega, &data, basis)?
+    } else if options.relative {
+        fit::fit_resolved_relative(&omega, &data, modes, spacing)?.fit
     } else { fit::fit_resolved(&omega, &data, modes, spacing)? };
     let report = Report {
         sides: options.sides, surface_samples: surface.len(), board_modes: modes,
@@ -196,6 +219,7 @@ pub fn prepare(surface: &[SurfaceSample], bank: &Bank, options: &Options, medium
         rms_error: fitted.rms_error, resistance_peak_error: fitted.resistance_peak_error,
         resistance_rms_error: fitted.resistance_rms_error,
         acoustic_ports: fitted.model.ports,
+        pointwise: fitted.pointwise, relative: options.relative,
         surface_rms_error: projection.as_ref().map(|(_, error)| *error),
         travel: projection.is_none().then_some((extent, spacing / TAU)),
     };

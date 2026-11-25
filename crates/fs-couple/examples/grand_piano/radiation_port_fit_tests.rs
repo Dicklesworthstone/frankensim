@@ -15,7 +15,8 @@ fn exact_rank_two(n:usize)->(Vec<Vec<f64>>,Vec<f64>) {
     (a.iter().zip(&b).map(|(a,b)|vec![4.*a,*b,0.,0.]).collect(),vec![1.,1.,2.,4.])
 }
 fn blank_fit(model:Model)->Fit {
-    Fit {model,peak_error:0.,rms_error:0.,resistance_peak_error:0.,resistance_rms_error:0.}
+    Fit {model,peak_error:0.,rms_error:0.,resistance_peak_error:0.,resistance_rms_error:0.,
+        pointwise:fs_couple::render::plate::impact::radiation::fit::PointwiseErrors::empty()}
 }
 
 #[test]

@@ -21,6 +21,8 @@ fn load_is_explicit_and_front_receiver_can_share_one_sided_load_with_cavity() {
     assert_eq!(load.max_hz, 2000.0);
     assert_eq!(selected.microphone_right, Some([1.2, 1.0, 1.0]));
     assert!(options(&["--rayleigh-loading", "2,20,2000,65"]).is_ok());
+    let relative = options(&["--rayleigh-loading", "2,20,2000,65,relative"]).unwrap();
+    assert!(relative.rayleigh_loading.unwrap().relative);
 }
 
 #[test]
@@ -54,6 +56,7 @@ fn primary_radiation_ports_are_explicit_bounded_and_require_the_load() {
     }
     for extra in [
         vec!["--radiation-ports", "1"],
+        vec!["--rayleigh-loading", "1,20,2000,65,relative", "--radiation-ports", "1"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "0"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "129"],
         vec!["--rayleigh-loading", "1,20,2000,65", "--radiation-ports", "1", "--radiation-ports", "2"],
