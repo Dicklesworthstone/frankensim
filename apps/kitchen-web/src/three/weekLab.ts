@@ -752,18 +752,20 @@ export function mountWeekLab(root: HTMLElement): void {
     set(tiles.waste, `${Math.round(run.wasted.p50)}`, `${Math.round(run.wasted.p90)}`, base ? Math.round(run.wasted.p50 - base.wasted.p50) : null, "");
   }
 
-  function renderStatus(run: CommissaryRun): void {
+  function renderStatus(run: CommissaryRun, base: CommissaryRun | null): void {
     if (!statusEl) return;
     const days = run.plan.days;
     const worst = days.reduce((a, r, i) => (r.otMin > days[a]!.otMin ? i : a), 0);
     const slack = days.reduce((a, r, i) => (r.idleMin > days[a]!.idleMin ? i : a), 0);
     const w = days[worst]!;
     const s = days[slack]!;
+    // Under 3 minutes reads as 0.0 h: no day has time to spare.
+    const spare = s.idleMin >= 3;
     const util = Math.round(run.plan.utilization * 100);
     let text: string;
     let state: "ok" | "warn" | "danger";
     if (settings.strategy === "day") {
-      text = `${DAY_NAMES[slack]} leaves ${fmtH(s.idleMin)} of crew time idle. ${w.otMin > 1 ? `${DAY_NAMES[worst]} needs ${fmtH(w.otMin)} of overtime${w.lateMeals > 0.5 ? ` and still sends ${Math.round(w.lateMeals)} meals out late` : ""}.` : "No day runs over."}`;
+      text = `${spare ? `${DAY_NAMES[slack]} leaves ${fmtH(s.idleMin)} of crew time idle.` : "No day leaves the crew time to spare."} ${w.otMin > 1 ? `${DAY_NAMES[worst]} needs ${fmtH(w.otMin)} of overtime${w.lateMeals > 0.5 ? ` and still sends ${Math.round(w.lateMeals)} meals out late` : ""}.` : "No day runs over."}`;
       state = w.lateMeals > 0.5 ? "danger" : w.otMin > 1 ? "warn" : "ok";
     } else {
       const big = days.reduce((a, r, i) => (r.aheadMin > days[a]!.aheadMin ? i : a), 0);
@@ -785,22 +787,31 @@ export function mountWeekLab(root: HTMLElement): void {
         text = `${DAY_NAMES[big]} cooks ${pans} pans ahead for ${fors}${limit}. `;
       }
       else if (!keeps) text = "Nothing on this menu keeps long enough to cook ahead. ";
-      else if (w.otMin > 1) text = "No day before the busy ones has time to spare for cooking ahead. ";
+      else if (w.otMin > 1) text = spare ? "No day before the busy ones has time to spare for cooking ahead. " : "No day has time to spare for cooking ahead. ";
       else text = "No day runs past the shift, so nothing needs cooking ahead. ";
       if (w.otMin > 1) text += `${DAY_NAMES[worst]} still needs ${fmtH(w.otMin)} of overtime${w.lateMeals > 0.5 ? ` and sends ${Math.round(w.lateMeals)} meals out late` : ""}.`;
       else text += b.aheadMin > 0 || !keeps ? `No day runs over; the crew works ${util}% of its paid hours.` : `The crew works ${util}% of its paid hours.`;
       state = w.lateMeals > 0.5 ? "danger" : w.otMin > 1 ? "warn" : "ok";
     }
     // A fourth cook against cooking ahead with three: the meals out late, and the paid crew-hours.
+    // `base` is three cooks on the day (null when that is the plan on screen).
     const paid = (r: CommissaryRun, n: number) => paidHours(r, n);
-    if (crew === 4) {
-      const three = runCommissary({ ...settings, strategy: "ahead" }, week);
-      const more = paid(run, 4) - paid(three, 3);
-      if (three.late.p50 <= run.late.p50 + 0.5 && more >= 1) text += ` Three cooks cooking ahead get as many meals out on time for ${Math.round(more)} crew-hours a week less.`;
-    } else if (crew === 3 && settings.strategy === "ahead") {
+    const asGood = (a: CommissaryRun, b: CommissaryRun) => a.late.p50 <= b.late.p50 + 0.5;
+    if (crew === 4 && base) {
+      // The cheaper of the three-cook plans that gets as many meals out, on the day first when they cost the same.
+      const three = [
+        { how: "on the day", r: base },
+        { how: "cooking ahead", r: runCommissary({ ...settings, strategy: "ahead" }, week) },
+      ]
+        .filter((o) => asGood(o.r, run))
+        .sort((a, b) => paid(a.r, 3) - paid(b.r, 3))[0];
+      const less = three ? paid(run, 4) - paid(three.r, 3) : 0;
+      if (three && less >= 1) text += ` Three cooks ${three.how} get as many meals out on time for ${Math.round(less)} crew-hours a week less.`;
+    } else if (crew === 3 && settings.strategy === "ahead" && base && (!asGood(base, run) || base.ot.p50 > run.ot.p50 + 0.5)) {
+      // Only when cooking ahead is what keeps three cooks on time or out of overtime.
       const four = runCommissary({ ...settings, strategy: "day" }, kitchenFor(4, week));
       const more = paid(four, 4) - paid(run, 3);
-      if (run.late.p50 <= four.late.p50 + 0.5 && more >= 1) text += ` A fourth cook on the day would get as many meals out on time for ${Math.round(more)} crew-hours a week more.`;
+      if (asGood(run, four) && more >= 1) text += ` A fourth cook on the day would get as many meals out on time for ${Math.round(more)} crew-hours a week more.`;
     }
     statusEl.textContent = text;
     statusEl.dataset.state = state;
@@ -846,7 +857,7 @@ export function mountWeekLab(root: HTMLElement): void {
     renderMenu();
     renderChart(run);
     renderTiles(run, base);
-    renderStatus(run);
+    renderStatus(run, base);
     if (racksVal) racksVal.textContent = `${settings.racks} ${settings.racks === 1 ? "rack" : "racks"} · ${(settings.racks ?? 3) * KITCHEN.rackPans} pans`;
     if (errVal) errVal.textContent = settings.sigma > 0 ? `±${Math.round(settings.sigma * 100)}%` : "Exact";
     if (swingVal) {
@@ -878,10 +889,8 @@ export function mountWeekLab(root: HTMLElement): void {
     settings.sigma = Number(errIn.value) / 100;
     update();
   });
-  swingIn?.addEventListener("input", () => {
-    swing = Number(swingIn.value) / 100;
-    week = reshapeWeek(swing);
-    // The racks' labels and the chart's days carry each day's meals.
+  /** The racks' labels and the chart's days carry each day's meals: redraw them for the week. */
+  function relabel(): void {
     week.forecast.forEach((n, d) => {
       const m = labelMats[d];
       if (m) {
@@ -892,6 +901,11 @@ export function mountWeekLab(root: HTMLElement): void {
       const el = dayMeals[d];
       if (el) el.textContent = n.toLocaleString("en-US");
     });
+  }
+  swingIn?.addEventListener("input", () => {
+    swing = Number(swingIn.value) / 100;
+    week = reshapeWeek(swing);
+    relabel();
     update();
   });
 
@@ -1204,6 +1218,8 @@ export function mountWeekLab(root: HTMLElement): void {
     }
   }
 
+  // A browser that restores the slider's value on reload or back starts on that week, not the drawn one.
+  if (week !== KITCHEN) relabel();
   update();
   show(0, 0);
   for (const k of cooks)
