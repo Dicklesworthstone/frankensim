@@ -1739,11 +1739,12 @@ mod render_tests {
     #[test]
     fn preset_dampers_reach_nodal_partials_after_key_and_pedal_release() {
         // A free bridge isolates the twentieth speaking partial from board
-        // loss. Its node at x/L=.35 defeats the original point damper.
+        // loss. Struck at 0.205 L, the estimated damper stands 45 mm further,
+        // at x/L = .25: a node of that partial, which defeats the point damper.
         let c = geometry::Course { midi:69, unison:1, length_m:1.0,
             linear_density_kg_m:0.02, tension_n:100.0, flexural_rigidity_nm2:0.0,
             bonded_section:None,
-            strike_fraction:0.12, hammer_mass_kg:0.008, felt_thickness_m:0.008,
+            strike_fraction:0.205, hammer_mass_kg:0.008, felt_thickness_m:0.008,
             felt_area_m2:0.0001, duplex_length_m:0.0, detune_cents:0.0 };
         let board = [linear::BoardMode { frequency_hz:100.0, damping_ratio:0.0,
             bridge:[0.0;88], volume:0.1 }];

@@ -16,6 +16,22 @@ const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_CELLS: usize = 128;
 const MAX_TERMS: usize = 4_000_000;
 
+/// Distance from the strike point to the centre of the estimated damper, toward
+/// the bridge. A grand's dampers stand in a line behind the hammer line, so each
+/// one sits a distance past its string's strike point, not at a fixed fraction of
+/// the string (WNG's damper scale-stick guide requires at least 35 mm at note 1).
+/// 45 mm is an estimate inside the sourced range, not a Steinway dimension. The
+/// former 35%-length station sat near the third partial's node, so the low bass
+/// kept its third partials (82-139 Hz on keys 21-30) after a release.
+pub const ESTIMATED_OFFSET_M: f64 = 0.045;
+
+/// Centre of the estimated damper on a course's speaking string, in metres from
+/// its fixed end: the strike point plus [`ESTIMATED_OFFSET_M`], never past
+/// mid-string. Shared by the point image and the estimated pads.
+pub fn estimated_centre_m(c: &Course) -> f64 {
+    (c.strike_fraction * c.length_m + ESTIMATED_OFFSET_M).min(0.5 * c.length_m)
+}
+
 /// An admitted physical pad on one course's speaking strings.
 #[derive(Clone, Copy, Debug)]
 pub struct Pad {
@@ -111,14 +127,15 @@ impl Specification {
     }
 
     /// Explicit estimates, not Steinway dimensions or identified felt losses.
-    /// Same 35%-length centre and 0.4 N s/m per-string drag as the point image;
-    /// width = min(40 mm, 8% of L). The existing estimated upper break is 88.
+    /// Same centre ([`estimated_centre_m`]) and 0.4 N s/m per-string drag as the
+    /// point image; width = min(40 mm, 8% of L). The estimated upper break is 88.
     pub fn estimated(courses: &[Course]) -> Result<Self, String> {
         let pads = courses.iter().map(|c| {
             let width = (0.08 * c.length_m).min(0.04);
+            let centre = estimated_centre_m(c);
             (c.midi, (c.midi <= 88).then_some(Pad {
-                start_m: 0.35 * c.length_m - 0.5 * width,
-                end_m: 0.35 * c.length_m + 0.5 * width,
+                start_m: centre - 0.5 * width,
+                end_m: centre + 0.5 * width,
                 drag_ns_m: 0.4,
             }))
         }).collect();
@@ -584,6 +601,13 @@ mod tests {
         let estimated = Specification::estimated(&courses).unwrap();
         assert!(estimated.pad(69).unwrap().is_some());
         assert!(estimated.pad(90).unwrap().is_none());
+        // The estimated pad is centred 45 mm past the strike point (0.12 L of 1 m).
+        let p = estimated.pad(69).unwrap().unwrap();
+        assert!((0.5 * (p.start_m + p.end_m) - 0.165).abs() < 1e-15);
+        // A short string keeps its damper at mid-string, inside the span.
+        let short = Course { length_m: 0.05, ..course() };
+        assert_eq!(estimated_centre_m(&short), 0.025);
+        assert!(Specification::estimated(&[short]).is_ok());
     }
     #[test]
     fn shared_pad_stations_refuse_a_collapsed_or_invalid_quadrature() {
@@ -598,14 +622,20 @@ mod tests {
     }
     #[test]
     fn distributed_loss_reaches_a_partial_at_the_point_dampers_node() {
-        let mut point = bank(0.0);
-        let mut span = bank(0.0);
-        point.v[19] = 0.2; span.v[19] = 0.2;
+        // Struck at 0.205 L, the point damper stands at 0.205 + 0.045 = 0.25 L:
+        // a node of the fourth partial (index 3).
+        let c = Course { strike_fraction: 0.205, ..course() };
+        assert!((estimated_centre_m(&c) - 0.25).abs() < 1e-15);
+        let new = || Bank::new(&[c], &[BoardMode { frequency_hz: 100.0, damping_ratio: 0.0,
+            bridge: [0.0;88], volume: 0.1 }], 192_000, 21_600.0, 32, false).unwrap();
+        let (mut point, mut span) = (new(), new());
+        point.v[3] = 0.2; span.v[3] = 0.2;
         let before = span.energy(); let q = span.q.clone();
         let legacy = point.damp_string(0, 0.4, 0.001);
-        let prepared = Prepared::new(&specification(), &[course()], &span).unwrap();
+        let pad = Specification::read(&format!("{HEADER}\npad,69,0.21,0.29,0.4\n"), &[c]).unwrap();
+        let prepared = Prepared::new(&pad, &[c], &span).unwrap();
         let loss = prepared.apply(&mut span.v, 0.001, 0.0, |_| false).unwrap();
-        assert!(legacy.abs() < 1e-24, "sin(20*pi*0.35) is a point node");
+        assert!(legacy.abs() < 1e-24, "sin(4*pi*0.25) is a point node");
         assert!(loss > 1e-5, "a pad must integrate speed squared, not square mean speed");
         assert_eq!(span.q, q);
         assert!((span.energy()+loss-before).abs() < 1e-12);

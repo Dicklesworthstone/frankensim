@@ -131,8 +131,9 @@ stick-slip, acoustic calibration, real-time performance or full piano action.
 The viscous image remains available with `frankensim-piano-dampers-v1` or the
 explicit `estimated` selection. It has no finite gap or moving pad state.
 
-The original point at 35% of string length is blind to partials with a node
-there, including the 20th pinned-string partial. A finite pad instead integrates
+A point damper is blind to the partials with a node at its station. The former
+35%-length station was 0.017 L from the third partial's node at L/3, so the
+low bass kept its third partials after a release. A finite pad instead integrates
 local velocity **squared** across its span. Opposite-moving portions do not
 cancel their dissipation, as they would when damping only the average velocity.
 The full modal cross terms and moving-bridge displacement contribution remain.
@@ -241,9 +242,15 @@ For either input format, files literally named `estimated` or `point` can be
 selected as `./estimated` or `./point`; the bare words select the corresponding
 built-in approximations.
 
-`estimated` uses a centre at 35% of speaking length, width equal to the smaller
-of 40 mm and 8% of length, and 0.4 N s/m per string. Keys above MIDI 88 are free.
-These are explicit estimates, NOT Steinway dimensions or measured felt losses.
+`estimated` centres each pad 45 mm past its course's strike point, toward the
+bridge, and never past mid-string. A grand's dampers stand in a line behind the
+hammer line (WNG's damper scale-stick guide requires at least 35 mm from note 1's
+strike point to its damper), so each sits a distance past its strike point rather
+than at a fixed fraction of the string: 0.14 L in the low bass, 0.19 L at C4, 0.43 L
+at key 88. The point image (`--dampers point`, or no preset) uses the same station.
+Width is the smaller of 40 mm and 8% of length, and drag 0.4 N s/m per string.
+Keys above MIDI 88 are free. These are explicit estimates, NOT Steinway
+dimensions or measured felt losses.
 Supplied geometry, tensions, hammer cards and acoustic observer are unchanged.
 
 ## Viscous numerical scope

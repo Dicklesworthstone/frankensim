@@ -351,7 +351,9 @@ impl Bank {
                     let mut beta2 = 0.0;
                     let mut modal_endpoint_k = 0.0;
                     let mut hammer_lift = c.strike_fraction;
-                    let mut damper_lift = 0.35; // authored station, replace for measured dampers
+                    // The speaking string's estimated damper station (duplex segments are never damped).
+                    let damper_fraction = dampers::estimated_centre_m(c) / c.length_m;
+                    let mut damper_lift = damper_fraction;
                     let bridge: Vec<f64> = if polarization==0 {
                         board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect()
                     } else {secondary.expect("admitted transverse rows")[ci].clone()};
@@ -370,7 +372,7 @@ impl Bank {
                         let sign = if n % 2 == 0 { -1.0 } else { 1.0 };
                         let beta = det::sqrt(2.0*card.linear_density_kg_m*card.length_m)*sign/(n as f64*PI);
                         let hammer_shape = card.strike_shape(n);
-                        let damper_shape = det::sin(n as f64*PI*0.35)/det::sqrt(card.modal_mass_kg());
+                        let damper_shape = det::sin(n as f64*PI*damper_fraction)/det::sqrt(card.modal_mass_kg());
                         let k = n as f64*PI/card.length_m;
                         let bend_fraction = card.flexural_rigidity_nm2*k*k/(tension + card.flexural_rigidity_nm2*k*k);
                         let strain_rate = if !damping {0.0} else if let Some(loss) = material_loss {
