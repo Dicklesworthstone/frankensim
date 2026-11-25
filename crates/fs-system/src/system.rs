@@ -35,6 +35,7 @@ use crate::wiring::{
 mod events;
 mod line;
 mod modes;
+mod plan;
 mod scalar;
 mod snapshot;
 
@@ -42,9 +43,14 @@ pub use events::{
     EventBracket, EventConfig, EventDirection, EventError, EventReport, EventSetConfig,
     EventSetError, EventSetReport, EventSetStatus, EventStatus, LocatedEvent,
 };
+pub use plan::{
+    AlgebraicLoopAudit, BlockClass, BlockCostEstimate, BlockPlan, CAUSALIZATION_AUDIT_SCHEMA,
+    CausalDetermination, CausalMatchingEntry, CausalizationAudit, EXECUTION_PLAN_SCHEMA,
+    ExecutionPlan, TearStrategy, TimeScaleGroup, TimeScaleTier,
+};
 pub use snapshot::SystemImage;
 
-use line::Line;
+use line::{Line, LineTear};
 use scalar::ScalarPlan;
 
 /// A prescribed port input: `(t0, dt, values)` fills the value held over the
@@ -1975,8 +1981,22 @@ impl SystemBuilder {
                 let affine = block.nodes.iter().all(|&node| {
                     self.nodes[node].class() == Class::ExactLinear && self.nodes[node].has_tangent()
                 });
-                let mut work =
-                    BlockWork::plan(block, &drivers, &input_owner, &output_start, affine);
+                let single_line_node = (line.len() == 1).then(|| line[0].node);
+                let affine_line_nodes = single_line_node.is_some()
+                    && block.nodes.iter().all(|&node| {
+                        Some(node) == single_line_node
+                            || (self.nodes[node].class() == Class::ExactLinear
+                                && self.nodes[node].has_tangent())
+                    });
+                let mut work = BlockWork::plan(
+                    block,
+                    &drivers,
+                    &input_owner,
+                    &output_start,
+                    affine,
+                    single_line_node,
+                    affine_line_nodes,
+                );
                 if line.is_empty() {
                     work.scalar = self.scalar_plan(block, &drivers, &input_owner, &output_owner);
                 }
@@ -2283,6 +2303,12 @@ struct BlockWork {
     /// readers: `slots[slot_start[column]..]`, in the readers' order.
     slots: Vec<usize>,
     slot_start: Vec<usize>,
+    /// Condensed factorization with a single load-line owner's columns left
+    /// out, used for load-line compliance and Woodbury tearing.
+    line_condensed: Condensed,
+    line_slots: Vec<usize>,
+    line_slot_start: Vec<usize>,
+    line_tear: Option<LineTear>,
     /// Rows whose driver's slopes depend on the outputs it reads, each with
     /// its part of `varying_terms`: per term of the driver, the reader that
     /// carries its slope (`usize::MAX` for a term that reads no output of
@@ -2298,6 +2324,12 @@ struct BlockWork {
     /// Of an affine block: the step its factors were made for (NaN if it
     /// has none).
     kept_dt_s: f64,
+    /// Every neighbour of a single-load-line block is `ExactLinear` with a
+    /// declared tangent and every varying driver is a load line, so the
+    /// neighbour factors, compliance matrix, and Woodbury `Z` basis depend
+    /// on `dt_s` alone.
+    affine_line: bool,
+    kept_line_dt_s: f64,
     /// The Jacobian's entries off the identity as `(row, column, value)`,
     /// in the order the most recent assembly formed them: how the target
     /// of wire `row` moves with input `column`. An affine block reuses
@@ -2333,7 +2365,44 @@ impl BlockWork {
     /// them freshly from the accepted state.
     fn invalidate_caches(&mut self) {
         self.kept_dt_s = f64::NAN;
+        self.kept_line_dt_s = f64::NAN;
         self.found.clear();
+    }
+
+    /// Bytes of pre-allocated static workspace held by this block.
+    fn workspace_bytes(&self, group_count: usize) -> usize {
+        use core::mem::size_of;
+        let vec_f64 = (self.residual.len()
+            + self.update_start.len()
+            + self.rounding.len()
+            + self.allowance.len()
+            + group_count
+            + self.floor.len()
+            + self.carried.len()
+            + self.scale.len()
+            + self.kind_rounding.len()
+            + self.fp_current.len()
+            + self.fp_image.len()
+            + self.fp_next.len())
+            * size_of::<f64>();
+        let structural = self.column_readers.len() * size_of::<Range<usize>>()
+            + self.readers.len() * size_of::<(usize, usize, f64)>()
+            + (self.slots.len()
+                + self.slot_start.len()
+                + self.line_slots.len()
+                + self.line_slot_start.len()
+                + self.varying_terms.len())
+                * size_of::<usize>()
+            + self.varying.len() * size_of::<(usize, Range<usize>)>()
+            + self.slots.len() * size_of::<(usize, usize, f64)>();
+        let found = self.found.inputs.len() * size_of::<f64>()
+            + self.found.columns.len() * size_of::<f64>();
+        vec_f64
+            + structural
+            + found
+            + self.condensed.workspace_bytes()
+            + self.line_condensed.workspace_bytes()
+            + self.line_tear.as_ref().map_or(0, LineTear::workspace_bytes)
     }
     /// Workspaces and reader lists of `block`. `affine` says whether every
     /// component of it is exactly linear and declares its tangent.
@@ -2344,6 +2413,8 @@ impl BlockWork {
         input_owner: &[usize],
         output_start: &[usize],
         affine: bool,
+        line_node: Option<usize>,
+        affine_line_nodes: bool,
     ) -> Self {
         let m = block.unknowns.len();
         // Rows whose driver is not linear, and room for where its terms go.
@@ -2423,6 +2494,78 @@ impl BlockWork {
             );
         }
         let entries = slots.len();
+        let (line_condensed, line_slots, line_slot_start, line_tear) =
+            if let Some(ln) = line_node {
+                let line_pattern: Vec<Vec<usize>> = pattern
+                    .iter()
+                    .enumerate()
+                    .map(|(column, rows)| {
+                        if input_owner[block.unknowns[column]] == ln {
+                            Vec::new()
+                        } else {
+                            rows.clone()
+                        }
+                    })
+                    .collect();
+                let line_condensed = Condensed::plan(&line_pattern);
+                let mut line_slots = Vec::new();
+                let mut line_slot_start = Vec::with_capacity(m);
+                for (column, range) in column_readers.iter().enumerate() {
+                    line_slot_start.push(line_slots.len());
+                    if input_owner[block.unknowns[column]] != ln {
+                        line_slots.extend(
+                            readers[range.clone()]
+                                .iter()
+                                .map(|&(row, _, _)| line_condensed.slot(row, column)),
+                        );
+                    }
+                }
+                let ln_pos = block
+                    .nodes
+                    .binary_search(&ln)
+                    .expect("a block's load-line component belongs to its block");
+                let ln_outputs = output_start[ln]..output_start[ln + 1];
+                let mut active_outputs = Vec::new();
+                for &target in &block.unknowns {
+                    match &drivers[target] {
+                        Driver::OnLine { terms, own } => {
+                            for &(source, _) in &terms[..terms.len() - own] {
+                                if ln_outputs.contains(&source) {
+                                    active_outputs.push(source - ln_outputs.start);
+                                }
+                            }
+                        }
+                        other => {
+                            sources.clear();
+                            other.sources(&mut sources);
+                            for &source in &sources {
+                                if ln_outputs.contains(&source) {
+                                    active_outputs.push(source - ln_outputs.start);
+                                }
+                            }
+                        }
+                    }
+                }
+                active_outputs.sort_unstable();
+                active_outputs.dedup();
+                let line_tear = LineTear::plan(
+                    m,
+                    ln,
+                    &block.unknowns,
+                    input_owner,
+                    active_outputs,
+                    of_node[ln_pos].clone(),
+                )
+                .filter(|tear| line_condensed.kept() + tear.width() < condensed.kept());
+                (line_condensed, line_slots, line_slot_start, line_tear)
+            } else {
+                (Condensed::default(), Vec::new(), Vec::new(), None)
+            };
+        let affine_line = line_node.is_some()
+            && affine_line_nodes
+            && varying
+                .iter()
+                .all(|&(row, _)| matches!(drivers[block.unknowns[row]], Driver::OnLine { .. }));
         Self {
             scalar: None,
             residual: vec![0.0; m],
@@ -2436,10 +2579,16 @@ impl BlockWork {
             readers,
             slots,
             slot_start,
+            line_condensed,
+            line_slots,
+            line_slot_start,
+            line_tear,
             affine: affine && varying.is_empty(),
             varying,
             varying_terms,
             kept_dt_s: f64::NAN,
+            affine_line,
+            kept_line_dt_s: f64::NAN,
             // One entry per Jacobian entry: an assembly never grows it.
             slopes: Vec::with_capacity(entries),
             floor: vec![0.0; m],
@@ -2531,6 +2680,12 @@ impl Found {
         self.column.fill(false);
     }
 
+    /// Forget kept proposals while preserving cached `ExactLinear` neighbour
+    /// tangent columns at an unchanged step length.
+    fn clear_proposed(&mut self) {
+        self.proposed.fill(false);
+    }
+
     /// Keep `inputs`, at which the component at `position` was just
     /// proposed, if it declares its tangent.
     fn keep_inputs(&mut self, position: usize, inputs: &[f64]) {
@@ -2568,6 +2723,17 @@ impl Found {
     /// repeats in this first pass.
     fn column_of(&self, column: usize, width: usize) -> Option<&[f64]> {
         if self.repeated[self.owner_position[column]] && self.column[column] {
+            let start = self.column_start[column];
+            Some(&self.columns[start..start + width])
+        } else {
+            None
+        }
+    }
+
+    /// The kept column of unknown `column`, `width` long, for an `ExactLinear`
+    /// neighbour whose declared tangent depends on `dt_s` alone.
+    fn column_kept(&self, column: usize, width: usize) -> Option<&[f64]> {
+        if self.column[column] {
             let start = self.column_start[column];
             Some(&self.columns[start..start + width])
         } else {
@@ -3095,7 +3261,13 @@ impl System {
             .iter()
             .zip(&self.block_work)
             .filter(|(block, _)| block.looped())
-            .map(|(block, work)| (block.unknowns.len(), work.condensed.kept()))
+            .map(|(block, work)| {
+                let kept = match &work.line_tear {
+                    Some(tear) => work.line_condensed.kept() + tear.width(),
+                    None => work.condensed.kept(),
+                };
+                (block.unknowns.len(), kept)
+            })
             .collect()
     }
 
@@ -3849,10 +4021,16 @@ impl System {
             readers,
             slots,
             slot_start,
+            line_condensed,
+            line_slots,
+            line_slot_start,
+            line_tear,
             varying,
             varying_terms,
             affine,
             kept_dt_s,
+            affine_line,
+            kept_line_dt_s,
             slopes,
             floor,
             carried,
@@ -3862,6 +4040,8 @@ impl System {
             ..
         } = work;
         let affine = *affine;
+        let affine_line = *affine_line;
+        let single_line_node = (self.lines[block].len() == 1).then(|| self.lines[block][0].node);
         let mode = if self.lines[block].is_empty() {
             BlockSolveMode::InterfaceNewton
         } else {
@@ -3893,7 +4073,9 @@ impl System {
         // such as a span) take one update with its efforts held, which is
         // exact where the other components are affine; every other unknown
         // keeps its start.
-        if !self.lines[block].is_empty() {
+        if single_line_node.is_some() {
+            self.release(block, unknowns, residual, line_condensed)?;
+        } else if !self.lines[block].is_empty() {
             self.release(block, unknowns, residual, condensed)?;
         }
         loop {
@@ -4199,7 +4381,7 @@ impl System {
             } else {
                 *kept_dt_s = f64::NAN;
                 slopes.clear();
-                condensed.clear();
+                let keep_neighbors = affine_line && kept_line_dt_s.to_bits() == dt_s.to_bits();
                 // The slopes of the drivers that are not linear, at the
                 // outputs of this iterate.
                 for (row, terms) in varying.iter() {
@@ -4212,43 +4394,128 @@ impl System {
                         }
                     }
                 }
-                for (column, &index) in unknowns.iter().enumerate() {
-                    let node = self.input_owner[index];
-                    let local = index - self.input_start[node];
-                    // The first assembly takes a repeated component's
-                    // column from finding the line, at the same inputs.
-                    if first_pass
-                        && !found.proposed.is_empty()
-                        && let Some(kept) = found.column_of(column, self.node_outputs(node).len())
-                    {
-                        self.scratch_outputs[..kept.len()].copy_from_slice(kept);
-                    } else if self.given_on_line(block, index) {
-                        // A flow of the line that no effort of its component
-                        // moves: its column is held at zero, and nothing is
-                        // asked at a perturbation of it (`given_on_line`).
+                if let Some(tear) = line_tear.as_mut() {
+                    if !keep_neighbors {
+                        *kept_line_dt_s = f64::NAN;
+                        line_condensed.clear();
+                    }
+                    let mut line_col_pos = 0_usize;
+                    for (column, &index) in unknowns.iter().enumerate() {
+                        let node = self.input_owner[index];
+                        let is_line_col = Some(node) == single_line_node;
+                        let local = index - self.input_start[node];
                         let width = self.node_outputs(node).len();
-                        self.scratch_outputs[..width].fill(0.0);
-                    } else if let Some(shorter) =
-                        self.tangent_column(node, local, dt_s, group_scale, scalar.is_some(), cx)?
-                    {
-                        return Ok(Err(shorter));
+                        if !is_line_col
+                            && keep_neighbors
+                            && let Some(kept) = found.column_kept(column, width)
+                        {
+                            self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                        } else if first_pass
+                            && !found.proposed.is_empty()
+                            && let Some(kept) = found.column_of(column, width)
+                        {
+                            self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                        } else if self.given_on_line(block, index) {
+                            self.scratch_outputs[..width].fill(0.0);
+                        } else if let Some(shorter) = self.tangent_column(
+                            node,
+                            local,
+                            dt_s,
+                            group_scale,
+                            scalar.is_some(),
+                            cx,
+                        )? {
+                            return Ok(Err(shorter));
+                        }
+                        let reading = &readers[column_readers[column].clone()];
+                        if is_line_col {
+                            tear.set_column(line_col_pos, &self.scratch_outputs[..width]);
+                            line_col_pos += 1;
+                            for &(row, offset, slope) in reading {
+                                let through = slope * self.scratch_outputs[offset];
+                                rounding[row] += (through * self.inputs[index]).abs();
+                                slopes.push((row, column, through));
+                            }
+                        } else if keep_neighbors {
+                            for &(row, offset, slope) in reading {
+                                let through = slope * self.scratch_outputs[offset];
+                                rounding[row] += (through * self.inputs[index]).abs();
+                                slopes.push((row, column, through));
+                            }
+                        } else {
+                            for (&(row, offset, slope), &slot) in
+                                reading.iter().zip(&line_slots[line_slot_start[column]..])
+                            {
+                                let through = slope * self.scratch_outputs[offset];
+                                line_condensed.subtract(slot, through);
+                                rounding[row] += (through * self.inputs[index]).abs();
+                                slopes.push((row, column, through));
+                            }
+                        }
                     }
-                    // Every row that reads this component's outputs, where
-                    // the plan keeps its entry in this column.
-                    let reading = &readers[column_readers[column].clone()];
-                    for (&(row, offset, slope), &slot) in
-                        reading.iter().zip(&slots[slot_start[column]..])
+                    if !keep_neighbors
+                        && (!line_condensed.factor() || !tear.compute_z(line_condensed, readers))
                     {
-                        let through = slope * self.scratch_outputs[offset];
-                        condensed.subtract(slot, through);
-                        rounding[row] += (through * self.inputs[index]).abs();
-                        slopes.push((row, column, through));
+                        return Err(SystemError::Singular {
+                            nodes: self.names_of(nodes),
+                        });
                     }
-                }
-                if !condensed.factor() {
-                    return Err(SystemError::Singular {
-                        nodes: self.names_of(nodes),
-                    });
+                    if !tear.factor_w() {
+                        return Err(SystemError::Singular {
+                            nodes: self.names_of(nodes),
+                        });
+                    }
+                } else {
+                    condensed.clear();
+                    for (column, &index) in unknowns.iter().enumerate() {
+                        let node = self.input_owner[index];
+                        let is_line_col = Some(node) == single_line_node;
+                        let local = index - self.input_start[node];
+                        let width = self.node_outputs(node).len();
+                        // The first assembly takes a repeated component's
+                        // column from finding the line, at the same inputs.
+                        if !is_line_col
+                            && keep_neighbors
+                            && let Some(kept) = found.column_kept(column, width)
+                        {
+                            self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                        } else if first_pass
+                            && !found.proposed.is_empty()
+                            && let Some(kept) = found.column_of(column, width)
+                        {
+                            self.scratch_outputs[..kept.len()].copy_from_slice(kept);
+                        } else if self.given_on_line(block, index) {
+                            // A flow of the line that no effort of its component
+                            // moves: its column is held at zero, and nothing is
+                            // asked at a perturbation of it (`given_on_line`).
+                            self.scratch_outputs[..width].fill(0.0);
+                        } else if let Some(shorter) = self.tangent_column(
+                            node,
+                            local,
+                            dt_s,
+                            group_scale,
+                            scalar.is_some(),
+                            cx,
+                        )? {
+                            return Ok(Err(shorter));
+                        }
+                        // Every row that reads this component's outputs, where
+                        // the plan keeps its entry in this column.
+                        let reading = &readers[column_readers[column].clone()];
+                        for (&(row, offset, slope), &slot) in
+                            reading.iter().zip(&slots[slot_start[column]..])
+                        {
+                            let through = slope * self.scratch_outputs[offset];
+                            condensed.subtract(slot, through);
+                            rounding[row] += (through * self.inputs[index]).abs();
+                            slopes.push((row, column, through));
+                        }
+                    }
+                    if !condensed.factor() {
+                        return Err(SystemError::Singular {
+                            nodes: self.names_of(nodes),
+                        });
+                    }
                 }
                 if affine {
                     *kept_dt_s = dt_s;
@@ -4332,7 +4599,11 @@ impl System {
             for value in residual.iter_mut() {
                 *value = -*value;
             }
-            if !condensed.solve(residual) {
+            let solved = match line_tear.as_mut() {
+                Some(tear) => tear.solve(line_condensed, readers, residual),
+                None => condensed.solve(residual),
+            };
+            if !solved {
                 return Err(SystemError::Singular {
                     nodes: self.names_of(nodes),
                 });

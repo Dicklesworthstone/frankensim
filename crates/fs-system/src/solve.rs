@@ -203,6 +203,54 @@ impl Condensed {
         self.place.len() - self.follow
     }
 
+    /// Number of follower unknowns eliminated by substitution.
+    pub(crate) fn follow_count(&self) -> usize {
+        self.follow
+    }
+
+    /// Original unknown indices that follow, in exact substitution order.
+    pub(crate) fn follower_order(&self) -> Vec<usize> {
+        let mut order = vec![0_usize; self.follow];
+        for (unknown, &at) in self.place.iter().enumerate() {
+            if at < self.follow {
+                order[at] = unknown;
+            }
+        }
+        order
+    }
+
+    /// Original unknown indices kept in the dense loop-closing system, in pivot order.
+    pub(crate) fn kept_unknowns(&self) -> Vec<usize> {
+        let kept = self.kept();
+        let mut order = vec![0_usize; kept];
+        for (unknown, &at) in self.place.iter().enumerate() {
+            if at >= self.follow {
+                order[at - self.follow] = unknown;
+            }
+        }
+        order
+    }
+
+    /// Number of stored structural off-diagonal entries in `A`.
+    pub(crate) fn nnz(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Bytes of pre-allocated static workspace owned by this condensed solver.
+    pub(crate) fn workspace_bytes(&self) -> usize {
+        use core::mem::size_of;
+        self.place.len() * size_of::<usize>()
+            + self.columns.len() * size_of::<Range<usize>>()
+            + self.rows.len() * size_of::<usize>()
+            + self.values.len() * size_of::<f64>()
+            + self.reach.len() * size_of::<Range<usize>>()
+            + self.reached.len() * size_of::<usize>()
+            + self.dense.len() * size_of::<f64>()
+            + self.pivots.len() * size_of::<usize>()
+            + self.work.len() * size_of::<f64>()
+            + self.carry.len() * size_of::<f64>()
+    }
+
     /// Where the entry of `row` in `column` is kept, for [`Self::subtract`].
     /// The entry must be in the planned pattern.
     pub(crate) fn slot(&self, row: usize, column: usize) -> usize {

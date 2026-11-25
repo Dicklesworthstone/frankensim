@@ -33,10 +33,12 @@
 //!   one update with its efforts held, by the factors of the line's search
 //!   ([`System::release`]), and it is asked again.
 
+use core::ops::Range;
+
 use fs_exec::Cx;
 
 use super::{BlockWork, ROUNDING_UNITS, System, SystemError};
-use crate::solve::Condensed;
+use crate::solve::{Condensed, factor_dense, solve_factored};
 use crate::wiring::Driver;
 
 /// A symmetric part with an eigenvalue below this fraction of the matrix's
@@ -80,6 +82,14 @@ impl Line {
             ends,
             factor: vec![0.0; width * width],
         }
+    }
+
+    pub(super) fn workspace_bytes(&self) -> usize {
+        use core::mem::size_of;
+        self.places.len() * size_of::<(usize, usize, usize)>()
+            + self.ends.len() * size_of::<(usize, usize)>()
+            + self.compliance.len() * size_of::<f64>()
+            + self.factor.len() * size_of::<f64>()
     }
 
     /// Write the matrix into the drivers of the line's flows: the last
@@ -166,6 +176,164 @@ impl Line {
     }
 }
 
+/// Woodbury tear on the outputs of a looped block's load-line component.
+///
+/// The block's interface Jacobian is `J = M - B D_L P_L`, where `M = I - T_N`
+/// leaves the line component's columns out (held in `BlockWork::line_condensed`),
+/// `B` is the driver slopes reading the line component's active outputs, and
+/// `D_L` is the tangent of those outputs with respect to the line component's
+/// unknown inputs. With `Z = M^-1 B` and `W = I - D_L P_L Z`, solving
+/// `J x = b` reduces to `M u_0 = b`, `W y = D_L P_L u_0`, and `x = u_0 + Z y`:
+/// a dense solve of size `w` (the active outputs) instead of all line inputs.
+pub(super) struct LineTear {
+    active_outputs: Vec<usize>,
+    line_columns: Vec<usize>,
+    node_readers: Range<usize>,
+    m: usize,
+    d_line: Vec<f64>,
+    z_cols: Vec<f64>,
+    w_dense: Vec<f64>,
+    w_pivots: Vec<usize>,
+    rhs_y: Vec<f64>,
+    b_saved: Vec<f64>,
+}
+
+impl LineTear {
+    pub(super) fn plan(
+        m: usize,
+        line_node: usize,
+        unknowns: &[usize],
+        input_owner: &[usize],
+        active_outputs: Vec<usize>,
+        node_readers: Range<usize>,
+    ) -> Option<Self> {
+        let w = active_outputs.len();
+        if w == 0 {
+            return None;
+        }
+        let line_columns: Vec<usize> = unknowns
+            .iter()
+            .enumerate()
+            .filter_map(|(col, &index)| (input_owner[index] == line_node).then_some(col))
+            .collect();
+        let lc = line_columns.len();
+        Some(Self {
+            active_outputs,
+            line_columns,
+            node_readers,
+            m,
+            d_line: vec![0.0; w * lc],
+            z_cols: vec![0.0; w * m],
+            w_dense: vec![0.0; w * w],
+            w_pivots: vec![0; w],
+            rhs_y: vec![0.0; w],
+            b_saved: vec![0.0; m],
+        })
+    }
+
+    pub(super) fn width(&self) -> usize {
+        self.active_outputs.len()
+    }
+
+    pub(super) fn active_outputs(&self) -> &[usize] {
+        &self.active_outputs
+    }
+
+    pub(super) fn line_column_count(&self) -> usize {
+        self.line_columns.len()
+    }
+
+    pub(super) fn workspace_bytes(&self) -> usize {
+        use core::mem::size_of;
+        self.active_outputs.len() * size_of::<usize>()
+            + self.line_columns.len() * size_of::<usize>()
+            + self.d_line.len() * size_of::<f64>()
+            + self.z_cols.len() * size_of::<f64>()
+            + self.w_dense.len() * size_of::<f64>()
+            + self.w_pivots.len() * size_of::<usize>()
+            + self.rhs_y.len() * size_of::<f64>()
+            + self.b_saved.len() * size_of::<f64>()
+    }
+
+    pub(super) fn set_column(&mut self, col_pos: usize, outputs: &[f64]) {
+        let lc = self.line_columns.len();
+        for (row, &offset) in self.active_outputs.iter().enumerate() {
+            self.d_line[row * lc + col_pos] = outputs[offset];
+        }
+    }
+
+    pub(super) fn compute_z(
+        &mut self,
+        line_condensed: &mut Condensed,
+        readers: &[(usize, usize, f64)],
+    ) -> bool {
+        for (col, &target_offset) in self.active_outputs.iter().enumerate() {
+            let z_col = &mut self.z_cols[col * self.m..(col + 1) * self.m];
+            z_col.fill(0.0);
+            for &(row, offset, slope) in &readers[self.node_readers.clone()] {
+                if offset == target_offset {
+                    z_col[row] += slope;
+                }
+            }
+            if !line_condensed.solve(z_col) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn factor_w(&mut self) -> bool {
+        let w = self.active_outputs.len();
+        let lc = self.line_columns.len();
+        self.w_dense.fill(0.0);
+        for row in 0..w {
+            self.w_dense[row * w + row] = 1.0;
+            for col in 0..w {
+                let z_col = &self.z_cols[col * self.m..(col + 1) * self.m];
+                let mut dot = 0.0;
+                for (col_pos, &unknown_col) in self.line_columns.iter().enumerate() {
+                    dot += self.d_line[row * lc + col_pos] * z_col[unknown_col];
+                }
+                self.w_dense[row * w + col] -= dot;
+            }
+        }
+        factor_dense(&mut self.w_dense, &mut self.w_pivots, w)
+    }
+
+    pub(super) fn solve(
+        &mut self,
+        line_condensed: &mut Condensed,
+        readers: &[(usize, usize, f64)],
+        b: &mut [f64],
+    ) -> bool {
+        self.b_saved.copy_from_slice(b);
+        if !line_condensed.solve(b) {
+            return false;
+        }
+        let w = self.active_outputs.len();
+        let lc = self.line_columns.len();
+        for row in 0..w {
+            let mut sum = 0.0;
+            for (col_pos, &unknown_col) in self.line_columns.iter().enumerate() {
+                sum += self.d_line[row * lc + col_pos] * b[unknown_col];
+            }
+            self.rhs_y[row] = sum;
+        }
+        if !solve_factored(&self.w_dense, &self.w_pivots, &mut self.rhs_y, w) {
+            return false;
+        }
+        // Form `b_orig + B y` before applying `M^-1` so cancelling effort terms
+        // subtract before propagating into quiet follower rows.
+        b.copy_from_slice(&self.b_saved);
+        for &(row, offset, slope) in &readers[self.node_readers.clone()] {
+            if let Some(pos) = self.active_outputs.iter().position(|&o| o == offset) {
+                b[row] += slope * self.rhs_y[pos];
+            }
+        }
+        line_condensed.solve(b)
+    }
+}
+
 impl System {
     /// Find the load line of `block` for this step and put the block's
     /// inputs on it. Called once the unknowns hold their starting values
@@ -196,6 +364,9 @@ impl System {
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Option<f64>, SystemError> {
+        if lines.len() == 1 {
+            return self.find_lent_single(&mut lines[0], unknowns, nodes, work, dt_s, cx);
+        }
         // All load-line owners are held while the smooth neighbours are
         // condensed. Asking another non-smooth owner for a tangent here
         // would make a stuck constraint part of a supposedly released line.
@@ -322,6 +493,157 @@ impl System {
             line.write_drivers(&mut self.drivers);
             self.released_flows(line);
         }
+        Ok(None)
+    }
+
+
+    /// Single-load-line fast path using `work.line_condensed`, optional
+    /// Woodbury `LineTear`, and `affine_line` factor/compliance caching at an
+    /// unchanged `dt_s`. Multi-line blocks use `find_lent` above.
+    #[allow(clippy::too_many_lines)]
+    fn find_lent_single(
+        &mut self,
+        line: &mut Line,
+        unknowns: &[usize],
+        nodes: &[usize],
+        work: &mut BlockWork,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Option<f64>, SystemError> {
+        let width = line.places.len();
+        let held = self.node_outputs(line.node);
+        self.outputs[held.clone()].copy_from_slice(&self.accepted_outputs[held]);
+        if work.affine_line && work.kept_line_dt_s.to_bits() == dt_s.to_bits() {
+            work.found.clear_proposed();
+            for (position, &node) in nodes.iter().enumerate() {
+                if node == line.node {
+                    continue;
+                }
+                if let Some(shorter) = self.propose(node, dt_s, cx)? {
+                    return Ok(Some(shorter));
+                }
+                let inputs = self.node_inputs(node);
+                work.found.keep_inputs(position, &self.inputs[inputs]);
+            }
+            line.write_drivers(&mut self.drivers);
+            self.released_flows(line);
+            return Ok(None);
+        }
+        work.kept_line_dt_s = f64::NAN;
+        line.compliance.fill(0.0);
+        line.write_drivers(&mut self.drivers);
+        work.found.clear();
+        for (position, &node) in nodes.iter().enumerate() {
+            if node == line.node {
+                continue;
+            }
+            if let Some(shorter) = self.propose(node, dt_s, cx)? {
+                return Ok(Some(shorter));
+            }
+            let inputs = self.node_inputs(node);
+            work.found.keep_inputs(position, &self.inputs[inputs]);
+        }
+        work.group_scale.fill(0.0);
+        for &index in unknowns {
+            let group = self.input_group[index];
+            work.group_scale[group] = work.group_scale[group]
+                .max(self.inputs[index].abs())
+                .max(self.drivers[index].magnitude(&self.outputs, &self.boundary_values));
+        }
+        work.line_condensed.clear();
+        for (row, terms) in &work.varying {
+            self.drivers[unknowns[*row]].gradient(&self.outputs, &mut work.gradient);
+            for (&reader, &(_, slope)) in work.varying_terms[terms.clone()]
+                .iter()
+                .zip(work.gradient.iter())
+            {
+                if reader != usize::MAX {
+                    work.readers[reader].2 = slope;
+                }
+            }
+        }
+        let mut own_column = usize::MAX;
+        for (column, &index) in unknowns.iter().enumerate() {
+            let node = self.input_owner[index];
+            if node == line.node {
+                own_column = column;
+                continue;
+            }
+            let local = index - self.input_start[node];
+            if let Some(shorter) =
+                self.tangent_column(node, local, dt_s, &work.group_scale, false, cx)?
+            {
+                return Ok(Some(shorter));
+            }
+            let values = &self.scratch_outputs[..self.node_outputs(node).len()];
+            work.found.keep_column(column, values);
+            let reading = &work.readers[work.column_readers[column].clone()];
+            for (&(_, offset, slope), &slot) in
+                reading.iter().zip(&work.line_slots[work.line_slot_start[column]..])
+            {
+                work.line_condensed
+                    .subtract(slot, slope * self.scratch_outputs[offset]);
+            }
+        }
+        let component = line.node;
+        let no_line = |system: &Self| SystemError::LoadLine {
+            node: system.names[component].clone(),
+            reason: "the other components of its block do not determine how the flows at its \
+                     ports answer an effort: their Jacobian is singular or not finite",
+        };
+        if !work.line_condensed.factor() {
+            return Err(no_line(self));
+        }
+        let reading = work.column_readers[own_column].clone();
+        let first_output = self.output_start[line.node];
+        for effort in 0..width {
+            let local = line.places[effort].1 - first_output;
+            work.residual.fill(0.0);
+            for &(row, offset, slope) in &work.readers[reading.clone()] {
+                if offset == local {
+                    work.residual[row] += slope;
+                }
+            }
+            if !work.line_condensed.solve(&mut work.residual) {
+                return Err(no_line(self));
+            }
+            for (flow, &(_, _, unknown)) in line.places.iter().enumerate() {
+                line.compliance[flow * width + effort] = if unknown == usize::MAX {
+                    0.0
+                } else {
+                    -work.residual[unknown]
+                };
+            }
+            line.end_answers(effort, &work.residual);
+        }
+        if !line.passive() {
+            return Err(SystemError::LoadLine {
+                node: self.names[line.node].clone(),
+                reason: "its neighbours do not answer an effort with less flow: the line's \
+                         matrix is not finite or its symmetric part is negative",
+            });
+        }
+        line.write_drivers(&mut self.drivers);
+        if work.affine_line {
+            for (row, terms) in &work.varying {
+                self.drivers[unknowns[*row]].gradient(&self.outputs, &mut work.gradient);
+                for (&reader, &(_, slope)) in work.varying_terms[terms.clone()]
+                    .iter()
+                    .zip(work.gradient.iter())
+                {
+                    if reader != usize::MAX {
+                        work.readers[reader].2 = slope;
+                    }
+                }
+            }
+            if let Some(tear) = &mut work.line_tear
+                && !tear.compute_z(&mut work.line_condensed, &work.readers)
+            {
+                return Err(no_line(self));
+            }
+            work.kept_line_dt_s = dt_s;
+        }
+        self.released_flows(line);
         Ok(None)
     }
 

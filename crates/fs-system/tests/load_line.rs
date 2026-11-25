@@ -6572,18 +6572,23 @@ fn a_held_mass_is_not_proposed_or_differentiated_again_where_finding_the_line_al
     for (step, &(n, proposals, tangents, asks)) in rows.iter().enumerate() {
         // The slider first: what it is asked says how many assemblies the
         // step made, and is the same before and after.
+        // Because all smooth neighbours are `ExactLinear` with declared
+        // tangents and the step length `dt` is constant, `affine_line` caches
+        // the neighbour factors and tangent columns after step 0: step 0 takes
+        // 1 mass tangent, and subsequent steps reuse it (0 mass tangents).
+        let expected_tangents = usize::from(step == 0);
         let expected = match (n, asks) {
             // An exact fixed point at the first check: no assembly.
-            (0, 1) => (1, 1),
+            (0, 1) => (1, expected_tangents),
             // One assembly to judge the first check, taken with no update.
             (0, 3) => {
                 assembled += 1;
-                (1, 1)
+                (1, expected_tangents)
             }
             // `n` updates, one assembly before each.
             _ if n >= 1 && asks == 1 + 2 * n => {
                 assembled += 1;
-                (1 + n, n)
+                (1 + n, expected_tangents)
             }
             _ => panic!("step {step}: {n} updates, the slider asked {asks} times"),
         };

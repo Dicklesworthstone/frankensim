@@ -93,9 +93,12 @@ pub use ledger::{
     CarriedInventoryOutcome, EnergyLeakAttribution, Ledger, LedgerExport, WindowLedgerOutcome,
 };
 pub use system::{
-    BoundaryFn, Checkpoint, CheckpointError, EventBracket, EventConfig, EventDirection, EventError,
-    EventReport, EventSetConfig, EventSetError, EventSetReport, EventSetStatus, EventStatus,
-    LocatedEvent, Phase, SolveConfig, StepReport, System, SystemBuilder, SystemError, SystemImage,
+    AlgebraicLoopAudit, BlockClass, BlockCostEstimate, BlockPlan, BoundaryFn,
+    CAUSALIZATION_AUDIT_SCHEMA, CausalDetermination, CausalMatchingEntry, CausalizationAudit,
+    Checkpoint, CheckpointError, EXECUTION_PLAN_SCHEMA, EventBracket, EventConfig, EventDirection,
+    EventError, EventReport, EventSetConfig, EventSetError, EventSetReport, EventSetStatus,
+    EventStatus, ExecutionPlan, LocatedEvent, Phase, SolveConfig, StepReport, System,
+    SystemBuilder, SystemError, SystemImage, TearStrategy, TimeScaleGroup, TimeScaleTier,
     heat_sink,
 };
 pub use wiring::{AdmissionError, HeatSink, NodeId, PortRef, RouteTemperature};

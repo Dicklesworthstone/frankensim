@@ -130,20 +130,6 @@ pub(crate) trait Node {
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), OwnerError>;
-    /// Adjoint (vector-Jacobian product) of the port map; only called when
-    /// [`Node::has_tangent`] is true.
-    #[allow(dead_code)]
-    fn vjp(
-        &self,
-        _old: &dyn Any,
-        _dt_s: f64,
-        _inputs: &[f64],
-        _bar_outputs: &[f64],
-        _bar_inputs: &mut [f64],
-        _cx: &Cx<'_>,
-    ) -> Result<(), OwnerError> {
-        Err(OwnerError::tangent_not_offered())
-    }
     /// The ports of its load line, for a component added on one.
     fn line_ports(&self) -> Option<&[usize]> {
         None
@@ -453,27 +439,6 @@ where
             )
             .map_err(OwnerError::new)
     }
-
-    fn vjp(
-        &self,
-        old: &dyn Any,
-        dt_s: f64,
-        inputs: &[f64],
-        bar_outputs: &[f64],
-        bar_inputs: &mut [f64],
-        cx: &Cx<'_>,
-    ) -> Result<(), OwnerError> {
-        self.0
-            .vjp(
-                state_of::<C::State>(old)?,
-                dt_s,
-                inputs,
-                bar_outputs,
-                bar_inputs,
-                cx,
-            )
-            .map_err(OwnerError::new)
-    }
 }
 
 macro_rules! stage_residual_tier {
@@ -610,27 +575,6 @@ where
                 inputs,
                 d_inputs,
                 d_outputs,
-                cx,
-            )
-            .map_err(OwnerError::new)
-    }
-
-    fn vjp(
-        &self,
-        old: &dyn Any,
-        dt_s: f64,
-        inputs: &[f64],
-        bar_outputs: &[f64],
-        bar_inputs: &mut [f64],
-        cx: &Cx<'_>,
-    ) -> Result<(), OwnerError> {
-        self.0
-            .vjp(
-                state_of::<C::State>(old)?,
-                dt_s,
-                inputs,
-                bar_outputs,
-                bar_inputs,
                 cx,
             )
             .map_err(OwnerError::new)
