@@ -3013,6 +3013,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-evidence",
  "fs-exec",
  "fs-math",
  "fs-mbd",

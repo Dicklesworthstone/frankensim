@@ -6860,6 +6860,22 @@ impl Ledger {
 
     // -- metrics, events, tune ---------------------------------------------
 
+    /// Artifact kind tag for exported coupled-driver window ledgers
+    /// (`frankensim.window_ledger.v1`).
+    pub const WINDOW_LEDGER_ARTIFACT_KIND: &'static str = "window_ledger_v1";
+
+    /// Artifact kind tag for static structural execution plans
+    /// (`frankensim.execution_plan.v1`).
+    pub const EXECUTION_PLAN_ARTIFACT_KIND: &'static str = "execution_plan_v1";
+
+    /// Artifact kind tag for structural causalization audits
+    /// (`frankensim.causalization_audit.v1`).
+    pub const CAUSALIZATION_AUDIT_ARTIFACT_KIND: &'static str = "causalization_audit_v1";
+
+    /// Artifact kind tag for assembly lowering receipts
+    /// (`frankensim.lowering_receipt.v1`).
+    pub const LOWERING_RECEIPT_ARTIFACT_KIND: &'static str = "lowering_receipt_v1";
+
     /// Append one metric sample. `value` must be finite (REAL NOT NULL).
     ///
     /// # Errors
@@ -6889,6 +6905,207 @@ impl Ledger {
             ])
             .map_err(|e| sql_err("metric insert", &e))?;
         Ok(())
+    }
+
+    /// Atomically persist an exported coupled-driver window ledger: validates
+    /// `canonical_json`, stores it as a content-addressed
+    /// [`Self::WINDOW_LEDGER_ARTIFACT_KIND`] artifact, links it to `op` as
+    /// [`EdgeRole::Out`], and writes every `(name, value)` row into `metrics`
+    /// at logical timestamp `t`.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] for malformed JSON, empty metric names, or
+    /// non-finite metric values; engine/lineage errors if `op` is closed or
+    /// missing. All writes roll back on error.
+    #[allow(clippy::result_large_err)]
+    pub fn record_window_ledger(
+        &self,
+        op: i64,
+        t: i64,
+        canonical_json: &str,
+        metrics: &[(String, f64)],
+    ) -> Result<PutReceipt, LedgerError> {
+        self.require_json("canonical_json", canonical_json, false)?;
+        let mut seen_metrics = std::collections::BTreeSet::new();
+        for (name, value) in metrics {
+            if name.is_empty() {
+                return Err(LedgerError::Invalid {
+                    field: "metric.name".to_string(),
+                    problem: "empty metric name".to_string(),
+                });
+            }
+            if !seen_metrics.insert(name.as_str()) {
+                return Err(LedgerError::Invalid {
+                    field: "metric.name".to_string(),
+                    problem: format!("duplicate metric name '{name}'"),
+                });
+            }
+            if !value.is_finite() {
+                return Err(LedgerError::Invalid {
+                    field: format!("metric.{name}"),
+                    problem: format!("{value} is not finite; metrics are REAL NOT NULL"),
+                });
+            }
+        }
+        self.run_immediate(|| {
+            let receipt = self.put_artifact(
+                Self::WINDOW_LEDGER_ARTIFACT_KIND,
+                canonical_json.as_bytes(),
+                None,
+            )?;
+            self.link(op, &receipt.hash, EdgeRole::Out)?;
+            for (name, value) in metrics {
+                self.record_metric(op, t, name, *value)?;
+            }
+            Ok(receipt)
+        })
+    }
+
+    /// Atomically persist a content-addressed static structural execution plan
+    /// (`frankensim.execution_plan.v1`) and optional causalization audit
+    /// (`frankensim.causalization_audit.v1`), linking them to `op` as
+    /// [`EdgeRole::Out`] and recording deterministic plan summary metrics at
+    /// logical timestamp `t`.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] if `plan_json` or `audit_json` is malformed
+    /// JSON; engine/lineage errors if `op` is closed or missing. All writes
+    /// roll back on error.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    pub fn record_execution_plan(
+        &self,
+        op: i64,
+        t: i64,
+        plan_json: &str,
+        audit_json: Option<&str>,
+        block_count: usize,
+        loop_count: usize,
+        total_kept_unknowns: usize,
+        total_workspace_bytes: usize,
+    ) -> Result<(PutReceipt, Option<PutReceipt>), LedgerError> {
+        self.require_json("plan_json", plan_json, false)?;
+        if let Some(audit) = audit_json {
+            self.require_json("audit_json", audit, false)?;
+        }
+        let metrics = [
+            ("plan.blocks", block_count as f64),
+            ("plan.loops", loop_count as f64),
+            ("plan.kept_unknowns", total_kept_unknowns as f64),
+            ("plan.workspace_bytes", total_workspace_bytes as f64),
+        ];
+        self.run_immediate(|| {
+            let plan_receipt = self.put_artifact(
+                Self::EXECUTION_PLAN_ARTIFACT_KIND,
+                plan_json.as_bytes(),
+                None,
+            )?;
+            self.link(op, &plan_receipt.hash, EdgeRole::Out)?;
+            let audit_receipt = if let Some(audit) = audit_json {
+                let rec = self.put_artifact(
+                    Self::CAUSALIZATION_AUDIT_ARTIFACT_KIND,
+                    audit.as_bytes(),
+                    None,
+                )?;
+                self.link(op, &rec.hash, EdgeRole::Out)?;
+                Some(rec)
+            } else {
+                None
+            };
+            for (name, value) in metrics {
+                self.record_metric(op, t, name, value)?;
+            }
+            Ok((plan_receipt, audit_receipt))
+        })
+    }
+
+    /// Atomically persist a content-addressed assembly lowering receipt
+    /// (`frankensim.lowering_receipt.v1`), linking it to `op` as
+    /// [`EdgeRole::Out`] and recording deterministic lowering summary metrics
+    /// at logical timestamp `t`.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] if `receipt_json` is malformed JSON;
+    /// engine/lineage errors if `op` is closed or missing. All writes roll
+    /// back on error.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    pub fn record_lowering_receipt(
+        &self,
+        op: i64,
+        t: i64,
+        receipt_json: &str,
+        component_count: usize,
+        interface_count: usize,
+        joint_count: usize,
+        property_receipt_count: usize,
+    ) -> Result<PutReceipt, LedgerError> {
+        self.require_json("receipt_json", receipt_json, false)?;
+        let metrics = [
+            ("lowering.components", component_count as f64),
+            ("lowering.interfaces", interface_count as f64),
+            ("lowering.joints", joint_count as f64),
+            ("lowering.property_receipts", property_receipt_count as f64),
+        ];
+        self.run_immediate(|| {
+            let receipt = self.put_artifact(
+                Self::LOWERING_RECEIPT_ARTIFACT_KIND,
+                receipt_json.as_bytes(),
+                None,
+            )?;
+            self.link(op, &receipt.hash, EdgeRole::Out)?;
+            for (name, value) in metrics {
+                self.record_metric(op, t, name, value)?;
+            }
+            Ok(receipt)
+        })
+    }
+
+    /// Read all recorded metric rows `(t, name, value)` for operation `op`,
+    /// ordered deterministically by `(t, name)`.
+    ///
+    /// # Errors
+    /// Engine errors on SQL preparation or scan.
+    #[allow(clippy::result_large_err)]
+    pub fn metrics_for_op(&self, op: i64) -> Result<Vec<(i64, String, f64)>, LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT t, name, value FROM metrics WHERE op = ?1 ORDER BY t ASC, name ASC",
+                &[SqliteValue::Integer(op)],
+            )
+            .map_err(|e| sql_err("metrics_for_op query", &e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let t = match row.get(0) {
+                Some(SqliteValue::Integer(v)) => *v,
+                _ => {
+                    return Err(LedgerError::Invalid {
+                        field: "metrics.t".to_string(),
+                        problem: "expected INTEGER column".to_string(),
+                    });
+                }
+            };
+            let name = match row.get(1) {
+                Some(SqliteValue::Text(v)) => v.to_string(),
+                _ => {
+                    return Err(LedgerError::Invalid {
+                        field: "metrics.name".to_string(),
+                        problem: "expected TEXT column".to_string(),
+                    });
+                }
+            };
+            let value = match row.get(2) {
+                Some(SqliteValue::Float(v)) => *v,
+                Some(SqliteValue::Integer(v)) => *v as f64,
+                _ => {
+                    return Err(LedgerError::Invalid {
+                        field: "metrics.value".to_string(),
+                        problem: "expected REAL column".to_string(),
+                    });
+                }
+            };
+            out.push((t, name, value));
+        }
+        Ok(out)
     }
 
     /// Append one event-stream row; returns its rowid.

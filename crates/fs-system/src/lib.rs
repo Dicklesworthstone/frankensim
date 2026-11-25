@@ -76,7 +76,9 @@ mod wiring;
 
 pub use adaptive::{AdaptiveConfig, AdaptiveError, AdaptiveReport, ErrorNorm, ErrorTolerance};
 pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffered};
-pub use ledger::Ledger;
+pub use ledger::{
+    CarriedInventoryOutcome, EnergyLeakAttribution, Ledger, LedgerExport, WindowLedgerOutcome,
+};
 pub use system::{
     BoundaryFn, Checkpoint, CheckpointError, EventBracket, EventConfig, EventDirection, EventError,
     EventReport, EventSetConfig, EventSetError, EventSetReport, EventSetStatus, EventStatus,
