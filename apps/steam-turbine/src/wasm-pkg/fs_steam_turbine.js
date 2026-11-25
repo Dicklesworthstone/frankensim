@@ -121,6 +121,18 @@ export class SteamTurbineSim {
         }
     }
     /**
+     * The protection limits the engine applies, for the page to draw and colour against:
+     * `[vib_zone_ab_um, vib_alarm_um, vib_trip_um, bearing_derate_c, bearing_alarm_c,
+     *   bearing_trip_c, overspeed_trip_rpm]`.
+     * @returns {Float64Array}
+     */
+    limits() {
+        const ret = wasm.steamturbinesim_limits(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
      * @param {number} mesh_id
      * @returns {number}
      */
@@ -174,6 +186,16 @@ export class SteamTurbineSim {
         const ret = wasm.steamturbinesim_mesh_uvs(this.__wbg_ptr, mesh_id);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Microphone position [m] and gain, as the engine holds them: `[x, y, z, gain]`.
+     * @returns {Float64Array}
+     */
+    mic_settings() {
+        const ret = wasm.steamturbinesim_mic_settings(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
         return v1;
     }
     /**
@@ -248,12 +270,20 @@ export class SteamTurbineSim {
         return v1;
     }
     /**
-     * Reset to nominal warm 50 MW synchronized operation (`cold_start = false`) or
-     * cold start roll-up from turning gear (`cold_start = true`).
+     * Restart the operating state: nominal warm 50 MW synchronized operation (`cold_start = false`)
+     * or a cold roll-up from turning gear (`cold_start = true`). The machine's hardware (the
+     * active design) and the microphone placement are kept; only the operating state restarts.
      * @param {boolean} cold_start
      */
     reset(cold_start) {
         wasm.steamturbinesim_reset(this.__wbg_ptr, cold_start);
+    }
+    /**
+     * Restore everything the page can change: the default design, the default microphone and
+     * warm nominal operation.
+     */
+    reset_to_defaults() {
+        wasm.steamturbinesim_reset_to_defaults(this.__wbg_ptr);
     }
     reset_trips() {
         wasm.steamturbinesim_reset_trips(this.__wbg_ptr);
@@ -372,7 +402,7 @@ export class SteamTurbineSim {
         wasm.steamturbinesim_set_speed_ref_rpm(this.__wbg_ptr, rpm);
     }
     /**
-     * Flat 80-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
+     * Flat 81-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
      * @returns {Float64Array}
      */
     snapshot() {

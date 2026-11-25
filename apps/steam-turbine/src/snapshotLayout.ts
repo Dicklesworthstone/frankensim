@@ -1,6 +1,6 @@
 // Typed decoders for the flat WebAssembly ABI exported by fs-steam-turbine (lib.rs).
 
-export const SNAPSHOT_LEN = 80;
+export const SNAPSHOT_LEN = 81;
 export const BLADE_ROW_STRIDE = 9;
 export const STAGE_ROW_STRIDE = 16;
 export const NUM_STAGES = 17;
@@ -11,13 +11,59 @@ export const CAMPBELL_STRIDE = 6;
 export const STATUS_LABELS: Record<number, { text: string; tone: "nominal" | "island" | "alarm" | "trip" }> = {
   0: { text: "SYNC NOMINAL", tone: "nominal" },
   1: { text: "ISLAND / RUN-UP", tone: "island" },
-  2: { text: "ALARM: VIB / TEMP", tone: "alarm" },
+  2: { text: "ALARM", tone: "alarm" },
   3: { text: "TRIP: OVERSPEED", tone: "trip" },
   4: { text: "TRIP: THERMAL", tone: "trip" },
   5: { text: "TRIP: VIBRATION", tone: "trip" },
   6: { text: "TRIP: MANUAL ESV", tone: "trip" },
   7: { text: "TRIP: POLE SLIP", tone: "trip" },
 };
+
+/** Bit meanings of snapshot slot 80 (`alarmFlags`), in bit order. */
+export const ALARM_FLAG_TEXT: readonly string[] = [
+  "VIBRATION",
+  "BEARING TEMP",
+  "WHIRL UNSTABLE",
+  "OVERSPEED TRIP",
+  "THERMAL TRIP",
+  "VIBRATION TRIP",
+  "MANUAL TRIP",
+  "POLE-SLIP TRIP",
+  "DERATING",
+];
+
+/** Names of the alarms (bits 0..2) and derating (bit 8) that are set; trips have their own status. */
+export function activeAlarmNames(flags: number): string[] {
+  const out: string[] = [];
+  for (const bit of [0, 1, 2, 8]) {
+    if (flags & (1 << bit)) out.push(ALARM_FLAG_TEXT[bit]!);
+  }
+  return out;
+}
+
+/** Protection limits the engine applies (`SteamTurbineSim::limits`). */
+export interface EngineLimits {
+  vibZoneAbUm: number;
+  vibAlarmUm: number;
+  vibTripUm: number;
+  bearingDerateC: number;
+  bearingAlarmC: number;
+  bearingTripC: number;
+  overspeedTripRpm: number;
+}
+
+export function decodeLimits(f: Float64Array): EngineLimits {
+  const g = (i: number): number => f[i] ?? Number.NaN;
+  return {
+    vibZoneAbUm: g(0),
+    vibAlarmUm: g(1),
+    vibTripUm: g(2),
+    bearingDerateC: g(3),
+    bearingAlarmC: g(4),
+    bearingTripC: g(5),
+    overspeedTripRpm: g(6),
+  };
+}
 
 export interface TurbineSnapshot {
   timeS: number;
@@ -109,6 +155,8 @@ export interface TurbineSnapshot {
   loudnessSone: number;
   sharpnessAcum: number;
   bpfLpHz: number;
+  /** One bit per alarm and trip (see `ALARM_FLAG_TEXT`). */
+  alarmFlags: number;
 }
 
 export function decodeSnapshot(s: Float64Array): TurbineSnapshot {
@@ -203,6 +251,7 @@ export function decodeSnapshot(s: Float64Array): TurbineSnapshot {
     loudnessSone: g(77),
     sharpnessAcum: g(78),
     bpfLpHz: g(79),
+    alarmFlags: g(80),
   };
 }
 

@@ -24,10 +24,62 @@ use crate::materials::{G0_M_S2, library};
 pub const BEARING_CLEARANCE_M: f64 = 2.20e-4;
 /// Nominal HP balance-piston labyrinth seal radial clearance [m] (175 µm, tighter than 220 µm journal bearing).
 pub const LABYRINTH_CLEARANCE_M: f64 = 1.75e-4;
-/// ISO 7919 Zone B/C alarm boundary for 3,000 rpm industrial steam turbines [µm peak-to-peak].
+/// ISO 7919-2 relative shaft vibration zone boundaries for a large land-based steam turbine
+/// whose rated speed is 3,000 rpm (the standard's table values; they follow 4.8, 9.0 and
+/// 13.2 mm divided by the square root of the rated speed in rpm), in µm peak-to-peak.
+/// Zone A/B: newly commissioned machines normally fall below it.
+pub const ISO_7919_ZONE_AB_UM_PP: f64 = 90.0;
+/// Zone B/C: the alarm boundary.
 pub const ISO_7919_ALARM_UM_PP: f64 = 165.0;
-/// ISO 7919 Zone D trip boundary [µm peak-to-peak].
+/// Zone C/D: the trip boundary.
 pub const ISO_7919_TRIP_UM_PP: f64 = 240.0;
+/// Number of front-journal orbit samples kept for the orbit plot.
+pub const ORBIT_RING_LEN: usize = 256;
+/// Orbit samples per revolution (at speeds where the 0.5 ms sub-step allows it).
+const ORBIT_SAMPLES_PER_REV: f64 = 48.0;
+
+/// Peak-to-peak displacement over one shaft revolution, as two proximity probes at 90° read it
+/// (ISO 7919 `S(p-p)`: the larger of the two probes' peak-to-peak values).
+#[derive(Debug, Clone, Copy, Default)]
+struct RevolutionPeakToPeak {
+    lo: [f64; 2],
+    hi: [f64; 2],
+    elapsed_s: f64,
+    open: bool,
+}
+
+impl RevolutionPeakToPeak {
+    /// Add one journal displacement sample `(x, y)` [m] held for `h` seconds; returns the
+    /// window's peak-to-peak [m] when a window of `period_s` completes.
+    fn push(&mut self, x: f64, y: f64, h: f64, period_s: f64) -> Option<f64> {
+        if self.open {
+            self.lo = [self.lo[0].min(x), self.lo[1].min(y)];
+            self.hi = [self.hi[0].max(x), self.hi[1].max(y)];
+        } else {
+            self.lo = [x, y];
+            self.hi = [x, y];
+            self.elapsed_s = 0.0;
+            self.open = true;
+        }
+        self.elapsed_s += h;
+        if self.elapsed_s + 0.5 * h >= period_s {
+            self.open = false;
+            Some((self.hi[0] - self.lo[0]).max(self.hi[1] - self.lo[1]))
+        } else {
+            None
+        }
+    }
+}
+
+/// One shaft revolution at `omega` [s], bounded to 20 ms .. 0.5 s so a stopped or barely
+/// turning shaft still reports a level.
+fn revolution_window_s(omega_rad_s: f64) -> f64 {
+    if omega_rad_s.abs() > 1.0e-6 {
+        (2.0 * PI / omega_rad_s.abs()).clamp(0.02, 0.5)
+    } else {
+        0.5
+    }
+}
 
 /// Instantaneous hydrodynamic operating point and 8 linearized dynamic coefficients
 /// of one cylindrical journal bearing.
@@ -302,10 +354,14 @@ pub struct LateralRotorDynamics {
     pub q: [f64; 4],
     /// Generalized lateral velocities `[x', y', θ_x', θ_y']` [m/s, m/s, rad/s, rad/s].
     pub dq: [f64; 4],
-    /// Current shaft vibration peak-to-peak amplitude at front bearing [µm].
+    /// Shaft vibration `S(p-p)` at the front journal over the last completed revolution [µm].
     pub front_vib_um_pp: f64,
-    /// Current shaft vibration peak-to-peak amplitude at rear bearing [µm].
+    /// Shaft vibration `S(p-p)` at the rear journal over the last completed revolution [µm].
     pub rear_vib_um_pp: f64,
+    pp_front: RevolutionPeakToPeak,
+    pp_rear: RevolutionPeakToPeak,
+    /// Time since the last orbit sample [s].
+    orbit_sample_age_s: f64,
     /// Maximum labyrinth seal radial excursion [µm].
     pub seal_excursion_um: f64,
     /// Active radial rub normal force [N] (`> 0` when excursion exceeds `LABYRINTH_CLEARANCE_M`).
@@ -318,7 +374,8 @@ pub struct LateralRotorDynamics {
     pub dominant_whirl_hz: f64,
     /// First and second forward synchronous critical speeds [rpm].
     pub critical_speeds_rpm: [f64; 2],
-    /// Ring buffer of recent `(x_um, y_um)` front-bearing orbit samples (128 points) for Canvas2D orbit plot.
+    /// Ring buffer of recent `(x_um, y_um)` front-journal orbit samples ([`ORBIT_RING_LEN`] points,
+    /// up to 48 per revolution, taken inside the 0.5 ms integration sub-steps).
     pub orbit_ring_um: Vec<[f32; 2]>,
     orbit_cursor: usize,
     /// Precomputed Campbell diagram samples `[rpm, f1_hz, f2_hz, f3_hz, f4_hz, max_re_per_s]` (24 speeds).
@@ -337,15 +394,18 @@ impl LateralRotorDynamics {
             props,
             q: [2.0e-6, 0.0, 0.0, 0.0],
             dq: [0.0; 4],
-            front_vib_um_pp: 18.0,
-            rear_vib_um_pp: 22.0,
+            front_vib_um_pp: 0.0,
+            rear_vib_um_pp: 0.0,
+            pp_front: RevolutionPeakToPeak::default(),
+            pp_rear: RevolutionPeakToPeak::default(),
+            orbit_sample_age_s: 0.0,
             seal_excursion_um: 12.0,
             rub_normal_force_n: 0.0,
             rub_torque_nm: 0.0,
             spectral_abscissa_per_s: -12.0,
             dominant_whirl_hz: 28.0,
             critical_speeds_rpm: [1_780.0, 4_120.0],
-            orbit_ring_um: vec![[0.0, 0.0]; 128],
+            orbit_ring_um: vec![[0.0, 0.0]; ORBIT_RING_LEN],
             orbit_cursor: 0,
             campbell_table: Vec::with_capacity(24 * 6),
             iso_eproc: BettingEProcess::new(0.15),
@@ -473,6 +533,7 @@ impl LateralRotorDynamics {
 
         let n_sub = ((dt_s / 0.0005).ceil() as usize).clamp(1, 40);
         let h = dt_s / n_sub as f64;
+        let rev_s = revolution_window_s(omega_rad_s);
         let mut peak_rub_force = 0.0_f64;
         let mut peak_rub_torque = 0.0_f64;
 
@@ -629,35 +690,40 @@ impl LateralRotorDynamics {
                 self.dq[i] = v_pred[i] + 0.5 * h * acc[i];
                 self.q[i] = (q_pred[i] + 0.25 * h * h * acc[i]).clamp(-q_limits[i], q_limits[i]);
             }
+
+            // Journal displacements at this sub-step: per-revolution peak-to-peak and orbit samples.
+            let xf = self.q[0] + z_f * self.q[3];
+            let yf = self.q[1] - z_f * self.q[2];
+            let xr = self.q[0] + z_r * self.q[3];
+            let yr = self.q[1] - z_r * self.q[2];
+            if let Some(pp) = self.pp_front.push(xf, yf, h, rev_s) {
+                self.front_vib_um_pp = pp * 1.0e6;
+            }
+            if let Some(pp) = self.pp_rear.push(xr, yr, h, rev_s) {
+                self.rear_vib_um_pp = pp * 1.0e6;
+            }
+            self.orbit_sample_age_s += h;
+            if self.orbit_sample_age_s + 0.5 * h >= rev_s / ORBIT_SAMPLES_PER_REV {
+                self.orbit_sample_age_s = 0.0;
+                self.orbit_ring_um[self.orbit_cursor] = [(xf * 1.0e6) as f32, (yf * 1.0e6) as f32];
+                self.orbit_cursor = (self.orbit_cursor + 1) % self.orbit_ring_um.len();
+            }
         }
 
-        // Front and rear bearing journal displacements [m] + HP balance-piston seal excursion [m]
-        let xf = self.q[0] + self.props.front_bearing_rel_z_m * self.q[3];
-        let yf = self.q[1] - self.props.front_bearing_rel_z_m * self.q[2];
-        let xr = self.q[0] + self.props.rear_bearing_rel_z_m * self.q[3];
-        let yr = self.q[1] - self.props.rear_bearing_rel_z_m * self.q[2];
+        // HP balance-piston seal excursion [m] at the end of the step
         let z_seal = 0.92 - self.props.com_z_m;
         let xs_now = self.q[0] + z_seal * self.q[3];
         let ys_now = self.q[1] - z_seal * self.q[2];
-
-        // Smooth envelope peak-to-peak displacement [µm] (2 * radial amplitude)
-        let inst_f_pp = 2.0 * xf.hypot(yf) * 1.0e6;
-        let inst_r_pp = 2.0 * xr.hypot(yr) * 1.0e6;
-        let alpha = (dt_s / 0.12).clamp(0.02, 0.35);
-        self.front_vib_um_pp += alpha * (inst_f_pp - self.front_vib_um_pp);
-        self.rear_vib_um_pp += alpha * (inst_r_pp - self.rear_vib_um_pp);
         self.seal_excursion_um = xs_now.hypot(ys_now) * 1.0e6;
         self.rub_normal_force_n = peak_rub_force;
         self.rub_torque_nm = peak_rub_torque;
 
-        // Record front bearing orbit point [µm] into ring buffer
-        self.orbit_ring_um[self.orbit_cursor] = [(xf * 1.0e6) as f32, (yf * 1.0e6) as f32];
-        self.orbit_cursor = (self.orbit_cursor + 1) % self.orbit_ring_um.len();
-
         // Update anytime-valid ISO 7919 compliance betting e-process (`fs-eproc`)
         // Outcome x in [0, 1] = normalized violation severity above ISO alarm threshold
         let max_vib = self.front_vib_um_pp.max(self.rear_vib_um_pp);
-        let severity = ((max_vib - 80.0) / (ISO_7919_TRIP_UM_PP - 80.0)).clamp(0.0, 1.0);
+        let severity = ((max_vib - ISO_7919_ZONE_AB_UM_PP)
+            / (ISO_7919_TRIP_UM_PP - ISO_7919_ZONE_AB_UM_PP))
+            .clamp(0.0, 1.0);
         self.iso_log_e_value = self.iso_eproc.observe(severity);
 
         // Refresh exact 4-DOF complex eigenvalues every 10 steps (~5 Hz in real-time)

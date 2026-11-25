@@ -79,13 +79,13 @@
             <span class="kpi-label">HP ROTOR</span>
             <span class="kpi-value" id="kpi-temp">447<small>°C</small></span>
           </div>
-          <div class="status-pill status-nominal" id="status-pill">SYNC NOMINAL</div>
+          <div class="status-pill status-nominal" id="status-pill" role="status" aria-live="polite">SYNC NOMINAL</div>
         </div>
 
         <div class="topbar-actions">
           <button id="btn-play" class="icon-btn primary" title="Pause / Resume simulation (Space)">Pause</button>
           <button id="btn-audio" class="icon-btn" title="Toggle 48 kHz live turbine audio (M)">Audio Off</button>
-          <button id="btn-reset" class="icon-btn" title="Reset to nominal 50 MW state (R)">Reset</button>
+          <button id="btn-reset" class="icon-btn" title="Reset design, microphone and operation to the boot state (Shift+R)">Reset</button>
           <button id="btn-drawer-left" class="icon-btn mobile-only" aria-label="Toggle controls">Controls</button>
           <button id="btn-drawer-right" class="icon-btn mobile-only" aria-label="Toggle metrology">Metrology</button>
         </div>
@@ -116,6 +116,13 @@
           <div class="nav-hint" id="nav-hint">
             Drag: Orbit · Right/Shift+Drag: Pan · Scroll: Zoom to cursor · Dbl-click: Focus
           </div>
+        </div>
+
+        <!-- Engine error: the solver refused a step; the plant holds its last accepted state -->
+        <div class="engine-error hidden" id="engine-error" role="alert">
+          <strong>Simulation paused: the engine refused the step.</strong>
+          <span id="engine-error-text"></span>
+          <button id="btn-engine-error-dismiss" class="close-x" aria-label="Dismiss engine error">×</button>
         </div>
 
         <!-- Floating Experiment Guidance Banner -->
@@ -357,7 +364,7 @@
                   <input id="sl-explode" type="range" min="0" max="100" step="1" value="0" />
                 </label>
                 <label class="slider-row">
-                  <span>Rotor Visual Slow-Mo <em id="val-slowmo">1/28×</em></span>
+                  <span>Rotor Visual Slow-Mo <em id="val-slowmo">1/25×</em></span>
                   <input id="sl-slowmo" type="range" min="1" max="100" step="1" value="4" />
                 </label>
                 <div class="check-list" style="margin-top:6px;">

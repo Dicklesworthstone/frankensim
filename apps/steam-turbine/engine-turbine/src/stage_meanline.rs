@@ -67,16 +67,20 @@ impl TurbineDesignParams {
         }
     }
 
-    /// Tip-clearance leakage fraction delta relative to nominal 0.75 mm (scales Stodola/stage η).
+    /// Fraction of the HP section's flow that bypasses the blading through the shaft-gland and
+    /// diaphragm labyrinths. A fitted value. It does not depend on the blade tip clearance: tip
+    /// leakage is already a loss of each row in the meanline (`tip_loss`), and counting it here
+    /// as well would charge the clearance twice.
     #[must_use]
     pub fn hp_leakage_fraction(&self) -> f64 {
-        (0.018 * (self.tip_clearance_mm / 0.75)).clamp(0.007, 0.052)
+        0.018
     }
 
-    /// IP/LP tip-clearance leakage fraction delta relative to nominal 0.75 mm.
+    /// Fraction of the IP/LP section's flow that bypasses the blading through its labyrinths
+    /// (fitted; independent of the blade tip clearance, as for the HP section).
     #[must_use]
     pub fn iplp_leakage_fraction(&self) -> f64 {
-        (0.014 * (self.tip_clearance_mm / 0.75)).clamp(0.005, 0.042)
+        0.014
     }
 
     /// Thrust-balance factor: higher reaction raises rotor pressure drop and net axial thrust.

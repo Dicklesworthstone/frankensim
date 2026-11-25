@@ -281,7 +281,7 @@ export class TurbineScene {
   private navMode: NavMode = "orbit";
   private isoContoursEnabled = true;
   private explodeFrac = 0;
-  private visualSlowMo = 0.035;
+  private visualSlowMo = 0.04; // matches the slow-mo slider's initial value 4 (1/25×)
   private exaggerateOrbit = true;
   private showSteamMist = true;
   private visualTheta = 0;

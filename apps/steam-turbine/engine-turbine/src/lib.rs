@@ -47,7 +47,7 @@ use crate::steam::{eval_pt, sample_mollier_dome};
 use crate::system_assembly::AssembledTurbinePlant;
 
 /// Total number of `f64` fields in the flat telemetry snapshot returned by [`SteamTurbineSim::snapshot`].
-pub const SNAPSHOT_LEN: usize = 80;
+pub const SNAPSHOT_LEN: usize = 81;
 
 /// Run a closure with a deterministic, clock-free execution context safe on
 /// both native targets and `wasm32-unknown-unknown` (never touches `Instant::now`).
@@ -152,15 +152,54 @@ impl SteamTurbineSim {
         sim
     }
 
-    /// Reset to nominal warm 50 MW synchronized operation (`cold_start = false`) or
-    /// cold start roll-up from turning gear (`cold_start = true`).
+    /// Restart the operating state: nominal warm 50 MW synchronized operation (`cold_start = false`)
+    /// or a cold roll-up from turning gear (`cold_start = true`). The machine's hardware (the
+    /// active design) and the microphone placement are kept; only the operating state restarts.
     pub fn reset(&mut self, cold_start: bool) {
         let cat = geometry_catalog();
-        self.plant = AssembledTurbinePlant::build(cat, cold_start);
+        let design = self.plant.design;
+        let (mic_pos, mic_gain) = (self.acoustics.mic_pos_m, self.acoustics.mic_gain);
+        self.plant = AssembledTurbinePlant::build_with_design(cat, cold_start, design);
+        self.acoustics = TurbineAcousticSynth::new();
+        self.acoustics.set_mic_pos(mic_pos);
+        self.acoustics.mic_gain = mic_gain;
+        self.last_error.clear();
+        let _ = self.step(0.02);
+        let _ = self.render_audio_block(512);
+    }
+
+    /// Restore everything the page can change: the default design, the default microphone and
+    /// warm nominal operation.
+    pub fn reset_to_defaults(&mut self) {
+        let cat = geometry_catalog();
+        self.plant = AssembledTurbinePlant::build(cat, false);
         self.acoustics = TurbineAcousticSynth::new();
         self.last_error.clear();
         let _ = self.step(0.02);
         let _ = self.render_audio_block(512);
+    }
+
+    /// The protection limits the engine applies, for the page to draw and colour against:
+    /// `[vib_zone_ab_um, vib_alarm_um, vib_trip_um, bearing_derate_c, bearing_alarm_c,
+    ///   bearing_trip_c, overspeed_trip_rpm]`.
+    #[must_use]
+    pub fn limits(&self) -> Vec<f64> {
+        vec![
+            crate::rotordynamics::ISO_7919_ZONE_AB_UM_PP,
+            crate::rotordynamics::ISO_7919_ALARM_UM_PP,
+            crate::rotordynamics::ISO_7919_TRIP_UM_PP,
+            crate::components::BEARING_DERATE_START_K - 273.15,
+            crate::components::BEARING_ALARM_K - 273.15,
+            crate::components::BEARING_TRIP_K - 273.15,
+            crate::components::OVERSPEED_TRIP_RAD_S * 30.0 / PI,
+        ]
+    }
+
+    /// Microphone position [m] and gain, as the engine holds them: `[x, y, z, gain]`.
+    #[must_use]
+    pub fn mic_settings(&self) -> Vec<f64> {
+        let p = self.acoustics.mic_pos_m;
+        vec![p[0], p[1], p[2], self.acoustics.mic_gain]
     }
 
     /// Advance the coupled `fs_system::System` + 4-DOF rotordynamics + 17-stage meanline + 2D continuum by `dt_s`.
@@ -312,7 +351,7 @@ impl SteamTurbineSim {
     // Telemetry, Metrology, Audio & Geometry Exports
     // -----------------------------------------------------------------------
 
-    /// Flat 80-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
+    /// Flat 81-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
     #[must_use]
     pub fn snapshot(&self) -> Vec<f64> {
         self.snapshot_buf.clone()
@@ -402,8 +441,13 @@ impl SteamTurbineSim {
     /// Deterministic BLAKE3 content digest of the current accepted multiphysics state.
     #[must_use]
     pub fn state_digest_hex(&self) -> String {
-        let mut h = DomainHasher::new("fs-steam-turbine.state-digest.v1");
-        for &v in &self.snapshot_buf {
+        let mut h = DomainHasher::new("fs-steam-turbine.state-digest.v2");
+        // The acoustic slots 76..=79 change only when audio is rendered, so they are left out:
+        // the digest is of the plant state alone.
+        for (i, &v) in self.snapshot_buf.iter().enumerate() {
+            if (76..=79).contains(&i) {
+                continue;
+            }
             h.update(&v.to_bits().to_le_bytes());
         }
         for &q in &self.plant.lateral.q {
@@ -691,16 +735,45 @@ impl SteamTurbineSim {
             .liquid()
             .specific_enthalpy()
             .value();
-        let q_boiler_in_w = (hp_v.m_dot_kg_s.max(0.0) * (live.h_j_kg - h_f_cond)).max(1.0);
-        let elec_eff_pct = (gen_st.elec_power_w / q_boiler_in_w * 100.0).clamp(0.0, 65.0);
+        // Efficiencies are this instant's outputs over the live steam's heat input. With
+        // (almost) no live steam, after a trip or at standstill, the ratio is undefined: it is
+        // reported as NaN (the page shows "—") rather than clamped into a plausible number.
+        let q_boiler_in_w = hp_v.m_dot_kg_s.max(0.0) * (live.h_j_kg - h_f_cond);
+        let live_steam_flowing = hp_v.m_dot_kg_s > 2.5;
         let ext_heat_w = (ext_v.m_dot_kg_s.max(0.0) * (ext_h.h_j_kg - h_f_cond)).max(0.0);
-        let chp_eff_pct = ((gen_st.elec_power_w + ext_heat_w) / q_boiler_in_w * 100.0).clamp(0.0, 96.0);
+        let (elec_eff_pct, chp_eff_pct) = if live_steam_flowing {
+            (
+                gen_st.elec_power_w / q_boiler_in_w * 100.0,
+                (gen_st.elec_power_w + ext_heat_w) / q_boiler_in_w * 100.0,
+            )
+        } else {
+            (f64::NAN, f64::NAN)
+        };
 
         // Status code: 0 = SYNC_NOMINAL, 1 = ISLAND_OR_RUNUP, 2 = ALARM_VIB_OR_TEMP,
         //              3 = TRIP_OVERSPEED, 4 = TRIP_THERMAL, 5 = TRIP_VIBRATION, 6 = TRIP_MANUAL,
         //              7 = TRIP_POLE_SLIP (generator out of step, off the bus until the breaker is opened)
         let max_vib = lat.front_vib_um_pp.max(lat.rear_vib_um_pp);
         let max_brg_t = th.temps_k[TH_FRONT_BEARING].max(th.temps_k[TH_REAR_BEARING]);
+        let vib_alarm = max_vib > crate::rotordynamics::ISO_7919_ALARM_UM_PP;
+        let brg_alarm = max_brg_t > crate::components::BEARING_ALARM_K;
+        let whirl_unstable = lat.spectral_abscissa_per_s > 0.0;
+        // Every alarm and trip as its own bit, so the page can say which one fired.
+        let flag_bits = [
+            vib_alarm,
+            brg_alarm,
+            whirl_unstable,
+            gov.overspeed_tripped,
+            gov.thermal_state.tripped,
+            gov.vibration_tripped,
+            gov.manual_trip_flag(),
+            gen_st.out_of_step_tripped,
+            gov.derating_fraction < 1.0,
+        ];
+        let alarm_flags = flag_bits
+            .iter()
+            .enumerate()
+            .fold(0_u32, |acc, (i, &on)| if on { acc | (1 << i) } else { acc });
         let status_code = if gov.overspeed_tripped {
             3.0
         } else if gov.thermal_state.tripped {
@@ -711,7 +784,7 @@ impl SteamTurbineSim {
             6.0
         } else if gen_st.out_of_step_tripped {
             7.0
-        } else if max_vib > 140.0 || max_brg_t > 383.15 || lat.spectral_abscissa_per_s > 0.0 {
+        } else if vib_alarm || brg_alarm || whirl_unstable {
             2.0
         } else if !gen_st.breaker_closed || rpm < 2_850.0 {
             1.0
@@ -818,6 +891,7 @@ impl SteamTurbineSim {
         s[77] = self.acoustics.last_loudness_sone;
         s[78] = self.acoustics.last_sharpness_acum;
         s[79] = self.acoustics.last_bpf_lp_hz;
+        s[80] = f64::from(alarm_flags);
     }
 }
 
@@ -1463,6 +1537,13 @@ mod tests {
         for _ in 0..15 {
             assert!(sim.step(0.05));
         }
+        let s0 = sim.snapshot();
+        assert!(
+            s0[7] > 20.0 && s0[7] < 45.0 && s0[8] > s0[7] && s0[8] < 100.0,
+            "nominal electric / CHP efficiency out of band: {} / {}",
+            s0[7],
+            s0[8]
+        );
         sim.set_manual_trip(true);
         sim.set_grid_breaker(false);
         let mut rpm_at_1s = 0.0_f64;
@@ -1493,6 +1574,9 @@ mod tests {
         );
         assert!(s[35] < 0.05, "ESV must be closed after trip, got {}", s[35]);
         assert!(s[12] < 0.5, "Live steam flow must collapse after ESV trip, got {}", s[12]);
+        // With no live steam the efficiency ratio is undefined; it used to show the 65 % / 96 %
+        // display clamps.
+        assert!(s[7].is_nan() && s[8].is_nan(), "efficiency without live steam: {} / {}", s[7], s[8]);
         let rel_energy_err = s[71].abs() / (s[74].abs() * 1.0e6 + 1.0);
         assert!(
             rel_energy_err < 1.0e-5,
@@ -1568,6 +1652,195 @@ mod tests {
             live_before[7],
             live_after[5],
             live_after[7]
+        );
+    }
+
+    /// Orbit samples are taken inside the 0.5 ms rotor sub-steps, so one revolution at
+    /// 3,000 rpm is drawn by about 40 points that sweep the full circle, and the vibration level
+    /// is the peak-to-peak of a revolution. One sample per 20 ms plant step (one revolution)
+    /// used to draw a stroboscopic dot or a slow false precession, and the level was 2|r| at an
+    /// instant.
+    #[test]
+    fn orbit_resolves_each_revolution_and_vibration_is_its_peak_to_peak() {
+        let mut sim = SteamTurbineSim::new();
+        for _ in 0..10 {
+            assert!(sim.step(0.02), "{}", sim.last_error());
+        }
+        let orbit = sim.orbit_history();
+        let n = orbit.len() / 2;
+        assert_eq!(n, crate::rotordynamics::ORBIT_RING_LEN);
+        let omega = sim.plant.rotor_shaft_state().omega_rad_s;
+        let per_rev = ((2.0 * PI / omega) / 0.0005).round() as usize;
+        let pts: Vec<(f64, f64)> = (n - per_rev..n)
+            .map(|i| (f64::from(orbit[2 * i]), f64::from(orbit[2 * i + 1])))
+            .collect();
+        let cx = pts.iter().map(|p| p.0).sum::<f64>() / pts.len() as f64;
+        let cy = pts.iter().map(|p| p.1).sum::<f64>() / pts.len() as f64;
+        let mut swept = 0.0;
+        for w in pts.windows(2) {
+            let a0 = (w[0].1 - cy).atan2(w[0].0 - cx);
+            let a1 = (w[1].1 - cy).atan2(w[1].0 - cx);
+            swept += (a1 - a0 + PI).rem_euclid(2.0 * PI) - PI;
+        }
+        let expect = 2.0 * PI * (per_rev - 1) as f64 / per_rev as f64;
+        let (lo_x, hi_x) = pts
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.0), h.max(p.0)));
+        let (lo_y, hi_y) = pts
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.1), h.max(p.1)));
+        let pp = (hi_x - lo_x).max(hi_y - lo_y);
+        let front = sim.snapshot()[43];
+        eprintln!(
+            "{per_rev} samples/rev, swept {:.3} rad (expect {:.3}), pk-pk from ring {pp:.2} um, reported {front:.2} um",
+            swept, expect
+        );
+        assert!(
+            (swept.abs() - expect).abs() < 0.25 * 2.0 * PI,
+            "one revolution of orbit samples must sweep the circle: {swept} rad vs {expect} rad"
+        );
+        assert!(
+            (front - pp).abs() <= 0.05 * pp + 0.5,
+            "reported front S(p-p) {front} um must be the revolution's peak-to-peak {pp} um"
+        );
+    }
+
+    /// Every alarm and trip has its own bit in snapshot slot 80, and the bits agree with the
+    /// values they are judged on. The status code alone used one value for three alarms.
+    #[test]
+    fn alarm_flags_name_each_alarm_and_trip() {
+        let check = |sim: &SteamTurbineSim, seen: &mut u32| {
+            let s = sim.snapshot();
+            let flags = s[80] as u32;
+            *seen |= flags;
+            let max_vib = s[43].max(s[44]);
+            let status = s[9] as u32;
+            assert_eq!(
+                flags & 1 != 0,
+                max_vib > crate::rotordynamics::ISO_7919_ALARM_UM_PP,
+                "vibration bit vs {max_vib} um"
+            );
+            assert_eq!(
+                flags & 4 != 0,
+                s[47] > 0.0,
+                "whirl bit vs Re(lambda) {}",
+                s[47]
+            );
+            match status {
+                2 => assert!(
+                    flags & 0b111 != 0 && flags & 0b1111_1000 == 0,
+                    "alarm status, flags {flags:#b}"
+                ),
+                5 => assert!(
+                    flags & (1 << 5) != 0,
+                    "vibration trip status, flags {flags:#b}"
+                ),
+                0 | 1 => assert!(flags & 0b1111_1111 == 0, "healthy status, flags {flags:#b}"),
+                _ => {}
+            }
+        };
+        let mut seen = 0_u32;
+        let mut sim = SteamTurbineSim::new();
+        for _ in 0..10 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+            check(&sim, &mut seen);
+        }
+        assert_eq!(
+            seen & 0b1111_1111,
+            0,
+            "nominal running raises no alarm: {seen:#b}"
+        );
+        sim.set_rotor_unbalance_g_mm(280_000.0);
+        for _ in 0..60 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+            check(&sim, &mut seen);
+        }
+        let s = sim.snapshot();
+        eprintln!(
+            "after heavy unbalance: vib {:.0}/{:.0} um, status {}, flags seen {seen:#b}",
+            s[43], s[44], s[9]
+        );
+        assert!(
+            seen & 1 != 0,
+            "heavy unbalance must raise the vibration alarm bit: {seen:#b}"
+        );
+    }
+
+    /// Restarting the operating state keeps the machine's hardware and the microphone; only
+    /// "defaults" restores them. Cold Start and the experiment cards used to rebuild the
+    /// default machine behind a page still showing the custom one.
+    #[test]
+    fn reset_keeps_the_design_and_microphone_and_defaults_restore_them() {
+        let defaults = SteamTurbineSim::new();
+        let mut sim = SteamTurbineSim::new();
+        sim.apply_design_params(1.2, 0.40, 0.58, 260.0, 0.2, 110.0);
+        sim.set_mic_pos(4.0, 1.4, 6.0);
+        sim.set_mic_gain(2.0);
+        let custom = sim.design_params_flat();
+        assert_ne!(custom, defaults.design_params_flat());
+        for cold in [true, false] {
+            sim.reset(cold);
+            assert_eq!(
+                sim.design_params_flat(),
+                custom,
+                "reset(cold = {cold}) changed the design"
+            );
+            assert_eq!(
+                sim.mic_settings(),
+                vec![4.0, 1.4, 6.0, 2.0],
+                "reset(cold = {cold}) moved the microphone"
+            );
+        }
+        sim.reset_to_defaults();
+        assert_eq!(sim.design_params_flat(), defaults.design_params_flat());
+        assert_eq!(sim.mic_settings(), defaults.mic_settings());
+        assert_eq!(
+            sim.state_digest_hex(),
+            defaults.state_digest_hex(),
+            "defaults must be the boot state"
+        );
+    }
+
+    /// Blade tip clearance costs efficiency through each row's tip loss in the meanline. The
+    /// section's labyrinth bypass used to scale with the same clearance, charging it twice;
+    /// the plant-to-meanline power ratio must not move with the clearance.
+    #[test]
+    fn blade_tip_clearance_is_charged_once() {
+        let run = |tip_mm: f64| {
+            let mut sim = SteamTurbineSim::new();
+            let d = sim.plant.design;
+            sim.apply_design_params(
+                tip_mm,
+                d.hp_reaction,
+                d.lp_last_blade_h_m,
+                d.bearing_clearance_um,
+                d.bearing_preload,
+                d.casing_wall_mm,
+            );
+            for _ in 0..20 {
+                assert!(sim.step(0.05), "{}", sim.last_error());
+            }
+            let p = &sim.plant;
+            let ml_hp: f64 = p.meanline.stages[0..6].iter().map(|s| s.power_w).sum();
+            (p.hp_stages_state().shaft_power_w, ml_hp)
+        };
+        let (plant_a, ml_a) = run(0.75);
+        let (plant_b, ml_b) = run(1.50);
+        let drift = (plant_b / ml_b) / (plant_a / ml_a) - 1.0;
+        eprintln!(
+            "0.75 mm: plant {:.3} / meanline {:.3} MW; 1.50 mm: {:.3} / {:.3} MW; ratio drift {drift:.5}",
+            plant_a * 1e-6,
+            ml_a * 1e-6,
+            plant_b * 1e-6,
+            ml_b * 1e-6
+        );
+        assert!(
+            ml_b < ml_a,
+            "a wider tip clearance must cost meanline power: {ml_a} -> {ml_b}"
+        );
+        assert!(
+            drift.abs() < 0.003,
+            "plant/meanline power ratio moved {drift} with tip clearance"
         );
     }
 }

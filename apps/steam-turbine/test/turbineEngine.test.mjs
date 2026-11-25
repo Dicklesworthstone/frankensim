@@ -59,7 +59,11 @@ test("Nominal 50 MW steady state closes fs-system::Ledger First Law, Mass, and S
     assert.equal(sim.step(0.05), true, `step ${i} failed: ${sim.last_error()}`);
   }
   const s = sim.snapshot();
-  assert.equal(s.length, 80);
+  assert.equal(s.length, 81);
+  assert.equal(s[80], 0, `nominal running raises no alarm or trip flag: ${s[80]}`);
+  const lim = Array.from(sim.limits());
+  assert.deepEqual(lim.slice(0, 3), [90, 165, 240], `ISO 7919 zone limits: ${lim}`);
+  assert.ok(Math.abs(lim[6] - 3300) < 1e-9, `overspeed trip rpm: ${lim[6]}`);
 
   const rpm = s[2];
   const elecMw = s[5];
@@ -286,6 +290,11 @@ test("All 9 guided experiments, ESV manual trip coastdown, and extreme slider co
     }
     const s = sim.snapshot();
     for (let k = 0; k < s.length; k++) {
+      // Efficiencies (7, 8) are undefined, reported as NaN, exactly when no live steam flows (12).
+      if ((k === 7 || k === 8) && !(s[12] > 2.5)) {
+        assert.ok(Number.isNaN(s[k]), `${c.name} efficiency[${k}] without live steam must be NaN: ${s[k]}`);
+        continue;
+      }
       assert.ok(Number.isFinite(s[k]), `${c.name} snapshot[${k}] is non-finite: ${s[k]}`);
     }
     const relE = Math.abs(s[71]) / (Math.abs(s[74]) * 1e6 + 1);

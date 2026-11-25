@@ -772,6 +772,47 @@ input[type="range"] {
   word-break: break-all;
 }
 
+/* ---------- Engine error banner ---------- */
+.engine-error {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100% - 32px));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  background: rgba(60, 12, 16, 0.94);
+  border: 1px solid rgba(255, 92, 102, 0.7);
+  border-radius: 10px;
+  padding: 9px 34px 9px 12px;
+  color: #fecaca;
+  font-size: 12px;
+  z-index: 14;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.engine-error strong {
+  color: #fff;
+}
+
+.engine-error #engine-error-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.engine-error .close-x {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+
+.engine-error.hidden {
+  display: none;
+}
+
 /* ---------- Experiment Toast Banner ---------- */
 .exp-toast {
   position: absolute;

@@ -51,6 +51,12 @@ export class SteamTurbineSim {
      * Last solver error string (empty when healthy).
      */
     last_error(): string;
+    /**
+     * The protection limits the engine applies, for the page to draw and colour against:
+     * `[vib_zone_ab_um, vib_alarm_um, vib_trip_um, bearing_derate_c, bearing_alarm_c,
+     *   bearing_trip_c, overspeed_trip_rpm]`.
+     */
+    limits(): Float64Array;
     mesh_cap_start(mesh_id: number): number;
     /**
      * Total number of exported base meshes (`24`: 17 revolved solids/cutaway shells + 7 NURBS airfoils).
@@ -60,6 +66,10 @@ export class SteamTurbineSim {
     mesh_normals(mesh_id: number): Float32Array;
     mesh_positions(mesh_id: number): Float32Array;
     mesh_uvs(mesh_id: number): Float32Array;
+    /**
+     * Microphone position [m] and gain, as the engine holds them: `[x, y, z, gain]`.
+     */
+    mic_settings(): Float64Array;
     /**
      * Exact IAPWS-IF97 Region 4 saturation dome `[s_f, h_f, s_g, h_g, ...]` (`kJ/kg-K`, `kJ/kg`).
      */
@@ -92,10 +102,16 @@ export class SteamTurbineSim {
      */
     render_audio_block(frames: number): Float32Array;
     /**
-     * Reset to nominal warm 50 MW synchronized operation (`cold_start = false`) or
-     * cold start roll-up from turning gear (`cold_start = true`).
+     * Restart the operating state: nominal warm 50 MW synchronized operation (`cold_start = false`)
+     * or a cold roll-up from turning gear (`cold_start = true`). The machine's hardware (the
+     * active design) and the microphone placement are kept; only the operating state restarts.
      */
     reset(cold_start: boolean): void;
+    /**
+     * Restore everything the page can change: the default design, the default microphone and
+     * warm nominal operation.
+     */
+    reset_to_defaults(): void;
     reset_trips(): void;
     /**
      * Run FrankenSim's L4 ASCENT `fs-dfo::cma::cmaes` + `fs-dfo::nelder_mead` multi-variable
@@ -121,7 +137,7 @@ export class SteamTurbineSim {
     set_rotor_unbalance_g_mm(g_mm: number): void;
     set_speed_ref_rpm(rpm: number): void;
     /**
-     * Flat 80-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
+     * Flat 81-element telemetry snapshot array (see `snapshotLayout.ts` for field mapping).
      */
     snapshot(): Float64Array;
     /**
@@ -153,12 +169,14 @@ export interface InitOutput {
     readonly steamturbinesim_fem_shell_certificate_flat: (a: number) => [number, number];
     readonly steamturbinesim_geometry_receipt_flat: (a: number) => [number, number];
     readonly steamturbinesim_last_error: (a: number) => [number, number];
+    readonly steamturbinesim_limits: (a: number) => [number, number];
     readonly steamturbinesim_mesh_cap_start: (a: number, b: number) => number;
     readonly steamturbinesim_mesh_count: (a: number) => number;
     readonly steamturbinesim_mesh_indices: (a: number, b: number) => [number, number];
     readonly steamturbinesim_mesh_normals: (a: number, b: number) => [number, number];
     readonly steamturbinesim_mesh_positions: (a: number, b: number) => [number, number];
     readonly steamturbinesim_mesh_uvs: (a: number, b: number) => [number, number];
+    readonly steamturbinesim_mic_settings: (a: number) => [number, number];
     readonly steamturbinesim_mollier_dome: (a: number) => [number, number];
     readonly steamturbinesim_mollier_path: (a: number) => [number, number];
     readonly steamturbinesim_new: () => number;
@@ -167,6 +185,7 @@ export interface InitOutput {
     readonly steamturbinesim_refresh_campbell: (a: number) => void;
     readonly steamturbinesim_render_audio_block: (a: number, b: number) => [number, number];
     readonly steamturbinesim_reset: (a: number, b: number) => void;
+    readonly steamturbinesim_reset_to_defaults: (a: number) => void;
     readonly steamturbinesim_reset_trips: (a: number) => void;
     readonly steamturbinesim_run_design_optimization: (a: number, b: number, c: number) => [number, number];
     readonly steamturbinesim_set_condenser_air_fraction: (a: number, b: number) => void;

@@ -2212,6 +2212,15 @@ impl PortTangent for TurbineCasingThermalComponent {
 
 // ---------------------------------------------------------------------------
 // 9. GovernorControlComponent (fs-control SpeedController + ThermalDeratingPolicy)
+
+/// Babbitt temperature at which the governor starts derating the load [K] (105 °C).
+pub const BEARING_DERATE_START_K: f64 = 378.15;
+/// Babbitt temperature that raises the bearing alarm [K] (110 °C).
+pub const BEARING_ALARM_K: f64 = 383.15;
+/// Babbitt temperature that trips the unit [K] (120 °C, the matdb wipe onset).
+pub const BEARING_TRIP_K: f64 = 393.15;
+/// Overspeed trip: 110 % of the 3,000 rpm rated speed [rad/s].
+pub const OVERSPEED_TRIP_RAD_S: f64 = 110.0 * PI;
 // ---------------------------------------------------------------------------
 
 /// Electro-hydraulic steam turbine governor & protection system backed by
@@ -2258,8 +2267,8 @@ impl GovernorControlComponent {
         // Channel 1: LP Exhaust hood temp (derate > 100 C, trip >= 130 C = 403.15 K)
         let thermal_bands = [
             ThermalDeratingBand {
-                full_output_temperature_k: 378.15,
-                trip_temperature_k: 393.15,
+                full_output_temperature_k: BEARING_DERATE_START_K,
+                trip_temperature_k: BEARING_TRIP_K,
                 reset_temperature_k: 365.15,
             },
             ThermalDeratingBand {
@@ -2279,7 +2288,7 @@ impl GovernorControlComponent {
             speed_ctrl,
             thermal_bands,
             rated_omega_rad_s: 100.0 * PI,        // 3,000 rpm
-            overspeed_trip_rad_s: 110.0 * PI,     // 3,300 rpm (110% ISO overspeed trip!)
+            overspeed_trip_rad_s: OVERSPEED_TRIP_RAD_S, // 3,300 rpm
         }
     }
 

@@ -10,8 +10,10 @@
 import "./styles.css";
 import initWasm, { SteamTurbineSim } from "./wasm-pkg/fs_steam_turbine";
 import {
+  activeAlarmNames,
   decodeDesignParams,
   decodeFemCertificate,
+  decodeLimits,
   decodeGeometryReceipt,
   decodeOptReport,
   decodeSnapshot,
@@ -19,6 +21,7 @@ import {
   STATUS_LABELS,
   type DesignOptimizationReport,
   type DesignParams,
+  type EngineLimits,
   type FemShellCertificate,
   type GeometryReceipt,
   type StageTelemetry,
@@ -68,6 +71,8 @@ async function boot(): Promise<void> {
   const femCert: FemShellCertificate = decodeFemCertificate(sim.fem_shell_certificate_flat());
   let mollierDome = sim.mollier_dome();
   let campbellTable = sim.campbell_data();
+  // The protection limits the engine applies: tiles and plots are coloured against these.
+  const limits: EngineLimits = decodeLimits(sim.limits());
 
   bootStatus.textContent = "Compiling HDR studio shaders & uploading 24 FrankenSim meshes + 34 NURBS rows…";
   const viewport = byId<HTMLDivElement>("viewport");
@@ -109,6 +114,8 @@ async function boot(): Promise<void> {
   const btnQuickCutaway = byId<HTMLButtonElement>("btn-quick-cutaway");
   const btnQuickField = byId<HTMLButtonElement>("btn-quick-field");
 
+  const engineError = byId<HTMLDivElement>("engine-error");
+  const engineErrorText = byId<HTMLSpanElement>("engine-error-text");
   const expToast = byId<HTMLDivElement>("exp-toast");
   const expToastTag = byId<HTMLSpanElement>("exp-toast-tag");
   const expToastTitle = byId<HTMLElement>("exp-toast-title");
@@ -517,17 +524,27 @@ async function boot(): Promise<void> {
   );
   let micZ = 2.4;
   let micX = 2.2;
-  bindSlider("sl-micz", "val-micz", (v) => `${v.toFixed(1)} m`, (v) => {
+  const ctlMicZ = bindSlider("sl-micz", "val-micz", (v) => `${v.toFixed(1)} m`, (v) => {
     micZ = v;
     sim.set_mic_pos(micX, 1.4, micZ);
     scene.setMicPosition(micX, 1.4, micZ);
   });
-  bindSlider("sl-micx", "val-micx", (v) => `${v.toFixed(1)} m`, (v) => {
+  const ctlMicX = bindSlider("sl-micx", "val-micx", (v) => `${v.toFixed(1)} m`, (v) => {
     micX = v;
     sim.set_mic_pos(micX, 1.4, micZ);
     scene.setMicPosition(micX, 1.4, micZ);
   });
-  bindSlider("sl-gain", "val-gain", (v) => `${v.toFixed(1)}×`, (v) => sim.set_mic_gain(v));
+  const ctlGain = bindSlider("sl-gain", "val-gain", (v) => `${v.toFixed(1)}×`, (v) => sim.set_mic_gain(v));
+  // Show the microphone the engine holds (after "Reset" restores the default one).
+  const syncMicFromEngine = () => {
+    const [x, y, z, gain] = sim.mic_settings();
+    micX = x ?? micX;
+    micZ = z ?? micZ;
+    ctlMicX.set(micX);
+    ctlMicZ.set(micZ);
+    ctlGain.set(gain ?? 1);
+    scene.setMicPosition(micX, y ?? 1.4, micZ);
+  };
 
   let breakerClosed = true;
   let breakerShowsTrip = false;
@@ -566,6 +583,11 @@ async function boot(): Promise<void> {
 
   btnColdStart.addEventListener("click", () => {
     fastForwardRemainingS = 0;
+    clearEngineError();
+    activeExpId = null;
+    expToast.classList.add("hidden");
+    renderExperimentCards();
+    // The engine keeps the active design (hardware) and restarts only the operating state.
     sim.reset(true);
     resetControlSlidersToNominal();
     ctlLoad.set(20);
@@ -579,10 +601,13 @@ async function boot(): Promise<void> {
 
   btnReset.addEventListener("click", () => {
     fastForwardRemainingS = 0;
+    clearEngineError();
     activeExpId = "nominal";
     expToast.classList.add("hidden");
-    sim.reset(false);
+    // Everything back to the boot state: default design, default microphone, warm nominal.
+    sim.reset_to_defaults();
     resetControlSlidersToNominal();
+    syncMicFromEngine();
     syncDesignSliders(decodeDesignParams(sim.design_params_flat()));
     scene.rebuildBladeRows(sim);
     sim.refresh_campbell();
@@ -742,6 +767,7 @@ async function boot(): Promise<void> {
       btn.addEventListener("click", () => {
         activeExpId = exp.id;
         fastForwardRemainingS = 0;
+        clearEngineError();
         resetControlSlidersToNominal();
         exp.apply(sim);
         if (exp.id === "load_rejection") syncBreakerBtn(false);
@@ -801,13 +827,25 @@ async function boot(): Promise<void> {
 
   // ---------- Keyboard Shortcuts ----------
   window.addEventListener("keydown", (ev) => {
-    if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement) return;
+    const t = ev.target;
+    // Keys typed into a control (or Space/Enter on a focused button) belong to that control.
+    if (
+      t instanceof HTMLInputElement ||
+      t instanceof HTMLTextAreaElement ||
+      t instanceof HTMLSelectElement ||
+      t instanceof HTMLButtonElement ||
+      (t instanceof HTMLElement && t.isContentEditable)
+    ) {
+      return;
+    }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.code === "Space") {
       ev.preventDefault();
       btnPlay.click();
     } else if (ev.key === "m" || ev.key === "M") {
       btnAudio.click();
-    } else if (ev.key === "r" || ev.key === "R") {
+    } else if (ev.key === "R" && ev.shiftKey) {
+      // Shift+R: a reset discards the run, so a bare R (next to the camera keys) does nothing.
       btnReset.click();
     } else if (ev.key === "c" || ev.key === "C") {
       btnQuickCutaway.click();
@@ -854,6 +892,21 @@ async function boot(): Promise<void> {
     getFemCert: () => femCert,
   };
 
+  // ---------- Engine errors ----------
+  // A step the engine refuses leaves the plant at its last accepted state: say so and pause,
+  // instead of animating stale numbers.
+  function showEngineError(): void {
+    running = false;
+    btnPlay.textContent = "Resume";
+    btnPlay.classList.remove("primary");
+    engineErrorText.textContent = sim.last_error() || "the engine refused the step";
+    engineError.classList.remove("hidden");
+  }
+  function clearEngineError(): void {
+    engineError.classList.add("hidden");
+  }
+  byId<HTMLButtonElement>("btn-engine-error-dismiss").addEventListener("click", clearEngineError);
+
   // ---------- Main Animation & Telemetry Loop ----------
   // Reactive power delivered to the bus and the power factor: over-excited the machine exports
   // VArs (lagging), under-excited it absorbs them (leading).
@@ -867,17 +920,21 @@ async function boot(): Promise<void> {
   const updateHud = (snap: TurbineSnapshot, stages: StageTelemetry[]) => {
     kpiRpm.innerHTML = `${Math.round(snap.rpm).toLocaleString()}<small>rpm</small>`;
     kpiMw.innerHTML = `${snap.elecMw.toFixed(1)}<small>MW</small>`;
-    kpiEff.innerHTML = `${snap.chpEffPct.toFixed(0)} / ${snap.elecEffPct.toFixed(0)}<small>%</small>`;
+    // NaN = no live steam flowing, so no efficiency to report.
+    const pct = (v: number) => (Number.isFinite(v) ? v.toFixed(0) : "—");
+    kpiEff.innerHTML = `${pct(snap.chpEffPct)} / ${pct(snap.elecEffPct)}<small>%</small>`;
     kpiCond.innerHTML = `${snap.condKpa.toFixed(1)}<small>kPa</small>`;
     const maxVib = Math.max(snap.frontVibUmPp, snap.rearVibUmPp);
     kpiVib.innerHTML = `${maxVib.toFixed(0)}<small>µm pp</small>`;
     kpiTemp.innerHTML = `${snap.tHpRotorC.toFixed(0)}<small>°C</small>`;
 
     const st = STATUS_LABELS[snap.statusCode] ?? STATUS_LABELS[0]!;
-    statusPill.textContent = st.text;
+    const alarms = activeAlarmNames(snap.alarmFlags);
+    const stText = snap.statusCode === 2 && alarms.length > 0 ? `ALARM: ${alarms.join(" · ")}` : st.text;
+    statusPill.textContent = stText;
     statusPill.className = `status-pill status-${st.tone}`;
-    mkpiText.textContent = `${Math.round(snap.rpm).toLocaleString()} rpm · ${snap.elecMw.toFixed(1)} MW · ${snap.elecEffPct.toFixed(0)}% η · ${maxVib.toFixed(0)} µm`;
-    mkpiStatus.textContent = st.text;
+    mkpiText.textContent = `${Math.round(snap.rpm).toLocaleString()} rpm · ${snap.elecMw.toFixed(1)} MW · ${pct(snap.elecEffPct)}% η · ${maxVib.toFixed(0)} µm`;
+    mkpiStatus.textContent = stText;
     mkpiStatus.className = `status-pill status-${st.tone}`;
 
     // Out-of-step protection opens the generator breaker by itself; the operator clears the
@@ -924,7 +981,7 @@ async function boot(): Promise<void> {
       badgeAbscissa.textContent = `Re(λ) = ${snap.spectralAbscissaPerS.toFixed(1)}/s`;
       badgeEproc.textContent = `log E = ${snap.isoLogE.toFixed(2)}`;
       drawCampbellDiagram(canvasCampbell, campbellTable, snap);
-      drawOrbitPlot(canvasOrbit, sim.orbit_history(), snap, activeDesign.bearingClearanceUm);
+      drawOrbitPlot(canvasOrbit, sim.orbit_history(), snap, limits, activeDesign.bearingClearanceUm);
       renderMetricGrid(gridRotor, [
         {
           k: "Stability max Re(λ)",
@@ -935,7 +992,7 @@ async function boot(): Promise<void> {
         {
           k: "Front / Rear Vib",
           v: `${snap.frontVibUmPp.toFixed(1)} / ${snap.rearVibUmPp.toFixed(1)} µm`,
-          tone: maxVib > 140 ? "crit" : maxVib > 80 ? "warn" : "ok",
+          tone: maxVib > limits.vibAlarmUm ? "crit" : maxVib > limits.vibZoneAbUm ? "warn" : "ok",
         },
         {
           k: "Min Oil Film h_min",
@@ -991,7 +1048,10 @@ async function boot(): Promise<void> {
         {
           k: "Front / Rear Babbitt",
           v: `${snap.tFrontBrgC.toFixed(1)} / ${snap.tRearBrgC.toFixed(1)} °C`,
-          tone: Math.max(snap.tFrontBrgC, snap.tRearBrgC) > 105 ? "crit" : "ok",
+          tone: (() => {
+            const t = Math.max(snap.tFrontBrgC, snap.tRearBrgC);
+            return t > limits.bearingAlarmC ? "crit" : t > limits.bearingDerateC ? "warn" : "ok";
+          })(),
         },
         { k: "Diff Axial Expansion", v: `${snap.diffExpansionMm.toFixed(2)} mm` },
         { k: "HP Thermal Stress", v: `${snap.hpThermalStressMpa.toFixed(1)} MPa` },
@@ -1004,6 +1064,7 @@ async function boot(): Promise<void> {
   bootOverlay.classList.add("fade-out");
   setTimeout(() => bootOverlay.remove(), 340);
 
+  let lastCampbellMs = 0;
   const tick = (nowMs: number) => {
     const dtWallS = Math.min(0.05, Math.max(0.001, (nowMs - lastWallMs) * 0.001));
     lastWallMs = nowMs;
@@ -1014,12 +1075,23 @@ async function boot(): Promise<void> {
         const chunk = Math.min(0.05, fastForwardRemainingS);
         if (!sim.step(chunk)) {
           fastForwardRemainingS = 0;
+          showEngineError();
           break;
         }
         fastForwardRemainingS -= chunk;
       }
     } else if (running) {
-      sim.step(dtWallS * simRate);
+      if (!sim.step(dtWallS * simRate)) {
+        showEngineError();
+      }
+    }
+
+    // The Campbell diagram depends on speed and bearing temperatures: refresh it once a second
+    // while it is on screen.
+    if (activeRightTab === "rotor" && nowMs - lastCampbellMs > 1000) {
+      lastCampbellMs = nowMs;
+      sim.refresh_campbell();
+      campbellTable = sim.campbell_data();
     }
 
     const acousticOn = byId<HTMLInputElement>("vf-acoustic").checked;

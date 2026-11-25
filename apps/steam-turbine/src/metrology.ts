@@ -8,6 +8,7 @@
 import {
   CAMPBELL_STRIDE,
   MOLLIER_PAIR_STRIDE,
+  type EngineLimits,
   type StageTelemetry,
   type TurbineSnapshot,
 } from "./snapshotLayout";
@@ -507,12 +508,15 @@ export function drawCampbellDiagram(
 }
 
 /**
- * Draw the front bearing 128-point shaft whirl orbit plot with ISO 7919 & rub circles.
+ * Draw the front-journal orbit (the engine samples it inside its 0.5 ms rotor sub-steps, up to
+ * 48 points per revolution) with the ISO 7919 zone circles and the bearing clearance. A circle of
+ * radius r is an orbit whose peak-to-peak is 2r, so each ISO peak-to-peak limit is drawn at half.
  */
 export function drawOrbitPlot(
   canvas: HTMLCanvasElement,
   orbitFlat: Float32Array,
   snap: TurbineSnapshot,
+  limits: EngineLimits,
   bearingClearanceUm = 220,
 ): void {
   const { ctx, w, h } = prepareCanvas(canvas, 320, 160);
@@ -540,9 +544,9 @@ export function drawOrbitPlot(
   ctx.stroke();
 
   const rings: Array<{ rUm: number; color: string; dash: number[] }> = [
-    { rUm: 40, color: "rgba(52, 211, 153, 0.38)", dash: [2, 2] },
-    { rUm: 82.5, color: "rgba(250, 204, 21, 0.45)", dash: [3, 2] },
-    { rUm: 175, color: "rgba(255, 82, 82, 0.72)", dash: [4, 2] },
+    { rUm: limits.vibZoneAbUm / 2, color: "rgba(52, 211, 153, 0.38)", dash: [2, 2] },
+    { rUm: limits.vibAlarmUm / 2, color: "rgba(250, 204, 21, 0.45)", dash: [3, 2] },
+    { rUm: limits.vibTripUm / 2, color: "rgba(255, 82, 82, 0.72)", dash: [4, 2] },
     { rUm: brgClear, color: "rgba(96, 165, 250, 0.55)", dash: [] },
   ];
   for (const ring of rings) {
@@ -588,13 +592,13 @@ export function drawOrbitPlot(
   ctx.fillStyle = "rgba(180, 200, 218, 0.85)";
   ctx.fillText(`Scale: ±${maxUm} µm`, lx, 22);
   ctx.fillStyle = "#34d399";
-  ctx.fillText("80 µm ISO A/B", lx, 42);
+  ctx.fillText(`${limits.vibZoneAbUm.toFixed(0)} µm pp ISO A/B`, lx, 42);
   ctx.fillStyle = "#facc15";
-  ctx.fillText("165 µm Alarm", lx, 60);
+  ctx.fillText(`${limits.vibAlarmUm.toFixed(0)} µm pp Alarm`, lx, 60);
   ctx.fillStyle = "#ff5c66";
-  ctx.fillText("175 µm Seal Rub", lx, 78);
+  ctx.fillText(`${limits.vibTripUm.toFixed(0)} µm pp Trip`, lx, 78);
   ctx.fillStyle = "#60a5fa";
-  ctx.fillText(`${Math.round(brgClear)} µm Brg Wall`, lx, 96);
+  ctx.fillText(`${Math.round(brgClear)} µm Clearance`, lx, 96);
   ctx.fillStyle = snap.rubForceKn > 0.1 ? "#ff6b6b" : "#94a3b8";
   ctx.fillText(`Seal: ${snap.sealExcursionUm.toFixed(0)} µm`, lx, 122);
   ctx.fillText(`Rub:  ${snap.rubForceKn.toFixed(1)} kN`, lx, 140);

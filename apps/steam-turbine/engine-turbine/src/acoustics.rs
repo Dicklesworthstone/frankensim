@@ -454,7 +454,9 @@ impl TurbineAcousticSynth {
         let f_bpf_lp = 44.0 * f_rot; // 44 giant LP last-stage blades
         self.last_bpf_lp_hz = f_bpf_lp;
 
-        // Distance attenuation (referenced to 3.5 m nominal hall distance)
+        // Distance attenuation of the synthesised terms (referenced to a 3.5 m hall distance).
+        // The two Curle observers already radiate with their own retarded-time 1/r from the
+        // source to the microphone, so this gain is not applied to them.
         let dist = ((self.mic_pos_m[0]).powi(2)
             + (self.mic_pos_m[1] - 0.5).powi(2)
             + (self.mic_pos_m[2] - 2.6).powi(2))
@@ -571,8 +573,9 @@ impl TurbineAcousticSynth {
                 cur_modal_p
             };
 
-            let total_pa = dist_gain
-                * (p_valve + p_exhaust + p_sync + p_whirl + p_bpf + p_gen + p_wet + modal_impedance_gain * modal_sample);
+            let total_pa = p_valve
+                + p_exhaust
+                + dist_gain * (p_sync + p_whirl + p_bpf + p_gen + p_wet + modal_impedance_gain * modal_sample);
             self.meter.push(total_pa);
 
             let abs_p = total_pa.abs();

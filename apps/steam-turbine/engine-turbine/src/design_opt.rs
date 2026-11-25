@@ -159,7 +159,7 @@ pub fn evaluate_design_candidate(
     // Preload gently raises direct damping & shear drag (unified with JournalBearingComponent!)
     let preload_shear_factor = 1.0 + 0.35 * d.bearing_preload;
     let bearing_loss_w = (front.shear_loss_w + rear.shear_loss_w) * preload_shear_factor;
-    // Tip-clearance bypass steam leakage reduces net working steam flow identically to components.rs
+    // Labyrinth bypass leakage reduces net working steam flow, as in components.rs
     let hp_leak_frac = d.hp_leakage_fraction();
     let iplp_leak_frac = d.iplp_leakage_fraction();
     let hp_power_w: f64 = meanline.stages[0..6].iter().map(|s| s.power_w).sum();
