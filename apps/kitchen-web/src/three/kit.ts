@@ -236,17 +236,19 @@ export interface ShaderGate {
  * three's compileAsync, except that a material disposed while it compiles stops being waited for. three's own polls
  * each material's program and throws once the material has been disposed (a piece swapped out before its shaders were
  * ready, as picking pieces quickly in the equipment chapter does): its promise then never settled, so the gate counted
- * it pending until its 4 s timeout, and the error went uncaught.
+ * it pending until its 4 s timeout, and the error went uncaught. After `giveUpMs` it stops asking: a lost context
+ * never reports a program ready, and three's would poll it every 10 ms for good.
  */
-function compileSettled(renderer: THREE.WebGLRenderer, scene: THREE.Object3D, camera: THREE.Camera): Promise<void> {
+function compileSettled(renderer: THREE.WebGLRenderer, scene: THREE.Object3D, camera: THREE.Camera, giveUpMs: number): Promise<void> {
   return new Promise((resolve) => {
     const materials = renderer.compile(scene, camera);
+    const t0 = performance.now();
     const check = () => {
       for (const m of materials) {
         const program = (renderer.properties.get(m) as { currentProgram?: { isReady(): boolean } }).currentProgram;
         if (!program || program.isReady()) materials.delete(m);
       }
-      if (materials.size === 0) resolve();
+      if (materials.size === 0 || performance.now() - t0 > giveUpMs) resolve();
       else setTimeout(check, 10);
     };
     // Without the extension, asking whether a program is ready waits for it: give the driver a moment first.
@@ -262,7 +264,7 @@ export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera):
     ready: () => pending === 0,
     refresh(scene) {
       pending++;
-      const compiled = compileSettled(renderer, scene, camera).catch(() => undefined);
+      const compiled = compileSettled(renderer, scene, camera, 4000).catch(() => undefined);
       const timeout = new Promise((r) => setTimeout(r, 4000));
       return Promise.race([compiled, timeout]).then(() => {
         if (--pending > 0) return;

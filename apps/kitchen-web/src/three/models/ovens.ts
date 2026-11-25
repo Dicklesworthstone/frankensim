@@ -1495,6 +1495,7 @@ function boardArt(): [HTMLCanvasElement, HTMLCanvasElement, HTMLCanvasElement] {
   return [c, rc, bc];
 }
 
+/** A standard material, marked with where its UVs come from: projected onto a box, or the geometry's own. */
 function std(p: THREE.MeshStandardMaterialParameters, uv: "box" | "own" = "box", uvScale?: number): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial(p);
   m.userData.uv = uv;
@@ -1542,7 +1543,7 @@ interface FoodMats {
   board: THREE.MeshStandardMaterial;
 }
 
-let food: FoodMats | null = null;
+let foodMade: FoodMats | null = null;
 
 /**
  * The hot table's food and its board, painted the first time a hot table is built rather than with the rest of the
@@ -1550,7 +1551,7 @@ let food: FoodMats | null = null;
  * repeats every `tile` m.
  */
 function foodMats(): FoodMats {
-  if (food) return food;
+  if (foodMade) return foodMade;
   const tiled = (cv: HTMLCanvasElement, srgb: boolean, tile: number) => {
     const t = ctex(cv, srgb);
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -1563,7 +1564,7 @@ function foodMats(): FoodMats {
   const mashBump = tiled(mashMap.image as HTMLCanvasElement, false, 0.06);
   const chili = std({ ...art(chiliArt(), 0.12), bumpScale: 4, roughness: 0.32, metalness: 0 }, "own");
   const [bm, br, bb] = boardArt();
-  return (food = {
+  return (foodMade = {
     mac: std({ ...art(macArt(), 0.1), bumpScale: 1.6, roughness: 0.5, metalness: 0 }, "own"),
     // Open tubes: both faces drawn, so an end that stands clear of the sauce shows the pasta's inside.
     elbow: std({ color: 0xe9b04c, roughness: 0.42, metalness: 0, side: THREE.DoubleSide }),
@@ -1586,18 +1587,18 @@ interface BreadMats {
   breadToast: THREE.MeshStandardMaterial;
 }
 
-let breads: BreadMats | null = null;
+let breadMade: BreadMats | null = null;
 
 /** The toaster's bread, painted the first time a toaster is built. */
 function breadMats(): BreadMats {
-  if (breads) return breads;
+  if (breadMade) return breadMade;
   const bread = (toasted: boolean) => {
     const a = breadArt(toasted);
     const m = new THREE.MeshStandardMaterial({ map: a.map, bumpMap: a.bump, bumpScale: 2.2, roughness: 0.92, metalness: 0 });
     m.userData.uv = "own";
     return m;
   };
-  return (breads = { breadRaw: bread(false), breadToast: bread(true) });
+  return (breadMade = { breadRaw: bread(false), breadToast: bread(true) });
 }
 
 let fam: FamilyMats | null = null;
@@ -3433,7 +3434,7 @@ function mergeGeoms(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
  */
 const conveyorToaster: Builder = (s, e) => {
   const p = palette();
-  const fm = breadMats();
+  const bread = breadMats();
   const { w, d, h } = e;
   const fine1 = s.fine(1);
   const fine2 = s.fine(2);
@@ -3552,7 +3553,7 @@ const conveyorToaster: Builder = (s, e) => {
       const pa = g.attributes.position as THREE.BufferAttribute;
       for (let i = 0; i < pa.count; i++) pa.setY(i, pa.getY(i) + 0.0016 * ((pa.getX(i) / 0.055) ** 2 + (pa.getZ(i) / 0.06) ** 2));
     }
-    s.add(done ? fm.breadToast : fm.breadRaw, g, at, rot);
+    s.add(done ? bread.breadToast : bread.breadRaw, g, at, rot);
   };
   const ty = yTop + 0.0012 + 0.00625;
   if (fine1) {
