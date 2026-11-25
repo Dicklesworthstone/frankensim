@@ -7,9 +7,10 @@ import { mountBrigadeStage } from "./three/brigadeStage";
 import { mountColdChainLab } from "./three/coldChainLab";
 import { mountEquipmentTurntable } from "./three/equipmentTurntable";
 import { mountHeroKitchen, type HeroController } from "./three/heroKitchen";
-import { mountOvenLab } from "./three/ovenLab";
+import { OVEN_BOULE_DETAIL, mountOvenLab } from "./three/ovenLab";
 import { STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
+import { prefetchBouleLayers } from "./three/models/boulePrefetch";
 import { mountWeekLab } from "./three/weekLab";
 import { mountFloorLab } from "./three/floorLab";
 import { mountRushLab } from "./three/rushLab";
@@ -192,8 +193,10 @@ function bootstrap(): void {
   initReveal();
   initRangeTrackFills();
   // The stove chapter's ribeye texture is the heaviest single build on the page: start it on another thread now,
-  // while the hero kitchen builds, and mount the stove once it has arrived.
+  // while the hero kitchen builds, and mount the stove once it has arrived. The oven's loaf crust is the next
+  // heaviest; the oven waits for it only to build the loaf, after its own mount.
   const steakReady = prefetchSteakTissue(STOVE_STEAK);
+  void prefetchBouleLayers(OVEN_BOULE_DETAIL);
 
   const heroRoot = document.getElementById("hero");
   const hero = heroRoot ? tryMount("hero", () => mountHeroKitchen(heroRoot)) : null;

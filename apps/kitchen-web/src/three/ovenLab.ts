@@ -20,12 +20,15 @@ import { buildFixture, type Ext, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { combiCavity, vessel } from "./models/ovens";
 import { Shop } from "./models/shop";
+import { prefetchBouleLayers } from "./models/boulePrefetch";
 
 /** Archetype extents, metres (assets/kitchens/specs/equipment_dimensions.tsv). */
 const COMBI_ID = "NSF-COMBI-6PAN";
 const COMBI_EXT: Ext = { w: 0.847, d: 0.776, h: 0.782 };
 const BOULE_ID = "ARCH-FOOD-SOURDOUGH-BOULE";
 const BOULE_EXT: Ext = { w: 0.18, d: 0.18, h: 0.088 };
+/** The loaf's detail; main.ts starts its crust's texel layers in a worker as the page loads. */
+export const OVEN_BOULE_DETAIL = 2;
 const TABLE_ID = "NSF-PREPTABLE-48";
 const TABLE_EXT: Ext = { w: 1.219, d: 0.762, h: 0.914 };
 
@@ -210,7 +213,7 @@ export function mountOvenLab(root: HTMLElement): void {
   let bouleMs = 0;
   function buildBoule(): void {
     const tb = performance.now();
-    boule = buildFixture(BOULE_ID, BOULE_EXT, 2);
+    boule = buildFixture(BOULE_ID, BOULE_EXT, OVEN_BOULE_DETAIL);
     // The boule's frame has its joint at (w/2, 0, -d/2); centre it on the holder, which sits on the tray floor.
     boule.group.position.set(-BOULE_EXT.w / 2, 0, BOULE_EXT.d / 2);
     bouleHolder.add(boule.group);
@@ -549,12 +552,15 @@ export function mountOvenLab(root: HTMLElement): void {
   requestAnimationFrame(animate);
   const tMount = performance.now();
   void gate.refresh(scene);
-  // The chapter mounts well before it scrolls into view; the loaf is ready by the time it gets there.
-  setTimeout(() => {
-    if (!boule) buildBoule();
-    showState();
-    void gate.refresh(scene);
-  }, 0);
+  // The chapter mounts well before it scrolls into view; the loaf is ready by the time it gets there. Its crust's
+  // texel layers come from a worker; the loaf is built in a task of its own once they are in.
+  void prefetchBouleLayers(OVEN_BOULE_DETAIL).then(() =>
+    setTimeout(() => {
+      if (!boule) buildBoule();
+      showState();
+      void gate.refresh(scene);
+    }, 0),
+  );
 
   if (import.meta.env.DEV) {
     const w = window as unknown as Record<string, unknown>;
