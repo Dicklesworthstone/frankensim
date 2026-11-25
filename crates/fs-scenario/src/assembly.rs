@@ -13,6 +13,7 @@ use fs_qty::{Dims, QtyAny};
 use std::collections::BTreeSet;
 use std::fmt;
 
+pub mod draft;
 pub mod generators;
 pub(crate) mod wire;
 
