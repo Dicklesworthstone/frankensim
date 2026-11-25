@@ -76,22 +76,26 @@ felt cards and shank mechanics. Its native header selects flat FSB or crowned
 3-D shell FSS. An invalid/missing supplied board never falls back to the preset.
 Mesh-generation/export controls cannot accompany a supplied board override.
 The preset cannot be combined with --board modal CSV.
-The preset's strings meet its bridges at the source's 84 published coupling
-points, projected onto this approximate board's bridges; four end keys remain
-extrapolated (--rt0425-bridge-contacts names this default). The former estimate,
---estimated-bridge-contacts, spaces stations evenly along each bridge: with the
-published string lengths it puts most agraffes over the soundboard itself and
-reverses the bass order, so it only reproduces earlier renders.
+By default the preset's strings meet its bridges at stations spaced evenly
+along each bridge (--estimated-bridge-contacts names this default). With the
+published string lengths this puts most agraffes over the soundboard itself and
+reverses the bass order, so it is not the instrument's geometry; it is the
+default because the owner, listening, preferred its sound (Satie A/B,
+2026-11-25). --rt0425-bridge-contacts uses the source's 84 published coupling
+points instead, projected onto this approximate board's bridges; four end keys
+remain extrapolated.
 --rt0425-hammer-stiffness applies the source K_H to each unison string.
 --rt0425-hammer-dissipation requires that stiffness and uses the published
 per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
-By default the preset plays the felt pack's hammers, as the browser does:
-Stulov's 88 measured Abel hammers, each the whole hammer's K u^p + R d(u^p)/dt
-shared by its unison, with the pack's hammer mass (--felt-pack-hammers names
-this default). The RT-0425 hammer flags, --hammers or --legacy-felt-cards (the
-former default card, RT-0425's K_H divided across the unison with estimated
-crush and Prony terms) choose another card instead.
---felt-pack FILE supplies that felt pack (default: the built-in Stulov Abel set).
+By default the preset plays its estimated felt card: RT-0425's K_H divided
+across the unison with estimated crush and Prony terms (--legacy-felt-cards
+names this default; the owner preferred its sound in the same A/B).
+--felt-pack-hammers plays the felt pack's hammers instead, as the browser does:
+Stulov's 88 measured (unvoiced) Abel hammers, each the whole hammer's
+K u^p + R d(u^p)/dt shared by its unison, with the pack's hammer mass. The
+RT-0425 hammer flags or --hammers choose another card.
+--felt-pack FILE supplies that felt pack and plays it (default pack: the
+built-in Stulov Abel set).
 --board-panel-pack, --board-rib-pack and --board-bridge-pack FILE supply the preset
 board's fs-matdb packs (default: the built-in FPL Sitka spruce, sugar pine and
 hard maple); the cut-off bar takes the rib pack. The board's wood moisture
@@ -498,20 +502,17 @@ impl Options {
             || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
             return Err("bridge-contact choices need the preset board and exclude each other; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
         }
-        if options.legacy_felt_cards && (options.preset.is_none() || options.felt_pack_hammers
+        if options.legacy_felt_cards && (options.preset.is_none() || options.plays_felt_pack()
             || options.hammers.is_some() || options.rt0425_hammer_stiffness || options.rt0425_hammer_dissipation) {
-            return Err("--legacy-felt-cards selects the preset's former card; it excludes the felt pack, --hammers and the RT-0425 hammer flags".into());
-        }
-        if options.felt_pack.is_some() && !options.plays_felt_pack() {
-            return Err("--felt-pack supplies the felt-pack hammers, which the chosen hammer card does not play".into());
+            return Err("--legacy-felt-cards names the preset's default card; it excludes the felt pack (--felt-pack-hammers, --felt-pack), --hammers and the RT-0425 hammer flags".into());
         }
         if (options.board_panel_pack.is_some() || options.board_rib_pack.is_some() || options.board_bridge_pack.is_some())
             && !options.uses_preset_board() {
             return Err("board packs build the preset Model D board; they need --preset without --board or --board-geometry".into());
         }
-        if options.felt_pack_hammers && (options.preset.is_none() || options.hammers.is_some()
+        if options.plays_felt_pack() && (options.preset.is_none() || options.hammers.is_some()
             || options.render.is_none() || options.rt0425_hammer_stiffness || options.rt0425_hammer_dissipation) {
-            return Err("felt-pack hammers need a preset render without --hammers or the RT-0425 hammer flags".into());
+            return Err("felt-pack hammers (--felt-pack-hammers or --felt-pack) need a preset render without --hammers or the RT-0425 hammer flags".into());
         }
         if options.rt0425_string_damping && (options.preset.is_none()
             || options.scale.is_some() || options.string_sections.is_some() || options.render.is_none()) {
@@ -679,11 +680,10 @@ impl Options {
                 |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"))
         }
     }
-    /// The preset plays the felt pack's hammers unless another card is chosen:
-    /// --hammers, the RT-0425 hammer flags, or --legacy-felt-cards.
+    /// The felt pack's hammers play only when asked for: --felt-pack-hammers, or a
+    /// supplied --felt-pack. The preset's default is the estimated (legacy) card.
     fn plays_felt_pack(&self) -> bool {
-        self.felt_pack_hammers || (self.preset.is_some() && self.hammers.is_none()
-            && !self.rt0425_hammer_stiffness && !self.rt0425_hammer_dissipation && !self.legacy_felt_cards)
+        self.felt_pack_hammers || self.felt_pack.is_some()
     }
     fn uses_preset_board(&self) -> bool {
         self.preset.is_some() && self.board_geometry.is_none()
@@ -806,7 +806,7 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
         return Err("supplied string polarization was not projected from the played board; no one-plane fallback".into());
     }
     let secondary = polarization.map(string_polarization::Prepared::secondary);
-    // Supplied hammer cards (--hammers text) win over the default felt pack.
+    // The felt pack plays only when selected; refusals above keep --hammers out of it.
     let pack_hammers = (options.plays_felt_pack() && text.is_none()).then(|| {
         let card = selected_felt_card(options)?;
         scale.iter().map(|c| card.hammer(c.midi)).collect::<Result<Vec<_>, String>>()
@@ -1327,7 +1327,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
     let tuning_source = options.tuning_report();
     let preset = options.uses_preset_board().then(|| {
         let materials = preset_board_materials(&options, &air)?;
-        steinway_d::build_with_materials(options.mesh_divisions, !options.estimated_bridge_contacts, &materials)
+        steinway_d::build_with_materials(options.mesh_divisions, options.rt0425_bridge_contacts, &materials)
     }).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { write_fresh_output(path, preset.geometry.as_bytes())?; }
@@ -1842,7 +1842,8 @@ mod render_tests {
         assert!(options(&["--board-panel-pack", engelmann.as_str()]).is_err());
         assert!(with(&["--legacy-felt-cards", "--felt-pack", engelmann.as_str()]).is_err());
         let felt = write("felt.fsmatpk", include_bytes!("packs/hammer-felt-abel-stulov2005.fsmatpk"));
-        // The felt pack is the preset's default card, so --felt-pack alone supplies it.
+        // Supplying --felt-pack selects the felt-pack card, so --felt-pack alone plays it.
+        assert!(with(&["--felt-pack", felt.as_str()]).unwrap().plays_felt_pack());
         assert!(selected_felt_card(&with(&["--felt-pack", felt.as_str()]).unwrap()).is_ok());
         let card = selected_felt_card(&with(&["--felt-pack-hammers", "--felt-pack", felt.as_str()]).unwrap()).unwrap();
         assert_eq!(card.pack_id(), "hammer-felt-abel-stulov2005");
@@ -1850,12 +1851,13 @@ mod render_tests {
         assert!(selected_felt_card(&with(&["--felt-pack-hammers", "--felt-pack", engelmann.as_str()]).unwrap()).unwrap().hammer(69).is_err());
     }
     #[test]
-    fn the_preset_plays_the_felt_pack_by_default_and_the_legacy_card_on_request() {
+    fn the_preset_plays_the_legacy_card_by_default_and_the_felt_pack_on_request() {
         let base = ["--preset", "steinway-d", "--render", "piano.wav"];
         let with = |extra: &[&str]| options(&base.iter().copied().chain(extra.iter().copied()).collect::<Vec<_>>());
         let (default, legacy) = (with(&[]).unwrap(), with(&["--legacy-felt-cards"]).unwrap());
-        assert!(default.plays_felt_pack() && !legacy.plays_felt_pack());
-        assert!(with(&["--felt-pack-hammers"]).unwrap().plays_felt_pack());
+        assert!(!default.plays_felt_pack() && !legacy.plays_felt_pack());
+        let felt_pack = with(&["--felt-pack-hammers"]).unwrap();
+        assert!(felt_pack.plays_felt_pack());
         assert!(!with(&["--rt0425-hammer-stiffness"]).unwrap().plays_felt_pack());
         for extra in [
             vec!["--legacy-felt-cards", "--felt-pack-hammers"],
@@ -1863,18 +1865,23 @@ mod render_tests {
             vec!["--legacy-felt-cards", "--hammers", "felt.fsh"],
         ] { assert!(with(&extra).is_err(), "accepted {extra:?}"); }
         assert!(options(&["--legacy-felt-cards"]).is_err());
-        // The golden bump in numbers: the same strike, felt pack against the former card.
+        // The golden bump in numbers: the same strike, felt pack against the legacy card,
+        // and the default against --legacy-felt-cards (the same card: identical samples).
         let modes = board::demonstration();
         for midi in [36u8, 60, 84] {
             let course = steinway_scale::courses().unwrap()[usize::from(midi - 21)];
-            let mut pack = prepare_instrument_with_hammers(vec![course], &modes, &default, None).unwrap();
+            let mut pack = prepare_instrument_with_hammers(vec![course], &modes, &felt_pack, None).unwrap();
             let mut old = prepare_instrument_with_hammers(vec![course], &modes, &legacy, None).unwrap();
+            let mut plain = prepare_instrument_with_hammers(vec![course], &modes, &default, None).unwrap();
+            plain.note_on(midi, 2.5).unwrap();
             pack.note_on(midi, 2.5).unwrap();
             old.note_on(midi, 2.5).unwrap();
             let (mut a, mut b) = (Vec::new(), Vec::new());
             for _ in 0..4800 {
                 a.push(pack.step().unwrap());
-                b.push(old.step().unwrap());
+                let sample = old.step().unwrap();
+                assert_eq!(plain.step().unwrap().to_bits(), sample.to_bits(), "key {midi}: the default is not the legacy card");
+                b.push(sample);
             }
             let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
             let difference: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
