@@ -232,6 +232,29 @@ export interface ShaderGate {
    */
   defer(key: string, fn: () => void): void;
 }
+/**
+ * three's compileAsync, except that a material disposed while it compiles stops being waited for. three's own polls
+ * each material's program and throws once the material has been disposed (a piece swapped out before its shaders were
+ * ready, as picking pieces quickly in the equipment chapter does): its promise then never settled, so the gate counted
+ * it pending until its 4 s timeout, and the error went uncaught.
+ */
+function compileSettled(renderer: THREE.WebGLRenderer, scene: THREE.Object3D, camera: THREE.Camera): Promise<void> {
+  return new Promise((resolve) => {
+    const materials = renderer.compile(scene, camera);
+    const check = () => {
+      for (const m of materials) {
+        const program = (renderer.properties.get(m) as { currentProgram?: { isReady(): boolean } }).currentProgram;
+        if (!program || program.isReady()) materials.delete(m);
+      }
+      if (materials.size === 0) resolve();
+      else setTimeout(check, 10);
+    };
+    // Without the extension, asking whether a program is ready waits for it: give the driver a moment first.
+    if (renderer.extensions.has("KHR_parallel_shader_compile")) check();
+    else setTimeout(check, 10);
+  });
+}
+
 export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera): ShaderGate {
   let pending = 0;
   const queued = new Map<string, () => void>();
@@ -239,7 +262,7 @@ export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera):
     ready: () => pending === 0,
     refresh(scene) {
       pending++;
-      const compiled = renderer.compileAsync(scene, camera).catch(() => undefined);
+      const compiled = compileSettled(renderer, scene, camera).catch(() => undefined);
       const timeout = new Promise((r) => setTimeout(r, 4000));
       return Promise.race([compiled, timeout]).then(() => {
         if (--pending > 0) return;
