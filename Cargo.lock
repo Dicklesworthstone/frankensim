@@ -2285,6 +2285,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-multiphase"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-evidence",
+ "fs-exec",
+ "fs-matdb",
+ "fs-math",
+ "fs-ports",
+ "fs-qty",
+ "fs-thermochem",
+]
+
+[[package]]
 name = "fs-neuroshape-e2e"
 version = "0.0.1"
 dependencies = [
