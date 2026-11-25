@@ -966,7 +966,7 @@ export function mountWeekLab(root: HTMLElement): void {
       const y = Y(a.lateP90);
       const p = weekPlan(a.plan);
       const cls = `pt ${p.strategy}${front.has(a.plan) ? " on" : ""}`;
-      const tip = `<title>${describe(a.plan)}: ${hrs(a)} crew-hours a week; meals late ${Math.round(a.late)} in a typical week, ${lateOf(a)} 1 week in 10; ${Math.round(a.waste)} portions thrown out.</title>`;
+      const tip = `<title>${describe(a.plan)}: ${hrs(a)} crew-hours a week. Meals late: ${Math.round(a.late)} in a typical week; 1 week in 10 reaches ${lateOf(a)}. Portions thrown out: ${Math.round(a.waste)}.</title>`;
       svg += p.swaps.length
         ? `<path class="${cls}" data-plan="${a.plan}" d="M${x.toFixed(1)} ${(y - 5).toFixed(1)}l5 5l-5 5l-5 -5z">${tip}</path>`
         : `<circle class="${cls}" data-plan="${a.plan}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4">${tip}</circle>`;
@@ -991,7 +991,7 @@ export function mountWeekLab(root: HTMLElement): void {
       const better = all.filter((b) => beats(b, me)).length;
       text += `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other.`;
     }
-    mapNote.textContent = `${text} Pick a dot to run it.`;
+    mapNote.textContent = `${text} Pick a dot to run that plan.`;
   }
   mapEl?.addEventListener("click", (e) => {
     // The nearest dot within a fingertip of the click (the dots are 8 px across).

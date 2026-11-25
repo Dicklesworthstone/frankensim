@@ -2962,6 +2962,8 @@ button.wk-dish[aria-pressed="true"] {
 }
 .wk-mapsvg .pt:hover {
   opacity: 1;
+  stroke: #fff;
+  stroke-width: 2;
 }
 .wk-mapsvg .crew {
   fill: var(--muted);
