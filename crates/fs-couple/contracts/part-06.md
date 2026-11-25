@@ -5860,6 +5860,16 @@ Held over two steps of 0.1 s at 1 V, in this order:
   the run's 0.2 s, not a reading of the run; the supplied work, less the
   circuit's stored change and numerical loss, plus that heat, equals the
   cells' stored change within 1e-8 J;
+- each interval's step as the kernel's winding state keeps it, through
+  the module tests' `check_receipt`: each triangle's resistivity, card,
+  query temperature, field, current density, volume, heat and power, the
+  region currents, the voltages and the supplied work's split; the
+  owner's numerical dissipation stays above 1e-5 J;
+- the field's internal energy `psi + T s` in closed form from that step's
+  flux densities, with the end turns': its change is the winding's booked
+  stored change within 1.735e-18 J, and with the cells' stored change and
+  the booked numerical loss it balances the supplied work and the heater
+  within 6.983e-14 J;
 - each interval against `closed()`, the P1 quadrature that the module
   tests' `check_receipt` calls, on the kernel's own states: the profiles,
   the resistance, the region currents, the terminal voltage and the flux
@@ -5887,6 +5897,10 @@ loss, as in graph_caloric.rs.
 Held over the same two steps, in this order:
 - the ledger with the heater's heat, and the winding's entropy audit on
   both steps;
+- each interval's kept step as in the first test, the internal energy
+  with each owned magnetic triangle's `T s` at its cell's temperatures:
+  within 3.469e-18 J and 1.269e-13 J over the three variants, the bounds
+  as there;
 - each interval against `closed()` and each cell's closed-form heat, now
   with the link's conduction and each port's reversible heat, within
   4.874e-14 J; the booked loss, less the owner's backward-Euler dissipation
@@ -5911,6 +5925,20 @@ left off the winding, and link 17 left out of the timeline. The module
 refused the one in the shared laws, which also failed the module test. A
 ninth, the ports started at 310 K, cannot fail it: the field starts at
 zero, so the start temperatures meet no entropy.
+
+Defects in fs-em that only the kept step shows each failed both tests:
+- each magnetic triangle's reported end flux density a relative 1e-9 off,
+  at the internal energy: 1.187e-11 J from the booked change and
+  1.194e-11 J in the balance;
+- each solid triangle's reported power 1 % off its heat, at
+  `check_receipt`'s power, as it fails the two module tests that call it.
+  A relative 1e-6 stays inside that check's tolerance.
+Booking defects are the kernel's to refuse, at the first step: the booked
+stored change 1e-10 J high with the numerical loss 1e-10 J low, by its
+`EndpointEnergy` contract, and the loss alone 1e-10 J high, by its
+`EnergyBalance` contract. The conductors resolved 1e-3 K above the port
+temperatures fail both tests at `holds`, which `check_receipt` calls
+before the closed-form comparison calls it again.
 
 `tests/nonlinear_winding_enthalpy/graph_heat.rs`, included from heat.rs,
 declares H1's fixture as a graph:

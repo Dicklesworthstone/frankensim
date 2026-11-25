@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fs_em::winding::component::{ConductorLaw, HeatReceiver, PlanarWinding, PlanarWindingState};
+use fs_em::winding::hysteretic::HystereticWindingStep;
 use fs_material::phase::ResolvedHeatCapacityCurve;
 use fs_system::{NodeId, System};
 use fs_thermal::component::TimelineState;
@@ -119,8 +120,14 @@ fn history(row: &Row) -> History {
     }
 }
 
-fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<Row> {
-    let mut rows = Vec::new();
+/// The kernel's rows over the run, and each interval's step as its state
+/// keeps it.
+fn kernel_run(
+    system: &mut System,
+    winding: NodeId,
+    cells: NodeId,
+) -> (Vec<Row>, Vec<HystereticWindingStep>) {
+    let (mut rows, mut kept) = (Vec::new(), Vec::new());
     let mut before = [0.0; 4];
     with_cx(|cx| {
         for _ in 0..STEPS {
@@ -148,13 +155,96 @@ fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<Row> {
                 .simulation()
                 .temperature_k(CELL)
                 .unwrap();
-            let circuit = system.state::<PlayState>(winding).unwrap().circuit();
+            let state = system.state::<PlayState>(winding).unwrap();
+            let circuit = state.circuit();
+            kept.push(state.step().unwrap().clone());
             let energies = [0, 1, 2, 3].map(|k| now[k] - before[k]);
             rows.push(row(kelvin, circuit, energies));
             before = now;
         }
     });
-    rows
+    (rows, kept)
+}
+
+/// An interval's kept step against `reference()` from `from` under
+/// `volts`: the core, pinning, copper and graph-resistor heat, the end
+/// flux linkage, the terminal voltage, and the stored energies before and after
+/// \[J, Wb, V\]; and the largest departure of a record's query temperature
+/// from the cell's end temperature `kelvin` \[K\]. The step holds the two
+/// core records (triangles 1 and 7), six copper records and one graph
+/// resistor, and every conductor record is `law`'s at its own query
+/// temperature, bit for bit: the winding's last port temperature, which the
+/// kernel's fixed point leaves a round-off away from the cell's.
+fn records(
+    step: &HystereticWindingStep,
+    kelvin: f64,
+    law: &CellConductors,
+    from: History,
+    volts: f64,
+) -> [f64; 9] {
+    let expected = reference(from, volts);
+    let e = expected.state;
+    let counts = (
+        step.field.cells.len(),
+        step.cells.len(),
+        step.graph_resistors.len(),
+    );
+    assert_eq!(counts, (2, 6, 1));
+    assert!(
+        step.field
+            .cells
+            .iter()
+            .all(|loss| matches!(loss.source.triangle, 1 | 7))
+    );
+    let core = step
+        .field
+        .cells
+        .iter()
+        .map(|loss| (loss.source.triangle, &loss.source.conductor));
+    let copper = step
+        .cells
+        .iter()
+        .map(|loss| (loss.source.triangle, &loss.source.conductor));
+    let mut apart = 0.0_f64;
+    for (triangle, conductor) in core.chain(copper) {
+        let query = conductor
+            .material()
+            .query_point()
+            .iter()
+            .find(|(name, _)| name == "T");
+        let t = query.unwrap().1;
+        assert_eq!(
+            &law.conductor(triangle, t).unwrap(),
+            conductor,
+            "triangle {triangle}"
+        );
+        apart = apart.max((t - kelvin).abs());
+    }
+    let actual = [
+        step.field.joule_heat_j,
+        step.field.hysteresis_heat_j,
+        step.cells.iter().map(|loss| loss.heat_j).sum(),
+        step.graph_resistors[0].heat_j,
+        step.flux_linkages_wb[1][0],
+        step.terminal_voltage_v[0],
+        step.stored_before_j,
+        step.stored_after_j,
+    ];
+    let wanted = [
+        expected.core,
+        expected.pinning,
+        expected.copper,
+        expected.graph,
+        2.0 * DEPTH * e.b + END * e.i,
+        volts - GRAPH_R * e.i,
+        expected.stored_before,
+        expected.stored_after,
+    ];
+    let mut found = [apart; 9];
+    for (k, slot) in found.iter_mut().take(8).enumerate() {
+        *slot = (actual[k] - wanted[k]).abs();
+    }
+    found
 }
 
 /// The module's run: `step_hysteretic_candidate` from `start`, every
@@ -261,6 +351,13 @@ fn hold(most: [f64; 6], bounds: [f64; 6], what: &str) {
 /// interface closes to a relative 1e-10. The bounds sit about fifty times
 /// above.
 const ORACLE: [f64; 6] = [7e-9, 7e-10, 2.5e-11, 2.5e-10, 5e-11, 4e-10];
+/// Bounds of [`records`], in its order. The kernel's steps depart by at
+/// most 1.741e-12, 1.154e-12, 3.882e-12 and 6.717e-13 J, 1.039e-12 Wb,
+/// 4.061e-12 V, 0 and 2.271e-12 J, and 1.705e-13 K; the bounds sit about
+/// fifty times above, the stored energy before as after.
+const RECORDS: [f64; 9] = [
+    8.7e-11, 5.8e-11, 1.9e-10, 3.4e-11, 5.2e-11, 2e-10, 1.1e-10, 1.1e-10, 8.5e-12,
+];
 const MODULE: [f64; 6] = [1.1e-8, 7e-10, 2.5e-11, 2.5e-10, 5e-11, 4e-10];
 
 /// The fixture of
@@ -313,21 +410,33 @@ fn the_declared_graph_reproduces_the_voltage_reversal_and_its_memory() {
         &[CELL],
         Some(drive),
     );
-    let kernel = kernel_run(&mut system, electrical, cells);
+    let (kernel, kept) = kernel_run(&mut system, electrical, cells);
     ledger_closes(&system, electrical, cells, 0.0);
 
     // Each interval against `reference()` from the kernel's own start of
-    // interval.
-    let mut from = START;
+    // interval, with the step the kernel's state keeps.
+    let (mut from, mut split) = (START, [0.0_f64; 9]);
     let expected: Vec<Row> = kernel
         .iter()
+        .zip(&kept)
         .zip(DRIVES)
-        .map(|(row, volts)| {
+        .map(|((row, step), volts)| {
             let expected = reference_row(from, volts);
+            let found = records(step, row.kelvin, &law, from, volts);
+            for (most, value) in split.iter_mut().zip(found) {
+                *most = most.max(value);
+            }
             from = history(row);
             expected
         })
         .collect();
+    println!(
+        "kernel's steps against reference: {}",
+        split.map(|x| format!("{x:.3e}")).join(", ")
+    );
+    for (i, (value, bound)) in split.iter().zip(RECORDS).enumerate() {
+        assert!(*value <= bound, "record {i}: {split:?}");
+    }
     let oracle = largest(&kernel, &expected);
     hold(oracle, ORACLE, "kernel against reference");
 

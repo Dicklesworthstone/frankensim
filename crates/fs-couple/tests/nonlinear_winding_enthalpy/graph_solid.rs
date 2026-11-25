@@ -35,7 +35,7 @@ use fs_couple::circuit_enthalpy::material::MaterialNetwork;
 use fs_em::winding::component::{
     ConductorLaw, HeatReceiver, MagneticLaw, MagneticLaws, PlanarWinding, PlanarWindingState,
 };
-use fs_em::winding::nonlinear::NonlinearWindingCircuit;
+use fs_em::winding::nonlinear::{NonlinearWindingCircuit, NonlinearWindingStep};
 use fs_rep_mesh::TriComplex2;
 use fs_system::{NodeId, System};
 use fs_thermal::component::TimelineState;
@@ -44,8 +44,8 @@ use fs_thermal::enthalpy::conduction::ConductiveLink;
 use super::graph::TOLERANCE_J;
 use super::kernel::{CellConductors, conduction, graph, ledger_closes, timeline, with_cx};
 use super::solid::{
-    CELL_IDS, END_H, HEAT_CAPACITY, HEATER_W, Parts, SOLID_MATERIAL, STEP, VOLTAGE, circuit,
-    closed, config, holds, linear, magnetic_laws, parts, receiver, temperatures,
+    CELL_IDS, END_H, HEAT_CAPACITY, HEATER_W, Parts, SOLID_MATERIAL, STEP, VOLTAGE, check_receipt,
+    circuit, closed, config, holds, linear, magnetic_laws, parts, receiver, temperatures,
 };
 use super::*;
 
@@ -54,6 +54,10 @@ const STEPS: usize = 2;
 /// An accepted state: the winding circuit and the four cells' temperatures
 /// \[K\].
 type State = (NonlinearWindingCircuit<'static>, [f64; 4]);
+
+/// An interval's step as the kernel's state keeps it, and the winding's
+/// booked stored change and numerical loss over the interval \[J\].
+type Kept = (NonlinearWindingStep, [f64; 2]);
 
 /// One receiver per cell, with the cell's conducting triangles.
 fn receivers(circuit: &NonlinearWindingCircuit<'_>) -> Vec<HeatReceiver> {
@@ -69,7 +73,7 @@ fn receivers(circuit: &NonlinearWindingCircuit<'_>) -> Vec<HeatReceiver> {
 }
 
 /// The kernel's accepted states: the start, then the end of each interval.
-fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<State> {
+fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> (Vec<State>, Vec<Kept>) {
     let read = |system: &System| -> State {
         let circuit = system
             .state::<PlanarWindingState<'static>>(winding)
@@ -80,6 +84,7 @@ fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<State>
         (circuit, temperatures(timeline.simulation()))
     };
     let mut states = vec![read(system)];
+    let (mut kept, mut before) = (Vec::new(), [0.0; 2]);
     with_cx(|cx| {
         for _ in 0..STEPS {
             let report = system.step(STEP, cx).unwrap();
@@ -89,9 +94,60 @@ fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<State>
                 "the kernel took the whole interval"
             );
             states.push(read(system));
+            let node = &system.ledger().nodes[winding.index()];
+            let now = [node.stored_change_j.value(), node.numerical_loss_j.value()];
+            let state = system.state::<PlanarWindingState<'static>>(winding);
+            let step = state.unwrap().step().unwrap().clone();
+            kept.push((step, [now[0] - before[0], now[1] - before[1]]));
+            before = now;
         }
     });
-    states
+    (states, kept)
+}
+
+/// The kernel's kept steps against solid.rs's closed forms, interval by
+/// interval, with `check_receipt`'s record checks: each triangle's
+/// resistivity, card, query temperature, field, current density, volume,
+/// heat and power; the region currents; the voltages; and the supplied
+/// work's split. The owner's numerical dissipation stays above 1e-5 J.
+/// Then the field's internal energy `psi + T s` in closed form from the
+/// step's flux densities, with the end turns': its change against the
+/// winding's booked stored change, and in the balance of the supplied work
+/// and the heater against it, the cells' heat and the booked numerical
+/// loss \[J\].
+fn records(card: &MaterialCard, kernel: &[State], kept: &[Kept], slope: f64, what: &str) {
+    let mut most = [0.0_f64; 2];
+    let intervals = kernel.iter().zip(&kernel[1..]).zip(kept);
+    for (((old, before), (next, after)), (step, [stored, numerical])) in intervals {
+        check_receipt(card, old, next, *after, step);
+        assert!(step.numerical_dissipation_j > 1e-5, "{what}");
+        let mesh = next.field().problem().mesh();
+        let mut internal = [0.0; 2];
+        for magnetic in &step.field.magnetic_cells {
+            let owner = receiver(mesh, magnetic.triangle);
+            let t = owner.map_or([300.0; 2], |cell| [before[cell], after[cell]]);
+            let local = if owner.is_some() { slope } else { 0.0 };
+            let volume = mesh.face_measure(magnetic.triangle).unwrap();
+            for (i, b) in magnetic.flux_density_t.iter().enumerate() {
+                let (mu, b2) = (1.0 + local * (t[i] - 300.0), b[0] * b[0] + b[1] * b[1]);
+                let entropy = 0.5 * volume * b2 * local / (mu * mu);
+                internal[i] += 0.5 * volume * b2 / mu + t[i] * entropy;
+            }
+        }
+        let end = 0.5 * END_H * (next.currents_a()[0].powi(2) - old.currents_a()[0].powi(2));
+        let change = internal[1] - internal[0] + end;
+        let cells: f64 = (0..CELL_IDS.len())
+            .map(|cell| HEAT_CAPACITY * (after[cell] - before[cell]))
+            .sum();
+        let work = STEP * (VOLTAGE * next.currents_a()[0] + HEATER_W);
+        most[0] = most[0].max((stored - change).abs());
+        most[1] = most[1].max((change + cells + numerical - work).abs());
+    }
+    let shown = most.map(|x| format!("{x:.3e}")).join(" and ");
+    println!("graph {what}: internal energy against the booked change and the balance: {shown} J");
+    for (value, bound) in most.iter().zip(RECORDS_J) {
+        assert!(*value <= bound, "{what}: {most:?} against {RECORDS_J:?}");
+    }
 }
 
 /// The module's accepted states from `parts`, every conductor it reports
@@ -221,6 +277,11 @@ fn largest(ours: &[State], theirs: &[State]) -> [f64; 4] {
 /// Bounds of [`closed_form`] and [`largest`], about fifty times the
 /// departures measured.
 const CLOSED_J: f64 = 2.5e-12;
+/// Bounds of [`records`]: the internal energy's change against the booked
+/// stored change, and the balance \[J\]. Over S1 and S2's three runs the
+/// kernel departs by at most 3.5e-18 J and 1.3e-13 J; the bounds sit about
+/// fifty times above.
+const RECORDS_J: [f64; 2] = [1.8e-16, 6.5e-12];
 const MODULE: [f64; 4] = [4e-11, 2.5e-11, 2.7e-12, 4e-13];
 
 /// The fixture of `spatial_solid_heat_and_profiles_follow_the_same_finite_temperature_endpoint`:
@@ -255,9 +316,10 @@ fn the_declared_graph_reproduces_the_solid_winding_and_its_heater() {
         &CELL_IDS,
         Some(|_| VOLTAGE),
     );
-    let kernel = kernel_run(&mut system, electrical, cells);
+    let (kernel, kept) = kernel_run(&mut system, electrical, cells);
     // The heater's heat is its authored source over the run, not a reading.
     ledger_closes(&system, electrical, cells, HEATER_W * STEP * STEPS as f64);
+    records(parts.card, &kernel, &kept, 0.0, "S1");
 
     let [departure, ..] = closed_form(&kernel, 0.0, false);
     println!("graph S1: kernel against the closed form: {departure:.3e} J");
@@ -406,10 +468,12 @@ fn the_declared_graph_and_the_heat_assembly_differ_by_the_booked_term() {
             &CELL_IDS,
             Some(|_| VOLTAGE),
         );
-        let kernel = kernel_run(&mut system, electrical, cells);
+        let (kernel, kept) = kernel_run(&mut system, electrical, cells);
         ledger_closes(&system, electrical, cells, HEATER_W * STEP * STEPS as f64);
         let node = &system.ledger().nodes[electrical.index()];
         assert_eq!(node.entropy.as_ref().unwrap().audited_steps, STEPS as u64);
+        let what = format!("S2 (link {linked}, slope {slope})");
+        records(parts.card, &kernel, &kept, slope, &what);
 
         let [departure, terms, dissipation] = closed_form(&kernel, slope, linked);
         let booked = (node.numerical_loss_j.value() - dissipation - terms).abs();

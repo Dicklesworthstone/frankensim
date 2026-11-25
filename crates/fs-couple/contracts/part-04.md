@@ -5588,6 +5588,12 @@ resistor's R(T) off and at 8 % per kelvin:
   the stored change, numerical loss and supplied work `DT V I` within
   2.7e-11, 5.4e-11 and 3.2e-11 J. The linear and saturating graphs end
   more than 0.2 A, 0.1 K and 0.05 J of field energy apart;
+- each interval's step as the kernel's winding state keeps it, in the
+  one-cell fixture: every copper record carries the cell's card,
+  `resistivity(T)` and the query temperature `T`, the cell's end
+  temperature, and the records' heat is `DT winding_resistance(T) I^2` at
+  the end current, to the module test's tolerance. This runs after the
+  ledger and before the comparison with `reference()`;
 - each interval of the two-cell fixture against graph_material.rs's
   `oracle` (a scalar current bisection with the two cells' exact linear
   heat equations), from the kernel's own start of interval: within
@@ -5612,6 +5618,10 @@ comparison with `oracle` (alpha 0.08); the accepted resistance expected at
 in fs-em's field account that moves 1e-6 J from numerical loss to stored
 change, keeping the owner's balance, is refused by the kernel's
 `EndpointEnergy` contract at the first step of every graph.
+Two defects in fs-em each failed graph 1/2 at its copper records: the
+kept step's last copper record dropped, at the coil heat (seven of the
+eight records' heat); and the conductors resolved 1e-3 K above the port
+temperatures, at the query temperature.
 
 ### Ordinary resistor material feedback in nonlinear field circuits
 

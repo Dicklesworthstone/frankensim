@@ -2552,6 +2552,18 @@ Held over four steps of 0.02 s, in this order:
 - the ledger: residual within 1e-8 J; the supplied work, less the circuit's
   stored change and numerical loss, equals the cell's stored change within
   1e-8 J; the routes' entropy stays within the interface tolerance;
+- each interval's step as the kernel's winding state keeps it, against
+  `reference()` from the kernel's own start of interval: the core Joule,
+  pinning, copper and graph-resistor heat within 1.741e-12, 1.154e-12,
+  3.882e-12 and 6.717e-13 J, the end flux linkage within 1.039e-12 Wb,
+  the terminal voltage within 4.061e-12 V, the stored energy before bit
+  for bit and after within 2.271e-12 J. The step holds the two core
+  records (triangles 1 and 7), six copper records and the graph
+  resistor's, and each conductor record is the law's at the record's own
+  query temperature, bit for bit. That temperature is the winding's last
+  port temperature, which the kernel's fixed point leaves at most
+  1.705e-13 K from the cell's end temperature, so the module's own check,
+  at the cell's end temperature, does not hold of the kernel bit for bit;
 - each interval against `reference()`, the scalar P1/play balance, from the
   kernel's own start of interval (temperature, current, potentials, every
   triangle's field and retained polarization, and the energies): within
@@ -2571,6 +2583,17 @@ by more than 1e-3 A. These failed with the interval at the second drive,
 Eight planted defects in the graph's law, drive, receiver and cell and in
 the shared kernel's heat route each failed this test before its module
 comparison: six at the comparison with `reference()`, two at construction.
+Seven planted defects in the step the kernel's state keeps, each left out
+of the owner's receipt, failed it at that step's check: the terminal
+voltage, the first copper record's heat, the graph resistor's heat, the
+end flux linkage and the stored energies after and before, each 1e-9 off,
+at their own quantities; and the last copper record dropped, at the
+record counts. fs-em's Component resolving the conductors 1e-3 K above the
+port temperatures failed it there too, first at the core heat. The
+bit-for-bit conductor check failed the test's first build, which held the
+records at the cell's end temperature, 1.7e-13 K from their own. The six
+copper records' conductors are equal: copying one onto another changes
+nothing.
 
 ## Spatial hysteretic induction on the original finite thermal timeline
 

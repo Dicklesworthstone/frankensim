@@ -606,7 +606,7 @@ pub(super) fn holds(
 }
 
 /// The module's step record against [`closed`], after [`holds`].
-fn check_receipt(
+pub(super) fn check_receipt(
     card: &MaterialCard,
     old: &NonlinearWindingCircuit<'_>,
     next: &NonlinearWindingCircuit<'_>,

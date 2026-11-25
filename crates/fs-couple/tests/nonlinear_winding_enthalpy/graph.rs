@@ -135,7 +135,8 @@ impl ResistorLaw for BodyResistor {
 /// \[A\] and circuit state, and over the interval the circuit's stored
 /// change, Joule heat, numerical dissipation and supplied work \[J\], the
 /// entropy \[J/K\] its losses generate at their cells and the entropy
-/// conduction among the cells generates.
+/// conduction among the cells generates; and the step the kernel's winding
+/// state keeps (none in the module's rows).
 #[derive(Debug, Clone)]
 pub(super) struct Row {
     pub(super) kelvin: Vec<f64>,
@@ -146,6 +147,7 @@ pub(super) struct Row {
     pub(super) numerical_j: f64,
     supplied_j: f64,
     entropy_j_k: [f64; 2],
+    step: Option<NonlinearWindingStep>,
 }
 
 pub(super) fn module_row(
@@ -163,6 +165,7 @@ pub(super) fn module_row(
         numerical_j: step.numerical_dissipation_j,
         supplied_j: step.supplied_work_j,
         entropy_j_k,
+        step: None,
     }
 }
 
@@ -198,10 +201,10 @@ pub(super) fn graph_run(
                     .entropy_generated_j_per_k
                     .value(),
             ];
-            let circuit = system
+            let state = system
                 .state::<PlanarWindingState<'static>>(winding)
-                .unwrap()
-                .circuit();
+                .unwrap();
+            let circuit = state.circuit();
             let timeline = system.state::<TimelineState<'static>>(cells).unwrap();
             rows.push(Row {
                 kelvin: order
@@ -215,6 +218,7 @@ pub(super) fn graph_run(
                 numerical_j: now[2] - before[2],
                 supplied_j: now[3] - before[3],
                 entropy_j_k: [now[4] - before[4], now[5] - before[5]],
+                step: state.step().cloned(),
             });
             before = now;
         }
@@ -435,6 +439,29 @@ fn bisection(kernel: &[Row], saturating: bool) -> [f64; 6] {
     most
 }
 
+/// Each copper record of the kernel's kept steps, at the cell's end
+/// temperature `T`: the card is the cell's, the resistivity `resistivity(T)`
+/// and the query temperature `T`; and the records' heat is
+/// `DT winding_resistance(T) I^2` at the end current, as in the module test.
+fn copper_records(kernel: &[Row], card: &MaterialCard) {
+    for row in kernel {
+        let (step, t) = (row.step.as_ref().unwrap(), row.kelvin[0]);
+        let mut coil_heat = 0.0;
+        for loss in &step.cells {
+            coil_heat += loss.heat_j;
+            let material = loss.source.conductor.material();
+            assert_eq!(material.card_identity(), card.content_hash());
+            near(loss.source.conductor.resistivity_ohm_m(), resistivity(t));
+            let query = material.query_point().iter().find(|(name, _)| name == "T");
+            near(query.unwrap().1, t);
+        }
+        near(
+            coil_heat,
+            DT * winding_resistance(t) * row.current_a.powi(2),
+        );
+    }
+}
+
 /// Graph 3's bounds of [`capacitor`], in its order. On the export of
 /// 45a36e3bd3 the kernel agrees with the oracle within 2.8e-11 A,
 /// 7.1e-12 C, 4.0e-11 K, 9.4e-11 J and 7.3e-11 J; the bounds sit about
@@ -541,6 +568,7 @@ fn the_declared_graph_reproduces_the_fixed_resistor_winding_and_the_bisection_fi
         );
         let kernel = graph_run(&mut system, electrical, cells, &[CELL]);
         ledger_closes(&system, electrical, cells, 0.0);
+        copper_records(&kernel, card);
 
         // Graph 1: each interval of the kernel against the bisection fixed
         // point from the kernel's own start of interval.
