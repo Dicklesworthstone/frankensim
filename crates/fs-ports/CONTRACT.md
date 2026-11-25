@@ -552,3 +552,18 @@ identities, balance reactions, or certify a mechanical momentum law. Three
 G0/G3 regressions in `tests/carried_ports.rs` cover both port roles, signed and
 small independent coordinates, missing/nonfinite inventories, invalid wires,
 unrepresentable transfers, and compensated cancellation at extreme scales.
+
+## StageResidual conformance
+
+`component::conformance::check_stage_residual` checks the optional
+`StageResidual` tier at one operating point and converged stage unknowns
+`z_solution`: layout/vector lengths (`unknowns() > 0`), finite `initial_guess`,
+cancellation polling on `residual`, vanishing residual and output agreement
+with `propose` at `z_solution`, `accept` state equality with `propose` plus
+`audit_step` and `admit`, central-difference `jvp_z` verification of both
+residual and output derivatives along three deterministic directions at a
+perturbed probe point, and exact `vjp_z` transpose verification
+(`<bar_r, dr> + <bar_out, d_out> == <bar_z, dz>`). G0 reference tests in
+`tests/component_reference.rs` cover a clean `StageResidual` reference
+implementation plus three planted faults (non-root `z`, inverted `vjp_z` sign,
+and `residual` ignoring cancellation).

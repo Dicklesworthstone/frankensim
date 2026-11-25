@@ -410,7 +410,12 @@ fn g0_paired_composition_retains_real_trace_in_both_component_orders() {
             let state = law
                 .evaluate_composition(Temperature::new(300.0), fractions)
                 .unwrap();
-            near(state.mole_fractions()[minor], trace, 4.0 * f64::EPSILON, 0.0);
+            near(
+                state.mole_fractions()[minor],
+                trace,
+                4.0 * f64::EPSILON,
+                0.0,
+            );
             assert!(state.reduced_chemical_potentials()[minor].is_some());
             near(
                 state.reduced_chemical_potentials()[minor].unwrap(),
@@ -418,8 +423,7 @@ fn g0_paired_composition_retains_real_trace_in_both_component_orders() {
                 5e-15,
                 0.0,
             );
-            let independent = R * 300.0
-                * (trace * trace.ln() + (1.0 - trace) * (-trace).ln_1p());
+            let independent = R * 300.0 * (trace * trace.ln() + (1.0 - trace) * (-trace).ln_1p());
             near(state.mixing_gibbs_j_per_mol(), independent, 5e-15, 0.0);
             energies[minor] = state.mixing_gibbs_j_per_mol();
             let equilibrium = law
@@ -447,7 +451,12 @@ fn g0_paired_composition_retains_real_trace_in_both_component_orders() {
     let state = law
         .evaluate_composition(Temperature::new(300.0), fractions)
         .unwrap();
-    near(state.mole_fractions()[1], fractions[1], 4.0 * f64::EPSILON, 0.0);
+    near(
+        state.mole_fractions()[1],
+        fractions[1],
+        4.0 * f64::EPSILON,
+        0.0,
+    );
 }
 
 #[test]
@@ -467,10 +476,7 @@ fn g0_paired_composition_admission_pure_critical_and_binodal_endpoints() {
         );
     }
     let rounded = law
-        .evaluate_composition(
-            Temperature::new(300.0),
-            [0.3, 0.7 + 2.0 * f64::EPSILON],
-        )
+        .evaluate_composition(Temperature::new(300.0), [0.3, 0.7 + 2.0 * f64::EPSILON])
         .unwrap();
     near(
         rounded.mole_fractions().iter().sum(),
@@ -493,10 +499,7 @@ fn g0_paired_composition_admission_pure_critical_and_binodal_endpoints() {
     let critical = model(2.0, 0.0);
     assert!(
         critical
-            .evaluate_composition(
-                Temperature::new(300.0),
-                [0.5, 0.5 + f64::EPSILON],
-            )
+            .evaluate_composition(Temperature::new(300.0), [0.5, 0.5 + f64::EPSILON],)
             .unwrap()
             .thermodynamic_factor()
             >= 0.0
@@ -587,7 +590,12 @@ fn g1_paired_dilute_lever_rule_conserves_species_and_exchange_symmetry() {
                 .iter()
                 .map(|phase| phase.fraction_of_total_moles() * phase.mole_fractions()[i])
                 .sum();
-            near(recovered, equilibrium.feed().mole_fractions()[i], 8e-15, 0.0);
+            near(
+                recovered,
+                equilibrium.feed().mole_fractions()[i],
+                8e-15,
+                0.0,
+            );
         }
         results.push(equilibrium);
     }

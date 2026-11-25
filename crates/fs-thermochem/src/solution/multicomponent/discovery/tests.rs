@@ -203,7 +203,10 @@ fn g0_pure_and_ideal_feeds_select_one_phase_without_inventing_separation() {
         )
         .unwrap();
     assert_eq!(pure.candidate().phases().len(), 1);
-    assert_eq!(pure.candidate().phases()[0].component_moles(), [0.0, 4.5, 0.0]);
+    assert_eq!(
+        pure.candidate().phases()[0].component_moles(),
+        [0.0, 4.5, 0.0]
+    );
 
     let ideal = symmetric_ternary(0.0)
         .discover_equilibrium_candidate(
@@ -218,7 +221,11 @@ fn g0_pure_and_ideal_feeds_select_one_phase_without_inventing_separation() {
         ideal.report().feed_local_stability().kind(),
         MulticomponentLocalStabilityKindV1::LocallyStable
     );
-    near(ideal.report().selected_reduced_gibbs_improvement(), 0.0, 2e-14);
+    near(
+        ideal.report().selected_reduced_gibbs_improvement(),
+        0.0,
+        2e-14,
+    );
 }
 
 #[test]
@@ -267,15 +274,10 @@ fn g4_cancellation_at_every_observed_boundary_publishes_no_partial_discovery() {
     };
     let mut polls = 0;
     let complete = law
-        .discover_equilibrium_candidate(
-            Temperature::new(400.0),
-            &[1.0, 1.0, 1.0],
-            controls,
-            || {
-                polls += 1;
-                false
-            },
-        )
+        .discover_equilibrium_candidate(Temperature::new(400.0), &[1.0, 1.0, 1.0], controls, || {
+            polls += 1;
+            false
+        })
         .unwrap();
     assert!(polls > 20);
     for stop in [0, 1, polls / 3, polls / 2, polls - 1] {

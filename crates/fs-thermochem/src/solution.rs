@@ -23,7 +23,7 @@
 
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, expm1, ln, sqrt};
-use fs_qty::Temperature;
+use fs_qty::{Pressure, Temperature};
 
 /// Pure-component calorics and closed isobaric thermal equilibrium.
 pub mod caloric;
@@ -34,8 +34,14 @@ pub mod gradient;
 /// Source-owned multicomponent liquid activities and coupled diffusion forces.
 pub mod multicomponent;
 
+/// Asymmetric multicomponent NRTL excess-Gibbs liquid solution model.
+pub mod nrtl;
+
 /// Finite solid/liquid partition for an explicitly declared neutral solute.
 pub mod solubility;
+
+/// Asymmetric multicomponent UNIQUAC combinatorial-plus-residual excess-Gibbs model.
+pub mod uniquac;
 
 /// Maximum absolute sum error admitted for an independently represented pair.
 /// Inputs within this floating-point roundoff budget are normalized together.
@@ -823,3 +829,1785 @@ mod tests;
 
 #[cfg(test)]
 mod excess_heat_capacity_tests;
+
+// ============================================================================
+// Asymmetric Multicomponent Excess-Gibbs Solutions & Modified Raoult's Law VLE
+// ============================================================================
+
+/// Maximum species count admitted by asymmetric excess-Gibbs models (`NRTL`, `UNIQUAC`).
+pub const MAX_EXCESS_GIBBS_SPECIES_V1: usize = 64;
+
+/// Maximum admitted deviation of raw mole-fraction sum from unity before normalization.
+pub const EXCESS_GIBBS_COMPOSITION_SUM_TOLERANCE_V1: f64 = 64.0 * f64::EPSILON;
+
+/// Maximum outer iterations permitted in bounded VLE and flash solvers.
+pub const MAX_VLE_SOLVER_ITERATIONS_V1: usize = 512;
+
+/// Dedicated typed refusal for asymmetric excess-Gibbs models and Modified Raoult VLE.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExcessGibbsErrorV1 {
+    /// Invalid species list, duplicate species, mismatched dimensions, or invalid parameters.
+    InvalidModel(&'static str),
+    /// Temperature is non-finite, non-positive, or outside the declared validity domain.
+    TemperatureOutOfDomain {
+        /// Rejected temperature [K].
+        temperature_k: f64,
+        /// Inclusive lower validity bound [K].
+        min_k: f64,
+        /// Inclusive upper validity bound [K].
+        max_k: f64,
+    },
+    /// Pressure is non-finite or non-positive.
+    InvalidPressure {
+        /// Rejected pressure [Pa].
+        pressure_pa: f64,
+    },
+    /// Composition vector has wrong length, out-of-range/non-finite entries, or sum != 1.
+    InvalidComposition(&'static str),
+    /// Invalid solver options or vapor-pressure law parameter.
+    InvalidOptions(&'static str),
+    /// Intermediate or output thermodynamic value overflowed, underflowed, or became non-finite.
+    Unrepresentable(&'static str),
+    /// Bounded VLE/flash solver did not converge or root was unbracketed in the domain.
+    ConvergenceFailed {
+        /// Number of iterations executed before refusal.
+        iterations: usize,
+        /// Final dimensionless or relative pressure residual.
+        residual: f64,
+    },
+    /// Caller cancellation observed before publishing a complete result.
+    Cancelled,
+}
+
+impl core::fmt::Display for ExcessGibbsErrorV1 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidModel(msg) => write!(f, "invalid excess-Gibbs model: {msg}"),
+            Self::TemperatureOutOfDomain {
+                temperature_k,
+                min_k,
+                max_k,
+            } => write!(
+                f,
+                "temperature {temperature_k} K outside excess-Gibbs domain [{min_k}, {max_k}] K"
+            ),
+            Self::InvalidPressure { pressure_pa } => {
+                write!(
+                    f,
+                    "pressure {pressure_pa} Pa must be finite and strictly positive"
+                )
+            }
+            Self::InvalidComposition(msg) => write!(f, "invalid liquid/vapor composition: {msg}"),
+            Self::InvalidOptions(msg) => write!(f, "invalid VLE solver options: {msg}"),
+            Self::Unrepresentable(msg) => write!(f, "unrepresentable excess-Gibbs quantity: {msg}"),
+            Self::ConvergenceFailed {
+                iterations,
+                residual,
+            } => write!(
+                f,
+                "VLE solver failed to converge after {iterations} iterations (residual {residual:e})"
+            ),
+            Self::Cancelled => f.write_str("excess-Gibbs VLE calculation cancelled"),
+        }
+    }
+}
+
+impl core::error::Error for ExcessGibbsErrorV1 {}
+
+/// Exact single-potential evaluation returned by asymmetric excess-Gibbs models (`NRTL`, `UNIQUAC`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExcessGibbsEvaluationV1 {
+    pub(crate) temperature: Temperature,
+    pub(crate) mole_fractions: Vec<f64>,
+    pub(crate) reduced_excess_gibbs: f64,
+    pub(crate) excess_gibbs_j_per_mol: f64,
+    pub(crate) excess_enthalpy_j_per_mol: f64,
+    pub(crate) excess_entropy_j_per_mol_k: f64,
+    pub(crate) ln_gamma: Vec<f64>,
+    pub(crate) gamma: Vec<f64>,
+    pub(crate) d_ln_gamma_dt: Vec<f64>,
+    pub(crate) partial_excess_enthalpy_j_per_mol: Vec<f64>,
+    pub(crate) d_ln_gamma_dx: Vec<f64>,
+}
+
+impl ExcessGibbsEvaluationV1 {
+    /// Evaluated temperature [K].
+    #[must_use]
+    pub const fn temperature(&self) -> Temperature {
+        self.temperature
+    }
+
+    /// Normalized liquid mole fractions in declared species order.
+    #[must_use]
+    pub fn mole_fractions(&self) -> &[f64] {
+        &self.mole_fractions
+    }
+
+    /// Dimensionless reduced molar excess Gibbs energy `g^E / (R T)`.
+    #[must_use]
+    pub const fn reduced_excess_gibbs(&self) -> f64 {
+        self.reduced_excess_gibbs
+    }
+
+    /// Molar excess Gibbs energy `g^E` [J/mol].
+    #[must_use]
+    pub const fn excess_gibbs_j_per_mol(&self) -> f64 {
+        self.excess_gibbs_j_per_mol
+    }
+
+    /// Molar excess enthalpy `h^E = -R T^2 d(g^E/(RT))/dT` [J/mol].
+    #[must_use]
+    pub const fn excess_enthalpy_j_per_mol(&self) -> f64 {
+        self.excess_enthalpy_j_per_mol
+    }
+
+    /// Molar excess entropy `s^E = (h^E - g^E) / T` [J/(mol K)].
+    #[must_use]
+    pub const fn excess_entropy_j_per_mol_k(&self) -> f64 {
+        self.excess_entropy_j_per_mol_k
+    }
+
+    /// Natural logarithms of activity coefficients `ln gamma_i`.
+    #[must_use]
+    pub fn ln_activity_coefficients(&self) -> &[f64] {
+        &self.ln_gamma
+    }
+
+    /// Activity coefficients `gamma_i = exp(ln gamma_i)`.
+    #[must_use]
+    pub fn activity_coefficients(&self) -> &[f64] {
+        &self.gamma
+    }
+
+    /// Analytical temperature derivatives `d(ln gamma_i)/dT` [1/K].
+    #[must_use]
+    pub fn d_ln_gamma_dt(&self) -> &[f64] {
+        &self.d_ln_gamma_dt
+    }
+
+    /// Partial molar excess enthalpies `h_i^E = -R T^2 d(ln gamma_i)/dT` [J/mol].
+    #[must_use]
+    pub fn partial_excess_enthalpy_j_per_mol(&self) -> &[f64] {
+        &self.partial_excess_enthalpy_j_per_mol
+    }
+
+    /// Row-major `n x n` symmetric homogeneous-degree-0 Jacobian `d(ln gamma_i)/dx_j`.
+    #[must_use]
+    pub fn d_ln_gamma_dx(&self) -> &[f64] {
+        &self.d_ln_gamma_dx
+    }
+
+    /// Look up entry `(i, j)` of the Jacobian `d(ln gamma_i)/dx_j`.
+    #[must_use]
+    pub fn d_ln_gamma_dx_entry(&self, i: usize, j: usize) -> Option<f64> {
+        let n = self.mole_fractions.len();
+        if i < n && j < n {
+            Some(self.d_ln_gamma_dx[i * n + j])
+        } else {
+            None
+        }
+    }
+
+    /// Compute each Gibbs-Duhem column residual `sum_i x_i * d(ln gamma_i)/dx_j`.
+    ///
+    /// For any exact single-potential model this vanishes to floating-point roundoff.
+    #[must_use]
+    pub fn gibbs_duhem_column_residuals(&self) -> Vec<f64> {
+        let n = self.mole_fractions.len();
+        let mut residuals = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut sum = 0.0;
+            let mut comp = 0.0;
+            for i in 0..n {
+                neumaier_add(
+                    &mut sum,
+                    &mut comp,
+                    self.mole_fractions[i] * self.d_ln_gamma_dx[i * n + j],
+                );
+            }
+            residuals.push(sum + comp);
+        }
+        residuals
+    }
+
+    /// Compute the directional Gibbs-Duhem residual `sum_i x_i * (sum_j (d ln gamma_i / dx_j) * delta_x_j)`.
+    pub fn gibbs_duhem_residual(&self, delta_x: &[f64]) -> Result<f64, ExcessGibbsErrorV1> {
+        let n = self.mole_fractions.len();
+        if delta_x.len() != n || delta_x.iter().any(|v| !v.is_finite()) {
+            return Err(ExcessGibbsErrorV1::InvalidComposition(
+                "Gibbs-Duhem direction must have length n with finite entries",
+            ));
+        }
+        let mut total = 0.0;
+        let mut comp = 0.0;
+        for i in 0..n {
+            let mut d_lng_i = 0.0;
+            let mut c_i = 0.0;
+            for j in 0..n {
+                neumaier_add(
+                    &mut d_lng_i,
+                    &mut c_i,
+                    self.d_ln_gamma_dx[i * n + j] * delta_x[j],
+                );
+            }
+            neumaier_add(
+                &mut total,
+                &mut comp,
+                self.mole_fractions[i] * (d_lng_i + c_i),
+            );
+        }
+        Ok(total + comp)
+    }
+}
+
+/// Shared contract for asymmetric excess-Gibbs models driving Modified Raoult VLE.
+pub trait ExcessGibbsModelV1 {
+    /// Declared species in row/column order.
+    fn species(&self) -> &[SpeciesId];
+    /// Inclusive valid temperature interval `[T_min, T_max]` [K].
+    fn temperature_domain(&self) -> [Temperature; 2];
+    /// Evaluate excess Gibbs energy, activity coefficients, and exact analytical derivatives.
+    fn evaluate(
+        &self,
+        temperature: Temperature,
+        mole_fractions: &[f64],
+    ) -> Result<ExcessGibbsEvaluationV1, ExcessGibbsErrorV1>;
+}
+
+/// Pure-component saturation vapor pressure evaluation `(P^sat, dP^sat/dT)` in SI units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VaporPressurePointV1 {
+    /// Saturation vapor pressure `P^sat(T)` [Pa] (`0.0` for non-volatile solutes).
+    pub pressure_pa: f64,
+    /// Analytical derivative `dP^sat/dT` [Pa/K] (`0.0` for non-volatile solutes).
+    pub dp_dt_pa_per_k: f64,
+}
+
+/// Pure-component saturation vapor-pressure correlation for Modified Raoult VLE.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VaporPressureLawV1 {
+    /// SI natural-log Antoine equation: `ln(P^sat / Pa) = a - b_k / (T + c_k)`.
+    Antoine {
+        /// Dimensionless intercept `A` in `ln(P/Pa)`.
+        a: f64,
+        /// Positive slope coefficient `B` [K].
+        b_k: f64,
+        /// Temperature shift `C` [K] (`T + C > 0` across validity interval).
+        c_k: f64,
+        /// Inclusive lower temperature bound [K].
+        temperature_min_k: f64,
+        /// Inclusive upper temperature bound [K].
+        temperature_max_k: f64,
+    },
+    /// Wagner 2.5-5 equation: `ln(P^sat / P_c) = (a*tau + b*tau^1.5 + c*tau^2.5 + d*tau^5) / T_r`,
+    /// where `T_r = T / T_c` and `tau = 1 - T_r`.
+    Wagner25_5 {
+        /// Critical temperature `T_c` [K].
+        critical_temperature_k: f64,
+        /// Critical pressure `P_c` [Pa].
+        critical_pressure_pa: f64,
+        /// Linear `tau` coefficient `a`.
+        a: f64,
+        /// `tau^1.5` coefficient `b`.
+        b: f64,
+        /// `tau^2.5` coefficient `c`.
+        c: f64,
+        /// `tau^5` coefficient `d`.
+        d: f64,
+        /// Inclusive lower temperature bound [K].
+        temperature_min_k: f64,
+        /// Inclusive upper temperature bound [K] (`<= T_c`).
+        temperature_max_k: f64,
+    },
+    /// Wagner 3-6 equation: `ln(P^sat / P_c) = (a*tau + b*tau^1.5 + c*tau^3 + d*tau^6) / T_r`.
+    Wagner3_6 {
+        /// Critical temperature `T_c` [K].
+        critical_temperature_k: f64,
+        /// Critical pressure `P_c` [Pa].
+        critical_pressure_pa: f64,
+        /// Linear `tau` coefficient `a`.
+        a: f64,
+        /// `tau^1.5` coefficient `b`.
+        b: f64,
+        /// `tau^3` coefficient `c`.
+        c: f64,
+        /// `tau^6` coefficient `d`.
+        d: f64,
+        /// Inclusive lower temperature bound [K].
+        temperature_min_k: f64,
+        /// Inclusive upper temperature bound [K] (`<= T_c`).
+        temperature_max_k: f64,
+    },
+    /// IAPWS SR1-86(1992) ordinary water saturation correlation (`273.16..=647.096 K`).
+    IapwsWater,
+    /// Non-volatile solute (`P^sat = 0`, `dP^sat/dT = 0`, e.g., sucrose or dissolved salt).
+    NonVolatile,
+}
+
+impl VaporPressureLawV1 {
+    /// Construct a validated SI natural-log Antoine law `ln(P/Pa) = a - b_k / (T + c_k)`.
+    pub fn antoine_si_ln_pa(
+        a: f64,
+        b_k: f64,
+        c_k: f64,
+        temperature_min: Temperature,
+        temperature_max: Temperature,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        validate_temperature_domain(temperature_min, temperature_max)?;
+        let t_min = temperature_min.value();
+        let t_max = temperature_max.value();
+        if !a.is_finite() || !b_k.is_finite() || b_k <= 0.0 || !c_k.is_finite() {
+            return Err(ExcessGibbsErrorV1::InvalidOptions(
+                "Antoine parameters must be finite with B > 0",
+            ));
+        }
+        if t_min + c_k <= 0.0 {
+            return Err(ExcessGibbsErrorV1::InvalidOptions(
+                "Antoine denominator T_min + C must be strictly positive",
+            ));
+        }
+        Ok(Self::Antoine {
+            a,
+            b_k,
+            c_k,
+            temperature_min_k: t_min,
+            temperature_max_k: t_max,
+        })
+    }
+
+    /// Construct an Antoine law from published DECHEMA base-10 mmHg / Celsius constants:
+    /// `log10(P_mmHg) = a10 - b10 / (T_C + c_celsius)`.
+    pub fn antoine_base10_mmhg_celsius(
+        a10: f64,
+        b10: f64,
+        c_celsius: f64,
+        temperature_min: Temperature,
+        temperature_max: Temperature,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        if !a10.is_finite() || !b10.is_finite() || !c_celsius.is_finite() {
+            return Err(ExcessGibbsErrorV1::InvalidOptions(
+                "DECHEMA Antoine parameters must be finite",
+            ));
+        }
+        let ln10 = core::f64::consts::LN_10;
+        let ln_pa_per_mmhg = ln(101_325.0 / 760.0);
+        Self::antoine_si_ln_pa(
+            ln_pa_per_mmhg + a10 * ln10,
+            b10 * ln10,
+            c_celsius - 273.15,
+            temperature_min,
+            temperature_max,
+        )
+    }
+
+    /// Construct an Antoine law from published NIST WebBook base-10 bar / Kelvin constants:
+    /// `log10(P_bar) = a10 - b10 / (T_K + c_kelvin)`.
+    pub fn antoine_base10_bar_kelvin(
+        a10: f64,
+        b10: f64,
+        c_kelvin: f64,
+        temperature_min: Temperature,
+        temperature_max: Temperature,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        if !a10.is_finite() || !b10.is_finite() || !c_kelvin.is_finite() {
+            return Err(ExcessGibbsErrorV1::InvalidOptions(
+                "NIST Antoine parameters must be finite",
+            ));
+        }
+        let ln10 = core::f64::consts::LN_10;
+        Self::antoine_si_ln_pa(
+            (a10 + 5.0) * ln10,
+            b10 * ln10,
+            c_kelvin,
+            temperature_min,
+            temperature_max,
+        )
+    }
+
+    /// Construct a validated Wagner 2.5-5 vapor-pressure correlation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wagner_25_5(
+        critical_temperature: Temperature,
+        critical_pressure: Pressure,
+        a: f64,
+        b: f64,
+        c: f64,
+        d: f64,
+        temperature_min: Temperature,
+        temperature_max: Temperature,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        validate_wagner_inputs(
+            critical_temperature,
+            critical_pressure,
+            [a, b, c, d],
+            temperature_min,
+            temperature_max,
+        )?;
+        Ok(Self::Wagner25_5 {
+            critical_temperature_k: critical_temperature.value(),
+            critical_pressure_pa: critical_pressure.value(),
+            a,
+            b,
+            c,
+            d,
+            temperature_min_k: temperature_min.value(),
+            temperature_max_k: temperature_max.value(),
+        })
+    }
+
+    /// Construct a validated Wagner 3-6 vapor-pressure correlation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wagner_3_6(
+        critical_temperature: Temperature,
+        critical_pressure: Pressure,
+        a: f64,
+        b: f64,
+        c: f64,
+        d: f64,
+        temperature_min: Temperature,
+        temperature_max: Temperature,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        validate_wagner_inputs(
+            critical_temperature,
+            critical_pressure,
+            [a, b, c, d],
+            temperature_min,
+            temperature_max,
+        )?;
+        Ok(Self::Wagner3_6 {
+            critical_temperature_k: critical_temperature.value(),
+            critical_pressure_pa: critical_pressure.value(),
+            a,
+            b,
+            c,
+            d,
+            temperature_min_k: temperature_min.value(),
+            temperature_max_k: temperature_max.value(),
+        })
+    }
+
+    /// IAPWS SR1-86(1992) ordinary water saturation vapor pressure.
+    #[must_use]
+    pub const fn iapws_water() -> Self {
+        Self::IapwsWater
+    }
+
+    /// Non-volatile solute (`P^sat = 0` identically).
+    #[must_use]
+    pub const fn non_volatile() -> Self {
+        Self::NonVolatile
+    }
+
+    /// NIST Chemistry WebBook Antoine constants for pure ethanol (valid `273.15..=423.15 K`).
+    #[must_use]
+    pub fn ethanol_antoine_nist() -> Self {
+        Self::antoine_base10_bar_kelvin(
+            5.24677,
+            1598.673,
+            -46.424,
+            Temperature::new(273.15),
+            Temperature::new(423.15),
+        )
+        .expect("published NIST ethanol Antoine parameters are valid")
+    }
+
+    /// DECHEMA (Gmehling & Onken) Antoine constants for pure ethanol (`273.15..=423.15 K`).
+    #[must_use]
+    pub fn ethanol_antoine_dechema() -> Self {
+        Self::antoine_base10_mmhg_celsius(
+            8.11220,
+            1592.864,
+            226.184,
+            Temperature::new(273.15),
+            Temperature::new(423.15),
+        )
+        .expect("published DECHEMA ethanol Antoine parameters are valid")
+    }
+
+    /// DECHEMA (Gmehling & Onken) Antoine constants for pure water (`273.15..=423.15 K`).
+    #[must_use]
+    pub fn water_antoine_dechema() -> Self {
+        Self::antoine_base10_mmhg_celsius(
+            8.07131,
+            1730.63,
+            233.426,
+            Temperature::new(273.15),
+            Temperature::new(423.15),
+        )
+        .expect("published DECHEMA water Antoine parameters are valid")
+    }
+
+    /// Whether this component can enter the vapor phase (`false` only for `NonVolatile`).
+    #[must_use]
+    pub const fn is_volatile(self) -> bool {
+        !matches!(self, Self::NonVolatile)
+    }
+
+    /// Inclusive temperature validity domain `[T_min, T_max]` [K], or `None` for `NonVolatile`.
+    #[must_use]
+    pub const fn temperature_domain(self) -> Option<[f64; 2]> {
+        match self {
+            Self::Antoine {
+                temperature_min_k,
+                temperature_max_k,
+                ..
+            }
+            | Self::Wagner25_5 {
+                temperature_min_k,
+                temperature_max_k,
+                ..
+            }
+            | Self::Wagner3_6 {
+                temperature_min_k,
+                temperature_max_k,
+                ..
+            } => Some([temperature_min_k, temperature_max_k]),
+            Self::IapwsWater => Some([
+                crate::water::TRIPLE_POINT_TEMPERATURE_K,
+                crate::water::CRITICAL_TEMPERATURE_K,
+            ]),
+            Self::NonVolatile => None,
+        }
+    }
+
+    /// Evaluate `(P^sat(T), dP^sat/dT)` at `temperature`.
+    pub fn evaluate(
+        self,
+        temperature: Temperature,
+    ) -> Result<VaporPressurePointV1, ExcessGibbsErrorV1> {
+        let t = temperature.value();
+        if !t.is_finite() || t <= 0.0 {
+            return Err(ExcessGibbsErrorV1::TemperatureOutOfDomain {
+                temperature_k: t,
+                min_k: 0.0,
+                max_k: f64::INFINITY,
+            });
+        }
+        match self {
+            Self::NonVolatile => Ok(VaporPressurePointV1 {
+                pressure_pa: 0.0,
+                dp_dt_pa_per_k: 0.0,
+            }),
+            Self::IapwsWater => {
+                let sat = crate::water::SaturatedWaterState::at_temperature(temperature).map_err(
+                    |_| ExcessGibbsErrorV1::TemperatureOutOfDomain {
+                        temperature_k: t,
+                        min_k: crate::water::TRIPLE_POINT_TEMPERATURE_K,
+                        max_k: crate::water::CRITICAL_TEMPERATURE_K,
+                    },
+                )?;
+                Ok(VaporPressurePointV1 {
+                    pressure_pa: sat.pressure().value(),
+                    dp_dt_pa_per_k: sat.pressure_derivative().value(),
+                })
+            }
+            Self::Antoine {
+                a,
+                b_k,
+                c_k,
+                temperature_min_k,
+                temperature_max_k,
+            } => {
+                check_temperature_in_domain(temperature, temperature_min_k, temperature_max_k)?;
+                let denom = t + c_k;
+                if !denom.is_finite() || denom <= 0.0 {
+                    return Err(ExcessGibbsErrorV1::Unrepresentable(
+                        "Antoine denominator T + C is non-positive",
+                    ));
+                }
+                let ln_p = check_finite(a - b_k / denom, "Antoine ln(P^sat)")?;
+                let p_sat = exp(ln_p);
+                let dp_dt = p_sat * (b_k / (denom * denom));
+                if !p_sat.is_finite() || p_sat <= 0.0 || !dp_dt.is_finite() {
+                    return Err(ExcessGibbsErrorV1::Unrepresentable(
+                        "Antoine vapor pressure overflowed or underflowed",
+                    ));
+                }
+                Ok(VaporPressurePointV1 {
+                    pressure_pa: p_sat,
+                    dp_dt_pa_per_k: dp_dt,
+                })
+            }
+            Self::Wagner25_5 {
+                critical_temperature_k,
+                critical_pressure_pa,
+                a,
+                b,
+                c,
+                d,
+                temperature_min_k,
+                temperature_max_k,
+            } => {
+                check_temperature_in_domain(temperature, temperature_min_k, temperature_max_k)?;
+                evaluate_wagner(
+                    t,
+                    critical_temperature_k,
+                    critical_pressure_pa,
+                    [a, b, c, d],
+                    false,
+                )
+            }
+            Self::Wagner3_6 {
+                critical_temperature_k,
+                critical_pressure_pa,
+                a,
+                b,
+                c,
+                d,
+                temperature_min_k,
+                temperature_max_k,
+            } => {
+                check_temperature_in_domain(temperature, temperature_min_k, temperature_max_k)?;
+                evaluate_wagner(
+                    t,
+                    critical_temperature_k,
+                    critical_pressure_pa,
+                    [a, b, c, d],
+                    true,
+                )
+            }
+        }
+    }
+}
+
+fn validate_wagner_inputs(
+    critical_temperature: Temperature,
+    critical_pressure: Pressure,
+    coeffs: [f64; 4],
+    temperature_min: Temperature,
+    temperature_max: Temperature,
+) -> Result<(), ExcessGibbsErrorV1> {
+    validate_temperature_domain(temperature_min, temperature_max)?;
+    let tc = critical_temperature.value();
+    let pc = critical_pressure.value();
+    if !tc.is_finite() || tc <= 0.0 || !pc.is_finite() || pc <= 0.0 {
+        return Err(ExcessGibbsErrorV1::InvalidOptions(
+            "Wagner critical T_c and P_c must be finite and positive",
+        ));
+    }
+    if temperature_max.value() > tc {
+        return Err(ExcessGibbsErrorV1::InvalidOptions(
+            "Wagner temperature_max must not exceed critical temperature T_c",
+        ));
+    }
+    if coeffs.iter().any(|v| !v.is_finite()) {
+        return Err(ExcessGibbsErrorV1::InvalidOptions(
+            "Wagner coefficients must be finite",
+        ));
+    }
+    Ok(())
+}
+
+fn evaluate_wagner(
+    t: f64,
+    tc: f64,
+    pc: f64,
+    coeffs: [f64; 4],
+    is_3_6: bool,
+) -> Result<VaporPressurePointV1, ExcessGibbsErrorV1> {
+    let [a, b, c, d] = coeffs;
+    let tr = t / tc;
+    let tau = (tc - t) / tc;
+    if !tr.is_finite() || tr <= 0.0 || !tau.is_finite() || tau < 0.0 {
+        return Err(ExcessGibbsErrorV1::Unrepresentable(
+            "Wagner reduced temperature outside (0, 1]",
+        ));
+    }
+    let s = sqrt(tau);
+    let tau_15 = tau * s;
+    let tau2 = tau * tau;
+    let (f, fp) = if is_3_6 {
+        let tau3 = tau2 * tau;
+        let tau6 = tau3 * tau3;
+        (
+            a * tau + b * tau_15 + c * tau3 + d * tau6,
+            a + 1.5 * b * s + 3.0 * c * tau2 + 6.0 * d * (tau3 * tau2),
+        )
+    } else {
+        let tau25 = tau2 * s;
+        let tau5 = tau2 * tau2 * tau;
+        (
+            a * tau + b * tau_15 + c * tau25 + d * tau5,
+            a + 1.5 * b * s + 2.5 * c * tau_15 + 5.0 * d * (tau2 * tau2),
+        )
+    };
+    let ln_pr = check_finite(f / tr, "Wagner ln(P/P_c)")?;
+    let p_sat = pc * exp(ln_pr);
+    let dlnp_dt = -(fp * tr + f) / (tc * tr * tr);
+    let dp_dt = p_sat * dlnp_dt;
+    if !p_sat.is_finite() || p_sat <= 0.0 || !dp_dt.is_finite() {
+        return Err(ExcessGibbsErrorV1::Unrepresentable(
+            "Wagner vapor pressure overflowed or underflowed",
+        ));
+    }
+    Ok(VaporPressurePointV1 {
+        pressure_pa: p_sat,
+        dp_dt_pa_per_k: dp_dt,
+    })
+}
+
+/// Explicit tolerances and iteration cap for Modified Raoult VLE solvers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VleSolverOptionsV1 {
+    /// Absolute temperature bracket convergence tolerance [K].
+    pub temperature_tolerance_k: f64,
+    /// Relative pressure / equilibrium convergence tolerance (dimensionless).
+    pub relative_residual_tolerance: f64,
+    /// Maximum solver iterations (`1..=MAX_VLE_SOLVER_ITERATIONS_V1`).
+    pub maximum_iterations: usize,
+}
+
+impl Default for VleSolverOptionsV1 {
+    fn default() -> Self {
+        Self {
+            temperature_tolerance_k: 1e-11,
+            relative_residual_tolerance: 1e-12,
+            maximum_iterations: 128,
+        }
+    }
+}
+
+impl VleSolverOptionsV1 {
+    /// Validate numerical tolerance and iteration limits before running a solve.
+    pub fn validate(self) -> Result<(), ExcessGibbsErrorV1> {
+        if !self.temperature_tolerance_k.is_finite()
+            || self.temperature_tolerance_k <= 0.0
+            || !self.relative_residual_tolerance.is_finite()
+            || self.relative_residual_tolerance <= 0.0
+            || !(1..=MAX_VLE_SOLVER_ITERATIONS_V1).contains(&self.maximum_iterations)
+        {
+            return Err(ExcessGibbsErrorV1::InvalidOptions(
+                "VLE solver tolerances must be finite positive and iterations in 1..=512",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Modified Raoult's law K-values evaluated at `(T, P, x)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VleKValuesV1 {
+    /// Evaluated temperature [K].
+    pub temperature: Temperature,
+    /// Evaluated total pressure [Pa].
+    pub pressure: Pressure,
+    /// Normalized liquid mole fractions `x_i`.
+    pub liquid_x: Vec<f64>,
+    /// Equilibrium partition ratios `K_i = gamma_i(T, x) * P_i^sat(T) / P`.
+    pub k_values: Vec<f64>,
+    /// Normalized incipient vapor composition `y_i = K_i x_i / sum_j(K_j x_j)`.
+    pub vapor_y_normalized: Vec<f64>,
+    /// Bubble-point sum `sum_i K_i x_i` (`1.0` exactly at the bubble point).
+    pub sum_kx: f64,
+    /// Underlying excess-Gibbs liquid evaluation.
+    pub excess_gibbs: ExcessGibbsEvaluationV1,
+}
+
+/// Converged bubble-point solution `(T_bub, y)` at caller-specified pressure `P` and liquid `x`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BubblePointV1 {
+    /// Bubble-point temperature `T_bub` [K].
+    pub temperature: Temperature,
+    /// Specified total pressure `P` [Pa].
+    pub pressure: Pressure,
+    /// Normalized liquid mole fractions `x`.
+    pub liquid_x: Vec<f64>,
+    /// Equilibrium vapor mole fractions `y_i = x_i gamma_i P_i^sat / P`.
+    pub vapor_y: Vec<f64>,
+    /// Partition ratios `K_i = gamma_i P_i^sat / P`.
+    pub k_values: Vec<f64>,
+    /// Underlying excess-Gibbs evaluation at `T_bub`.
+    pub excess_gibbs: ExcessGibbsEvaluationV1,
+    /// Final dimensionless pressure residual `(P_calc - P) / P`.
+    pub relative_residual: f64,
+    /// Iterations executed.
+    pub iterations: usize,
+}
+
+/// Converged dew-point solution `(T_dew, x)` at caller-specified pressure `P` and vapor `y`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DewPointV1 {
+    /// Dew-point temperature `T_dew` [K].
+    pub temperature: Temperature,
+    /// Specified total pressure `P` [Pa].
+    pub pressure: Pressure,
+    /// Equilibrium liquid mole fractions `x`.
+    pub liquid_x: Vec<f64>,
+    /// Normalized vapor mole fractions `y`.
+    pub vapor_y: Vec<f64>,
+    /// Partition ratios `K_i = gamma_i P_i^sat / P`.
+    pub k_values: Vec<f64>,
+    /// Underlying excess-Gibbs evaluation at `(T_dew, x)`.
+    pub excess_gibbs: ExcessGibbsEvaluationV1,
+    /// Final dimensionless pressure residual `(P_dew - P) / P`.
+    pub relative_residual: f64,
+    /// Iterations executed.
+    pub iterations: usize,
+}
+
+/// Phase regime resolved by an isothermal `(T, P, z)` Modified Raoult flash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashPhaseRegimeV1 {
+    /// Total pressure is at or above bubble pressure (`beta = 0`).
+    SubcooledLiquid,
+    /// Feed splits into coexisting liquid and vapor phases (`0 < beta < 1`).
+    TwoPhase,
+    /// Total pressure is at or below dew pressure (`beta = 1`).
+    SuperheatedVapor,
+}
+
+/// Converged isothermal `(T, P, z)` flash result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsothermalFlashV1 {
+    /// Specified temperature [K].
+    pub temperature: Temperature,
+    /// Specified pressure [Pa].
+    pub pressure: Pressure,
+    /// Normalized overall feed mole fractions `z`.
+    pub feed_z: Vec<f64>,
+    /// Vapor molar fraction `beta` in `[0, 1]`.
+    pub vapor_fraction: f64,
+    /// Liquid phase mole fractions `x`.
+    pub liquid_x: Vec<f64>,
+    /// Vapor phase mole fractions `y`.
+    pub vapor_y: Vec<f64>,
+    /// Equilibrium K-values `K_i = gamma_i(T, x) P_i^sat(T) / P`.
+    pub k_values: Vec<f64>,
+    /// Identified phase regime.
+    pub phase_regime: FlashPhaseRegimeV1,
+    /// Maximum relative fugacity/equilibrium residual across components.
+    pub relative_residual: f64,
+    /// Outer flash iterations executed.
+    pub iterations: usize,
+}
+
+/// Modified Raoult's law VLE evaluator (`y_i P = x_i gamma_i(T, x) P_i^sat(T)`)
+/// parameterized by an explicit excess-Gibbs model `M` and per-species vapor-pressure laws.
+///
+/// Never hardcodes sea-level atmospheric pressure: every VLE query takes an explicit
+/// caller-supplied `Pressure` (`P_atm(z)` or vessel pressure).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModifiedRaoultVleV1<M> {
+    model: M,
+    vapor_pressures: Vec<VaporPressureLawV1>,
+    effective_t_min_k: f64,
+    effective_t_max_k: f64,
+}
+
+impl<M: ExcessGibbsModelV1> ModifiedRaoultVleV1<M> {
+    /// Bind an excess-Gibbs liquid model with one vapor-pressure law per species.
+    pub fn new(
+        model: M,
+        vapor_pressures: Vec<VaporPressureLawV1>,
+    ) -> Result<Self, ExcessGibbsErrorV1> {
+        let n = model.species().len();
+        if vapor_pressures.len() != n {
+            return Err(ExcessGibbsErrorV1::InvalidModel(
+                "vapor_pressures length must match excess-Gibbs species count",
+            ));
+        }
+        let [t_min, t_max] = model.temperature_domain();
+        let mut lo = t_min.value();
+        let mut hi = t_max.value();
+        for vp in &vapor_pressures {
+            if let Some([v_lo, v_hi]) = vp.temperature_domain() {
+                lo = lo.max(v_lo);
+                hi = hi.min(v_hi);
+            }
+        }
+        if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || hi < lo {
+            return Err(ExcessGibbsErrorV1::InvalidModel(
+                "excess-Gibbs and vapor-pressure temperature domains have empty intersection",
+            ));
+        }
+        Ok(Self {
+            model,
+            vapor_pressures,
+            effective_t_min_k: lo,
+            effective_t_max_k: hi,
+        })
+    }
+
+    /// Borrow the underlying excess-Gibbs model.
+    #[must_use]
+    pub const fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Borrow the per-species saturation vapor-pressure laws.
+    #[must_use]
+    pub fn vapor_pressures(&self) -> &[VaporPressureLawV1] {
+        &self.vapor_pressures
+    }
+
+    /// Effective inclusive temperature domain `[T_min, T_max]` [K] (intersection of all laws).
+    #[must_use]
+    pub const fn temperature_domain(&self) -> [Temperature; 2] {
+        [
+            Temperature::new(self.effective_t_min_k),
+            Temperature::new(self.effective_t_max_k),
+        ]
+    }
+
+    /// Evaluate Modified Raoult's law K-values `K_i = gamma_i(T, x) * P_i^sat(T) / P`.
+    pub fn k_values(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+        liquid_x: &[f64],
+    ) -> Result<VleKValuesV1, ExcessGibbsErrorV1> {
+        let p = check_positive_pressure(pressure)?;
+        check_temperature_in_domain(temperature, self.effective_t_min_k, self.effective_t_max_k)?;
+        let eval = self.model.evaluate(temperature, liquid_x)?;
+        let n = self.vapor_pressures.len();
+        let mut k_values = Vec::with_capacity(n);
+        let mut kx = Vec::with_capacity(n);
+        let mut sum_kx = 0.0;
+        for i in 0..n {
+            let vp = self.vapor_pressures[i].evaluate(temperature)?;
+            let ki = check_finite(eval.gamma[i] * vp.pressure_pa / p, "VLE K_i")?;
+            let term = ki * eval.mole_fractions[i];
+            k_values.push(ki);
+            kx.push(term);
+            sum_kx += term;
+        }
+        let sum_kx = check_finite(sum_kx, "VLE sum(K_i x_i)")?;
+        let vapor_y_normalized = if sum_kx > 0.0 {
+            kx.into_iter().map(|v| v / sum_kx).collect()
+        } else {
+            vec![0.0; n]
+        };
+        Ok(VleKValuesV1 {
+            temperature,
+            pressure,
+            liquid_x: eval.mole_fractions.clone(),
+            k_values,
+            vapor_y_normalized,
+            sum_kx,
+            excess_gibbs: eval,
+        })
+    }
+
+    /// Solve bubble-point temperature `T_bub(P, x)` and equilibrium vapor composition `y`
+    /// satisfying `sum_i x_i * gamma_i(T, x) * P_i^sat(T) = P` via safeguarded Newton-bisection.
+    pub fn bubble_point_t(
+        &self,
+        pressure: Pressure,
+        liquid_x: &[f64],
+        options: VleSolverOptionsV1,
+    ) -> Result<BubblePointV1, ExcessGibbsErrorV1> {
+        options.validate()?;
+        let p = check_positive_pressure(pressure)?;
+        let n = self.vapor_pressures.len();
+        let x = validate_and_normalize_mole_fractions(liquid_x, n)?;
+        if !(0..n).any(|i| x[i] > 0.0 && self.vapor_pressures[i].is_volatile()) {
+            return Err(ExcessGibbsErrorV1::InvalidComposition(
+                "bubble-point solve requires at least one present volatile species",
+            ));
+        }
+
+        let eval_bubble = |t_k: f64| -> Result<
+            (f64, f64, ExcessGibbsEvaluationV1, Vec<f64>),
+            ExcessGibbsErrorV1,
+        > {
+            let temp = Temperature::new(t_k);
+            let eg = self.model.evaluate(temp, &x)?;
+            let mut p_calc = 0.0;
+            let mut dp_dt = 0.0;
+            let mut p_sat_vec = Vec::with_capacity(n);
+            for i in 0..n {
+                let vp = self.vapor_pressures[i].evaluate(temp)?;
+                p_sat_vec.push(vp.pressure_pa);
+                if x[i] > 0.0 && vp.pressure_pa > 0.0 {
+                    let partial_p = x[i] * eg.gamma[i] * vp.pressure_pa;
+                    p_calc += partial_p;
+                    dp_dt += x[i]
+                        * eg.gamma[i]
+                        * (eg.d_ln_gamma_dt[i] * vp.pressure_pa + vp.dp_dt_pa_per_k);
+                }
+            }
+            let p_calc = check_finite(p_calc, "bubble pressure")?;
+            let dp_dt = check_finite(dp_dt, "bubble pressure derivative")?;
+            Ok((p_calc, dp_dt, eg, p_sat_vec))
+        };
+
+        let mut lo = self.effective_t_min_k;
+        let mut hi = self.effective_t_max_k;
+        let (p_lo, _, eg_lo, psat_lo) = eval_bubble(lo)?;
+        let (p_hi, _, eg_hi, psat_hi) = eval_bubble(hi)?;
+        let f_lo = p_lo - p;
+        let f_hi = p_hi - p;
+
+        if f_lo.abs() / p <= options.relative_residual_tolerance {
+            return Ok(build_bubble_result(
+                Temperature::new(lo),
+                pressure,
+                &x,
+                eg_lo,
+                &psat_lo,
+                p_lo,
+                0,
+            ));
+        }
+        if f_hi.abs() / p <= options.relative_residual_tolerance {
+            return Ok(build_bubble_result(
+                Temperature::new(hi),
+                pressure,
+                &x,
+                eg_hi,
+                &psat_hi,
+                p_hi,
+                0,
+            ));
+        }
+        if f_lo > 0.0 || f_hi < 0.0 {
+            let residual = if f_lo > 0.0 { f_lo / p } else { f_hi / p };
+            return Err(ExcessGibbsErrorV1::ConvergenceFailed {
+                iterations: 0,
+                residual,
+            });
+        }
+
+        // Clausius-Clapeyron log-linear initial guess in 1/T inside (lo, hi).
+        let mut t = if p_lo > 0.0 && p_hi > p_lo {
+            let frac = (ln(p) - ln(p_lo)) / (ln(p_hi) - ln(p_lo));
+            let inv_t = (1.0 / lo) + frac * ((1.0 / hi) - (1.0 / lo));
+            let guess = 1.0 / inv_t;
+            if guess.is_finite() && guess > lo && guess < hi {
+                guess
+            } else {
+                0.5 * (lo + hi)
+            }
+        } else {
+            0.5 * (lo + hi)
+        };
+
+        let mut last_rel = f64::INFINITY;
+        for iter in 1..=options.maximum_iterations {
+            let (p_calc, dp_dt, eg, psat_vec) = eval_bubble(t)?;
+            let f = p_calc - p;
+            last_rel = f / p;
+            if last_rel.abs() <= options.relative_residual_tolerance
+                || (hi - lo) <= options.temperature_tolerance_k
+            {
+                return Ok(build_bubble_result(
+                    Temperature::new(t),
+                    pressure,
+                    &x,
+                    eg,
+                    &psat_vec,
+                    p_calc,
+                    iter,
+                ));
+            }
+            if f < 0.0 {
+                lo = t;
+            } else {
+                hi = t;
+            }
+            let newton = if dp_dt > 0.0 && dp_dt.is_finite() {
+                t - f / dp_dt
+            } else {
+                f64::NAN
+            };
+            let next = if newton.is_finite() && newton > lo && newton < hi && newton != t {
+                newton
+            } else {
+                0.5 * (lo + hi)
+            };
+            if next <= lo || next >= hi {
+                return Ok(build_bubble_result(
+                    Temperature::new(t),
+                    pressure,
+                    &x,
+                    eg,
+                    &psat_vec,
+                    p_calc,
+                    iter,
+                ));
+            }
+            t = next;
+        }
+
+        Err(ExcessGibbsErrorV1::ConvergenceFailed {
+            iterations: options.maximum_iterations,
+            residual: last_rel,
+        })
+    }
+
+    /// Solve dew-point temperature `T_dew(P, y)` and incipient equilibrium liquid composition `x`
+    /// satisfying `y_i P = x_i gamma_i(T, x) P_i^sat(T)` and `sum_i x_i = 1`.
+    pub fn dew_point_t(
+        &self,
+        pressure: Pressure,
+        vapor_y: &[f64],
+        options: VleSolverOptionsV1,
+    ) -> Result<DewPointV1, ExcessGibbsErrorV1> {
+        options.validate()?;
+        let p = check_positive_pressure(pressure)?;
+        let n = self.vapor_pressures.len();
+        let y = validate_and_normalize_mole_fractions(vapor_y, n)?;
+        for i in 0..n {
+            if y[i] > 0.0 && !self.vapor_pressures[i].is_volatile() {
+                return Err(ExcessGibbsErrorV1::InvalidComposition(
+                    "non-volatile species cannot have positive vapor mole fraction in dew-point solve",
+                ));
+            }
+        }
+
+        let mut lo = self.effective_t_min_k;
+        let mut hi = self.effective_t_max_k;
+        let (p_lo, eg_lo, psat_lo) = self.dew_pressure_at_t(Temperature::new(lo), &y)?;
+        let (p_hi, eg_hi, psat_hi) = self.dew_pressure_at_t(Temperature::new(hi), &y)?;
+        let f_lo = p_lo - p;
+        let f_hi = p_hi - p;
+
+        if f_lo.abs() / p <= options.relative_residual_tolerance {
+            return Ok(build_dew_result(
+                Temperature::new(lo),
+                pressure,
+                &y,
+                eg_lo,
+                &psat_lo,
+                p_lo,
+                0,
+            ));
+        }
+        if f_hi.abs() / p <= options.relative_residual_tolerance {
+            return Ok(build_dew_result(
+                Temperature::new(hi),
+                pressure,
+                &y,
+                eg_hi,
+                &psat_hi,
+                p_hi,
+                0,
+            ));
+        }
+        if f_lo > 0.0 || f_hi < 0.0 {
+            let residual = if f_lo > 0.0 { f_lo / p } else { f_hi / p };
+            return Err(ExcessGibbsErrorV1::ConvergenceFailed {
+                iterations: 0,
+                residual,
+            });
+        }
+
+        // Safeguarded secant-bisection in log-pressure coordinates (nearly linear in 1/T).
+        let ln_p = ln(p);
+        let mut g_lo = ln(p_lo) - ln_p;
+        let mut g_hi = ln(p_hi) - ln_p;
+        let mut last_rel = f64::INFINITY;
+        let mut use_secant = true;
+        for iter in 1..=options.maximum_iterations {
+            let t = if use_secant
+                && g_lo.is_finite()
+                && g_hi.is_finite()
+                && (g_hi - g_lo).abs() > 0.0
+            {
+                let sec = lo - g_lo * (hi - lo) / (g_hi - g_lo);
+                let margin = 0.05 * (hi - lo);
+                if sec.is_finite() && sec > lo + margin && sec < hi - margin {
+                    sec
+                } else {
+                    0.5 * (lo + hi)
+                }
+            } else {
+                0.5 * (lo + hi)
+            };
+            let (p_calc, eg, psat_vec) = self.dew_pressure_at_t(Temperature::new(t), &y)?;
+            let f = p_calc - p;
+            last_rel = f / p;
+            if last_rel.abs() <= options.relative_residual_tolerance
+                || (hi - lo) <= options.temperature_tolerance_k
+            {
+                return Ok(build_dew_result(
+                    Temperature::new(t),
+                    pressure,
+                    &y,
+                    eg,
+                    &psat_vec,
+                    p_calc,
+                    iter,
+                ));
+            }
+            let prev_span = hi - lo;
+            let g_mid = ln(p_calc) - ln_p;
+            if f < 0.0 {
+                lo = t;
+                g_lo = g_mid;
+            } else {
+                hi = t;
+                g_hi = g_mid;
+            }
+            // Alternate to bisection whenever secant shrinks bracket slowly.
+            use_secant = (hi - lo) < 0.75 * prev_span;
+            if hi <= lo {
+                return Ok(build_dew_result(
+                    Temperature::new(t),
+                    pressure,
+                    &y,
+                    eg,
+                    &psat_vec,
+                    p_calc,
+                    iter,
+                ));
+            }
+        }
+
+        Err(ExcessGibbsErrorV1::ConvergenceFailed {
+            iterations: options.maximum_iterations,
+            residual: last_rel,
+        })
+    }
+
+    /// Compute the mixture boiling range `(bubble, dew, T_dew - T_bub)` at `pressure`
+    /// and overall composition `composition` (used by Schluender-Thome mixture boiling
+    /// suppression in wine deglazing and sauce reduction).
+    pub fn boiling_range_k(
+        &self,
+        pressure: Pressure,
+        composition: &[f64],
+        options: VleSolverOptionsV1,
+    ) -> Result<(BubblePointV1, DewPointV1, f64), ExcessGibbsErrorV1> {
+        let bubble = self.bubble_point_t(pressure, composition, options)?;
+        let dew = self.dew_point_t(pressure, composition, options)?;
+        let delta_t_bp = dew.temperature.value() - bubble.temperature.value();
+        Ok((bubble, dew, delta_t_bp))
+    }
+
+    /// Isothermal `(T, P, z)` flash using Modified Raoult's law and Rachford-Rice.
+    pub fn flash_pt(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+        overall_z: &[f64],
+        options: VleSolverOptionsV1,
+    ) -> Result<IsothermalFlashV1, ExcessGibbsErrorV1> {
+        options.validate()?;
+        let p = check_positive_pressure(pressure)?;
+        check_temperature_in_domain(temperature, self.effective_t_min_k, self.effective_t_max_k)?;
+        let n = self.vapor_pressures.len();
+        let z = validate_and_normalize_mole_fractions(overall_z, n)?;
+
+        let mut p_sat = Vec::with_capacity(n);
+        for vp in &self.vapor_pressures {
+            p_sat.push(vp.evaluate(temperature)?.pressure_pa);
+        }
+
+        // 1. Bubble-point pressure test at (T, z).
+        let eg_z = self.model.evaluate(temperature, &z)?;
+        let mut p_bub = 0.0;
+        let mut k_bub = Vec::with_capacity(n);
+        for i in 0..n {
+            let ki = check_finite(eg_z.gamma[i] * p_sat[i] / p, "flash K_bub")?;
+            k_bub.push(ki);
+            p_bub += z[i] * eg_z.gamma[i] * p_sat[i];
+        }
+        let p_bub = check_finite(p_bub, "flash bubble pressure")?;
+        if p >= p_bub * (1.0 - options.relative_residual_tolerance) {
+            let y_inc = if p_bub > 0.0 {
+                (0..n)
+                    .map(|i| z[i] * eg_z.gamma[i] * p_sat[i] / p_bub)
+                    .collect()
+            } else {
+                vec![0.0; n]
+            };
+            return Ok(IsothermalFlashV1 {
+                temperature,
+                pressure,
+                feed_z: z.clone(),
+                vapor_fraction: 0.0,
+                liquid_x: z,
+                vapor_y: y_inc,
+                k_values: k_bub,
+                phase_regime: FlashPhaseRegimeV1::SubcooledLiquid,
+                relative_residual: 0.0,
+                iterations: 0,
+            });
+        }
+
+        // 2. Dew-point pressure test (only possible if every present species is volatile).
+        let all_present_volatile =
+            (0..n).all(|i| z[i] == 0.0 || self.vapor_pressures[i].is_volatile());
+        let mut x_init = z.clone();
+        if all_present_volatile {
+            let (p_dew, eg_dew, _) = self.dew_pressure_at_t(temperature, &z)?;
+            if p <= p_dew * (1.0 + options.relative_residual_tolerance) {
+                let k_dew = (0..n).map(|i| eg_dew.gamma[i] * p_sat[i] / p).collect();
+                return Ok(IsothermalFlashV1 {
+                    temperature,
+                    pressure,
+                    feed_z: z.clone(),
+                    vapor_fraction: 1.0,
+                    liquid_x: eg_dew.mole_fractions,
+                    vapor_y: z,
+                    k_values: k_dew,
+                    phase_regime: FlashPhaseRegimeV1::SuperheatedVapor,
+                    relative_residual: 0.0,
+                    iterations: 0,
+                });
+            }
+            if p_bub > p_dew {
+                let theta = ((p_bub - p) / (p_bub - p_dew)).clamp(0.05, 0.95);
+                for i in 0..n {
+                    x_init[i] = (1.0 - theta) * z[i] + theta * eg_dew.mole_fractions[i];
+                }
+                normalize_positive_in_place(&mut x_init)?;
+            }
+        }
+
+        // 3. Two-phase Rachford-Rice + bounded Wegstein-accelerated ln(K) substitution.
+        let mut x = x_init;
+        let eg0 = self.model.evaluate(temperature, &x)?;
+        let mut k_vals: Vec<f64> = (0..n).map(|i| eg0.gamma[i] * p_sat[i] / p).collect();
+        let mut y = vec![0.0; n];
+        let mut prev_u: Option<Vec<f64>> = None;
+        let mut prev_gu: Option<Vec<f64>> = None;
+        let mut last_res = f64::INFINITY;
+
+        for iter in 1..=options.maximum_iterations {
+            let beta = solve_rachford_rice(&z, &k_vals)?;
+
+            for i in 0..n {
+                // (1 - beta) + beta * K_i avoids catastrophic 1 - 1 cancellation for tiny K_i.
+                let denom = (1.0 - beta) + beta * k_vals[i];
+                if !denom.is_finite() || denom <= 0.0 {
+                    return Err(ExcessGibbsErrorV1::Unrepresentable(
+                        "Rachford-Rice denominator became non-positive",
+                    ));
+                }
+                x[i] = (z[i] / denom).max(0.0);
+                y[i] = (k_vals[i] * x[i]).max(0.0);
+            }
+            normalize_positive_in_place(&mut x)?;
+            normalize_positive_in_place(&mut y)?;
+
+            let eg = self.model.evaluate(temperature, &x)?;
+            let mut max_eq_res = 0.0_f64;
+            let mut max_mb_res = 0.0_f64;
+            let mut k_new = Vec::with_capacity(n);
+            for i in 0..n {
+                let ki_new = check_finite(eg.gamma[i] * p_sat[i] / p, "flash K_new")?;
+                k_new.push(ki_new);
+                let eq_res = (y[i] - ki_new * x[i]).abs();
+                let mb_res = ((1.0 - beta) * x[i] + beta * y[i] - z[i]).abs();
+                max_eq_res = max_eq_res.max(eq_res);
+                max_mb_res = max_mb_res.max(mb_res);
+            }
+            let res = max_eq_res.max(max_mb_res);
+            if res <= options.relative_residual_tolerance {
+                return Ok(IsothermalFlashV1 {
+                    temperature,
+                    pressure,
+                    feed_z: z,
+                    vapor_fraction: beta,
+                    liquid_x: x,
+                    vapor_y: y,
+                    k_values: k_new,
+                    phase_regime: FlashPhaseRegimeV1::TwoPhase,
+                    relative_residual: res,
+                    iterations: iter,
+                });
+            }
+            let u: Vec<f64> = k_vals
+                .iter()
+                .map(|&ki| if ki > 0.0 { ln(ki) } else { 0.0 })
+                .collect();
+            let gu: Vec<f64> = k_new
+                .iter()
+                .map(|&ki| if ki > 0.0 { ln(ki) } else { 0.0 })
+                .collect();
+            let mut k_next = vec![0.0; n];
+            if res > last_res {
+                for i in 0..n {
+                    k_next[i] = if k_new[i] > 0.0 && k_vals[i] > 0.0 {
+                        exp(0.5 * (u[i] + gu[i]))
+                    } else {
+                        k_new[i]
+                    };
+                }
+            } else if let (Some(pu), Some(pgu)) = (&prev_u, &prev_gu) {
+                for i in 0..n {
+                    if k_new[i] <= 0.0 || k_vals[i] <= 0.0 {
+                        k_next[i] = k_new[i];
+                        continue;
+                    }
+                    let du = u[i] - pu[i];
+                    let dgu = gu[i] - pgu[i];
+                    if du.abs() > 1e-15 {
+                        let slope = dgu / du;
+                        let denom = 1.0 - slope;
+                        let w = if denom.abs() > 1e-12 {
+                            (1.0 / denom).clamp(0.1, 1.5)
+                        } else {
+                            0.5
+                        };
+                        let u_next = check_finite(u[i] + w * (gu[i] - u[i]), "Wegstein ln(K)")?;
+                        k_next[i] = check_finite(exp(u_next), "Wegstein K")?;
+                    } else {
+                        k_next[i] = k_new[i];
+                    }
+                }
+            } else {
+                for i in 0..n {
+                    k_next[i] = if k_new[i] > 0.0 && k_vals[i] > 0.0 {
+                        exp(0.5 * (u[i] + gu[i]))
+                    } else {
+                        k_new[i]
+                    };
+                }
+            }
+            prev_u = Some(u);
+            prev_gu = Some(gu);
+            k_vals = k_next;
+            last_res = res;
+        }
+
+        Err(ExcessGibbsErrorV1::ConvergenceFailed {
+            iterations: options.maximum_iterations,
+            residual: last_res,
+        })
+    }
+
+    fn dew_pressure_at_t(
+        &self,
+        temperature: Temperature,
+        y: &[f64],
+    ) -> Result<(f64, ExcessGibbsEvaluationV1, Vec<f64>), ExcessGibbsErrorV1> {
+        let n = self.vapor_pressures.len();
+        let mut p_sat = Vec::with_capacity(n);
+        let mut x = vec![0.0; n];
+        let mut w_sum = 0.0;
+        for i in 0..n {
+            let ps = self.vapor_pressures[i].evaluate(temperature)?.pressure_pa;
+            p_sat.push(ps);
+            if y[i] > 0.0 {
+                if ps <= 0.0 {
+                    return Err(ExcessGibbsErrorV1::Unrepresentable(
+                        "volatile species has non-positive saturation pressure",
+                    ));
+                }
+                let wi = y[i] / ps;
+                x[i] = wi;
+                w_sum += wi;
+            }
+        }
+        if !w_sum.is_finite() || w_sum <= 0.0 {
+            return Err(ExcessGibbsErrorV1::Unrepresentable(
+                "dew-point ideal weight sum is non-positive",
+            ));
+        }
+        for xi in &mut x {
+            *xi /= w_sum;
+        }
+
+        let mut prev_diff = f64::INFINITY;
+        for _ in 0..128 {
+            let eg = self.model.evaluate(temperature, &x)?;
+            let mut next_x = vec![0.0; n];
+            let mut w = 0.0;
+            for i in 0..n {
+                if y[i] > 0.0 {
+                    let denom = eg.gamma[i] * p_sat[i];
+                    if !denom.is_finite() || denom <= 0.0 {
+                        return Err(ExcessGibbsErrorV1::Unrepresentable(
+                            "dew-point denominator gamma_i * P_i^sat is non-positive",
+                        ));
+                    }
+                    let wi = y[i] / denom;
+                    next_x[i] = wi;
+                    w += wi;
+                }
+            }
+            if !w.is_finite() || w <= 0.0 {
+                return Err(ExcessGibbsErrorV1::Unrepresentable(
+                    "dew-point liquid normalization sum is non-positive",
+                ));
+            }
+            let mut max_diff = 0.0_f64;
+            for i in 0..n {
+                next_x[i] /= w;
+                max_diff = max_diff.max((next_x[i] - x[i]).abs());
+            }
+            if max_diff <= 1e-13 {
+                let eg_final = self.model.evaluate(temperature, &next_x)?;
+                let mut w_final = 0.0;
+                for i in 0..n {
+                    if y[i] > 0.0 {
+                        w_final += y[i] / (eg_final.gamma[i] * p_sat[i]);
+                    }
+                }
+                let p_dew = check_finite(1.0 / w_final, "dew pressure")?;
+                return Ok((p_dew, eg_final, p_sat));
+            }
+            if max_diff > prev_diff {
+                for i in 0..n {
+                    x[i] = 0.5 * x[i] + 0.5 * next_x[i];
+                }
+                normalize_positive_in_place(&mut x)?;
+            } else {
+                x = next_x;
+            }
+            prev_diff = max_diff;
+        }
+
+        Err(ExcessGibbsErrorV1::ConvergenceFailed {
+            iterations: 128,
+            residual: prev_diff,
+        })
+    }
+}
+
+fn solve_rachford_rice(z: &[f64], k: &[f64]) -> Result<f64, ExcessGibbsErrorV1> {
+    let eval_g = |beta: f64| -> (f64, f64) {
+        let mut g = 0.0;
+        let mut gp = 0.0;
+        for (&zi, &ki) in z.iter().zip(k) {
+            if zi == 0.0 {
+                continue;
+            }
+            let km1 = ki - 1.0;
+            // (1 - beta) + beta * K_i is a sum of nonnegative terms on [0, 1], avoiding
+            // cancellation when 0 < K_i < 2^-53 near beta = 1.
+            let denom = (1.0 - beta) + beta * ki;
+            if denom <= 0.0 {
+                return (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            }
+            let ratio = km1 / denom;
+            g += zi * ratio;
+            gp -= zi * ratio * ratio;
+        }
+        (g, gp)
+    };
+
+    let (g0, _) = eval_g(0.0);
+    if !g0.is_finite() {
+        return Err(ExcessGibbsErrorV1::Unrepresentable(
+            "Rachford-Rice g(0) is non-finite",
+        ));
+    }
+    if g0 <= 0.0 {
+        return Ok(1e-9);
+    }
+    let has_non_volatile = z.iter().zip(k).any(|(&zi, &ki)| zi > 0.0 && ki == 0.0);
+    if !has_non_volatile {
+        let (g1, _) = eval_g(1.0);
+        if g1 >= 0.0 {
+            return Ok(1.0 - 1e-9);
+        }
+    }
+
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    let mut beta = 0.5;
+    for _ in 0..100 {
+        let (g, gp) = eval_g(beta);
+        if !g.is_finite() {
+            beta = 0.5 * (lo + hi);
+            continue;
+        }
+        if g.abs() <= 1e-14 || (hi - lo) <= 1e-14 {
+            return Ok(beta);
+        }
+        if g > 0.0 {
+            lo = beta;
+        } else {
+            hi = beta;
+        }
+        let newton = if gp < 0.0 && gp.is_finite() {
+            beta - g / gp
+        } else {
+            f64::NAN
+        };
+        beta = if newton.is_finite() && newton > lo && newton < hi {
+            newton
+        } else {
+            0.5 * (lo + hi)
+        };
+    }
+    Ok(0.5 * (lo + hi))
+}
+
+fn build_bubble_result(
+    temperature: Temperature,
+    pressure: Pressure,
+    x: &[f64],
+    eg: ExcessGibbsEvaluationV1,
+    psat_vec: &[f64],
+    p_calc: f64,
+    iterations: usize,
+) -> BubblePointV1 {
+    let p = pressure.value();
+    let n = x.len();
+    let mut k_values = Vec::with_capacity(n);
+    let mut vapor_y = Vec::with_capacity(n);
+    for i in 0..n {
+        let ki = eg.gamma[i] * psat_vec[i] / p;
+        k_values.push(ki);
+        vapor_y.push(if p_calc > 0.0 {
+            x[i] * eg.gamma[i] * psat_vec[i] / p_calc
+        } else {
+            0.0
+        });
+    }
+    BubblePointV1 {
+        temperature,
+        pressure,
+        liquid_x: x.to_vec(),
+        vapor_y,
+        k_values,
+        excess_gibbs: eg,
+        relative_residual: (p_calc - p) / p,
+        iterations,
+    }
+}
+
+fn build_dew_result(
+    temperature: Temperature,
+    pressure: Pressure,
+    y: &[f64],
+    eg: ExcessGibbsEvaluationV1,
+    psat_vec: &[f64],
+    p_dew: f64,
+    iterations: usize,
+) -> DewPointV1 {
+    let p = pressure.value();
+    let k_values = (0..y.len())
+        .map(|i| eg.gamma[i] * psat_vec[i] / p)
+        .collect();
+    DewPointV1 {
+        temperature,
+        pressure,
+        liquid_x: eg.mole_fractions.clone(),
+        vapor_y: y.to_vec(),
+        k_values,
+        excess_gibbs: eg,
+        relative_residual: (p_dew - p) / p,
+        iterations,
+    }
+}
+
+fn normalize_positive_in_place(values: &mut [f64]) -> Result<(), ExcessGibbsErrorV1> {
+    let mut sum = 0.0;
+    let mut comp = 0.0;
+    for &v in values.iter() {
+        neumaier_add(&mut sum, &mut comp, v);
+    }
+    let total = sum + comp;
+    if !total.is_finite() || total <= 0.0 {
+        return Err(ExcessGibbsErrorV1::Unrepresentable(
+            "phase mole-fraction normalization sum is non-positive",
+        ));
+    }
+    for v in values.iter_mut() {
+        *v /= total;
+    }
+    Ok(())
+}
+
+pub(crate) fn check_finite(value: f64, label: &'static str) -> Result<f64, ExcessGibbsErrorV1> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(ExcessGibbsErrorV1::Unrepresentable(label))
+    }
+}
+
+pub(crate) fn check_positive_pressure(pressure: Pressure) -> Result<f64, ExcessGibbsErrorV1> {
+    let p = pressure.value();
+    if !p.is_finite() || p <= 0.0 {
+        return Err(ExcessGibbsErrorV1::InvalidPressure { pressure_pa: p });
+    }
+    Ok(p)
+}
+
+pub(crate) fn validate_distinct_species(species: &[SpeciesId]) -> Result<(), ExcessGibbsErrorV1> {
+    for i in 0..species.len() {
+        for j in (i + 1)..species.len() {
+            if species[i] == species[j] {
+                return Err(ExcessGibbsErrorV1::InvalidModel(
+                    "duplicate species identity in excess-Gibbs model",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_temperature_domain(
+    min_t: Temperature,
+    max_t: Temperature,
+) -> Result<(), ExcessGibbsErrorV1> {
+    let lo = min_t.value();
+    let hi = max_t.value();
+    if !lo.is_finite() || lo <= 0.0 || !hi.is_finite() || hi < lo {
+        return Err(ExcessGibbsErrorV1::InvalidModel(
+            "temperature domain must be finite, strictly positive, and ordered",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_temperature_in_domain(
+    temperature: Temperature,
+    min_k: f64,
+    max_k: f64,
+) -> Result<f64, ExcessGibbsErrorV1> {
+    let t = temperature.value();
+    if !t.is_finite() || t <= 0.0 || t < min_k || t > max_k {
+        return Err(ExcessGibbsErrorV1::TemperatureOutOfDomain {
+            temperature_k: t,
+            min_k,
+            max_k,
+        });
+    }
+    Ok(t)
+}
+
+pub(crate) fn validate_and_normalize_mole_fractions(
+    mole_fractions: &[f64],
+    expected_len: usize,
+) -> Result<Vec<f64>, ExcessGibbsErrorV1> {
+    if mole_fractions.len() != expected_len {
+        return Err(ExcessGibbsErrorV1::InvalidComposition(
+            "mole fraction length does not match species count",
+        ));
+    }
+    let mut sum = 0.0;
+    let mut comp = 0.0;
+    for &x in mole_fractions {
+        if !x.is_finite() || !(0.0..=1.0).contains(&x) {
+            return Err(ExcessGibbsErrorV1::InvalidComposition(
+                "mole fraction must be finite and in [0, 1]",
+            ));
+        }
+        neumaier_add(&mut sum, &mut comp, x);
+    }
+    let total = sum + comp;
+    if !total.is_finite() || (total - 1.0).abs() > EXCESS_GIBBS_COMPOSITION_SUM_TOLERANCE_V1 {
+        return Err(ExcessGibbsErrorV1::InvalidComposition(
+            "mole fractions must sum to unity",
+        ));
+    }
+    let mut normalized = Vec::with_capacity(expected_len);
+    for &x in mole_fractions {
+        let nx = x / total;
+        if x > 0.0 && nx == 0.0 {
+            return Err(ExcessGibbsErrorV1::Unrepresentable(
+                "positive trace mole fraction underflowed during normalization",
+            ));
+        }
+        normalized.push(nx);
+    }
+    Ok(normalized)
+}
+
+fn neumaier_add(sum: &mut f64, comp: &mut f64, term: f64) {
+    let next = *sum + term;
+    *comp += if sum.abs() >= term.abs() {
+        (*sum - next) + term
+    } else {
+        (term - next) + *sum
+    };
+    *sum = next;
+}

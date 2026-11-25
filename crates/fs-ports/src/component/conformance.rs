@@ -24,9 +24,15 @@
 //! step in units changed by powers of two, which must give the same numbers
 //! in the new units, to the bit.
 //!
+//! For [`StageResidual`]: [`check_stage_residual`] checks unknown-count
+//! consistency, finite initial guess, cancellation polling of `residual`,
+//! root satisfaction at the proposed solution, agreement of `accept` with
+//! `propose` and `audit_step`, `jvp_z` against central finite differences of
+//! both residual and outputs, and `vjp_z` against `jvp_z` by the dot-product
+//! test.
+//!
 //! Not covered yet (bead `frankensim-rc-1109-root-3gc12.5.11`):
-//! [`StageResidual`](super::StageResidual) checks and the temporal order
-//! hook.
+//! the temporal order hook (bead `.14.1`) and property shrinking.
 
 use core::fmt;
 
@@ -35,8 +41,8 @@ use fs_qty::{DIMENSION_COUNT, Dims, Energy, Mass, Power, Temperature, Time};
 
 use super::{
     Carrier, Class, Component, ContractViolation, LoadLine, PortLayout, PortRole, PortSpec,
-    PortTangent, Proposal, Receipt, StepAudit, audit_carried_step, audit_entropy_step,
-    audit_mass_step, audit_step,
+    PortTangent, Proposal, Receipt, StageResidual, StepAudit, audit_carried_step,
+    audit_entropy_step, audit_mass_step, audit_step,
 };
 use crate::Entropy;
 
@@ -1384,4 +1390,258 @@ where
     }
     in_new_units(START_LAW, numbers)?;
     Ok(seen)
+}
+
+/// Check the [`StageResidual`] tier at one operating point and its converged
+/// stage unknowns `z_solution`.
+///
+/// Covered:
+/// 1. Layout and vector lengths (`inputs`, `z_solution` of length `unknowns() > 0`).
+/// 2. `initial_guess` fills a finite starting vector.
+/// 3. `residual` polls `cx` and refuses under a cancelled context.
+/// 4. At `z_solution`, `residual` vanishes within `absolute_tolerance` and its
+///    outputs agree with `propose` within `relative_tolerance * scale + absolute_tolerance`.
+/// 5. `accept` builds a candidate state and receipt passing `audit_step` and
+///    `admit`, and matching `propose`.
+/// 6. `jvp_z` matches central finite differences of `residual` (both `dr` and
+///    `d_outputs`) along three deterministic directions at a perturbed point
+///    `z_probe` (so nonzero residuals and curvature are exercised).
+/// 7. `vjp_z` is the exact transpose of `jvp_z`:
+///    `<bar_r, dr> + <bar_outputs, d_outputs> == <bar_z, dz>`.
+///
+/// # Errors
+/// The first [`Failure`] found.
+#[allow(clippy::too_many_lines)]
+pub fn check_stage_residual<C>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    z_solution: &[f64],
+    relative_tolerance: f64,
+    absolute_tolerance: f64,
+    cx: &Cx<'_>,
+) -> Result<(), Failure<C::Error>>
+where
+    C: StageResidual,
+    C::State: PartialEq + fmt::Debug,
+{
+    let ports = component.ports();
+    let layout = PortLayout::new(ports).map_err(Failure::Contract)?;
+    let (n_in, n_out) = (layout.input_len(), layout.output_len());
+    if case.inputs.len() != n_in {
+        return Err(Failure::Contract(ContractViolation::VectorLength {
+            vector: "inputs",
+            expected: n_in,
+            actual: case.inputs.len(),
+        }));
+    }
+    let n_z = component.unknowns();
+    if n_z == 0 {
+        return Err(law(
+            "StageResidual exposes at least one unknown",
+            "unknowns() returned 0".to_owned(),
+        ));
+    }
+    if z_solution.len() != n_z {
+        return Err(Failure::Contract(ContractViolation::VectorLength {
+            vector: "z",
+            expected: n_z,
+            actual: z_solution.len(),
+        }));
+    }
+
+    // 1. Finite initial guess.
+    let mut guess = vec![f64::NAN; n_z];
+    component
+        .initial_guess(case.state, case.dt_s, case.inputs, &mut guess)
+        .map_err(Failure::Owner)?;
+    if !guess.iter().all(|v| v.is_finite()) {
+        return Err(law(
+            "initial_guess fills every unknown with a finite value",
+            format!("got {guess:?}"),
+        ));
+    }
+
+    // 2. Cancellation polling on residual.
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    let cancelled = Cx::new(&gate, cx.arena(), cx.stream_key(), cx.budget(), cx.mode());
+    let mut cancelled_r = vec![f64::NAN; n_z];
+    let mut cancelled_out = vec![f64::NAN; n_out];
+    if component
+        .residual(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            z_solution,
+            &mut cancelled_r,
+            &mut cancelled_out,
+            &cancelled,
+        )
+        .is_ok()
+    {
+        return Err(law(
+            "StageResidual::residual polls cx: a call under a cancelled context is refused",
+            "residual returned Ok under a pre-cancelled context".to_owned(),
+        ));
+    }
+
+    // 3. Residual vanishes at z_solution and outputs match propose.
+    let mut r_sol = vec![f64::NAN; n_z];
+    let mut out_sol = vec![f64::NAN; n_out];
+    component
+        .residual(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            z_solution,
+            &mut r_sol,
+            &mut out_sol,
+            cx,
+        )
+        .map_err(Failure::Owner)?;
+    for (idx, &val) in r_sol.iter().enumerate() {
+        if !(val.is_finite() && val.abs() <= absolute_tolerance) {
+            return Err(law(
+                "residual vanishes at the converged stage unknowns",
+                format!("r[{idx}] = {val:e}, allowed {absolute_tolerance:e}"),
+            ));
+        }
+    }
+
+    let mut prop_state = case.stale.clone();
+    let mut prop_out = vec![f64::NAN; n_out];
+    let Proposal::Step(_) = component
+        .propose(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            &mut prop_state,
+            &mut prop_out,
+            cx,
+        )
+        .map_err(Failure::Owner)?
+    else {
+        return Err(law(
+            "StageResidual is checked where propose takes the step",
+            "propose asked to shorten".to_owned(),
+        ));
+    };
+    for (idx, (&a, &b)) in out_sol.iter().zip(&prop_out).enumerate() {
+        let scale = a.abs().max(b.abs());
+        if !((a - b).abs() <= relative_tolerance * scale + absolute_tolerance) {
+            return Err(law(
+                "residual outputs at z_solution match propose",
+                format!("output {idx}: residual gave {a:e}, propose gave {b:e}"),
+            ));
+        }
+    }
+
+    // 4. accept matches audit_step, admit, and propose candidate state.
+    let mut accepted_state = case.stale.clone();
+    let receipt = component
+        .accept(case.state, case.dt_s, case.inputs, z_solution, &mut accepted_state)
+        .map_err(Failure::Owner)?;
+    if accepted_state != prop_state {
+        return Err(law(
+            "accept at z_solution produces the same candidate state as propose",
+            format!("accept gave {accepted_state:?}, propose gave {prop_state:?}"),
+        ));
+    }
+    let stored_old = component
+        .stored_energy_j(case.state)
+        .map_err(Failure::Owner)?;
+    let stored_new = component
+        .stored_energy_j(&accepted_state)
+        .map_err(Failure::Owner)?;
+    audit_step(
+        ports,
+        &layout,
+        case.dt_s,
+        case.inputs,
+        &out_sol,
+        &receipt,
+        stored_old,
+        stored_new,
+    )
+    .map_err(Failure::Contract)?;
+    component
+        .admit(case.state, &accepted_state, &receipt)
+        .map_err(Failure::Owner)?;
+
+    // 5. jvp_z against central differences and vjp_z transpose dot-product test.
+    let z_scale = z_solution.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+    let probe_shift = direction(n_z, 999);
+    let z_probe: Vec<f64> = z_solution
+        .iter()
+        .zip(&probe_shift)
+        .map(|(z, s)| z + 1.0e-3 * z_scale * s)
+        .collect();
+    let step = z_scale * f64::EPSILON.cbrt();
+    let mut r_plus = vec![0.0; n_z];
+    let mut r_minus = vec![0.0; n_z];
+    let mut out_plus = vec![0.0; n_out];
+    let mut out_minus = vec![0.0; n_out];
+    let mut dr = vec![0.0; n_z];
+    let mut d_out = vec![0.0; n_out];
+    let mut bar_z = vec![0.0; n_z];
+
+    for seed in 1..=3_u64 {
+        let dz = direction(n_z, seed);
+        let z_plus: Vec<f64> = z_probe.iter().zip(&dz).map(|(z, d)| z + step * d).collect();
+        let z_minus: Vec<f64> = z_probe.iter().zip(&dz).map(|(z, d)| z - step * d).collect();
+        component
+            .residual(case.state, case.dt_s, case.inputs, &z_plus, &mut r_plus, &mut out_plus, cx)
+            .map_err(Failure::Owner)?;
+        component
+            .residual(case.state, case.dt_s, case.inputs, &z_minus, &mut r_minus, &mut out_minus, cx)
+            .map_err(Failure::Owner)?;
+        component
+            .jvp_z(case.state, case.dt_s, case.inputs, &z_probe, &dz, &mut dr, &mut d_out, cx)
+            .map_err(Failure::Owner)?;
+
+        let (mut r_err, mut r_size) = (0.0_f64, 0.0_f64);
+        for ((p, m), j) in r_plus.iter().zip(&r_minus).zip(&dr) {
+            let fd = (p - m) / (2.0 * step);
+            r_err = r_err.max((fd - j).abs());
+            r_size = r_size.max(fd.abs()).max(j.abs());
+        }
+        if !(r_err <= relative_tolerance * r_size + absolute_tolerance) {
+            return Err(law(
+                "jvp_z residual derivative matches finite differences",
+                format!("direction {seed}: max diff {r_err:e}, derivative size {r_size:e}"),
+            ));
+        }
+
+        let (mut o_err, mut o_size) = (0.0_f64, 0.0_f64);
+        for ((p, m), j) in out_plus.iter().zip(&out_minus).zip(&d_out) {
+            let fd = (p - m) / (2.0 * step);
+            o_err = o_err.max((fd - j).abs());
+            o_size = o_size.max(fd.abs()).max(j.abs());
+        }
+        if !(o_err <= relative_tolerance * o_size + absolute_tolerance) {
+            return Err(law(
+                "jvp_z output derivative matches finite differences",
+                format!("direction {seed}: max diff {o_err:e}, derivative size {o_size:e}"),
+            ));
+        }
+
+        let bar_r = direction(n_z, seed + 200);
+        let bar_out = direction(n_out, seed + 300);
+        component
+            .vjp_z(case.state, case.dt_s, case.inputs, &z_probe, &bar_r, &bar_out, &mut bar_z, cx)
+            .map_err(Failure::Owner)?;
+        let left: f64 = bar_r.iter().zip(&dr).map(|(a, b)| a * b).sum::<f64>()
+            + bar_out.iter().zip(&d_out).map(|(a, b)| a * b).sum::<f64>();
+        let right: f64 = bar_z.iter().zip(&dz).map(|(a, b)| a * b).sum();
+        let magnitude: f64 = bar_r.iter().zip(&dr).map(|(a, b)| (a * b).abs()).sum::<f64>()
+            + bar_out.iter().zip(&d_out).map(|(a, b)| (a * b).abs()).sum::<f64>()
+            + bar_z.iter().zip(&dz).map(|(a, b)| (a * b).abs()).sum::<f64>();
+        if !((left - right).abs() <= 64.0 * f64::EPSILON * magnitude + f64::MIN_POSITIVE) {
+            return Err(law(
+                "vjp_z is the transpose of jvp_z",
+                format!("<bar_r, dr> + <bar_out, d_out> = {left}, <bar_z, dz> = {right}"),
+            ));
+        }
+    }
+    Ok(())
 }

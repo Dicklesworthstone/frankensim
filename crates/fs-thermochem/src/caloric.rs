@@ -13,6 +13,11 @@ use crate::{
 use fs_qty::Temperature;
 use std::sync::Arc;
 
+/// Choi-Okos proximate thermophysical properties and piecewise freezing ice fraction.
+pub mod proximate;
+/// Moisture sorption isotherms (GAB and Oswin) and Clausius-Clapeyron isosteric heat.
+pub mod sorption;
+
 /// Operation-tree version for explicit continuous caloric references.
 pub const NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1: u32 = 3;
 

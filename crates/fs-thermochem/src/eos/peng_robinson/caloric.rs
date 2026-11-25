@@ -344,8 +344,10 @@ impl DensityChanges {
         }
         let m = molar_mass.value();
         let b = initial.caloric.parameters.b_mix;
-        let v1 = m / rho1;
-        if !v1.is_finite() || v1 <= b {
+        let c = initial.caloric.parameters.volume_shift_m3_per_mol;
+        let v1_tr = m / rho1;
+        let v1_pr = if c == 0.0 { v1_tr } else { v1_tr + c };
+        if !v1_tr.is_finite() || v1_tr <= 0.0 || !v1_pr.is_finite() || v1_pr <= b {
             return Err(PengRobinsonErrorV1::OutsideCovolume);
         }
         // Canonical density ordering retains exact endpoint reversal, including
@@ -355,35 +357,83 @@ impl DensityChanges {
         } else {
             (rho1, rho0, -1.0)
         };
-        let eta0 = b / (m / lo);
-        let eta1 = b / (m / hi);
-        let free0 = 1.0 - eta0;
-        let free1 = 1.0 - eta1;
-        let d0 = 1.0 + 2.0 * eta0 - eta0 * eta0;
-        let d1 = 1.0 + 2.0 * eta1 - eta1 * eta1;
-        let dr = (hi - lo) / m;
-        let deta = b * dr;
-        let denominator = 1.0 + (eta0 + eta1) - eta0 * eta1;
-        let q = det::sqrt(2.0) * deta / denominator;
-        let atanh_over_q = if q == 0.0 {
-            1.0
+        let value = if c == 0.0 {
+            let eta0 = b / (m / lo);
+            let eta1 = b / (m / hi);
+            let free0 = 1.0 - eta0;
+            let free1 = 1.0 - eta1;
+            let d0 = 1.0 + 2.0 * eta0 - eta0 * eta0;
+            let d1 = 1.0 + 2.0 * eta1 - eta1 * eta1;
+            let dr = (hi - lo) / m;
+            let deta = b * dr;
+            let denominator = 1.0 + (eta0 + eta1) - eta0 * eta1;
+            let q = det::sqrt(2.0) * deta / denominator;
+            let atanh_over_q = if q == 0.0 {
+                1.0
+            } else {
+                (log_one_plus(q) - log_one_plus(-q)) / (2.0 * q)
+            };
+            let offset = -deta / free0;
+            let log_free_volume = if offset > -1.0 {
+                log_one_plus(offset)
+            } else {
+                det::ln(free1) - det::ln(free0)
+            };
+            Self {
+                integral: sign * (dr / denominator) * atanh_over_q,
+                excluded_volume: sign * deta / (free0 * free1),
+                attractive_volume: sign * dr * (1.0 + eta0 * eta1) / (d0 * d1),
+                log_free_volume: sign * log_free_volume,
+                mean_excluded_volume: mean(eta0 / free0, eta1 / free1),
+                mean_attractive_volume: mean((lo / m) / d0, (hi / m) / d1),
+                log_density_ratio: log_ratio(rho1, rho0),
+            }
         } else {
-            (log_one_plus(q) - log_one_plus(-q)) / (2.0 * q)
-        };
-        let offset = -deta / free0;
-        let log_free_volume = if offset > -1.0 {
-            log_one_plus(offset)
-        } else {
-            det::ln(free1) - det::ln(free0)
-        };
-        let value = Self {
-            integral: sign * (dr / denominator) * atanh_over_q,
-            excluded_volume: sign * deta / (free0 * free1),
-            attractive_volume: sign * dr * (1.0 + eta0 * eta1) / (d0 * d1),
-            log_free_volume: sign * log_free_volume,
-            mean_excluded_volume: mean(eta0 / free0, eta1 / free1),
-            mean_attractive_volume: mean((lo / m) / d0, (hi / m) / d1),
-            log_density_ratio: log_ratio(rho1, rho0),
+            let v_hi_tr = m / lo;
+            let v_lo_tr = m / hi;
+            let v_hi_pr = v_hi_tr + c;
+            let v_lo_pr = v_lo_tr + c;
+            let eta0 = b / v_hi_pr;
+            let eta1 = b / v_lo_pr;
+            let free0 = 1.0 - eta0;
+            let free1 = 1.0 - eta1;
+            let d0 = 1.0 + 2.0 * eta0 - eta0 * eta0;
+            let d1 = 1.0 + 2.0 * eta1 - eta1 * eta1;
+            let dv = m * (hi - lo) / (lo * hi);
+            let dr = dv / (v_hi_pr * v_lo_pr);
+            let deta = b * dr;
+            let denominator = 1.0 + (eta0 + eta1) - eta0 * eta1;
+            let q = det::sqrt(2.0) * deta / denominator;
+            let atanh_over_q = if q == 0.0 {
+                1.0
+            } else {
+                (log_one_plus(q) - log_one_plus(-q)) / (2.0 * q)
+            };
+            let excl_scale = (b - c) / b;
+            let u0 = v_hi_tr / v_hi_pr;
+            let u1 = v_lo_tr / v_lo_pr;
+            let gamma0 = c / v_hi_pr;
+            let gamma1 = c / v_lo_pr;
+            let attractive_factor =
+                u0 * u1 - gamma0 * gamma1 - eta0 * gamma1 - eta1 * gamma0 + eta0 * eta1;
+            let offset = ((c - b) * dv) / ((v_hi_pr - b) * v_lo_tr);
+            let log_free_volume = if offset.is_finite() && offset > -1.0 {
+                log_one_plus(offset)
+            } else {
+                det::ln((v_lo_pr - b) / v_lo_tr) - det::ln((v_hi_pr - b) / v_hi_tr)
+            };
+            Self {
+                integral: sign * (dr / denominator) * atanh_over_q,
+                excluded_volume: sign * excl_scale * deta / (free0 * free1),
+                attractive_volume: sign * dr * attractive_factor / (d0 * d1),
+                log_free_volume: sign * log_free_volume,
+                mean_excluded_volume: excl_scale * mean(eta0 / free0, eta1 / free1),
+                mean_attractive_volume: mean(
+                    (v_hi_tr / (v_hi_pr * v_hi_pr)) / d0,
+                    (v_lo_tr / (v_lo_pr * v_lo_pr)) / d1,
+                ),
+                log_density_ratio: log_ratio(rho1, rho0),
+            }
         };
         if [
             value.integral,

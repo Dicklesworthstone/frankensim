@@ -45,10 +45,55 @@ use core::ops::Range;
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
-use fs_qty::chemistry::SpeciesId;
+pub use fs_qty::MolarMass;
+pub use fs_qty::chemistry::{ElementalMatrix, SpeciesId};
 use fs_qty::{Dims, Mass};
 
 use crate::{PortKind, StableId};
+
+/// Canonical enthalpy reference for all coupled kitchen mass+enthalpy streams
+/// (`kitchen_gas_v1` and `kitchen_liquid_v1`), matching JANAF 298.15 K
+/// formation enthalpy.
+pub const ENTHALPY_REF_JANAF_298K_FORMATION: &str = "janaf-298.15K-formation";
+
+/// Canonical enthalpy reference for closed heat-only refrigerant loops
+/// (`refrigerant_v1`), matching IIR 273.15 K saturated liquid convention.
+pub const ENTHALPY_REF_IIR_273K: &str = "iir-273.15K";
+
+/// Canonical refrigerant species identifiers supported by [`refrigerant_v1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefrigerantSpecies {
+    /// Propane (R-290).
+    R290,
+    /// Zeotropic HFC blend R-404A.
+    R404A,
+    /// Low-GWP HFO/HFC blend R-448A.
+    R448A,
+    /// Tetrafluoroethane (R-134a).
+    R134a,
+    /// Carbon dioxide (R-744, transcritical capable).
+    R744,
+}
+
+impl RefrigerantSpecies {
+    /// Canonical species identifier string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::R290 => "R290",
+            Self::R404A => "R404A",
+            Self::R448A => "R448A",
+            Self::R134a => "R134a",
+            Self::R744 => "R744",
+        }
+    }
+}
+
+impl AsRef<str> for RefrigerantSpecies {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 
 /// Version of the executable Component contract.
 pub const COMPONENT_CONTRACT_VERSION: u16 = 0;
@@ -203,6 +248,119 @@ impl StreamBasis {
     pub fn quantities(&self) -> &[StreamQuantity] {
         &self.quantities
     }
+}
+
+fn stable_id_for_basis(kind: &'static str, value: &str) -> Result<StableId, ContractViolation> {
+    StableId::new(value).map_err(|_| ContractViolation::InvalidStreamBasis {
+        reason: kind,
+        detail: value.to_owned(),
+    })
+}
+
+fn species_quantity(name: &str) -> Result<StreamQuantity, ContractViolation> {
+    SpeciesId::new(name)
+        .map(StreamQuantity::SpeciesMass)
+        .map_err(|_| ContractViolation::InvalidStreamBasis {
+            reason: "invalid canonical species identifier",
+            detail: name.to_owned(),
+        })
+}
+
+/// Canonical gas-phase stream basis for coupled kitchen air, combustion,
+/// exhaust, and vapor streams on the [`ENTHALPY_REF_JANAF_298K_FORMATION`]
+/// absolute enthalpy datum.
+///
+/// Carried coordinates in wire order:
+/// `[H2O, C2H5OH, CO2, O2, N2, CH4, C3H8, CO, grease_vapor]`.
+///
+/// # Errors
+/// Returns [`ContractViolation`] only if identifier or basis validation fails.
+pub fn kitchen_gas_v1() -> Result<StreamBasis, ContractViolation> {
+    const SPECIES: [&str; 9] = [
+        "H2O",
+        "C2H5OH",
+        "CO2",
+        "O2",
+        "N2",
+        "CH4",
+        "C3H8",
+        "CO",
+        "grease_vapor",
+    ];
+    let mut quantities = Vec::with_capacity(SPECIES.len());
+    for name in SPECIES {
+        quantities.push(species_quantity(name)?);
+    }
+    StreamBasis::new(
+        stable_id_for_basis("invalid medium identifier", "kitchen-gas-v1")?,
+        stable_id_for_basis(
+            "invalid enthalpy reference",
+            ENTHALPY_REF_JANAF_298K_FORMATION,
+        )?,
+        quantities,
+    )
+}
+
+/// Canonical liquid-phase stream basis for coupled kitchen aqueous, ethanol,
+/// oil, and dissolved-solute streams on the
+/// [`ENTHALPY_REF_JANAF_298K_FORMATION`] absolute enthalpy datum.
+///
+/// Includes `glycerol` alongside `triglyceride`, `H2O`, and `ffa` so oil
+/// hydrolysis closes atom-for-atom against [`ElementalMatrix`].
+///
+/// Carried coordinates in wire order:
+/// `[H2O, C2H5OH, triglyceride, ffa, glycerol, solute_salt, solute_sugar, solute_fond]`.
+///
+/// # Errors
+/// Returns [`ContractViolation`] only if identifier or basis validation fails.
+pub fn kitchen_liquid_v1() -> Result<StreamBasis, ContractViolation> {
+    const SPECIES: [&str; 8] = [
+        "H2O",
+        "C2H5OH",
+        "triglyceride",
+        "ffa",
+        "glycerol",
+        "solute_salt",
+        "solute_sugar",
+        "solute_fond",
+    ];
+    let mut quantities = Vec::with_capacity(SPECIES.len());
+    for name in SPECIES {
+        quantities.push(species_quantity(name)?);
+    }
+    StreamBasis::new(
+        stable_id_for_basis("invalid medium identifier", "kitchen-liquid-v1")?,
+        stable_id_for_basis(
+            "invalid enthalpy reference",
+            ENTHALPY_REF_JANAF_298K_FORMATION,
+        )?,
+        quantities,
+    )
+}
+
+/// Canonical closed-loop refrigerant stream basis on the
+/// [`ENTHALPY_REF_IIR_273K`] enthalpy datum.
+///
+/// Refrigerant streams must remain on closed loops that couple to kitchen air
+/// or food only through `Carrier::Heat` ports. Each refrigerant species gets
+/// its own medium identifier (`refrigerant-v1/<species>`) so distinct working
+/// fluids cannot be bonded.
+///
+/// # Errors
+/// Returns [`ContractViolation::InvalidStreamBasis`] if `species` is not a
+/// valid canonical species/medium identifier.
+pub fn refrigerant_v1(species: impl AsRef<str>) -> Result<StreamBasis, ContractViolation> {
+    let name = species.as_ref();
+    let quantity = species_quantity(name)?;
+    let medium = stable_id_for_basis(
+        "invalid refrigerant medium identifier",
+        &format!("refrigerant-v1/{name}"),
+    )?;
+    StreamBasis::new(
+        medium,
+        stable_id_for_basis("invalid enthalpy reference", ENTHALPY_REF_IIR_273K)?,
+        vec![quantity],
+    )
 }
 
 /// Which side of a port the component receives.
@@ -780,28 +938,67 @@ impl PortSpec {
     }
 }
 
-/// Offsets of each port inside a component's input and output vectors.
+/// Offsets of each port inside a component's input and output vectors,
+/// together with the semantic carried-coordinate layout across stream ports.
 ///
-/// Ports are laid out in declaration order. Building the layout also admits
-/// the port list: identifiers are unique and carriers agree with roles.
+/// Ports are laid out in declaration order. Building the layout admits the
+/// port list: identifiers are unique, carriers agree with roles, and stream
+/// ports admit either a consistent semantic union of identified
+/// [`StreamBasis`] coordinates or positional unidentified streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortLayout {
     input_offsets: Vec<usize>,
     output_offsets: Vec<usize>,
+    /// Deterministic ordered union of identified carried quantities across all
+    /// stream ports of this component (empty for non-stream or unidentified
+    /// stream components).
+    carried_quantities: Vec<StreamQuantity>,
+    /// Total component-level carried inventory slots (`carried_quantities.len()`
+    /// for identified streams, or max port `carried_quantities()` for
+    /// unidentified streams).
+    carried_count: usize,
+    /// Whether this component declares identified stream ports.
+    identified_streams: bool,
+    /// CSR offsets into `port_carried_slots`, one range per port.
+    port_carried_offsets: Vec<usize>,
+    /// For each port's local carried coordinate `c`, the component-level
+    /// carried slot index `0..carried_count`.
+    port_carried_slots: Vec<usize>,
 }
 
 impl PortLayout {
     /// Lay out `ports` in order.
     ///
+    /// Multiple identified stream ports on one component may carry different
+    /// [`StreamBasis`]es (for example [`kitchen_gas_v1`] and
+    /// [`kitchen_liquid_v1`], or a subset and superset basis). Their carried
+    /// coordinates are unified deterministically in declaration order by
+    /// semantic [`StreamQuantity`] identity, and each port's local coordinates
+    /// map to component-level inventory slots.
+    ///
     /// # Errors
-    /// [`ContractViolation::DuplicatePort`] for a repeated identifier and
-    /// [`ContractViolation::PortRole`] for a carrier that disagrees with its
-    /// role. Identified stream ports of one owner must assign the same
-    /// quantity to each shared ordinal, as required by its inventory audit.
+    /// - [`ContractViolation::DuplicatePort`] for a repeated identifier.
+    /// - [`ContractViolation::PortRole`] for a carrier that disagrees with its
+    ///   role.
+    /// - [`ContractViolation::StreamCoordinate`] when a component mixes
+    ///   identified and unidentified stream ports, declares conflicting SI
+    ///   dimensions for the same semantic quantity identity, or declares two
+    ///   ports of the same medium with permuted identical coordinate sets.
+    /// - [`ContractViolation::StreamDatumMismatch`] when two identified stream
+    ///   ports share a medium or any carried quantity identity while declaring
+    ///   different enthalpy references.
+    #[allow(clippy::too_many_lines)]
     pub fn new(ports: &[PortSpec]) -> Result<Self, ContractViolation> {
         let mut input_offsets = Vec::with_capacity(ports.len() + 1);
         let mut output_offsets = Vec::with_capacity(ports.len() + 1);
+        let mut port_carried_offsets = Vec::with_capacity(ports.len() + 1);
+        let mut port_carried_slots = Vec::new();
+        let mut carried_quantities: Vec<StreamQuantity> = Vec::new();
         let (mut input, mut output) = (0_usize, 0_usize);
+        let mut any_identified = false;
+        let mut any_unidentified = false;
+        let mut max_unidentified_carried = 0_usize;
+
         for (index, port) in ports.iter().enumerate() {
             if ports[..index].iter().any(|earlier| earlier.id == port.id) {
                 return Err(ContractViolation::DuplicatePort {
@@ -814,31 +1011,136 @@ impl PortLayout {
                     port: port.id.as_str().to_owned(),
                 });
             }
-            if let Some(basis) = port.stream_basis() {
-                for earlier in &ports[..index] {
-                    if let Some(other) = earlier.stream_basis() {
-                        if let Some(carried) = basis.quantities().iter()
-                            .zip(other.quantities()).position(|(a, b)| a != b)
+            if port.carrier == Carrier::Stream {
+                if let Some(basis) = port.stream_basis() {
+                    any_identified = true;
+                    for earlier in &ports[..index] {
+                        if earlier.carrier != Carrier::Stream {
+                            continue;
+                        }
+                        let Some(other) = earlier.stream_basis() else {
+                            return Err(ContractViolation::StreamCoordinate {
+                                a: earlier.id.as_str().to_owned(),
+                                b: port.id.as_str().to_owned(),
+                                carried: 0,
+                            });
+                        };
+                        let mut shares_quantity = false;
+                        for (local, qty) in basis.quantities().iter().enumerate() {
+                            if let Some(matched) = other
+                                .quantities()
+                                .iter()
+                                .find(|earlier_qty| earlier_qty.same_identity(qty))
+                            {
+                                shares_quantity = true;
+                                if matched != qty {
+                                    return Err(ContractViolation::StreamCoordinate {
+                                        a: earlier.id.as_str().to_owned(),
+                                        b: port.id.as_str().to_owned(),
+                                        carried: local,
+                                    });
+                                }
+                            }
+                        }
+                        let same_medium = other.medium() == basis.medium();
+                        if (same_medium || shares_quantity)
+                            && other.enthalpy_reference() != basis.enthalpy_reference()
+                        {
+                            return Err(ContractViolation::StreamDatumMismatch {
+                                a: earlier.id.as_str().to_owned(),
+                                b: port.id.as_str().to_owned(),
+                                reference_a: other.enthalpy_reference().as_str().to_owned(),
+                                reference_b: basis.enthalpy_reference().as_str().to_owned(),
+                            });
+                        }
+                        if same_medium && other.quantities() != basis.quantities() {
+                            let other_subset = other
+                                .quantities()
+                                .iter()
+                                .all(|q| basis.quantities().contains(q));
+                            let basis_subset = basis
+                                .quantities()
+                                .iter()
+                                .all(|q| other.quantities().contains(q));
+                            if other_subset && basis_subset {
+                                let carried = basis
+                                    .quantities()
+                                    .iter()
+                                    .zip(other.quantities())
+                                    .position(|(a, b)| a != b)
+                                    .unwrap_or(0);
+                                return Err(ContractViolation::StreamCoordinate {
+                                    a: earlier.id.as_str().to_owned(),
+                                    b: port.id.as_str().to_owned(),
+                                    carried,
+                                });
+                            }
+                        }
+                    }
+                    port_carried_offsets.push(port_carried_slots.len());
+                    for qty in basis.quantities() {
+                        let slot = if let Some(existing) =
+                            carried_quantities.iter().position(|known| known == qty)
+                        {
+                            existing
+                        } else {
+                            let next = carried_quantities.len();
+                            carried_quantities.push(qty.clone());
+                            next
+                        };
+                        port_carried_slots.push(slot);
+                    }
+                } else {
+                    any_unidentified = true;
+                    if any_identified {
+                        if let Some(earlier) = ports[..index]
+                            .iter()
+                            .find(|p| p.carrier == Carrier::Stream && p.stream_basis().is_some())
                         {
                             return Err(ContractViolation::StreamCoordinate {
                                 a: earlier.id.as_str().to_owned(),
                                 b: port.id.as_str().to_owned(),
-                                carried,
+                                carried: 0,
                             });
                         }
                     }
+                    let count = port.carried_quantities();
+                    max_unidentified_carried = max_unidentified_carried.max(count);
+                    port_carried_offsets.push(port_carried_slots.len());
+                    port_carried_slots.extend(0..count);
                 }
+            } else {
+                port_carried_offsets.push(port_carried_slots.len());
             }
             input_offsets.push(input);
             output_offsets.push(output);
             input += port.input_width();
             output += port.output_width();
         }
+        if any_identified && any_unidentified {
+            // Unreachable because both directions are checked above, kept defensive.
+            return Err(ContractViolation::StreamCoordinate {
+                a: String::new(),
+                b: String::new(),
+                carried: 0,
+            });
+        }
         input_offsets.push(input);
         output_offsets.push(output);
+        port_carried_offsets.push(port_carried_slots.len());
+        let carried_count = if any_identified {
+            carried_quantities.len()
+        } else {
+            max_unidentified_carried
+        };
         Ok(Self {
             input_offsets,
             output_offsets,
+            carried_quantities,
+            carried_count,
+            identified_streams: any_identified,
+            port_carried_offsets,
+            port_carried_slots,
         })
     }
 
@@ -870,6 +1172,63 @@ impl PortLayout {
     #[must_use]
     pub fn output_range(&self, port: usize) -> Range<usize> {
         self.output_offsets[port]..self.output_offsets[port + 1]
+    }
+
+    /// Total number of distinct carried inventory slots across all stream ports
+    /// of this component.
+    #[must_use]
+    pub fn carried_len(&self) -> usize {
+        self.carried_count
+    }
+
+    /// Canonical ordered union of identified carried quantities across all
+    /// stream ports of this component (empty for non-stream or unidentified
+    /// stream components).
+    #[must_use]
+    pub fn carried_quantities(&self) -> &[StreamQuantity] {
+        &self.carried_quantities
+    }
+
+    /// Whether this component has at least one identified stream port.
+    #[must_use]
+    pub fn has_identified_streams(&self) -> bool {
+        self.identified_streams
+    }
+
+    /// Component-level carried slots corresponding to each local carried
+    /// coordinate of `port` (empty for non-stream ports or out-of-range port).
+    #[must_use]
+    pub fn port_carried_slots(&self, port: usize) -> &[usize] {
+        let Some(&start) = self.port_carried_offsets.get(port) else {
+            return &[];
+        };
+        let Some(&end) = self.port_carried_offsets.get(port + 1) else {
+            return &[];
+        };
+        &self.port_carried_slots[start..end]
+    }
+
+    /// Component-level carried slot for local coordinate `local` on `port`.
+    #[must_use]
+    pub fn port_carried_slot(&self, port: usize, local: usize) -> Option<usize> {
+        self.port_carried_slots(port).get(local).copied()
+    }
+
+    /// Local carried coordinate index on `port` mapped to component-level
+    /// carried slot `carried`, or `None` if `port` does not carry it.
+    #[must_use]
+    pub fn port_local_for_carried(&self, port: usize, carried: usize) -> Option<usize> {
+        self.port_carried_slots(port)
+            .iter()
+            .position(|&slot| slot == carried)
+    }
+
+    /// Component-level carried slot for semantic `quantity`, if present.
+    #[must_use]
+    pub fn carried_slot_of(&self, quantity: &StreamQuantity) -> Option<usize> {
+        self.carried_quantities
+            .iter()
+            .position(|known| known == quantity)
     }
 }
 
@@ -1022,18 +1381,48 @@ pub trait Component {
 
     /// Independently measured inventory of one carried stream coordinate.
     ///
-    /// `carried` is zero-based after mass and enthalpy, in the same order on
-    /// every stream of this owner. `None` is unavailable; stateless transport
-    /// can declare `Some(0.0)`. Finite signed inventories are allowed (for
-    /// example a momentum coordinate). Declaring one opts into conservation:
-    /// reactions or internal production must not masquerade as transport.
-    /// Coordinate meaning and units must agree between connected owners.
+    /// `carried` indexes the component's canonical carried-coordinate layout
+    /// (`0..PortLayout::carried_len()`, which matches the local ordinal for
+    /// single-basis and unidentified streams). `None` is unavailable; stateless
+    /// transport can declare `Some(0.0)`. Finite signed inventories are allowed
+    /// (for example a momentum coordinate). Declaring one opts into
+    /// conservation: reactions must be declared through
+    /// [`Self::carried_production`] and [`Self::reaction_basis`], never
+    /// masqueraded as transport.
     fn stored_carried_quantity(
         &self,
         _state: &Self::State,
         _carried: usize,
     ) -> Result<Option<f64>, Self::Error> {
         Ok(None)
+    }
+
+    /// Step-averaged net internal reactive production rate
+    /// `[inventory unit / s]` of component carried slot `carried` over the step
+    /// `dt_s` from `old` to `new`.
+    ///
+    /// Positive values denote production; negative values denote consumption.
+    /// `Ok(None)` (the default) declares no reactive production. Any nonzero
+    /// production requires [`Self::reaction_basis`] to supply an
+    /// [`ElementalMatrix`] and species [`MolarMass`] table so
+    /// [`audit_carried_reactions`] can prove `A * (m_dot / M) == 0` and
+    /// `sum(m_dot) == 0`.
+    fn carried_production(
+        &self,
+        _old: &Self::State,
+        _new: &Self::State,
+        _dt_s: f64,
+        _carried: usize,
+    ) -> Result<Option<f64>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Elemental stoichiometry matrix and species molar masses `[kg/mol]`
+    /// governing reactive [`Self::carried_production`].
+    ///
+    /// `None` (the default) declares a non-reacting component.
+    fn reaction_basis(&self) -> Option<(&ElementalMatrix, &[(SpeciesId, MolarMass)])> {
+        None
     }
 
     /// Largest step not above `proposed_s` the component accepts from `state`.
@@ -1338,7 +1727,9 @@ pub trait StageResidual: Component {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractViolation {
     /// An owner's identified stream ports disagree on a conserved coordinate
-    /// used by the same ordinal inventory measurement.
+    /// used by the same ordinal inventory measurement, declare conflicting SI
+    /// dimensions for the same semantic quantity, or mix identified and
+    /// unidentified streams.
     StreamCoordinate {
         /// Earlier port.
         a: String,
@@ -1346,6 +1737,47 @@ pub enum ContractViolation {
         b: String,
         /// Zero-based carried coordinate.
         carried: usize,
+    },
+    /// Two identified stream ports on the same component share a medium or
+    /// carried quantity identity while declaring different enthalpy references.
+    StreamDatumMismatch {
+        /// Earlier port.
+        a: String,
+        /// Conflicting port.
+        b: String,
+        /// Enthalpy reference of port `a`.
+        reference_a: String,
+        /// Enthalpy reference of port `b`.
+        reference_b: String,
+    },
+    /// A canonical stream basis could not be built from the supplied identifier.
+    InvalidStreamBasis {
+        /// Why the basis declaration was refused.
+        reason: &'static str,
+        /// Rejected identifier text.
+        detail: String,
+    },
+    /// Reactive `carried_production` lacks a valid elemental/molar-mass basis.
+    ReactionBasis {
+        /// Why the reaction basis was refused.
+        reason: &'static str,
+    },
+    /// Reactive mass production rates fail `sum(m_dot) == 0`.
+    ReactionMassImbalance {
+        /// Net mass production rate sum [kg/s].
+        mass_rate_sum_kg_s: f64,
+        /// Applied tolerance [kg/s].
+        tolerance_kg_s: f64,
+    },
+    /// Reactive molar production rates `n_dot_i = m_dot_i / M_i` fail
+    /// `A * n_dot == 0` for `element`.
+    ElementalImbalance {
+        /// Canonical element symbol whose balance failed.
+        element: String,
+        /// Net molar production rate of `element` [mol/s].
+        residual_mol_s: f64,
+        /// Applied tolerance [mol/s].
+        tolerance_mol_s: f64,
     },
     /// Two conserved stream coordinates use the same semantic identity.
     DuplicateStreamQuantity {
@@ -1545,20 +1977,73 @@ impl fmt::Display for ContractViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StreamCoordinate { a, b, carried } => write!(
-                f, "stream ports `{a}` and `{b}` disagree on conserved coordinate {carried}"
+                f,
+                "stream ports `{a}` and `{b}` disagree on conserved coordinate {carried}"
+            ),
+            Self::StreamDatumMismatch {
+                a,
+                b,
+                reference_a,
+                reference_b,
+            } => write!(
+                f,
+                "stream ports `{a}` ({reference_a}) and `{b}` ({reference_b}) share a medium or \
+                 carried quantity across incompatible enthalpy datums"
+            ),
+            Self::InvalidStreamBasis { reason, detail } => {
+                write!(f, "invalid stream basis ({reason}): `{detail}`")
+            }
+            Self::ReactionBasis { reason } => write!(f, "invalid reaction basis: {reason}"),
+            Self::ReactionMassImbalance {
+                mass_rate_sum_kg_s,
+                tolerance_kg_s,
+            } => write!(
+                f,
+                "reactive carried mass production sum {mass_rate_sum_kg_s} kg/s exceeds tolerance \
+                 {tolerance_kg_s} kg/s"
+            ),
+            Self::ElementalImbalance {
+                element,
+                residual_mol_s,
+                tolerance_mol_s,
+            } => write!(
+                f,
+                "reactive elemental balance for `{element}`: residual {residual_mol_s} mol/s \
+                 exceeds tolerance {tolerance_mol_s} mol/s"
             ),
             Self::DuplicateStreamQuantity { first, index } => write!(
-                f, "stream coordinates {first} and {index} repeat a quantity identity"
+                f,
+                "stream coordinates {first} and {index} repeat a quantity identity"
             ),
             Self::StreamWidth { carried } => write!(
-                f, "stream with {carried} carried coordinates has an unrepresentable width"
+                f,
+                "stream with {carried} carried coordinates has an unrepresentable width"
             ),
-            Self::CarriedAvailability { carried, old_available, new_available } => write!(f,
-                "carried inventory {carried} availability changed: accepted {old_available}, candidate {new_available}"),
-            Self::StoredCarried { carried, endpoint, value } => write!(f,
-                "carried inventory {carried} at {endpoint} is not finite: {value}"),
-            Self::CarriedBalance { carried, port_in, stored_change, tolerance } => write!(f,
-                "carried inventory {carried}: port input {port_in} != stored change {stored_change} within {tolerance}"),
+            Self::CarriedAvailability {
+                carried,
+                old_available,
+                new_available,
+            } => write!(
+                f,
+                "carried inventory {carried} availability changed: accepted {old_available}, candidate {new_available}"
+            ),
+            Self::StoredCarried {
+                carried,
+                endpoint,
+                value,
+            } => write!(
+                f,
+                "carried inventory {carried} at {endpoint} is not finite: {value}"
+            ),
+            Self::CarriedBalance {
+                carried,
+                port_in,
+                stored_change,
+                tolerance,
+            } => write!(
+                f,
+                "carried inventory {carried}: port input {port_in} != stored change {stored_change} within {tolerance}"
+            ),
             Self::DuplicatePort { port } => write!(f, "port identifier `{port}` is used twice"),
             Self::PortRole { port } => {
                 write!(
@@ -1992,21 +2477,28 @@ fn entropy_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractVio
 pub struct CarriedStepAudit {
     /// Net transported amount entering the owner, in the coordinate's unit.
     pub port_in: f64,
+    /// Net internal reactive production over the step (`dt_s * rate`), in the
+    /// coordinate's unit. Zero for non-reacting coordinates.
+    pub production: f64,
     /// Candidate inventory minus accepted inventory.
     pub stored_change: f64,
-    /// Port input minus inventory change, retaining compensated small terms.
+    /// Port input plus production minus inventory change, retaining
+    /// compensated small terms.
     pub balance_defect: f64,
     /// Applied floating-point rounding allowance.
     pub tolerance: f64,
 }
 
-/// Audit one carried coordinate against independent endpoint measurements.
+/// Audit one carried coordinate against independent endpoint measurements,
+/// with zero internal reactive production.
 ///
-/// Coordinates are zero-based after mass and enthalpy. Owners declare the
-/// correspondence across their ports; missing coordinates contribute no
-/// transfer. Signed inventories are allowed, and both `None` means unknown.
-/// No allocation; the scaled compensated sum uses the same 128-epsilon
-/// rounding model as the mass audit, independently for every coordinate.
+/// Coordinates index the component's canonical carried layout
+/// (`0..layout.carried_len()`). Transfers across multi-basis stream ports are
+/// routed semantically through [`PortLayout::port_local_for_carried`]; ports
+/// that do not carry `carried` contribute zero. Signed inventories are
+/// allowed, and both `None` means unknown. No allocation; the scaled
+/// compensated sum uses the same 128-epsilon rounding model as the mass audit,
+/// independently for every coordinate.
 ///
 /// # Errors
 /// Refuses malformed/nonfinite wires, a missing endpoint, nonfinite inventory
@@ -2021,6 +2513,37 @@ pub fn audit_carried_step(
     carried: usize,
     stored_old: Option<f64>,
     stored_new: Option<f64>,
+) -> Result<Option<CarriedStepAudit>, ContractViolation> {
+    audit_carried_step_with_production(
+        ports, layout, dt_s, inputs, outputs, carried, stored_old, stored_new, None,
+    )
+}
+
+/// Audit one carried coordinate against independent endpoint measurements and
+/// an optional step-averaged internal reactive production rate
+/// (`production_rate` in inventory units per second).
+///
+/// Callers with nonzero reactive production must also invoke
+/// [`audit_carried_reactions`] over the component's full production slice to
+/// prove `A * (m_dot / M) == 0` and `sum(m_dot) == 0`.
+///
+/// No allocation.
+///
+/// # Errors
+/// Refuses malformed/nonfinite wires, nonfinite production rate or amount, a
+/// missing endpoint, nonfinite inventory or account, and a conservation defect
+/// beyond floating-point rounding.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn audit_carried_step_with_production(
+    ports: &[PortSpec],
+    layout: &PortLayout,
+    dt_s: f64,
+    inputs: &[f64],
+    outputs: &[f64],
+    carried: usize,
+    stored_old: Option<f64>,
+    stored_new: Option<f64>,
+    production_rate: Option<f64>,
 ) -> Result<Option<CarriedStepAudit>, ContractViolation> {
     if !(dt_s.is_finite() && dt_s > 0.0) {
         return Err(ContractViolation::Step { dt_s });
@@ -2038,18 +2561,49 @@ pub fn audit_carried_step(
             });
         }
     }
+    for (index, port) in ports.iter().enumerate() {
+        let expected = layout.port_carried_slots(index).len();
+        let actual = port.carried_quantities();
+        if expected != actual {
+            return Err(ContractViolation::VectorLength {
+                vector: "port carried layout",
+                expected,
+                actual,
+            });
+        }
+    }
     if !inputs.iter().chain(outputs).all(|value| value.is_finite()) {
         return Err(ContractViolation::NonFinite {
             quantity: "carried port values",
         });
     }
+    let prod_amount = match production_rate {
+        None => None,
+        Some(rate) => {
+            if !rate.is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "carried production rate",
+                });
+            }
+            let amount = dt_s * rate;
+            if !amount.is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "carried production amount",
+                });
+            }
+            Some(amount)
+        }
+    };
     let transfers = ports.iter().enumerate().map(|(index, port)| {
-        port.carried_quantity_in(
-            dt_s,
-            &inputs[layout.input_range(index)],
-            &outputs[layout.output_range(index)],
-            carried,
-        )
+        match layout.port_local_for_carried(index, carried) {
+            Some(local) => port.carried_quantity_in(
+                dt_s,
+                &inputs[layout.input_range(index)],
+                &outputs[layout.output_range(index)],
+                local,
+            ),
+            None => 0.0,
+        }
     });
     let mut scale = 0.0_f64;
     for transfer in transfers.clone() {
@@ -2059,6 +2613,9 @@ pub fn audit_carried_step(
             });
         }
         scale = scale.max(transfer.abs());
+    }
+    if let Some(amount) = prod_amount {
+        scale = scale.max(amount.abs());
     }
     for (endpoint, inventory) in [("accepted", stored_old), ("candidate", stored_new)] {
         if let Some(value) = inventory {
@@ -2086,17 +2643,30 @@ pub fn audit_carried_step(
     let scale = if scale == 0.0 { 1.0 } else { scale };
     let transfers = transfers.map(|value| value / scale);
     let net = carried_sum(transfers.clone())?;
-    let absolute = carried_sum(transfers.clone().map(f64::abs))?;
-    let defect = carried_sum(transfers.chain([old / scale, -new / scale]))?;
+    let (absolute, defect, production_val) = match prod_amount {
+        None => {
+            let absolute = carried_sum(transfers.clone().map(f64::abs))?;
+            let defect = carried_sum(transfers.chain([old / scale, -new / scale]))?;
+            (absolute, defect, 0.0)
+        }
+        Some(amount) => {
+            let scaled_prod = amount / scale;
+            let absolute = carried_sum(transfers.clone().map(f64::abs).chain([scaled_prod.abs()]))?;
+            let defect = carried_sum(transfers.chain([scaled_prod, old / scale, -new / scale]))?;
+            (absolute, defect, amount)
+        }
+    };
     let tolerance = 128.0 * f64::EPSILON * absolute.max(old.abs() / scale).max(new.abs() / scale);
     let audit = CarriedStepAudit {
         port_in: net * scale,
+        production: production_val,
         stored_change: carried_sum([new / scale, -old / scale])? * scale,
         balance_defect: defect * scale,
         tolerance: tolerance * scale,
     };
     if ![
         audit.port_in,
+        audit.production,
         audit.stored_change,
         audit.balance_defect,
         audit.tolerance,
@@ -2111,12 +2681,231 @@ pub fn audit_carried_step(
     if !(defect.abs() <= tolerance) {
         return Err(ContractViolation::CarriedBalance {
             carried,
-            port_in: audit.port_in,
+            port_in: audit.port_in + audit.production,
             stored_change: audit.stored_change,
             tolerance: audit.tolerance,
         });
     }
     Ok(Some(audit))
+}
+
+/// Audit elemental stoichiometry (`A * (m_dot / M) == 0`) and total mass rate
+/// closure (`sum(m_dot) == 0`) across a component's carried production rates.
+///
+/// `productions` must have length `layout.carried_len()`, indexed by canonical
+/// component carried slot (`0..layout.carried_len()`). `None` and `Some(0.0)`
+/// both denote zero production. No allocation on passing calls.
+///
+/// # Errors
+/// - [`ContractViolation::VectorLength`] if `productions.len() != layout.carried_len()`.
+/// - [`ContractViolation::NonFinite`] if any rate or converted molar rate is nonfinite.
+/// - [`ContractViolation::ReactionBasis`] if nonzero production lacks a valid
+///   `reaction_basis`, if `molar_masses` contains non-positive or duplicate
+///   entries, if an elemental-matrix species lacks a molar mass, or if a
+///   reacting coordinate is not a species present in `ElementalMatrix`.
+/// - [`ContractViolation::ElementalImbalance`] if `|A_e * n_dot| > 1e-12 * sum_s |A_{e,s} * n_dot_s|`
+///   for any element `e` (checked in canonical element order).
+/// - [`ContractViolation::ReactionMassImbalance`] if `|sum(m_dot)| > 1e-12 * sum(|m_dot|)`.
+#[allow(clippy::too_many_lines)]
+pub fn audit_carried_reactions(
+    layout: &PortLayout,
+    productions: &[Option<f64>],
+    reaction_basis: Option<(&ElementalMatrix, &[(SpeciesId, MolarMass)])>,
+) -> Result<(), ContractViolation> {
+    const STOICH_REL_TOL: f64 = 1.0e-12;
+
+    if productions.len() != layout.carried_len() {
+        return Err(ContractViolation::VectorLength {
+            vector: "carried_productions",
+            expected: layout.carried_len(),
+            actual: productions.len(),
+        });
+    }
+    let mut any_nonzero = false;
+    let mut max_abs_mass_rate = 0.0_f64;
+    for prod in productions {
+        if let Some(rate) = *prod {
+            if !rate.is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "carried production rate",
+                });
+            }
+            if rate != 0.0 {
+                any_nonzero = true;
+                max_abs_mass_rate = max_abs_mass_rate.max(rate.abs());
+            }
+        }
+    }
+    let Some((elemental, molar_masses)) = reaction_basis else {
+        if any_nonzero {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "nonzero carried_production requires Component::reaction_basis",
+            });
+        }
+        return Ok(());
+    };
+    if molar_masses.is_empty() {
+        return Err(ContractViolation::ReactionBasis {
+            reason: "reaction_basis molar-mass table must not be empty",
+        });
+    }
+    for (index, (species, molar_mass)) in molar_masses.iter().enumerate() {
+        let value = molar_mass.value();
+        if !(value.is_finite() && value > 0.0) {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "species molar mass must be finite and strictly positive",
+            });
+        }
+        if molar_masses[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == species)
+        {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "duplicate species in reaction_basis molar-mass table",
+            });
+        }
+    }
+    for species in elemental.species() {
+        if !molar_masses.iter().any(|(known, _)| known == species) {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "elemental matrix species missing from molar-mass table",
+            });
+        }
+    }
+    if !any_nonzero {
+        return Ok(());
+    }
+    if !layout.has_identified_streams() {
+        return Err(ContractViolation::ReactionBasis {
+            reason: "reactive carried_production requires identified stream ports",
+        });
+    }
+    let quantities = layout.carried_quantities();
+    // Validate every reacting slot maps to a species in the elemental matrix
+    // with a representable molar rate `m_dot / M`.
+    for (slot, prod) in productions.iter().enumerate() {
+        let Some(rate) = *prod else {
+            continue;
+        };
+        if rate == 0.0 {
+            continue;
+        }
+        let Some(StreamQuantity::SpeciesMass(species)) = quantities.get(slot) else {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "reactive carried_production slot must be a SpeciesMass coordinate",
+            });
+        };
+        if elemental.species().binary_search(species).is_err() {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "reacting species is absent from ElementalMatrix",
+            });
+        }
+        let Some((_, molar_mass)) = molar_masses.iter().find(|(known, _)| known == species) else {
+            return Err(ContractViolation::ReactionBasis {
+                reason: "reacting species is absent from molar-mass table",
+            });
+        };
+        let molar_rate = rate / molar_mass.value();
+        if !molar_rate.is_finite() {
+            return Err(ContractViolation::NonFinite {
+                quantity: "carried molar production rate",
+            });
+        }
+    }
+
+    // 1. Check elemental balance A * n_dot == 0 in canonical element order.
+    for (elem_row, element) in elemental.elements().iter().enumerate() {
+        let mut elem_scale = 0.0_f64;
+        for (slot, prod) in productions.iter().enumerate() {
+            let Some(rate) = *prod else {
+                continue;
+            };
+            if rate == 0.0 {
+                continue;
+            }
+            let Some(StreamQuantity::SpeciesMass(species)) = quantities.get(slot) else {
+                continue;
+            };
+            let Ok(sp_col) = elemental.species().binary_search(species) else {
+                continue;
+            };
+            let Some(count) = elemental.get(elem_row, sp_col) else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            let Some((_, molar_mass)) = molar_masses.iter().find(|(known, _)| known == species)
+            else {
+                continue;
+            };
+            let term = (count as f64) * (rate / molar_mass.value());
+            if !term.is_finite() {
+                return Err(ContractViolation::NonFinite {
+                    quantity: "elemental production term",
+                });
+            }
+            elem_scale = elem_scale.max(term.abs());
+        }
+        if elem_scale == 0.0 {
+            continue;
+        }
+        let terms = productions.iter().enumerate().filter_map(|(slot, prod)| {
+            let rate = (*prod)?;
+            if rate == 0.0 {
+                return None;
+            }
+            let StreamQuantity::SpeciesMass(species) = quantities.get(slot)? else {
+                return None;
+            };
+            let sp_col = elemental.species().binary_search(species).ok()?;
+            let count = elemental.get(elem_row, sp_col)?;
+            if count == 0 {
+                return None;
+            }
+            let (_, molar_mass) = molar_masses.iter().find(|(known, _)| known == species)?;
+            Some(((count as f64) * (rate / molar_mass.value())) / elem_scale)
+        });
+        let net = carried_sum(terms.clone())?;
+        let abs_sum = carried_sum(terms.map(f64::abs))?;
+        let residual_mol_s = net * elem_scale;
+        let tolerance_mol_s = STOICH_REL_TOL * abs_sum * elem_scale;
+        if !(residual_mol_s.is_finite() && tolerance_mol_s.is_finite()) {
+            return Err(ContractViolation::NonFinite {
+                quantity: "elemental production balance",
+            });
+        }
+        if !(net.abs() <= STOICH_REL_TOL * abs_sum) {
+            return Err(ContractViolation::ElementalImbalance {
+                element: element.as_str().to_owned(),
+                residual_mol_s,
+                tolerance_mol_s,
+            });
+        }
+    }
+
+    // 2. Check strict total mass rate closure sum(m_dot) == 0.
+    let mass_terms = productions
+        .iter()
+        .flatten()
+        .filter(|&&rate| rate != 0.0)
+        .map(|&rate| rate / max_abs_mass_rate);
+    let mass_net = carried_sum(mass_terms.clone())?;
+    let mass_abs = carried_sum(mass_terms.map(f64::abs))?;
+    let mass_rate_sum_kg_s = mass_net * max_abs_mass_rate;
+    let tolerance_kg_s = STOICH_REL_TOL * mass_abs * max_abs_mass_rate;
+    if !(mass_rate_sum_kg_s.is_finite() && tolerance_kg_s.is_finite()) {
+        return Err(ContractViolation::NonFinite {
+            quantity: "reactive mass production balance",
+        });
+    }
+    if !(mass_net.abs() <= STOICH_REL_TOL * mass_abs) {
+        return Err(ContractViolation::ReactionMassImbalance {
+            mass_rate_sum_kg_s,
+            tolerance_kg_s,
+        });
+    }
+    Ok(())
 }
 
 fn carried_sum(values: impl IntoIterator<Item = f64>) -> Result<f64, ContractViolation> {

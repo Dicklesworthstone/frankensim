@@ -304,7 +304,7 @@ impl Trial {
         let gap = (roots.len() > 1)
             .then(|| liquid.log_fugacity_coefficients()[0] - vapor.log_fugacity_coefficients()[0]);
         let side = gap.unwrap_or_else(|| {
-            if liquid.molar_volume_m3_per_mol() / liquid.covolume_m3_per_mol
+            if liquid.untranslated_molar_volume_m3_per_mol() / liquid.covolume_m3_per_mol
                 > CRITICAL_VOLUME_OVER_B
             {
                 1.0

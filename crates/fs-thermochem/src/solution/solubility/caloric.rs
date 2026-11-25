@@ -216,7 +216,9 @@ impl SolubilityCaloricModelV1 {
                 .saturating_add(2 * core::mem::size_of::<usize>())
                 .saturating_add(core::mem::align_of::<CaloricOwner>())
                 .saturating_add(
-                    self.owner.components.capacity()
+                    self.owner
+                        .components
+                        .capacity()
                         .saturating_mul(core::mem::size_of::<SolubilityCaloricComponentV1>()),
                 )
                 .saturating_add(self.owner.solvent_cp.heap_bytes()),
@@ -224,7 +226,9 @@ impl SolubilityCaloricModelV1 {
                 bytes
                     .saturating_add(component.law.heap_bytes())
                     .saturating_add(
-                        component.common_phase_cp.as_ref()
+                        component
+                            .common_phase_cp
+                            .as_ref()
                             .map_or(0, MolarHeatCapacityCurveV1::heap_bytes),
                     )
             },

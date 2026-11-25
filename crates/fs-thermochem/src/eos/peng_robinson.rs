@@ -45,6 +45,29 @@ pub struct PengRobinsonComponentV1 {
     pub molar_mass: MolarMass,
 }
 
+impl PengRobinsonComponentV1 {
+    /// Pair this component with a constant Péneloux molar volume shift `c_i`
+    /// [m³/mol] (`v_translated = v_PR - sum(x_i c_i)`).
+    #[must_use]
+    pub const fn with_volume_shift(
+        self,
+        volume_shift_m3_per_mol: f64,
+    ) -> PengRobinsonTranslatedComponentV1 {
+        PengRobinsonTranslatedComponentV1 {
+            component: self,
+            volume_shift_m3_per_mol,
+        }
+    }
+}
+
+/// Pure-component Peng--Robinson constants paired with a constant Péneloux
+/// molar volume translation `c_i` [m³/mol] (`v_translated = v_PR - sum(x_i c_i)`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PengRobinsonTranslatedComponentV1 {
+    pub component: PengRobinsonComponentV1,
+    pub volume_shift_m3_per_mol: f64,
+}
+
 /// Root selection within one fixed-composition PT evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PengRobinsonPhaseV1 {
@@ -69,10 +92,13 @@ pub enum PengRobinsonErrorV1 {
     InvalidBinaryInteraction { row: usize, column: usize, bits: u64 },
     AsymmetricBinaryInteraction { row: usize, column: usize },
     NonzeroBinaryInteractionDiagonal { component: usize, bits: u64 },
+    VolumeShiftLength { components: usize, shifts: usize },
+    InvalidVolumeShift { component: usize, bits: u64 },
     InvalidTemperature { bits: u64 },
     InvalidPressure { bits: u64 },
     InvalidDensity { bits: u64 },
     OutsideCovolume,
+    NonPositiveTranslatedVolume,
     MechanicallyUnstable,
     Unrepresentable { what: &'static str },
     NoMechanicalRoot,
@@ -91,17 +117,38 @@ pub struct PengRobinsonMixtureV1 {
     components: Vec<PengRobinsonComponentV1>,
     mole_fractions: Vec<f64>,
     binary_interactions: Vec<f64>,
+    volume_shifts_m3_per_mol: Vec<f64>,
     molar_mass: MolarMass,
 }
 
 impl PengRobinsonMixtureV1 {
-    /// Admit a fixed-composition mixture. An empty interaction matrix means
-    /// k_ij=0. A supplied matrix is row-major, symmetric, finite, has exactly
-    /// zero diagonal, and must keep every (1-k_ij) nonnegative.
+    /// Admit a fixed-composition mixture with zero Péneloux volume shifts.
+    /// An empty interaction matrix means k_ij=0. A supplied matrix is
+    /// row-major, symmetric, finite, has exactly zero diagonal, and must keep
+    /// every (1-k_ij) nonnegative.
     pub fn new(
         components: Vec<PengRobinsonComponentV1>,
         mole_fractions: Vec<f64>,
         binary_interactions: Vec<f64>,
+    ) -> Result<Self, PengRobinsonErrorV1> {
+        let shifts = vec![0.0; components.len()];
+        Self::new_with_volume_shifts(components, mole_fractions, binary_interactions, shifts)
+    }
+
+    /// Admit a fixed-composition mixture with per-component constant Péneloux
+    /// molar volume shifts `c_i` [m³/mol] (`v_translated = v_PR - sum(x_i c_i)`).
+    ///
+    /// Constant `c_i` preserves exact vapor-liquid phase equilibrium
+    /// (`ln(phi_i^L / phi_i^V)` is invariant) while translating molar volumes
+    /// (`v_tr = v_PR - c`), compressibility (`Z_tr = Z_PR - p*c/(R*T)`),
+    /// residual enthalpy (`H^R_tr = H^R_PR - p*c`), and component fugacities
+    /// (`ln phi_i^VT = ln phi_i^PR - p*c_i/(R*T)`) consistently with exact
+    /// Péneloux--Rauzy--Fréze (1982) thermodynamics.
+    pub fn new_with_volume_shifts(
+        components: Vec<PengRobinsonComponentV1>,
+        mole_fractions: Vec<f64>,
+        binary_interactions: Vec<f64>,
+        volume_shifts_m3_per_mol: Vec<f64>,
     ) -> Result<Self, PengRobinsonErrorV1> {
         let n = components.len();
         if n == 0 {
@@ -117,6 +164,12 @@ impl PengRobinsonMixtureV1 {
             return Err(PengRobinsonErrorV1::CompositionLength {
                 components: n,
                 fractions: mole_fractions.len(),
+            });
+        }
+        if volume_shifts_m3_per_mol.len() != n {
+            return Err(PengRobinsonErrorV1::VolumeShiftLength {
+                components: n,
+                shifts: volume_shifts_m3_per_mol.len(),
             });
         }
         for (i, component) in components.iter().enumerate() {
@@ -138,6 +191,13 @@ impl PengRobinsonMixtureV1 {
                     component: i,
                     field: "acentric factor",
                     bits: component.acentric_factor.to_bits(),
+                });
+            }
+            let shift = volume_shifts_m3_per_mol[i];
+            if !shift.is_finite() {
+                return Err(PengRobinsonErrorV1::InvalidVolumeShift {
+                    component: i,
+                    bits: shift.to_bits(),
                 });
             }
         }
@@ -204,8 +264,50 @@ impl PengRobinsonMixtureV1 {
             components,
             mole_fractions,
             binary_interactions: kij,
+            volume_shifts_m3_per_mol,
             molar_mass: MolarMass::new(molar_mass),
         })
+    }
+
+    /// Admit a fixed-composition mixture from components paired with Péneloux
+    /// molar volume shifts `c_i` [m³/mol].
+    pub fn from_translated_components(
+        translated: Vec<PengRobinsonTranslatedComponentV1>,
+        mole_fractions: Vec<f64>,
+        binary_interactions: Vec<f64>,
+    ) -> Result<Self, PengRobinsonErrorV1> {
+        let mut components = Vec::with_capacity(translated.len());
+        let mut shifts = Vec::with_capacity(translated.len());
+        for entry in translated {
+            components.push(entry.component);
+            shifts.push(entry.volume_shift_m3_per_mol);
+        }
+        Self::new_with_volume_shifts(components, mole_fractions, binary_interactions, shifts)
+    }
+
+    /// Attach or replace constant Péneloux molar volume shifts `c_i` [m³/mol]
+    /// on an already-admitted mixture.
+    pub fn with_volume_shifts(
+        mut self,
+        volume_shifts_m3_per_mol: Vec<f64>,
+    ) -> Result<Self, PengRobinsonErrorV1> {
+        let n = self.components.len();
+        if volume_shifts_m3_per_mol.len() != n {
+            return Err(PengRobinsonErrorV1::VolumeShiftLength {
+                components: n,
+                shifts: volume_shifts_m3_per_mol.len(),
+            });
+        }
+        for (i, &shift) in volume_shifts_m3_per_mol.iter().enumerate() {
+            if !shift.is_finite() {
+                return Err(PengRobinsonErrorV1::InvalidVolumeShift {
+                    component: i,
+                    bits: shift.to_bits(),
+                });
+            }
+        }
+        self.volume_shifts_m3_per_mol = volume_shifts_m3_per_mol;
+        Ok(self)
     }
 
     #[must_use]
@@ -221,6 +323,18 @@ impl PengRobinsonMixtureV1 {
         &self.binary_interactions
     }
     #[must_use]
+    pub fn volume_shifts_m3_per_mol(&self) -> &[f64] {
+        &self.volume_shifts_m3_per_mol
+    }
+    #[must_use]
+    pub fn mixture_volume_shift_m3_per_mol(&self) -> f64 {
+        self.mole_fractions
+            .iter()
+            .zip(&self.volume_shifts_m3_per_mol)
+            .map(|(x, c)| x * c)
+            .sum()
+    }
+    #[must_use]
     pub const fn molar_mass(&self) -> MolarMass {
         self.molar_mass
     }
@@ -233,7 +347,12 @@ impl PengRobinsonMixtureV1 {
             MixingRecord::Component { index, covolume, .. } => bi[index] = covolume,
             MixingRecord::Pair { row, column, attraction, .. } => aij[row * n + column] = attraction,
         })?;
-        Ok(MixedParameters { caloric, aij, bi })
+        Ok(MixedParameters {
+            caloric,
+            aij,
+            bi,
+            ci: self.volume_shifts_m3_per_mol.clone(),
+        })
     }
 
     // Both evaluations retain the original component and pair operation tree.
@@ -284,8 +403,10 @@ impl PengRobinsonMixtureV1 {
         let mut da_mix_dt = 0.0;
         let mut d2a_mix_dt2 = 0.0;
         let mut b_mix = 0.0;
+        let mut c_mix = 0.0;
         for i in 0..n {
             b_mix += self.mole_fractions[i] * bi[i];
+            c_mix += self.mole_fractions[i] * self.volume_shifts_m3_per_mol[i];
             for j in 0..n {
                 let value = det::sqrt(ai[i] * ai[j])
                     * (1.0 - self.binary_interactions[i * n + j]);
@@ -317,13 +438,20 @@ impl PengRobinsonMixtureV1 {
         }
         if !a_mix.is_finite() || a_mix <= 0.0
             || !da_mix_dt.is_finite() || !d2a_mix_dt2.is_finite()
-            || !b_mix.is_finite() || b_mix <= 0.0 {
+            || !b_mix.is_finite() || b_mix <= 0.0
+            || !c_mix.is_finite() {
             return Err(PengRobinsonErrorV1::Unrepresentable {
                 what: "mixture attraction/covolume",
             });
         }
 
-        Ok(MixedCaloricParameters { a_mix, da_mix_dt, d2a_mix_dt2, b_mix })
+        Ok(MixedCaloricParameters {
+            a_mix,
+            da_mix_dt,
+            d2a_mix_dt2,
+            b_mix,
+            volume_shift_m3_per_mol: c_mix,
+        })
     }
 
     /// Evaluate PT roots and phase-local fugacity/density observables.
@@ -362,13 +490,28 @@ impl PengRobinsonMixtureV1 {
             return Err(PengRobinsonErrorV1::NoMechanicalRoot);
         }
 
+        let c_mix = mixed.caloric.volume_shift_m3_per_mol;
         let mut phases = Vec::with_capacity(roots.len());
-        for z in roots {
-            let molar_volume = z * rt / p;
+        for z_pr in roots {
+            let untranslated_volume = z_pr * rt / p;
+            let (z, molar_volume) = if c_mix == 0.0 {
+                (z_pr, untranslated_volume)
+            } else {
+                let translated_volume = untranslated_volume - c_mix;
+                let translated_z = z_pr - p * c_mix / rt;
+                if !translated_volume.is_finite()
+                    || translated_volume <= 0.0
+                    || !translated_z.is_finite()
+                    || translated_z <= 0.0
+                {
+                    return Err(PengRobinsonErrorV1::NonPositiveTranslatedVolume);
+                }
+                (translated_z, translated_volume)
+            };
             let density = self.molar_mass.value() / molar_volume;
             phases.push(mixed.phase_root(
-                &self.mole_fractions, t, z, molar_volume, density,
-                dimensionless_a, dimensionless_b,
+                &self.mole_fractions, t, p, z_pr, z, untranslated_volume,
+                molar_volume, density, dimensionless_a, dimensionless_b,
             )?);
         }
 
@@ -385,8 +528,9 @@ impl PengRobinsonMixtureV1 {
 
     /// Evaluate a homogeneous state at conserved mass density and temperature.
     ///
-    /// This evaluates p(T,v) directly with v=M/rho, without a cubic root solve
-    /// or a density-changing phase selection. It requires p>0, v>b and
+    /// This evaluates p(T,v) directly with v=M/rho (and v_PR = v + c_mix for
+    /// Péneloux-translated mixtures), without a cubic root solve or a
+    /// density-changing phase selection. It requires p>0, v_PR>b and
     /// (dp/dv)_T<0. Mechanical stability includes metastable homogeneous
     /// states; it does not establish phase equilibrium or exclude coexistence.
     /// Caloric stability additionally requires the caller's ideal-reference Cv.
@@ -402,8 +546,11 @@ impl PengRobinsonMixtureV1 {
         }
         let mixed = self.mixing(t)?;
         let point = mixed.caloric.density_coordinates(t, rho, self.molar_mass.value())?;
-        let root = mixed.phase_root(&self.mole_fractions, t, point.z, point.volume,
-            rho, point.dimensionless_a, point.dimensionless_b)?;
+        let root = mixed.phase_root(
+            &self.mole_fractions, t, point.pressure, point.z_untranslated, point.z,
+            point.untranslated_volume, point.volume, rho,
+            point.dimensionless_a, point.dimensionless_b,
+        )?;
         root.caloric_state().require_mechanical_stability()?;
         Ok(PengRobinsonDensityEvaluationV1 {
             temperature, pressure: Pressure::new(point.pressure), molar_mass: self.molar_mass, root,
@@ -435,6 +582,7 @@ struct MixedParameters {
     caloric: MixedCaloricParameters,
     aij: Vec<f64>,
     bi: Vec<f64>,
+    ci: Vec<f64>,
 }
 
 // One fused traversal: finite differences need the same original pair values
@@ -451,12 +599,15 @@ struct MixedCaloricParameters {
     da_mix_dt: f64,
     d2a_mix_dt2: f64,
     b_mix: f64,
+    volume_shift_m3_per_mol: f64,
 }
 
 struct DensityCoordinates {
     pressure: f64,
     z: f64,
+    z_untranslated: f64,
     volume: f64,
+    untranslated_volume: f64,
     dimensionless_a: f64,
     dimensionless_b: f64,
 }
@@ -466,10 +617,18 @@ impl MixedCaloricParameters {
         molar_mass: MolarMass) -> Result<PengRobinsonDensityCaloricEvaluationV1, PengRobinsonErrorV1> {
         let t = temperature.value();
         let point = self.density_coordinates(t, density.value(), molar_mass.value())?;
-        let residual_geometry = ResidualGeometry::new(point.z, point.dimensionless_a,
-            point.dimensionless_b, point.volume, self.b_mix)?;
-        let caloric = CaloricState { parameters: self, temperature_k: t,
-            molar_volume_m3_per_mol: point.volume, residual_geometry };
+        let residual_geometry = ResidualGeometry::new(
+            point.z_untranslated, point.dimensionless_a, point.dimensionless_b,
+            point.untranslated_volume, point.volume, self.b_mix, self.volume_shift_m3_per_mol,
+            point.pressure, t,
+        )?;
+        let caloric = CaloricState {
+            parameters: self,
+            temperature_k: t,
+            molar_volume_m3_per_mol: point.volume,
+            untranslated_molar_volume_m3_per_mol: point.untranslated_volume,
+            residual_geometry,
+        };
         caloric.require_mechanical_stability()?;
         Ok(PengRobinsonDensityCaloricEvaluationV1 {
             temperature, pressure: Pressure::new(point.pressure), molar_mass,
@@ -493,37 +652,51 @@ impl MixedCaloricParameters {
         -> Result<DensityCoordinates, PengRobinsonErrorV1> {
         let volume = molar_mass / rho;
         let b = self.b_mix;
-        if !volume.is_finite() || volume <= b {
+        let c = self.volume_shift_m3_per_mol;
+        let untranslated_volume = if c == 0.0 { volume } else { volume + c };
+        if !volume.is_finite() || volume <= 0.0
+            || !untranslated_volume.is_finite() || untranslated_volume <= b {
             return Err(PengRobinsonErrorV1::OutsideCovolume);
         }
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
-        let denominator = volume * volume + 2.0 * b * volume - b * b;
-        let pressure = rt / (volume - b) - self.a_mix / denominator;
+        let denominator = untranslated_volume * untranslated_volume
+            + 2.0 * b * untranslated_volume - b * b;
+        let pressure = rt / (untranslated_volume - b) - self.a_mix / denominator;
         if !denominator.is_finite() || denominator <= 0.0 || !pressure.is_finite() || pressure <= 0.0 {
             return Err(PengRobinsonErrorV1::Unrepresentable {
                 what: "positive homogeneous density-temperature pressure",
             });
         }
-        let z = pressure * volume / rt;
+        let z_untranslated = pressure * untranslated_volume / rt;
+        let z = if c == 0.0 { z_untranslated } else { pressure * volume / rt };
         let (dimensionless_a, dimensionless_b) = self.dimensionless(t, pressure)?;
-        Ok(DensityCoordinates { pressure, z, volume, dimensionless_a, dimensionless_b })
+        Ok(DensityCoordinates {
+            pressure, z, z_untranslated, volume, untranslated_volume,
+            dimensionless_a, dimensionless_b,
+        })
     }
 }
 
 impl MixedParameters {
-    fn phase_root(&self, fractions: &[f64], t: f64, z: f64, volume: f64,
-        density: f64, dimensionless_a: f64, dimensionless_b: f64)
+    #[allow(clippy::too_many_arguments)]
+    fn phase_root(&self, fractions: &[f64], t: f64, p: f64, z_pr: f64, z: f64,
+        untranslated_volume: f64, volume: f64, density: f64,
+        dimensionless_a: f64, dimensionless_b: f64)
         -> Result<PengRobinsonPhaseRootV1, PengRobinsonErrorV1> {
         let mixed = self.caloric;
-        if !volume.is_finite() || volume <= mixed.b_mix
+        if !untranslated_volume.is_finite() || untranslated_volume <= mixed.b_mix
+            || !volume.is_finite() || volume <= 0.0
             || !density.is_finite() || density <= 0.0 {
             return Err(PengRobinsonErrorV1::Unrepresentable { what: "phase-root observables" });
         }
         let residual_geometry = ResidualGeometry::new(
-            z, dimensionless_a, dimensionless_b, volume, mixed.b_mix,
+            z_pr, dimensionless_a, dimensionless_b, untranslated_volume, volume, mixed.b_mix,
+            mixed.volume_shift_m3_per_mol, p, t,
         )?;
-        let log_phi = fugacity_logs(residual_geometry, t,
-            mixed.a_mix, mixed.b_mix, fractions, &self.aij, &self.bi)?;
+        let log_phi = fugacity_logs(
+            residual_geometry, t, p, mixed.a_mix, mixed.b_mix,
+            fractions, &self.aij, &self.bi, &self.ci,
+        )?;
         let residual_gibbs_over_rt = fractions.iter().zip(&log_phi)
             .map(|(x, value)| x * value).sum::<f64>();
         if !residual_gibbs_over_rt.is_finite() {
@@ -532,6 +705,7 @@ impl MixedParameters {
         Ok(PengRobinsonPhaseRootV1 {
             compressibility_factor: z,
             molar_volume_m3_per_mol: volume,
+            untranslated_molar_volume_m3_per_mol: untranslated_volume,
             mass_density_kg_per_m3: density,
             residual_gibbs_over_rt,
             log_fugacity_coefficients: log_phi,
@@ -539,6 +713,7 @@ impl MixedParameters {
             attraction_temperature_derivative: mixed.da_mix_dt,
             attraction_second_temperature_derivative: mixed.d2a_mix_dt2,
             covolume_m3_per_mol: mixed.b_mix,
+            volume_shift_m3_per_mol: mixed.volume_shift_m3_per_mol,
             temperature_k: t,
             residual_geometry,
         })
@@ -590,6 +765,16 @@ impl PengRobinsonDensityCaloricEvaluationV1 {
     pub const fn compressibility_factor(&self) -> f64 { self.compressibility_factor }
     #[must_use]
     pub const fn molar_volume_m3_per_mol(&self) -> f64 { self.caloric.molar_volume_m3_per_mol }
+    /// Untranslated Peng--Robinson molar volume `v_PR = v_translated + c_mix` [m³/mol].
+    #[must_use]
+    pub const fn untranslated_molar_volume_m3_per_mol(&self) -> f64 {
+        self.caloric.untranslated_molar_volume_m3_per_mol
+    }
+    /// Mixture Péneloux molar volume shift `c_mix = sum(x_i c_i)` [m³/mol].
+    #[must_use]
+    pub const fn volume_shift_m3_per_mol(&self) -> f64 {
+        self.caloric.parameters.volume_shift_m3_per_mol
+    }
     /// U^R [J/mol] relative to ideal gas at the same T and composition.
     #[must_use]
     pub fn residual_internal_energy_j_mol(&self) -> f64 { self.caloric.residual_internal_energy_j_mol() }
@@ -751,40 +936,95 @@ fn signed_cuberoot(value: f64) -> f64 {
 /// residual energy or fugacity. Immutable roots reuse the logarithms and integral.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ResidualGeometry {
-    z_minus_one: f64,
-    log_z: f64,
-    log_free_volume: f64,
+    z_pr_minus_one: f64,
+    z_tr_minus_one: f64,
+    log_z_pr: f64,
+    log_z_tr: f64,
+    log_free_volume_pr: f64,
+    log_free_volume_tr: f64,
     attraction_integral: f64,
 }
 
 impl ResidualGeometry {
-    fn new(z: f64, a: f64, b: f64, volume: f64, covolume: f64)
-        -> Result<Self, PengRobinsonErrorV1> {
-        let mut z_minus_one = z - 1.0;
-        if z_minus_one.abs() < 0.5 {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        z_pr: f64,
+        a: f64,
+        b: f64,
+        untranslated_volume: f64,
+        translated_volume: f64,
+        covolume: f64,
+        volume_shift: f64,
+        pressure: f64,
+        temperature: f64,
+    ) -> Result<Self, PengRobinsonErrorV1> {
+        let mut z_pr_minus_one = z_pr - 1.0;
+        if z_pr_minus_one.abs() < 0.5 {
             // The original cubic gives Z-1 = B-A*(Z-B)/(Z²+2BZ-B²).
             // Unlike subtraction from rounded Z, this retains its dilute limit.
-            let denominator = z * z + 2.0 * b * z - b * b;
-            z_minus_one = b - a * ((z - b) / denominator);
+            let denominator = z_pr * z_pr + 2.0 * b * z_pr - b * b;
+            z_pr_minus_one = b - a * ((z_pr - b) / denominator);
         }
-        let log_z = if z_minus_one.abs() < 0.5 {
-            log_one_plus(z_minus_one)
+        let log_z_pr = if z_pr_minus_one.abs() < 0.5 {
+            log_one_plus(z_pr_minus_one)
         } else {
             // Dense low-pressure roots can have Z so small that Z-1 rounds
             // to -1. Their logarithm must retain the original positive root.
-            det::ln(z)
+            det::ln(z_pr)
         };
-        let eta = covolume / volume;
+        let eta = covolume / untranslated_volume;
         let sqrt_2 = det::sqrt(2.0);
-        let log_free_volume = log_one_plus(-eta);
+        let log_free_volume_pr = log_one_plus(-eta);
         let attraction_integral = log_one_plus(
             2.0 * sqrt_2 * eta / (1.0 + (1.0 - sqrt_2) * eta),
         ) / (2.0 * sqrt_2 * covolume);
-        if [z_minus_one, log_z, log_free_volume, attraction_integral]
-            .iter().any(|value| !value.is_finite()) {
+        let (z_tr_minus_one, log_z_tr, log_free_volume_tr) = if volume_shift == 0.0 {
+            (z_pr_minus_one, log_z_pr, log_free_volume_pr)
+        } else {
+            let v_tr = translated_volume;
+            let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature;
+            let shift_z = pressure * volume_shift / rt;
+            let z_tr = z_pr - shift_z;
+            if !v_tr.is_finite() || v_tr <= 0.0 || !z_tr.is_finite() || z_tr <= 0.0 {
+                return Err(PengRobinsonErrorV1::NonPositiveTranslatedVolume);
+            }
+            let z_tr_minus_one = z_pr_minus_one - shift_z;
+            let log_z_tr = if z_tr_minus_one.abs() < 0.5 {
+                log_one_plus(z_tr_minus_one)
+            } else {
+                det::ln(z_tr)
+            };
+            let free_offset = (volume_shift - covolume) / v_tr;
+            let log_free_volume_tr = if free_offset.abs() < 0.5 {
+                log_one_plus(free_offset)
+            } else {
+                det::ln((untranslated_volume - covolume) / v_tr)
+            };
+            (z_tr_minus_one, log_z_tr, log_free_volume_tr)
+        };
+        if [
+            z_pr_minus_one,
+            z_tr_minus_one,
+            log_z_pr,
+            log_z_tr,
+            log_free_volume_pr,
+            log_free_volume_tr,
+            attraction_integral,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
             return Err(PengRobinsonErrorV1::Unrepresentable { what: "residual EOS geometry" });
         }
-        Ok(Self { z_minus_one, log_z, log_free_volume, attraction_integral })
+        Ok(Self {
+            z_pr_minus_one,
+            z_tr_minus_one,
+            log_z_pr,
+            log_z_tr,
+            log_free_volume_pr,
+            log_free_volume_tr,
+            attraction_integral,
+        })
     }
 }
 
@@ -802,23 +1042,30 @@ fn log_one_plus(offset: f64) -> f64 {
 fn fugacity_logs(
     geometry: ResidualGeometry,
     temperature: f64,
+    pressure: f64,
     a_mix: f64,
     b_mix: f64,
     x: &[f64],
     aij: &[f64],
     bi: &[f64],
+    ci: &[f64],
 ) -> Result<Vec<f64>, PengRobinsonErrorV1> {
-    let attraction_scale = a_mix / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature)
-        * geometry.attraction_integral;
+    let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature;
+    let attraction_scale = a_mix / rt * geometry.attraction_integral;
     let n = x.len();
     let mut result = vec![0.0; n];
     for i in 0..n {
         let sum_aij = (0..n).map(|j| x[j] * aij[i * n + j]).sum::<f64>();
         let bi_over_b = bi[i] / b_mix;
         let bracket = 2.0 * sum_aij / a_mix - bi_over_b;
-        let value = bi_over_b * geometry.z_minus_one
-            - geometry.log_z - geometry.log_free_volume
+        let pr_value = bi_over_b * geometry.z_pr_minus_one
+            - geometry.log_z_pr - geometry.log_free_volume_pr
             - attraction_scale * bracket;
+        let value = if ci[i] == 0.0 {
+            pr_value
+        } else {
+            pr_value - pressure * ci[i] / rt
+        };
         if !value.is_finite() {
             return Err(PengRobinsonErrorV1::Unrepresentable {
                 what: "fugacity coefficient",
@@ -834,6 +1081,7 @@ fn fugacity_logs(
 pub struct PengRobinsonPhaseRootV1 {
     compressibility_factor: f64,
     molar_volume_m3_per_mol: f64,
+    untranslated_molar_volume_m3_per_mol: f64,
     mass_density_kg_per_m3: f64,
     residual_gibbs_over_rt: f64,
     log_fugacity_coefficients: Vec<f64>,
@@ -841,6 +1089,7 @@ pub struct PengRobinsonPhaseRootV1 {
     attraction_temperature_derivative: f64,
     attraction_second_temperature_derivative: f64,
     covolume_m3_per_mol: f64,
+    volume_shift_m3_per_mol: f64,
     temperature_k: f64,
     residual_geometry: ResidualGeometry,
 }
@@ -853,9 +1102,11 @@ impl PengRobinsonPhaseRootV1 {
                 da_mix_dt: self.attraction_temperature_derivative,
                 d2a_mix_dt2: self.attraction_second_temperature_derivative,
                 b_mix: self.covolume_m3_per_mol,
+                volume_shift_m3_per_mol: self.volume_shift_m3_per_mol,
             },
             temperature_k: self.temperature_k,
             molar_volume_m3_per_mol: self.molar_volume_m3_per_mol,
+            untranslated_molar_volume_m3_per_mol: self.untranslated_molar_volume_m3_per_mol,
             residual_geometry: self.residual_geometry,
         }
     }
@@ -867,6 +1118,16 @@ impl PengRobinsonPhaseRootV1 {
     #[must_use]
     pub const fn molar_volume_m3_per_mol(&self) -> f64 {
         self.molar_volume_m3_per_mol
+    }
+    /// Untranslated Peng--Robinson molar volume `v_PR = v_translated + c_mix` [m³/mol].
+    #[must_use]
+    pub const fn untranslated_molar_volume_m3_per_mol(&self) -> f64 {
+        self.untranslated_molar_volume_m3_per_mol
+    }
+    /// Mixture Péneloux molar volume shift `c_mix = sum(x_i c_i)` [m³/mol].
+    #[must_use]
+    pub const fn volume_shift_m3_per_mol(&self) -> f64 {
+        self.volume_shift_m3_per_mol
     }
     #[must_use]
     pub const fn mass_density_kg_per_m3(&self) -> f64 {
@@ -946,6 +1207,7 @@ struct CaloricState {
     parameters: MixedCaloricParameters,
     temperature_k: f64,
     molar_volume_m3_per_mol: f64,
+    untranslated_molar_volume_m3_per_mol: f64,
     residual_geometry: ResidualGeometry,
 }
 
@@ -958,18 +1220,18 @@ impl CaloricState {
     fn residual_enthalpy_j_mol(&self) -> f64 {
         UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
             * self.temperature_k
-            * self.residual_geometry.z_minus_one
+            * self.residual_geometry.z_tr_minus_one
             + self.residual_internal_energy_j_mol()
     }
 
     fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
-        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_free_volume
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_free_volume_tr
             + self.parameters.da_mix_dt * self.residual_geometry.attraction_integral
     }
 
     fn residual_entropy_j_mol_k(&self) -> f64 {
         self.residual_entropy_at_density_j_mol_k()
-            + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_z
+            + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_z_tr
     }
 
     fn residual_cv_j_mol_k(&self) -> f64 {
@@ -980,7 +1242,7 @@ impl CaloricState {
     fn pressure_derivatives(&self) -> (f64, f64) {
         let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
         let t = self.temperature_k;
-        let v = self.molar_volume_m3_per_mol;
+        let v = self.untranslated_molar_volume_m3_per_mol;
         let b = self.parameters.b_mix;
         let d = v * v + 2.0 * b * v - b * b;
         let dp_dt_v = r / (v - b) - self.parameters.da_mix_dt / d;

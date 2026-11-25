@@ -25,7 +25,7 @@ impl PengRobinsonDensityCaloricEvaluationV1 {
     /// the volume coordinate is molar volume, not mass-specific or total volume.
     #[must_use]
     pub fn pressure_temperature_second_derivatives(&self) -> (f64, f64) {
-        let v = self.molar_volume_m3_per_mol();
+        let v = self.untranslated_molar_volume_m3_per_mol();
         let p = self.caloric.parameters;
         let b = p.b_mix;
         let d = v * v + 2.0 * b * v - b * b;
@@ -41,7 +41,7 @@ impl PengRobinsonDensityCaloricEvaluationV1 {
     /// including in the dilute limit where the residual is much smaller.
     #[must_use]
     pub fn internal_energy_volume_derivative_pa(&self) -> f64 {
-        let v = self.molar_volume_m3_per_mol();
+        let v = self.untranslated_molar_volume_m3_per_mol();
         let p = self.caloric.parameters;
         let b = p.b_mix;
         let d = v * v + 2.0 * b * v - b * b;
@@ -125,8 +125,10 @@ impl PengRobinsonCaloricReferenceV1<'_> {
             }
         }
         let b = self.initial.covolume_m3_per_mol();
-        let v0 = self.initial.molar_volume_m3_per_mol();
-        let v1 = self.mixture.molar_mass.value() / self.final_density.value();
+        let c_mix = self.initial.volume_shift_m3_per_mol();
+        let v0 = self.initial.untranslated_molar_volume_m3_per_mol();
+        let v1_tr = self.mixture.molar_mass.value() / self.final_density.value();
+        let v1 = if c_mix == 0.0 { v1_tr } else { v1_tr + c_mix };
         let eta_min = b / v0.max(v1);
         let eta_max = b / v0.min(v1);
         let roundoff = (128.0 + 4.0 * (n * n) as f64) * f64::EPSILON;

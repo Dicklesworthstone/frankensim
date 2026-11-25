@@ -111,8 +111,10 @@ impl PengRobinsonMixtureV1 {
         let state = mixed.density_caloric_evaluation(temperature, density, self.molar_mass)?;
         let t = temperature.value();
         let p = state.pressure().value();
-        let v = state.molar_volume_m3_per_mol();
+        let v = state.untranslated_molar_volume_m3_per_mol();
+        let v_tr = state.molar_volume_m3_per_mol();
         let b = mixed.b_mix;
+        let c_mix = mixed.volume_shift_m3_per_mol;
         let denominator = v * v + 2.0 * b * v - b * b;
         let pressure_b =
             R * t / ((v - b) * (v - b)) + 2.0 * mixed.a_mix * (v - b) / (denominator * denominator);
@@ -143,16 +145,23 @@ impl PengRobinsonMixtureV1 {
             let delta_b = row.covolume - b;
             let delta_a = 2.0 * (row.attraction - mixed.a_mix);
             let delta_da_dt = 2.0 * (row.temperature_derivative - mixed.da_mix_dt);
-            // Keeping p fixed determines n*dv/dn_i=vbar_i-v. Retain this
-            // correction BEFORE adding v, including in the dilute limit.
+            let delta_c = self.volume_shifts_m3_per_mol[i] - c_mix;
+            // Keeping p fixed determines n*dv_PR/dn_i=vbar_PR,i-v_PR. Retain
+            // this correction BEFORE adding v_tr, including in the dilute limit,
+            // and apply the constant Péneloux shift -(c_i - c_mix).
             let delta_v = (delta_a / denominator - pressure_b * delta_b) / pressure_v;
-            let molar_volume_m3_mol = v + delta_v;
-            // d(n H^R)/dn_i, with H^R=(T a'-a)I+p*v-R*T.
+            let molar_volume_m3_mol = if delta_c == 0.0 {
+                v_tr + delta_v
+            } else {
+                v_tr + delta_v - delta_c
+            };
+            // d(n H^R)/dn_i, with H^R=(T a'-a)I+p*(v_PR-c)-R*T.
             let terms = [
                 bulk_enthalpy,
                 (t * delta_da_dt - delta_a) * integral,
                 energy_coefficient * integral_b * delta_b,
                 enthalpy_volume_derivative * delta_v,
+                if delta_c == 0.0 { 0.0 } else { -p * delta_c },
             ];
             let mut residual_enthalpy_j_mol = 0.0;
             let mut correction = 0.0;

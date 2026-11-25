@@ -21,7 +21,7 @@
 //! chemical elements and rest mass. It binds the original gas calorics without
 //! applying chemical elemental/mass-conservation certificates to nuclear events.
 
-mod caloric;
+pub mod caloric;
 pub mod decay;
 pub mod coulomb;
 mod enthalpy;
@@ -43,8 +43,21 @@ use core::fmt;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError};
 use fs_qty::{Dims, MolarMass, Pressure, Qty, Temperature};
 
-pub use caloric::{Nasa9CaloricReferenceV1, Nasa9CaloricRegionCorrectionV1,
-    NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1};
+pub use caloric::sorption::{
+    GabIsothermV1, OswinIsothermV1, OswinTemperatureLawV1, SorptionErrorV1, SorptionEvaluationV1,
+    SorptionIsothermV1,
+};
+pub use caloric::{
+    NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1, Nasa9CaloricReferenceV1,
+    Nasa9CaloricRegionCorrectionV1,
+};
+pub use solution::nrtl::NrtlModelV1;
+pub use solution::uniquac::{UniquacComponentV1, UniquacModelV1, UniquacSplitEvaluationV1};
+pub use solution::{
+    BubblePointV1, DewPointV1, ExcessGibbsErrorV1, ExcessGibbsEvaluationV1, ExcessGibbsModelV1,
+    FlashPhaseRegimeV1, IsothermalFlashV1, ModifiedRaoultVleV1, VaporPressureLawV1,
+    VaporPressurePointV1, VleKValuesV1, VleSolverOptionsV1,
+};
 pub use temperature_tangent::{
     MolarHeatCapacityTemperatureDerivativeV1, Nasa9TemperatureDerivativeErrorV1,
 };

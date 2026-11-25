@@ -71,7 +71,10 @@ fn exact_exponential_dissolution_and_precipitation_are_opposite_transfers() {
 fn declared_half_life_halves_active_deficits_and_composes_across_steps() {
     let active = model(2.0, 1.5, PrecipitationPolicyV1::ExistingSolidOnly);
     let volume = Volume::new(3.0);
-    let half_life = active.saturation_deficit_half_life(volume).unwrap().unwrap();
+    let half_life = active
+        .saturation_deficit_half_life(volume)
+        .unwrap()
+        .unwrap();
     near(half_life.value(), 2.0 * core::f64::consts::LN_2);
     let advance = |state: &SolubilityKineticStateV1, duration| {
         active
@@ -92,7 +95,10 @@ fn declared_half_life_halves_active_deficits_and_composes_across_steps() {
             split.state().dissolved().value(),
             direct.state().dissolved().value(),
         );
-        near(split.state().solid().value(), direct.state().solid().value());
+        near(
+            split.state().solid().value(),
+            direct.state().solid().value(),
+        );
         let second_half = advance(direct.state(), half_life);
         near(
             6.0 - second_half.state().dissolved().value(),

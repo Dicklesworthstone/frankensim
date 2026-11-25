@@ -32,11 +32,12 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
     Case, Failure, Observed, ReversalAllowance, UnitExponents, check_component, check_exact_linear,
-    check_port_tangent, check_time_reversal, check_unit_rescaling, unit_factor,
+    check_port_tangent, check_stage_residual, check_time_reversal, check_unit_rescaling,
+    unit_factor,
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
-    Proposal, Receipt, StepAudit, audit_step,
+    Proposal, Receipt, StageResidual, StepAudit, audit_step,
 };
 use fs_ports::{PortKind, StableId};
 use fs_qty::Dims;
@@ -1009,4 +1010,171 @@ fn a_signal_port_or_an_exponent_beyond_the_limit_is_refused_before_a_step() {
         law,
         "unit exponents are at most UNIT_EXPONENT_LIMIT in size"
     );
+}
+
+impl StageResidual for SpringMassDamper {
+    fn unknowns(&self) -> usize {
+        1
+    }
+
+    fn initial_guess(
+        &self,
+        old: &Oscillator,
+        _dt_s: f64,
+        _inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), Cancelled> {
+        z[0] = old.velocity_m_s;
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        old: &Oscillator,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Cancelled> {
+        if self.fault != Fault::IgnoresCancellation {
+            cx.checkpoint()?;
+        }
+        let force_n = inputs[0];
+        let half = 0.5 * dt_s / self.mass_kg;
+        let denominator = 1.0 + half * self.damping_n_s_m + 0.5 * dt_s * half * self.stiffness_n_m;
+        let rhs = old.velocity_m_s + half * (force_n - self.stiffness_n_m * old.position_m);
+        let mean = z[0];
+        r[0] = denominator * mean - rhs;
+        outputs[0] = mean;
+        outputs[1] = -self.damping_n_s_m * mean * mean;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &Oscillator,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Cancelled> {
+        cx.checkpoint()?;
+        let half = 0.5 * dt_s / self.mass_kg;
+        let denominator = 1.0 + half * self.damping_n_s_m + 0.5 * dt_s * half * self.stiffness_n_m;
+        let mean = z[0];
+        dr[0] = denominator * dz[0];
+        d_outputs[0] = dz[0];
+        d_outputs[1] = -2.0 * self.damping_n_s_m * mean * dz[0];
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &Oscillator,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Cancelled> {
+        cx.checkpoint()?;
+        let half = 0.5 * dt_s / self.mass_kg;
+        let denominator = 1.0 + half * self.damping_n_s_m + 0.5 * dt_s * half * self.stiffness_n_m;
+        let mean = z[0];
+        let sign = if self.fault == Fault::VjpSign { -1.0 } else { 1.0 };
+        bar_z[0] = sign
+            * (denominator * bar_r[0] + bar_outputs[0]
+                - 2.0 * self.damping_n_s_m * mean * bar_outputs[1]);
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &Oscillator,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut Oscillator,
+    ) -> Result<Receipt, Cancelled> {
+        let (force_n, temperature_k) = (inputs[0], inputs[1]);
+        let mean = z[0];
+        let mid_position = old.position_m + 0.5 * dt_s * mean;
+        new.position_m = old.position_m + dt_s * mean;
+        new.velocity_m_s = 2.0 * mean - old.velocity_m_s;
+        let loss_w = self.damping_n_s_m * mean * mean;
+        let stored_change_j = self.mass_kg * mean * (new.velocity_m_s - old.velocity_m_s)
+            + self.stiffness_n_m * mid_position * (dt_s * mean);
+        let scale_j = (dt_s * force_n * mean).abs()
+            + dt_s * loss_w
+            + self.stored_energy_j(old)?
+            + self.stored_energy_j(new)?;
+        Ok(Receipt {
+            stored_change_j,
+            dissipated_j: dt_s * loss_w,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: dt_s * loss_w / temperature_k,
+            energy_tolerance_j: 16.0 * f64::EPSILON * scale_j,
+            residual: 0.0,
+            tolerance: 0.0,
+        })
+    }
+}
+
+#[test]
+fn reference_stage_residual_passes_and_planted_faults_fail() {
+    let gate = CancelGate::new_clock_free();
+    let clean = SpringMassDamper::new(Fault::None);
+    let (z_sol, _) = clean.mean_velocity(&START, 1.0e-3, INPUTS[0]);
+    with_cx(&gate, |cx| {
+        check_stage_residual(&clean, &case(), &[z_sol], 1.0e-7, 1.0e-12, cx)
+    })
+    .expect("clean StageResidual conforms");
+
+    // Non-root z is refused by residual vanishing law.
+    let err = with_cx(&gate, |cx| {
+        check_stage_residual(&clean, &case(), &[z_sol + 1.0e-4], 1.0e-7, 1.0e-12, cx)
+    })
+    .expect_err("non-root must fail");
+    assert!(matches!(
+        err,
+        Failure::Law {
+            law: "residual vanishes at the converged stage unknowns",
+            ..
+        }
+    ));
+
+    // Wrong vjp_z sign is refused by transpose dot-product test.
+    let bad_vjp = SpringMassDamper::new(Fault::VjpSign);
+    let err = with_cx(&gate, |cx| {
+        check_stage_residual(&bad_vjp, &case(), &[z_sol], 1.0e-7, 1.0e-12, cx)
+    })
+    .expect_err("wrong vjp_z sign must fail");
+    assert!(matches!(
+        err,
+        Failure::Law {
+            law: "vjp_z is the transpose of jvp_z",
+            ..
+        }
+    ));
+
+    // Ignoring cancellation on residual is refused.
+    let no_cancel = SpringMassDamper::new(Fault::IgnoresCancellation);
+    let err = with_cx(&gate, |cx| {
+        check_stage_residual(&no_cancel, &case(), &[z_sol], 1.0e-7, 1.0e-12, cx)
+    })
+    .expect_err("uncancelled residual must fail");
+    assert!(matches!(
+        err,
+        Failure::Law {
+            law: "StageResidual::residual polls cx: a call under a cancelled context is refused",
+            ..
+        }
+    ));
 }

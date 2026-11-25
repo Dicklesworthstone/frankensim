@@ -20,8 +20,8 @@ use super::stability::{
     MulticomponentStabilityErrorV1,
 };
 use super::{
-    MulticomponentRegularSolutionV1, MulticomponentSolutionErrorV1,
-    MulticomponentSolutionStateV1, sum,
+    MulticomponentRegularSolutionV1, MulticomponentSolutionErrorV1, MulticomponentSolutionStateV1,
+    sum,
 };
 use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_qty::Temperature;
@@ -186,9 +186,7 @@ impl MulticomponentRegularSolutionV1 {
                 .iter()
                 .any(|value| !value.is_finite() || *value < 0.0)
         {
-            return Err(MulticomponentPhaseDiscoveryErrorV1::Invalid(
-                "feed moles",
-            ));
+            return Err(MulticomponentPhaseDiscoveryErrorV1::Invalid("feed moles"));
         }
         let total_moles = positive(sum(component_moles.iter().copied()), "total feed moles")?;
         let fractions = normalized(component_moles, total_moles)?;
@@ -203,7 +201,8 @@ impl MulticomponentRegularSolutionV1 {
                 "positive feed inventory",
             ));
         }
-        let feed_stability = feed.local_stability(controls.equilibrium.stability, &mut cancelled)?;
+        let feed_stability =
+            feed.local_stability(controls.equilibrium.stability, &mut cancelled)?;
         let maximum_phases = controls
             .maximum_phases
             .min(active.len())
@@ -305,11 +304,9 @@ impl MulticomponentRegularSolutionV1 {
         }
 
         poll(&mut cancelled)?;
-        let candidate = best.ok_or(
-            MulticomponentPhaseDiscoveryErrorV1::NoAdmissibleCandidate {
-                attempted_candidates: attempted,
-            },
-        )?;
+        let candidate = best.ok_or(MulticomponentPhaseDiscoveryErrorV1::NoAdmissibleCandidate {
+            attempted_candidates: attempted,
+        })?;
         let selected_phase_count = candidate.phases().len();
         let selected_reduced_gibbs_improvement = finite(
             (candidate.report().feed_mixing_gibbs_j
@@ -385,7 +382,9 @@ fn attempt(
         true
     } else {
         (energy - *best_energy).abs() <= energy_tolerance
-            && best.as_ref().is_some_and(|current| candidate.phases().len() < current.phases().len())
+            && best
+                .as_ref()
+                .is_some_and(|current| candidate.phases().len() < current.phases().len())
     };
     if better {
         *best_energy = energy;
