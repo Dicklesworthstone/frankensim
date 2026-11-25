@@ -12,6 +12,8 @@
 //!   module and the Component both refuse a temperature refresh of a field
 //!   that holds it fixed;
 //! - the source port holds 10 V.
+//!
+//! Graphs 5 and 6, of the play-memory owner, are in [`hysteretic`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,6 +33,10 @@ use fs_thermal::component::TimelineState;
 
 use super::kernel::{card_words, conduction, graph, ledger_closes, timeline, with_cx, with_gate};
 use super::*;
+
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "hysteretic_graph.rs"]
+mod hysteretic;
 
 const STEPS: usize = 2;
 const DRIVE: f64 = 10.0;
@@ -61,18 +67,29 @@ impl CardConductors {
         circuit: &SpatialNonlinearWindingCircuit<'_>,
         trip: Option<(usize, &'static CancelGate)>,
     ) -> Self {
+        let context = source::absolute_point(300.0);
+        let (core, strands) = (circuit.field().conductors(), circuit.conductors());
+        Self::on(card, context, core, strands, trip)
+    }
+
+    /// The law over any owner's `core` and `strands`, each cell's query
+    /// point `context`.
+    fn on(
+        card: &MaterialCard,
+        context: QueryPoint,
+        core: &[Option<ResolvedConductorState>],
+        strands: &[SpatialWindingConductor],
+        trip: Option<(usize, &'static CancelGate)>,
+    ) -> Self {
         Self {
             card: card.clone(),
-            context: source::absolute_point(300.0),
-            core: circuit
-                .field()
-                .conductors()
+            context,
+            core: core
                 .iter()
                 .enumerate()
                 .filter_map(|(cell, conductor)| Some((cell, conductor.clone()?)))
                 .collect(),
-            strands: circuit
-                .conductors()
+            strands: strands
                 .iter()
                 .map(|strand| ((strand.winding, strand.cell), strand.conductor.clone()))
                 .collect(),
@@ -125,23 +142,37 @@ impl SpatialConductorLaw<ResolvedConductorState> for CardConductors {
     }
 }
 
-/// Graph 4's resistor: its body's card at the temperature its port
-/// receives, as a 1 m long, 1 m^2 conductor, as test 4 authors it. As the
-/// module's `CellResistor` does, it resolves the resistivity alone, from the
-/// claim its single-claim selection picks at 300 K.
+/// A graph resistor's law: its body's card at the temperature its port
+/// receives, at that body's query `point`, as a `length_m` long conductor of
+/// `area_m2`. As the module's `CellResistor` does, it resolves the
+/// resistivity alone, from the claim its single-claim selection picks at
+/// 300 K.
 #[derive(Debug)]
 struct BodyResistor {
     card: MaterialCard,
+    point: fn(f64) -> QueryPoint,
+    length_m: f64,
+    area_m2: f64,
     requirement: ScalarPropertyRequirement,
     pins: MaterialPropertySelection,
 }
 
 impl BodyResistor {
+    /// Graph 4's: 1 m long, 1 m^2, as test 4 authors it.
     fn new(card: &MaterialCard) -> Self {
+        Self::sized(card, source::absolute_point, 1.0, 1.0)
+    }
+
+    fn sized(
+        card: &MaterialCard,
+        point: fn(f64) -> QueryPoint,
+        length_m: f64,
+        area_m2: f64,
+    ) -> Self {
         let requirement = BASIS.requirement().unwrap();
         let selected = resolve_material_state_point(
             card,
-            &source::absolute_point(300.0),
+            &point(300.0),
             std::slice::from_ref(&requirement),
             MaterialPropertySelection::SingleClaimOnly,
         )
@@ -149,6 +180,9 @@ impl BodyResistor {
         let claim = selected.properties()[0].answer().receipt.selected;
         Self {
             card: card.clone(),
+            point,
+            length_m,
+            area_m2,
             pins: MaterialPropertySelection::PinnedByProperty(
                 [(requirement.name().to_owned(), claim)]
                     .into_iter()
@@ -163,13 +197,13 @@ impl ResistorLaw for BodyResistor {
     fn conductor(&self, kelvin: f64) -> Result<ResolvedConductor, String> {
         let material = resolve_material_state_point(
             &self.card,
-            &source::absolute_point(kelvin),
+            &(self.point)(kelvin),
             std::slice::from_ref(&self.requirement),
             self.pins.clone(),
         )
         .map_err(|e| format!("{e:?}"))?;
         ResolvedConductorState::try_from_material_with_basis(material, BASIS)
-            .and_then(|state| state.into_uniform_conductor(1.0, 1.0))
+            .and_then(|state| state.into_uniform_conductor(self.length_m, self.area_m2))
             .map_err(|e| e.to_string())
     }
 
@@ -388,20 +422,23 @@ impl Bodies {
     }
 }
 
-/// The fixture's winding as the Component beside `bodies`' timeline: one
-/// receiver per body, each at its cell's port.
-fn kernel(
-    bodies: Bodies,
-    circuit: &SpatialNonlinearWindingCircuit<'static>,
-    law: Arc<CardConductors>,
-    mu: &[ThermalMagneticMaterial],
-) -> (System, NodeId, NodeId) {
+/// The Component's heat receivers, their cells' ports and its resistor laws.
+type Layout = (
+    Vec<SpatialHeatReceiver>,
+    Vec<CellId>,
+    BTreeMap<usize, Arc<dyn ResistorLaw>>,
+);
+
+/// The coil's receiver takes all 48 tetrahedra and, without `resistor`, the
+/// graph resistor's heat; with `resistor`, a second receiver at the
+/// resistor's body takes that heat.
+fn layout(resistor: Option<Arc<dyn ResistorLaw>>) -> Layout {
     let branch = ROUTES[0].branch;
     let coil = |resistors| SpatialHeatReceiver {
         cells: (0..48).collect(),
         resistors,
     };
-    let (receivers, ports, resistors) = match bodies.resistor {
+    match resistor {
         None => (vec![coil(vec![branch])], vec![CELL], BTreeMap::new()),
         Some(resistor) => (
             vec![
@@ -414,7 +451,18 @@ fn kernel(
             vec![CELL, RES_CELL],
             BTreeMap::from([(branch, resistor)]),
         ),
-    };
+    }
+}
+
+/// The fixture's winding as the Component beside `bodies`' timeline: one
+/// receiver per body, each at its cell's port.
+fn kernel(
+    bodies: Bodies,
+    circuit: &SpatialNonlinearWindingCircuit<'static>,
+    law: Arc<CardConductors>,
+    mu: &[ThermalMagneticMaterial],
+) -> (System, NodeId, NodeId) {
+    let (receivers, ports, resistors) = layout(bodies.resistor);
     let temperatures = vec![300.0; ports.len()];
     // One law per receiver; the resistor body's has no cells to ask it.
     let law = law as Arc<dyn SpatialConductorLaw<ResolvedConductorState>>;
@@ -476,11 +524,14 @@ fn kernel_run(system: &mut System, winding: NodeId, cells: NodeId) -> Vec<Row> {
 /// The module's conductors at `t` \[K\] are `law`'s there, bit for bit.
 fn follows(
     law: &CardConductors,
-    circuit: &SpatialNonlinearWindingCircuit<'_>,
+    (strands, core): (
+        &[SpatialWindingConductor],
+        &[Option<ResolvedConductorState>],
+    ),
     t: f64,
     interval: usize,
 ) {
-    for strand in circuit.conductors() {
+    for strand in strands {
         let (winding, cell) = (strand.winding, strand.cell);
         assert_eq!(
             law.strand(winding, cell, t).unwrap(),
@@ -488,7 +539,7 @@ fn follows(
             "interval {interval}, winding {winding}, cell {cell}"
         );
     }
-    for (cell, conductor) in circuit.field().conductors().iter().enumerate() {
+    for (cell, conductor) in core.iter().enumerate() {
         if let Some(conductor) = conductor {
             assert_eq!(
                 &law.core(cell, t).unwrap(),
@@ -538,8 +589,9 @@ fn module_run(
                 || false,
             )
             .unwrap();
-        let t = kelvins(next.thermal());
-        follows(law, next.circuit(), t[0], interval);
+        let (t, c) = (kelvins(next.thermal()), next.circuit());
+        let conductors = (c.conductors(), c.field().conductors());
+        follows(law, conductors, t[0], interval);
         let (thermal, circuit, report) = next.into_parts();
         rows.push(Row::new(t, &circuit, &report.coupled.electrical));
         (heat, electrical) = (thermal, circuit);
@@ -793,8 +845,9 @@ fn assembly_run(
                 &[0.0],
             )
             .unwrap();
-            let t = kelvins(next.thermal());
-            follows(law, next.circuit(), t[0], interval);
+            let (t, c) = (kelvins(next.thermal()), next.circuit());
+            let conductors = (c.conductors(), c.field().conductors());
+            follows(law, conductors, t[0], interval);
             let (thermal, circuit, report) = next.into_parts();
             near(
                 report.external_heat_j,
@@ -947,8 +1000,9 @@ fn material_run(
                 || false,
             )
             .unwrap();
-        let t = kelvins(next.thermal());
-        follows(law, next.circuit(), t[0], interval);
+        let (t, c) = (kelvins(next.thermal()), next.circuit());
+        let conductors = (c.conductors(), c.field().conductors());
+        follows(law, conductors, t[0], interval);
         let (thermal, circuit, report) = next.into_parts();
         let step = &report.coupled.electrical;
         assert_eq!(

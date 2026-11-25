@@ -1,7 +1,7 @@
 //! Native spatial play, eddy currents, strands and graph bodies share finite heat.
 #[allow(dead_code)]
 #[path = "../../../fs-em/tests/spatial_induction_winding/hysteretic_common.rs"]
-mod data;
+pub(super) mod data;
 
 use data::*;
 use fs_couple::circuit_enthalpy::{
@@ -28,7 +28,7 @@ const GRAPH_CELL: CellId = CellId(8);
 const MAT: MaterialId = MaterialId(9);
 const BASIS: ElectricalPropertyBasis = ElectricalPropertyBasis::Resistivity;
 
-fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
+pub(super) fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
     ResolvedHeatCapacityCurve::try_new(
         card,
         HeatCapacitySourceQuery {
@@ -45,7 +45,10 @@ fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
     )
     .unwrap()
 }
-fn thermal(curve: &ResolvedHeatCapacityCurve, separate_graph: bool) -> DepositionSimulation<'_> {
+pub(super) fn thermal(
+    curve: &ResolvedHeatCapacityCurve,
+    separate_graph: bool,
+) -> DepositionSimulation<'_> {
     let ids = if separate_graph {
         vec![CELL, GRAPH_CELL]
     } else {
@@ -97,7 +100,7 @@ fn thermal(curve: &ResolvedHeatCapacityCurve, separate_graph: bool) -> Depositio
     .unwrap()
     .0
 }
-fn cells<'a>(
+pub(super) fn cells<'a>(
     card: &'a MaterialCard,
     curve: &'a ResolvedHeatCapacityCurve,
     query: &'a QueryPoint,
@@ -123,7 +126,7 @@ fn cells<'a>(
         })
         .collect()
 }
-fn regions() -> Vec<SpatialMagneticRegion> {
+pub(super) fn regions() -> Vec<SpatialMagneticRegion> {
     (0..48)
         .map(|tetrahedron| SpatialMagneticRegion::Cell {
             tetrahedron,

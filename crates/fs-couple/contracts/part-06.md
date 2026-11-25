@@ -5600,9 +5600,10 @@ to 290 K, on a card whose permeability rises 0.0004 per kelvin:
 The separate-body graph sends the graph resistor's heat to its own body's
 cell through a second heat port. A resistor law gives the resistor from the
 body's card at that port's temperature, resolving the resistivity alone from
-the claim the module's `CellResistor` pins. The second port has no
-tetrahedra, so the conductor law it must carry is never asked. On a fixed and
-a 0.5 %-per-kelvin resistor card:
+the claim the module's `CellResistor` pins. The second port carries the
+coil's conductor law only because the Component requires one conductor law
+per heat receiver; the port has no tetrahedra, so that law is never asked. On
+a fixed and a 0.5 %-per-kelvin resistor card:
 - the ledger closes;
 - on each interval, on the kernel's rows and the module's alike, the
   resistance is `0.7 (1 + alpha (T_r - 300))` at the body's end temperature
@@ -5633,6 +5634,57 @@ Five planted defects each failed one of the two graphs:
   balance, which fs-system's endpoint-energy check refuses in the
   heat-assembly graph; and the graph resistors kept at the circuit's values
   whatever their laws give.
+
+Two more graphs declare the play-memory cases (`hysteretic.rs`, feature
+`magnetic-hysteresis`), each over two steps of 0.1 s. They use fs-em's
+conductor lane, `SpatialWinding::at_port_temperatures`. The play-memory owner
+refreshes no field material with temperature, so the Component refuses it
+the magnetic lane: only its conductors and its graph resistor follow the
+ports. The Component takes the owner's own energy allowance, its controls'
+4e-7 J.
+
+The first holds the fifth case, 180 V and then 0 V, with the graph resistor
+heating the coil's cell:
+- the ledger closes;
+- on each interval the kernel's rows meet the case's scalar reference. The
+  cell's temperature solves its `10 dT` balance of eddy, pinning, strand and
+  resistor heat (373.045 and 388.264 K, equal to 9 digits). The current is
+  the voltage play's, and the field's heat is the eddy and pinning heat;
+- after the release, the field holds the play's remanent memory;
+- each interval against the case's own path (`step_hysteretic_candidate`,
+  its conductors the law's, bit for bit): within 1.327e-10 K, 1.502e-11 A,
+  the circuit state to the bit, 1.531e-14 Wb and 1.651e-10 J; every cell's
+  branch polarizations agree within 1.099e-13 T.
+
+The second holds the sixth case at 120 V over both steps, its graph resistor
+in its own body at the case's length and area (after 120 V, the owner's
+circuit Newton refuses a release to 0 V, in the module and the Component
+alike):
+- the ledger closes;
+- on each interval the current is the voltage play's at the resistance of
+  the body's end temperature. The body's `10 dT` is the resistor's heat, and
+  the coil cell's is the strand and field heat;
+- each interval against the module's material step
+  (`step_hysteretic_material_candidate`, its resistor the law's, bit for
+  bit): within 4.604e-12 K, 1.080e-12 A, 2.842e-14, 2.165e-15 Wb and
+  1.285e-11 J; the polarizations agree within 1.643e-14 T;
+- as in the separate-body graph, the module refuses a construction circuit
+  holding the body's card at 301 K, and the kernel steps it to the
+  original's bits;
+- a cancellation requested at the law's last answer in the first step is
+  the kernel's `Cancelled`: the step publishes nothing, and the retry equals
+  the good step bit for bit.
+The bounds sit 48 to 53 times above the larger of the two graphs' values.
+
+Five planted defects each failed at least one of the two graphs:
+- in the first graph's declaration, its two intervals' voltages swapped;
+- in the graphs' resistor law, the body resistor's length and area swapped;
+- in the shared kernel, a fresh gate in place of the one given, which
+  leaves the late cancellation undelivered;
+- in the Component, the graph resistors kept at the circuit's values
+  whatever their laws give; and the play-memory owner's pinning and viscous
+  heat left out of its receivers, which the Component's own balance check
+  refuses in both graphs (defects of 0.209 and 0.109 J).
 
 ## Tetrahedral material current closes finite enthalpy
 
