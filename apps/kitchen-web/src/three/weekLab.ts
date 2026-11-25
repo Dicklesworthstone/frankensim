@@ -1038,7 +1038,7 @@ export function mountWeekLab(root: HTMLElement): void {
     }
     const onTime = all.filter((a) => lateOf(a) === 0).sort((a, b) => hrs(a) - hrs(b) || a.waste - b.waste || a.paid - b.paid)[0];
     let text = onTime ? `Cheapest with no meal late 9 weeks in 10: ${describe(onTime.plan)}, ${hrs(onTime)}\u00a0h. ` : "No plan gets every meal out on time 9 weeks in 10. ";
-    if (front.has(cur)) text += "This plan is on the frontier.";
+    if (front.has(cur)) text += "This plan is on the frontier: no plan does better on one count without doing worse on the other.";
     else if (me) {
       const better = all.filter((b) => beats(b, me)).length;
       text += `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other.`;
