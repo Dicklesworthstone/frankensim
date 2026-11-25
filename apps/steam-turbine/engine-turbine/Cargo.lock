@@ -1186,10 +1186,13 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-la",
+ "fs-matdb",
  "fs-math",
  "fs-orbit",
  "fs-phs",
  "fs-ports",
+ "fs-qty",
+ "fs-scenario",
  "fs-solver",
 ]
 

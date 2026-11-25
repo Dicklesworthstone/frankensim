@@ -68,6 +68,7 @@ pub mod diagnostics;
 pub mod elements;
 mod erased;
 pub mod ledger;
+pub mod lowering;
 #[cfg(feature = "phs")]
 pub mod phs;
 #[cfg(feature = "phs")]
@@ -91,6 +92,23 @@ pub use erased::{
 };
 pub use ledger::{
     CarriedInventoryOutcome, EnergyLeakAttribution, Ledger, LedgerExport, WindowLedgerOutcome,
+};
+pub use lowering::{
+    AcousticAssemblySpec, AcousticFamilyConstructor, AcousticFamilyContext, AcousticFamilyKey,
+    AcousticMemberLoweringReceipt, AcousticMemberSpec, CardStore, ComponentLoweringReceipt,
+    ConstitutiveModelRef, FidelityRungKind, FidelitySelectionPolicy, GearMeshConstructor,
+    GearMeshLoweringContext, GearMeshLoweringKey, GearMeshLoweringReceipt, InterfaceCardEntry,
+    InterfaceConstructor, InterfaceKindTag, InterfaceLoweringContext, InterfaceLoweringKey,
+    InterfaceLoweringReceipt, JointConstructor, JointLoweringContext, JointLoweringKey,
+    JointLoweringReceipt, LOWERING_GEOMETRY_HASH_DOMAIN, LOWERING_RECEIPT_HASH_DOMAIN,
+    LOWERING_RECEIPT_SCHEMA, LoweredAcousticMemberOutput, LoweredGearMeshOutput,
+    LoweredInterfaceOutput, LoweredJointOutput, LoweredPartOutput, LoweredSystem, LoweringError,
+    LoweringGraph, LoweringReceipt, LoweringRegistry, MatDbQueryEnv, POWER_PORT_SCHEMA_HASH_DOMAIN,
+    ParameterProvenance, ParameterSource, PartConstructor, PartLoweringContext, PartLoweringKey,
+    PowerPortSchemaCard, ProvenanceRecorder, ResolvedInterfaceCard, SourceLoweringReceipt,
+    geometry_axial_area_over_length_m, geometry_generator_label, geometry_polar_inertia_over_rho,
+    geometry_volume_m3, register_kernel_defaults, resolve_geometry_fingerprint,
+    spiral_spring_stiffness_factor_m3,
 };
 pub use system::{
     AlgebraicLoopAudit, AnalysisError, AnalysisKind, AnalysisOutcome, AnalysisRequest, BlockClass,
