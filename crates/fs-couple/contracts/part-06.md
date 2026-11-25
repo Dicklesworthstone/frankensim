@@ -7059,3 +7059,30 @@ native trajectory, and atomic cancellation/observer refusal. They do not claim f
 latent-heat feedback, nonspherical collapse, wall jets, erosion, fully coupled
 multiphase CFD, or experimental validation.
 
+### Heated concentric section on the multirate composition kernel (bead frankensim-rc-1109-root-3gc12.5.9)
+
+`examples/heated_section_sound.rs` (served by `apps/observatory`) now steps its
+coupled electro-thermal-modal specimen as one multirate `fs_system::System` via
+`System::step_multirate` with `SlowInterpolation::ZeroOrderHold`:
+- **Slow rate group (`substeps = 1`, `macro_dt <= 6.25 ms`)**: two
+  `fs_material::phase::component::UniformEnthalpyBody` layer stores (core and
+  sleeve), radial cylindrical conduction via
+  `fs_material::thermal::conduction::component::LayerConductor`, and two
+  voltage-driven `fs_material::conductor::component::OhmicResistor` components
+  joined on `core_body.heat` and `sleeve_body.heat` through `common_effort`.
+- **Fast rate group (`substeps = 100`, `16 kHz` `dt_acoustic <= 62.5 us`, `100x`
+  rate separation)**: a 4-mode `fs_nlmodal::component::ModalStructure` built
+  from the same `ConcentricElasticSection`, whose `heat` port feeds the slow
+  sleeve thermal junction across the rate boundary via `Dd` accumulators.
+- The CLI, CSV (`time_s,cold_pressure_pa,heated_pressure_pa`), interleaved
+  PCM-16 WAV, and stderr metric layout parsed by `apps/observatory/protocol.mjs`
+  are unchanged; cold and heated receiver pressures remain frozen-state listener
+  observations from `compile_concentric_material_assembly`.
+- `tests/heated_section_multirate.rs` proves equivalence against the legacy
+  `HeatedConcentricSection::advance_to` pairing (layer temperatures, electrical
+  energy, stored heat, fixed-strain axial force, and heated pressure), closes
+  the whole-system window ledger (`|energy_residual_j| < 1e-12`,
+  `|connection_defect_j| < 1e-10` within the radial-conduction `G * ulp(T)`
+  floor, `|numerical_loss_j| < 1e-12` (roundoff), `entropy` `Color::Verified`), and
+  verifies `100x` cross-rate conservation of nonzero modal viscous damping heat
+  against the `1x` single-rate reference.
