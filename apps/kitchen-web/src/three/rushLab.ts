@@ -678,10 +678,10 @@ export function mountRushLab(root: HTMLElement): void {
     mapEl.innerHTML = svg + "</svg>";
     if (mapNote) {
       if (scores.size < PLANS) mapNote.textContent = `Running plan ${scores.size + 1} of ${PLANS}, each over ${DAYS_N} days…`;
-      else if (front.has(cur)) mapNote.textContent = `This plan is on the frontier: no plan does better on one count without doing worse on the other. Click any dot to run it.`;
+      else if (front.has(cur)) mapNote.textContent = `This plan is on the frontier: no plan does better on one count without doing worse on the other. Pick a dot to run that plan.`;
       else {
         const better = all.filter((b) => me && b.waitP90 <= me.waitP90 && b.waste <= me.waste && (b.waitP90 < me.waitP90 || b.waste < me.waste)).length;
-        mapNote.textContent = `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other. Click any dot to run it.`;
+        mapNote.textContent = `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other. Pick a dot to run that plan.`;
       }
     }
   }
