@@ -42,7 +42,7 @@ import {
   type WalkinConfig,
   type WalkinState,
 } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
+import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Ext, type Model } from "./models/all";
 import { speedRackSlides } from "./models/cold";
 import { palette } from "./models/materials";
@@ -1095,6 +1095,8 @@ export function mountColdChainLab(root: HTMLElement): void {
     stats: () => ({ mode, triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, pans: panSpots.length, puffs: steam.count + doorFog.count + plume.count + haze.count }),
   };
 
+  const fitWalkin = clipFitter(camera, wiScene, 0.03);
+  const fitCarrier = clipFitter(camera, carScene, 0.03);
   function animate(now: number): void {
     requestAnimationFrame(animate);
     const dt = Math.max(0, Math.min(0.05, (now - lastTs) / 1000));
@@ -1142,6 +1144,7 @@ export function mountColdChainLab(root: HTMLElement): void {
     } else drawCarrier(tAnim, dt);
 
     controls.update();
+    (mode === "walkin" ? fitWalkin : fitCarrier)();
     // The models run on; the 3D view waits for its shaders (both scenes are compiled at mount).
     if (gate.ready()) renderer.render(mode === "walkin" ? wiScene : carScene, camera);
   }

@@ -28,7 +28,7 @@ import {
   type Traffic,
 } from "../sim/commissaryFloor";
 import { menuFor, runCommissary } from "../sim/commissaryWeek";
-import { ASSET_BASE, bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
+import { ASSET_BASE, bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture } from "./models/all";
 import { palette } from "./models/materials";
 import { Routine, makeStaff, panSeconds, type RoutineStep, type Staff } from "./models/people";
@@ -613,8 +613,11 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
       chiller.hooks.set?.("door", open ? Math.min(1, (t - open[0]) / 0.6, (open[1] - t) / 0.6) : 0);
     }
     controls.update();
+    fitClip();
     renderer.render(scene, camera);
   }
+  // Depth precision for the high, distant view: the walk-ins' roof panels lie under a millimetre off their frames.
+  const fitClip = clipFitter(camera, scene, 0.1);
   requestAnimationFrame(animate);
   void gate.refresh(scene);
 

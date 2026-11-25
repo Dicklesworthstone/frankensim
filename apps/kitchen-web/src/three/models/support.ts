@@ -1117,7 +1117,8 @@ function typeOneHood(island: boolean): Builder {
       // The supply collar's fire damper: a blade held open by its own fusible link.
       if (s.fine(2)) {
         s.add(p.ssDull, rbox(s, x1 - x0 - 0.006, 0.0015, (z1 - z0) * 0.9, 0.0004), [(x0 + x1) / 2, hb + 0.03, (z0 + z1) / 2], [0.5, 0, 0]);
-        s.add(p.ssDull, cyl(s, 0.003, x1 - x0, "x", 8), [(x0 + x1) / 2, hb + 0.03, (z0 + z1) / 2]);
+        // Its spindle's ends sit in the collar's side sheets, not flush with their outer faces.
+        s.add(p.ssDull, cyl(s, 0.003, x1 - x0 - 0.0016, "x", 8), [(x0 + x1) / 2, hb + 0.03, (z0 + z1) / 2]);
         s.add(p.brass, rbox(s, 0.02, 0.008, 0.0008, 0.0002), [(x0 + x1) / 2, hb + 0.045, z0 + 0.012]);
       }
     }
@@ -1231,7 +1232,7 @@ function typeOneHood(island: boolean): Builder {
         const nh2 = Math.max(2, Math.round(w / 1.1));
         for (let i = 0; i < nh2; i++) {
           const x = 0.25 + ((w - 0.5) * (i + 0.5)) / nh2;
-          s.add(p.ssBright, cyl(s, 0.003, hb - yf - 0.012, "y", 8), [x, (hb + yf + 0.012) / 2, zf]);
+          s.add(p.ssBright, cyl(s, 0.003, hb - yf - 0.0128, "y", 8), [x, (hb + yf + 0.0112) / 2, zf]);
           s.add(p.ssBright, torus(s, 0.0125, 0.0022, "x", Math.PI * 2, 16, 5), [x, yf, zf]);
         }
       }
@@ -1607,7 +1608,8 @@ function leverWaste(s: Shop, x: number, y: number, z: number, zBack: number, zFr
   }
   // The valve body under it: cast, chrome-plated, a 2 in tailpiece below.
   const yv = y - 0.045;
-  const body: [number, number][] = f2 ? [[0, -0.05], [0.026, -0.05], [0.03, -0.04], [0.034, -0.02], [0.036, 0.0], [0.034, 0.025], [0.028, 0.04], [0.026, 0.045], [0, 0.045]] : [[0, -0.05], [0.03, -0.042], [0.036, 0], [0.027, 0.042], [0, 0.045]];
+  // Its top stops just under the bowl's outer skin (0.045 up would put it flush with the bowl's floor).
+  const body: [number, number][] = f2 ? [[0, -0.05], [0.026, -0.05], [0.03, -0.04], [0.034, -0.02], [0.036, 0.0], [0.034, 0.025], [0.028, 0.04], [0.026, 0.0432], [0, 0.0432]] : [[0, -0.05], [0.03, -0.042], [0.036, 0], [0.027, 0.042], [0, 0.0432]];
   s.add(p.chrome, lathe(s, body, f2 ? 24 : 16), [x, yv, z]);
   s.add(p.chrome, cyl(s, 0.0245, yv - 0.05 - 0.4, "y", f2 ? 24 : 16, 0.0245, true), [x, (yv - 0.05 + 0.4) / 2, z]);
   // The overflow, from a slotted cover high on the bowl's back wall down into the body (behind the bowl: close views).

@@ -19,7 +19,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { EXEMPLARS, FLAGSHIP_EQUIPMENT, computeKitchenTelemetry, type CameraPresetId, type ExemplarId, type ExemplarSpec, type HeroMetrics } from "../sim/exemplars";
-import { ASSET_BASE, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate, thermalColor, type Scene3dFixture } from "./kit";
+import { ASSET_BASE, createScrollSafeOrbit, createStudioRenderer, fitClipPlanes, getSoftParticleTexture, observeInView, shaderGate, thermalColor, type Scene3dFixture } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { placeFixture } from "./models/shop";
@@ -4821,22 +4821,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     const m = 0.15;
     clipBox.min.set(-m, -m, -K.D - m);
     clipBox.max.set(K.W + m, K.H + m, m);
-    const p = camera.position;
-    const dNear = clipBox.distanceToPoint(p);
-    let dFar = 0;
-    for (let i = 0; i < 8; i++) {
-      const x = i & 1 ? clipBox.max.x : clipBox.min.x;
-      const y = i & 2 ? clipBox.max.y : clipBox.min.y;
-      const z = i & 4 ? clipBox.max.z : clipBox.min.z;
-      dFar = Math.max(dFar, Math.hypot(x - p.x, y - p.y, z - p.z));
-    }
-    const near = Math.max(0.05, dNear * 0.6);
-    const far = dFar + 1;
-    if (Math.abs(camera.near - near) > near * 0.05 || Math.abs(camera.far - far) > far * 0.05) {
-      camera.near = near;
-      camera.far = far;
-      camera.updateProjectionMatrix();
-    }
+    fitClipPlanes(camera, clipBox, 0.05);
   }
 
   function animate(now: number): void {

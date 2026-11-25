@@ -95,7 +95,9 @@ export function pipe(s: Shop, pts: readonly V3[], r: number, bend = r * 3, radia
 export function flangedLeg(s: Shop, x: number, z: number, h: number, r = 0.019): void {
   const p = palette();
   const fh = Math.min(0.03, h * 0.3);
-  s.add(p.ss, cyl(s, r, h - fh, "y", 20), [x, fh + (h - fh) / 2, z]);
+  // Close up the leg starts inside its nut, so that its end does not lie flush with the nut's underside.
+  const y0 = s.fine(2) ? fh + 0.004 : fh;
+  s.add(p.ss, cyl(s, r, h - y0, "y", 20), [x, y0 + (h - y0) / 2, z]);
   s.add(p.ssBright, lathe(s, [
     [0, 0],
     [r * 1.5, 0],
@@ -1205,7 +1207,8 @@ function counterShell(s: Shop, e: Ext, o: Shell): void {
     }
   // The bottom pan; the sides, each one sheet cut to the body and rising behind the back splash round the flue
   // chamber; the back.
-  s.add(p.ssDull, sheet(s, w - 0.0032, 0.0016, bodyD), [w / 2, legH + 0.0008, (zf + back) / 2]);
+  // (It stops behind the control panel, whose lower edge would otherwise lie flush with its own.)
+  s.add(p.ssDull, sheet(s, w - 0.0032, 0.0016, bodyD - 0.0012), [w / 2, legH + 0.0008, (zf - 0.0012 + back) / 2]);
   const rr = 0.005;
   const side: P2[] = [[back, legH], [zf, legH], [zf, o.sideTop - rr], ...arc2([zf - rr, o.sideTop - rr], rr, 0, Math.PI / 2, s.seg(5, 2)).slice(1), [o.zTop1, o.sideTop], [o.zTop1, yS], [back, yS]];
   for (const x of [0, w - 0.0016]) s.add(p.ss, zyPlate(s, side, 0.0016), [x, 0, 0]);
@@ -2385,7 +2388,8 @@ const tiltSkillet: Builder = (s, e) => {
   s.add(p.castIron, rbox(s, 0.04, 0.05, 0.11, 0.008), [0.035, piv[1] - 0.012, piv[2]]);
   s.add(p.castIron, cyl(s, 0.042, 0.04, "x", 24), [0.035, piv[1], piv[2]]);
   if (s.fine(2)) s.add(p.brass, cyl(s, 0.004, 0.012, "y", 8), [0.035, piv[1] + 0.046, piv[2]]);
-  if (s.fine(2)) for (const sz of [-1, 1]) s.add(p.ssBright, new THREE.CylinderGeometry(0.008, 0.008, 0.008, 6), [0.035, piv[1] - 0.033, piv[2] + sz * 0.042]);
+  // Its bolts' nuts, under the block.
+  if (s.fine(2)) for (const sz of [-1, 1]) s.add(p.ssBright, new THREE.CylinderGeometry(0.008, 0.008, 0.008, 6), [0.035, piv[1] - 0.0405, piv[2] + sz * 0.042]);
 
   // The console: a stainless pedestal on its own two legs, the gearbox on its flank.
   const cw = cx1 - cx0;
@@ -2811,7 +2815,7 @@ const kettle: Builder = (s, e) => {
   });
   // The hinge bracket on the rim's back and its counterbalance spring.
   s.add(p.ss, rbox(s, 0.2, 0.05, 0.05, 0.005), [cx, rimY - 0.012, cz - R - 0.035]);
-  if (s.fine(1)) s.add(p.ssBright, cyl(s, 0.018, 0.2, "x", 18), [cx, rimY + 0.012, cz - R - 0.06]);
+  if (s.fine(1)) s.add(p.ssBright, cyl(s, 0.018, 0.19, "x", 18), [cx, rimY + 0.012, cz - R - 0.06]);
   if (s.fine(2)) for (let i = 0; i < 9; i++) s.add(p.ssDull, torus(s, 0.0205, 0.0025, "x", Math.PI * 2, 14, 5), [cx - 0.09 + i * 0.0225, rimY + 0.012, cz - R - 0.06]);
 
   return (b) => {

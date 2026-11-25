@@ -2474,7 +2474,9 @@ function walkIn(k: WalkInSpec): Builder {
         j.add(pvc, bx(j, sw, len, 0.002, 0.0008), [0, -len / 2, 0]);
         // The strip folds over a hanger plate: a stainless clamp across its top with two bolts.
         j.add(p.ssBright, bx(j, sw - 0.01, 0.03, 0.005, 0.0015), [0, -0.008, i % 2 ? -0.0042 : 0.0042]);
-        if (j.fine(2)) for (const sx of [-0.06, 0.06]) j.add(p.ssBright, cyl(j, 0.004, 0.012, "z", 8), [sx, -0.008, 0.001]);
+        // Its bolts run from just behind the strip out through the clamp; a symmetric bolt would end flush with the
+        // face of the strip hung behind it.
+        if (j.fine(2)) for (const sx of [-0.06, 0.06]) j.add(p.ssBright, cyl(j, 0.004, 0.0095, "z", 8), [sx, -0.008, i % 2 ? -0.00225 : 0.00225]);
         strips.push(name);
       }
     }
@@ -3700,7 +3702,8 @@ const iceMachine: Builder = (s, e) => {
   // The head: bottom pan, ends, top, the louvred intake and the condenser behind it, the panel above.
   const H = h - yh;
   s.add(p.gasket, new THREE.BoxGeometry(w - 0.004, 0.0018, d - 0.008), [w / 2, yh + 0.001, -d / 2]);
-  s.add(p.ssDull, new THREE.BoxGeometry(w - 2 * t, t, d), [w / 2, yh + 0.002 + t / 2, -d / 2]);
+  // (The pan stops behind the kick panel, whose face it would otherwise share.)
+  s.add(p.ssDull, new THREE.BoxGeometry(w - 2 * t, t, d - t), [w / 2, yh + 0.002 + t / 2, -(d + t) / 2]);
   for (const x of [t / 2, w - t / 2]) s.add(p.ss, bx(s, t, H - 0.002 - t, d, 0.0005), [x, yh + 0.002 + (H - 0.002 - t) / 2, -d / 2]);
   s.add(p.ss, bx(s, w, t, d, 0.0005), [w / 2, h - t / 2, -d / 2]);
   const gy0 = yh + 0.018;

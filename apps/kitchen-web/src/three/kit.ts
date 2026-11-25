@@ -84,6 +84,51 @@ export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera):
 }
 
 /**
+ * Clip planes that follow the camera, for a scene whose drawn parts all lie inside `box`: the near plane at 0.6 of the
+ * distance to the box's nearest point (a plane, it cuts nothing nearer than that within 53° of the view axis, wider
+ * than any of the page's frusta reach), never under `minNear`, and the far plane just past the box's farthest corner.
+ * A fixed near plane of a few centimetres leaves the depth buffer able to part only about z² / (near · 2²⁴): half a
+ * millimetre at 20 m, so a pan on a counter or a roof panel on its frame flickers from a high, distant view. Fitted to
+ * the box, the same view parts surfaces a few hundredths of a millimetre apart.
+ */
+/**
+ * Clip planes fitted each frame to the box round everything a scene draws (hidden parts included, a margin and a
+ * standing person's headroom added for what moves about in it), the box measured again now and then for parts that
+ * arrive late.
+ */
+export function clipFitter(camera: THREE.PerspectiveCamera, scene: THREE.Object3D, minNear: number, headroom = 2.4): () => void {
+  const box = new THREE.Box3();
+  let age = Infinity;
+  return () => {
+    if (++age > 90) {
+      box.setFromObject(scene).expandByScalar(0.25);
+      box.max.y = Math.max(box.max.y, headroom);
+      age = 0;
+    }
+    fitClipPlanes(camera, box, minNear);
+  };
+}
+
+export function fitClipPlanes(camera: THREE.PerspectiveCamera, box: THREE.Box3, minNear = 0.05): void {
+  const p = camera.position;
+  const dNear = box.distanceToPoint(p);
+  let dFar = 0;
+  for (let i = 0; i < 8; i++) {
+    const x = i & 1 ? box.max.x : box.min.x;
+    const y = i & 2 ? box.max.y : box.min.y;
+    const z = i & 4 ? box.max.z : box.min.z;
+    dFar = Math.max(dFar, Math.hypot(x - p.x, y - p.y, z - p.z));
+  }
+  const near = Math.max(minNear, dNear * 0.6);
+  const far = dFar + 1;
+  if (Math.abs(camera.near - near) > near * 0.05 || Math.abs(camera.far - far) > far * 0.05) {
+    camera.near = near;
+    camera.far = far;
+    camera.updateProjectionMatrix();
+  }
+}
+
+/**
  * Scroll-safe OrbitControls: wheel zoom is OFF by default so normal vertical page
  * scrolling is NEVER hijacked; clicking/focusing the canvas unlocks zoom until blur/leave.
  */

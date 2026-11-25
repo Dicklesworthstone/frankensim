@@ -2710,7 +2710,7 @@ function combi(pans: 6 | 10 | 20): Builder {
         const gx = pcx + 0.048;
         const gy = hy - 0.055;
         cut.add(p.ssBright, torus(cut, 0.0095, 0.0024, "z", Math.PI * 2, 24, 8), [gx, gy, hz + 0.0016]);
-        cut.add(p.rubber, cyl(cut, 0.0072, 0.002, "z", 16), [gx, gy, hz + 0.001]);
+        cut.add(p.rubber, cyl(cut, 0.0072, 0.0025, "z", 16), [gx, gy, hz + 0.00125]);
         tube(cut, p.rubber, [[pcx, hy - 0.052, gz], [pcx + 0.003, hy - 0.088, gz + 0.006], [pcx + 0.026, hy - 0.104, gz + 0.004], [gx, hy - 0.09, hz + 0.016], [gx, gy, hz + 0.008], [gx, gy, hz - 0.004]], 0.0058, 0.014, 12);
       }
       // The core-temperature probe: a needle on a silicone grip, parked in its holder on the right wall at the front,
@@ -3196,8 +3196,9 @@ const microwave: Builder = (s, e) => {
   ] as const) {
     s.add(p.ss, new THREE.CylinderGeometry(rb, rb, zf - zb, s.seg(12, 3), 1, true, a0, Math.PI / 2).rotateX(Math.PI / 2), [x, h - rb, (zf + zb) / 2]);
   }
-  slab(s, p.ssDull, 0.001, w - 0.001, yb, yb + 0.0012, zb, zf);
-  slab(s, p.ssDull, 0.001, w - 0.001, yb, h - 0.001, zb, zb + 0.0012);
+  // The bottom pan sits between the sides and behind the front frame, not flush with their faces.
+  slab(s, p.ssDull, 0.0012, w - 0.0012, yb, yb + 0.0012, zb, zf - 0.002);
+  slab(s, p.ssDull, 0.0012, w - 0.0012, yb, h - 0.0012, zb, zb + 0.0012);
   // Vent louvres: sides near the back, and the back's exhaust grille.
   if (fine1) {
     for (const sg of [-1, 1]) louvres(s, [sg < 0 ? 0 : w, h * 0.55, zb + 0.1], [0, sg * Math.PI / 2, 0], 8, 0.12, 0.016);
@@ -3429,8 +3430,9 @@ const conveyorToaster: Builder = (s, e) => {
   // Housing: a wrapper over top and sides, back and bottom pans.
   slab(s, p.ss, x0, x1, h - 0.0012, h, zb, zf, 0.0006);
   for (const x of [x0, x1 - 0.0012]) slab(s, p.ss, x, x + 0.0012, yb, h, zb, zf, 0.0006);
-  slab(s, p.ssDull, x0, x1, yb, yb + 0.0012, zb, zf);
-  slab(s, p.ssDull, x0, x1, yb, h, zb, zb + 0.0012);
+  // The pans sit between the side sheets and under the top, not flush with their outer faces.
+  slab(s, p.ssDull, x0 + 0.0012, x1 - 0.0012, yb, yb + 0.0012, zb, zf - 0.0015);
+  slab(s, p.ssDull, x0 + 0.0012, x1 - 0.0012, yb, h - 0.0012, zb, zb + 0.0012);
   if (fine1) {
     for (const sg of [-1, 1]) louvres(s, [sg < 0 ? x0 : x1, h - 0.07, zb + 0.12], [0, sg * Math.PI / 2, 0], 4, 0.14, 0.018);
     louvres(s, [cx, h - 0.0001 + 0.0001, zb + 0.1], [-Math.PI / 2, 0, 0], 5, 0.22, 0.02);
@@ -3648,8 +3650,8 @@ const airFryer: Builder = (s, e) => {
   // The case: a wrapper with rounded front corners, back and bottom pans, the front frame round the drawer.
   slab(s, p.ss, 0, w, h - 0.0012, h, zb, zf, 0.0006);
   for (const x of [0, w - 0.0012]) slab(s, p.ss, x, x + 0.0012, yb, h, zb, zf, 0.0006);
-  slab(s, p.ssDull, 0.001, w - 0.001, yb, yb + 0.0012, zb, zf);
-  slab(s, p.ssDull, 0.001, w - 0.001, yb, h - 0.001, zb, zb + 0.0012);
+  slab(s, p.ssDull, 0.0012, w - 0.0012, yb, yb + 0.0012, zb, zf - 0.002);
+  slab(s, p.ssDull, 0.0012, w - 0.0012, yb, h - 0.0012, zb, zb + 0.0012);
   {
     const sh = roundRect(w - 0.002, h - yb - 0.002, 0.008, w / 2, (h + yb) / 2);
     rectPath(sh, op.x1 - op.x0, op.y1 - op.y0, 0.01, cx, (op.y0 + op.y1) / 2, true);
@@ -4200,7 +4202,7 @@ const steamTable: Builder = (s, e) => {
   slab(s, p.ss, 0, w, yb, top, zf - 0.0012, zf, r2(0.0006));
   slab(s, p.ss, 0, w, yb, top, zb, zb + 0.0012, r2(0.0006));
   for (const x of [0, w - 0.0012]) slab(s, p.ss, x, x + 0.0012, yb, top, zb, zf, r2(0.0006));
-  slab(s, p.ssDull, 0.001, w - 0.001, yb, yb + 0.0012, zb, zf);
+  slab(s, p.ssDull, 0.0012, w - 0.0012, yb, yb + 0.0012, zb + 0.0012, zf - 0.0012);
   {
     const sh = roundRect(w, zf - zb, 0.004, w / 2, zc);
     for (const x of wells) rectPath(sh, 0.31, 0.51, 0.01, x, zc, true);

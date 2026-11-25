@@ -13,7 +13,7 @@
  */
 import * as THREE from "three";
 import { DAYS, KITCHEN, MENU, SWAPS, runCommissary, type CommissaryRun, type DayResult, type Settings, type Strategy } from "../sim/commissaryWeek";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
+import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { speedRackSlides } from "./models/cold";
 import { palette } from "./models/materials";
@@ -909,8 +909,10 @@ export function mountWeekLab(root: HTMLElement): void {
     else weekT = frozen;
     show(weekT, dt);
     controls.update();
+    fitClip();
     renderer.render(scene, camera);
   }
+  const fitClip = clipFitter(camera, scene, 0.05);
   requestAnimationFrame(animate);
   void gate.refresh(scene);
 

@@ -22,7 +22,7 @@
 
 import * as THREE from "three";
 import { estimateLumbarTorqueNm } from "../sim/physicsKernels";
-import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
+import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { wireShelving } from "./models/cold";
 import { palette } from "./models/materials";
@@ -755,6 +755,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
     });
   let last = performance.now();
   let sinceReadout = 0;
+  const fitClip = clipFitter(camera, scene, 0.05);
   function animate(now: number): void {
     requestAnimationFrame(animate);
     const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
@@ -771,6 +772,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
     if (!inView || !gate.ready()) return;
     for (const r of ranges) r.hooks.tick?.(now / 1000, dt, 1);
     controls.update();
+    fitClip();
     renderer.render(scene, camera);
   }
   requestAnimationFrame(animate);
