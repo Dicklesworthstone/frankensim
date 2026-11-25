@@ -850,6 +850,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-mms"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
+
+[[package]]
 name = "fs-modal"
 version = "0.0.1"
 dependencies = [
@@ -933,8 +940,14 @@ version = "0.0.1"
 dependencies = [
  "fs-exec",
  "fs-iface",
+ "fs-mms",
+ "fs-propcheck",
  "fs-qty",
 ]
+
+[[package]]
+name = "fs-propcheck"
+version = "0.0.1"
 
 [[package]]
 name = "fs-psycho"
