@@ -375,7 +375,7 @@
               </div>
 
               <div class="control-group">
-                <div class="group-title">Simulation Time Rate</div>
+                <div class="group-title">Simulation Time Rate <span class="group-note" id="val-rtf" title="Simulated seconds per wall-clock second, measured">RTF –</span></div>
                 <div class="segmented" id="seg-timescale">
                   <button data-rate="0.25">0.25×</button>
                   <button data-rate="1" class="active">1×</button>
@@ -393,6 +393,7 @@
             <button class="tab" data-right-tab="rotor" role="tab" aria-selected="false">Campbell &amp; Orbit</button>
             <button class="tab" data-right-tab="audio" role="tab" aria-selected="false">Acoustics</button>
             <button class="tab" data-right-tab="ledger" role="tab" aria-selected="false">Ledger &amp; FEM</button>
+            <button class="tab" data-right-tab="trends" role="tab" aria-selected="false">Trends &amp; Log</button>
           </div>
 
           <div class="panel-body">
@@ -491,6 +492,34 @@
               <div class="control-group">
                 <div class="group-title">8-Node Thermal Network &amp; Norton Creep</div>
                 <div class="metric-grid" id="grid-thermal"></div>
+              </div>
+            </section>
+
+            <!-- RIGHT TAB 5: Trend recorder, event log and CSV export -->
+            <section class="tab-pane" id="right-trends">
+              <div class="chart-card">
+                <div class="chart-head">
+                  <span>Trends (simulated time)</span>
+                  <div class="mini-seg" id="seg-trend-window">
+                    <button data-window="60" class="active">60 s</button>
+                    <button data-window="600">10 min</button>
+                    <button data-window="Infinity">All</button>
+                  </div>
+                </div>
+                <canvas id="canvas-trends" class="trend-canvas" width="320" height="300"></canvas>
+                <div class="trend-lanes" id="trend-lanes"></div>
+              </div>
+              <div class="control-group" style="margin-top:8px;">
+                <div class="group-title">Export (CSV)</div>
+                <div class="btn-grid-3">
+                  <button class="action-btn" id="btn-csv-fine" title="Every channel at every 20 ms engine step, last 60 s">60 s · 20 ms</button>
+                  <button class="action-btn" id="btn-csv-coarse" title="Every channel every 0.5 s of simulated time, last 2 h">2 h · 0.5 s</button>
+                  <button class="action-btn" id="btn-csv-events" title="The event log below">Events</button>
+                </div>
+              </div>
+              <div class="control-group">
+                <div class="group-title">Event Log <span class="group-note" id="event-count"></span></div>
+                <ol class="event-log" id="event-log"></ol>
               </div>
             </section>
           </div>

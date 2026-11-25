@@ -11,7 +11,7 @@
     "deploy:cf": "npm run build:cf && npx wrangler deploy --config cloudflare/wrangler.jsonc",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --test test/turbineEngine.test.mjs",
+    "test": "node --test test/turbineEngine.test.mjs test/trends.test.mjs",
     "wasm": "CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_turbine /Users/jemanuel/.cargo/bin/cargo lbuild --offline --manifest-path engine-turbine/Cargo.toml --target wasm32-unknown-unknown --release -j 4 && wasm-bindgen --target web --out-dir src/wasm-pkg ${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_turbine/wasm32-unknown-unknown/release/fs_steam_turbine.wasm"
   },
   "devDependencies": {

@@ -14,6 +14,8 @@ The generator is the classical machine on an infinite bus: a constant EMF `E′`
 
 Shaft vibration is ISO 7919's `S(p-p)`: the larger of the two probe directions' peak-to-peak journal displacement over the last revolution, taken from samples inside the rotor model's 0.5 ms integration sub-steps, which also draw the orbit (about 40 points per revolution at 3,000 rpm). Alarm and trip sit at the standard's zone boundaries for a 3,000 rpm machine (165 and 240 µm); the page colours and draws against the limits the engine reports (`limits()`), and each alarm and trip has its own bit in the snapshot, so the status names its cause. Efficiency is reported only while live steam flows. Blade tip clearance costs power once, as each row's tip loss in the meanline; the sections' labyrinth bypass (1.8 % HP, 1.4 % IP/LP) is a fitted constant.
 
+The page advances the engine in fixed 20 ms steps (the plant's own sub-step), so a run follows the same trajectory at any frame rate; the time-rate control shows the measured real-time factor, which falls below the requested rate when the computer running the page cannot keep up. Every step is recorded. The Trends & Log tab plots any four of 33 snapshot channels over the last 60 s (every step) or the last 2 h (every 0.5 s) with a cursor read-out, exports either record as CSV, and logs the engine's alarm, trip, status and breaker changes and the operator's actions (also exportable). A reset, cold start, experiment or new design restarts the engine clock and the record.
+
 ## Quick Start
 
 ```bash

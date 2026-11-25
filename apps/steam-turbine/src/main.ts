@@ -39,6 +39,20 @@ import {
 } from "./metrology";
 import { EXPERIMENTS, type CameraPreset, type CutawayMode, type ShaderMode } from "./experiments";
 import { FIELD_MODE_SPECS } from "./turbineShaders";
+import {
+  DEFAULT_LANES,
+  EventLog,
+  LANE_COLORS,
+  TREND_CHANNELS,
+  TrendRecorder,
+  downloadText,
+  drawTrendLanes,
+  eventsCsv,
+  formatSimTime,
+  trendCsv,
+} from "./trends";
+
+type RightTab = "thermo" | "rotor" | "audio" | "ledger" | "trends";
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -85,13 +99,38 @@ async function boot(): Promise<void> {
   let cutaway: CutawayMode = "half";
   let shader: ShaderMode = "pbr";
   let stageChartMode: StageChartMode = "pt";
-  let activeRightTab: "thermo" | "rotor" | "audio" | "ledger" = "thermo";
+  let activeRightTab: RightTab = "thermo";
   let activeExpId: string | null = "nominal";
   let selectedOptObj = 0;
   let lastOptReport: DesignOptimizationReport | null = null;
   let fastForwardRemainingS = 0;
   let frameCounter = 0;
   let lastWallMs = performance.now();
+  // The engine advances in fixed 20 ms steps (the plant's own sub-step bound) whatever the frame
+  // rate: wall time accrues as simulated time owed, and whole steps pay it off. A run is then the
+  // same trajectory on every display, and the trend recorder samples it at a fixed interval.
+  const FIXED_DT_S = 0.02;
+  // Engine time allowed per frame before the page drops the backlog (and the RTF shows it).
+  const FRAME_ENGINE_BUDGET_MS = 12;
+  let simDebtS = 0;
+  let rtfWallS = 0;
+  let rtfSimS = 0;
+  let rtfLastSimT = 0;
+  const trendRec = new TrendRecorder();
+  const eventLog = new EventLog();
+  {
+    const boot = decodeSnapshot(sim.snapshot());
+    trendRec.record(boot);
+    eventLog.restart("Boot: warm, synchronised, nominal load", boot);
+  }
+  // The engine clock restarted (reset, cold start, experiment, new design): a new record.
+  const restartRecording = (text: string) => {
+    simDebtS = 0;
+    const snap = decodeSnapshot(sim.snapshot());
+    trendRec.clear();
+    trendRec.record(snap);
+    eventLog.restart(text, snap);
+  };
 
   // DOM References
   const kpiRpm = byId<HTMLSpanElement>("kpi-rpm");
@@ -225,7 +264,7 @@ async function boot(): Promise<void> {
   };
 
   let hudReady = false;
-  const switchRightTab = (tab: "thermo" | "rotor" | "audio" | "ledger") => {
+  const switchRightTab = (tab: RightTab) => {
     activeRightTab = tab;
     document.querySelectorAll<HTMLButtonElement>("[data-right-tab]").forEach((b) => {
       const active = b.dataset.rightTab === tab;
@@ -248,7 +287,7 @@ async function boot(): Promise<void> {
   });
   document.querySelectorAll<HTMLButtonElement>("[data-right-tab]").forEach((b) => {
     b.addEventListener("click", () => {
-      switchRightTab((b.dataset.rightTab ?? "thermo") as "thermo" | "rotor" | "audio" | "ledger");
+      switchRightTab((b.dataset.rightTab ?? "thermo") as RightTab);
     });
   });
 
@@ -343,6 +382,7 @@ async function boot(): Promise<void> {
     labelId: string,
     format: (v: number) => string,
     onChange: (v: number) => void,
+    logName?: string,
   ) => {
     const sl = byId<HTMLInputElement>(sliderId);
     const lb = byId<HTMLElement>(labelId);
@@ -352,6 +392,9 @@ async function boot(): Promise<void> {
       onChange(v);
     };
     sl.addEventListener("input", sync);
+    if (logName) {
+      sl.addEventListener("change", () => eventLog.operator(`${logName} → ${format(Number(sl.value))}`));
+    }
     return {
       get: () => Number(sl.value),
       set: (v: number) => {
@@ -361,26 +404,26 @@ async function boot(): Promise<void> {
     };
   };
 
-  const ctlLoad = bindSlider("sl-load", "val-load", (v) => `${v.toFixed(0)}%`, (v) => sim.set_load_setpoint(v / 100));
-  const ctlExt = bindSlider("sl-ext", "val-ext", (v) => `${v.toFixed(0)}%`, (v) => sim.set_extraction_demand(v / 100));
-  const ctlPBoiler = bindSlider("sl-pboiler", "val-pboiler", (v) => `${v.toFixed(0)} bar`, (v) => sim.set_live_steam_bar(v));
-  const ctlTBoiler = bindSlider("sl-tboiler", "val-tboiler", (v) => `${v.toFixed(0)} °C`, (v) => sim.set_live_steam_temp_c(v));
-  const ctlRpmRef = bindSlider("sl-rpmref", "val-rpmref", (v) => `${v.toFixed(0)} rpm`, (v) => sim.set_speed_ref_rpm(v));
-  const ctlExc = bindSlider("sl-exc", "val-exc", (v) => `${(v / 100).toFixed(2)} pu`, (v) => sim.set_excitation_pu(v / 100));
-  const ctlAir = bindSlider("sl-air", "val-air", (v) => `${v.toFixed(2)}%`, (v) => sim.set_condenser_air_fraction(v / 100));
-  const ctlCwFlow = bindSlider("sl-cwflow", "val-cwflow", (v) => `${v.toFixed(0)}%`, (v) => sim.set_cw_flow_frac(v / 100));
-  const ctlCwTemp = bindSlider("sl-cwtemp", "val-cwtemp", (v) => `${v.toFixed(1)} °C`, (v) => sim.set_cw_inlet_temp_c(v));
-  const ctlUnbal = bindSlider("sl-unbal", "val-unbal", (v) => `${Math.round(v).toLocaleString()} g·mm`, (v) => sim.set_rotor_unbalance_g_mm(v));
+  const ctlLoad = bindSlider("sl-load", "val-load", (v) => `${v.toFixed(0)}%`, (v) => sim.set_load_setpoint(v / 100), "Load setpoint");
+  const ctlExt = bindSlider("sl-ext", "val-ext", (v) => `${v.toFixed(0)}%`, (v) => sim.set_extraction_demand(v / 100), "Extraction demand");
+  const ctlPBoiler = bindSlider("sl-pboiler", "val-pboiler", (v) => `${v.toFixed(0)} bar`, (v) => sim.set_live_steam_bar(v), "Live steam pressure");
+  const ctlTBoiler = bindSlider("sl-tboiler", "val-tboiler", (v) => `${v.toFixed(0)} °C`, (v) => sim.set_live_steam_temp_c(v), "Live steam temperature");
+  const ctlRpmRef = bindSlider("sl-rpmref", "val-rpmref", (v) => `${v.toFixed(0)} rpm`, (v) => sim.set_speed_ref_rpm(v), "Speed reference");
+  const ctlExc = bindSlider("sl-exc", "val-exc", (v) => `${(v / 100).toFixed(2)} pu`, (v) => sim.set_excitation_pu(v / 100), "Excitation");
+  const ctlAir = bindSlider("sl-air", "val-air", (v) => `${v.toFixed(2)}%`, (v) => sim.set_condenser_air_fraction(v / 100), "Condenser air in-leakage");
+  const ctlCwFlow = bindSlider("sl-cwflow", "val-cwflow", (v) => `${v.toFixed(0)}%`, (v) => sim.set_cw_flow_frac(v / 100), "Cooling water flow");
+  const ctlCwTemp = bindSlider("sl-cwtemp", "val-cwtemp", (v) => `${v.toFixed(1)} °C`, (v) => sim.set_cw_inlet_temp_c(v), "Cooling water inlet");
+  const ctlUnbal = bindSlider("sl-unbal", "val-unbal", (v) => `${Math.round(v).toLocaleString()} g·mm`, (v) => sim.set_rotor_unbalance_g_mm(v), "Rotor unbalance");
   const ctlWhip = bindSlider("sl-whip", "val-whip", (v) => v.toFixed(2), (v) => {
     sim.set_oil_whip_destabilize(v);
     sim.refresh_campbell();
     campbellTable = sim.campbell_data();
-  });
+  }, "Oil-whip destabilisation");
   const ctlOilP = bindSlider("sl-oilp", "val-oilp", (v) => `${v.toFixed(0)}%`, (v) => {
     sim.set_lube_oil_pressure_frac(v / 100);
     sim.refresh_campbell();
     campbellTable = sim.campbell_data();
-  });
+  }, "Lube oil pressure");
 
   // ---------- L4 ASCENT Design Studio Sliders & fs-dfo Optimizer ----------
   const btnDesApply = byId<HTMLButtonElement>("btn-des-apply");
@@ -429,7 +472,13 @@ async function boot(): Promise<void> {
     sim.refresh_campbell();
     campbellTable = sim.campbell_data();
     scene.rebuildBladeRows(sim);
-    syncDesignSliders(decodeDesignParams(sim.design_params_flat()));
+    const applied = decodeDesignParams(sim.design_params_flat());
+    syncDesignSliders(applied);
+    restartRecording(
+      `Design applied: tip ${applied.tipClearanceMm.toFixed(2)} mm, reaction ${applied.hpReaction.toFixed(2)}, ` +
+        `LP blade ${applied.lpLastBladeHM.toFixed(3)} m, bearing ${applied.bearingClearanceUm.toFixed(0)} µm / ` +
+        `preload ${applied.bearingPreload.toFixed(2)}, wall ${applied.casingWallMm.toFixed(0)} mm (plant rebuilt warm)`,
+    );
     updateHud(decodeSnapshot(sim.snapshot()), decodeStageProfile(sim.stage_profile_flat()));
   };
 
@@ -558,11 +607,16 @@ async function boot(): Promise<void> {
   btnBreaker.addEventListener("click", () => {
     syncBreakerBtn(!breakerClosed);
     sim.set_grid_breaker(breakerClosed);
+    eventLog.operator(`Breaker ${breakerClosed ? "close" : "open"} command`);
   });
-  btnTrip.addEventListener("click", () => sim.set_manual_trip(true));
+  btnTrip.addEventListener("click", () => {
+    sim.set_manual_trip(true);
+    eventLog.operator("Manual ESV trip");
+  });
   btnResetTrip.addEventListener("click", () => {
     sim.set_manual_trip(false);
     sim.reset_trips();
+    eventLog.operator("Trips reset");
   });
 
   const resetControlSlidersToNominal = () => {
@@ -596,6 +650,7 @@ async function boot(): Promise<void> {
     sim.set_load_setpoint(0.20);
     sim.refresh_campbell();
     campbellTable = sim.campbell_data();
+    restartRecording("Cold start (design kept), breaker open, load setpoint 20 %");
     updateHud(decodeSnapshot(sim.snapshot()), decodeStageProfile(sim.stage_profile_flat()));
   });
 
@@ -614,6 +669,7 @@ async function boot(): Promise<void> {
     campbellTable = sim.campbell_data();
     mollierDome = sim.mollier_dome();
     renderExperimentCards();
+    restartRecording("Reset to defaults (design, microphone, warm nominal)");
     updateHud(decodeSnapshot(sim.snapshot()), decodeStageProfile(sim.stage_profile_flat()));
   });
 
@@ -803,6 +859,7 @@ async function boot(): Promise<void> {
         }
 
         campbellTable = sim.campbell_data();
+        restartRecording(`Experiment: ${exp.title}`);
         applyCutaway(exp.cutaway);
         applyShader(exp.shader);
         selectCamera(exp.camera);
@@ -821,7 +878,9 @@ async function boot(): Promise<void> {
 
   document.querySelectorAll<HTMLButtonElement>("[data-ff]").forEach((b) => {
     b.addEventListener("click", () => {
-      fastForwardRemainingS += Number(b.dataset.ff ?? 2);
+      const add = Number(b.dataset.ff ?? 2);
+      fastForwardRemainingS += add;
+      eventLog.operator(`Fast-forward +${add} s`);
     });
   });
 
@@ -888,9 +947,97 @@ async function boot(): Promise<void> {
     runDesignOpt,
     applyOptimized: () => lastOptReport && applyDesignToEngine(lastOptReport.optimizedParams),
     getSnapshot: () => decodeSnapshot(sim.snapshot()),
+    trends: trendRec,
+    events: eventLog,
     getStageProfile: () => decodeStageProfile(sim.stage_profile_flat()),
     getFemCert: () => femCert,
   };
+
+  // ---------- Trends, event log and CSV export ----------
+  const canvasTrends = byId<HTMLCanvasElement>("canvas-trends");
+  const trendLanesEl = byId<HTMLDivElement>("trend-lanes");
+  const eventLogEl = byId<HTMLOListElement>("event-log");
+  const eventCountEl = byId<HTMLSpanElement>("event-count");
+  const valRtf = byId<HTMLSpanElement>("val-rtf");
+  const laneIds: string[] = [...DEFAULT_LANES];
+  let trendWindowS = 60;
+  let trendHoverFrac: number | null = null;
+  let eventLogDirty = true;
+  eventLog.onChange = () => {
+    eventLogDirty = true;
+  };
+
+  laneIds.forEach((id, li) => {
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", `Trend lane ${li + 1}`);
+    sel.style.setProperty("--lane-color", LANE_COLORS[li % LANE_COLORS.length]!);
+    for (const c of TREND_CHANNELS) {
+      const opt = document.createElement("option");
+      opt.value = c.id;
+      opt.textContent = `${c.label} [${c.unit}]`;
+      opt.selected = c.id === id;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => {
+      laneIds[li] = sel.value;
+      drawTrendLanes(canvasTrends, trendRec, laneIds, trendWindowS, trendHoverFrac);
+    });
+    trendLanesEl.appendChild(sel);
+  });
+  document.querySelectorAll<HTMLButtonElement>("#seg-trend-window button").forEach((b) => {
+    b.addEventListener("click", () => {
+      trendWindowS = Number(b.dataset.window ?? 60);
+      document.querySelectorAll<HTMLButtonElement>("#seg-trend-window button").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      drawTrendLanes(canvasTrends, trendRec, laneIds, trendWindowS, trendHoverFrac);
+    });
+  });
+  // The plot spans the canvas less 8 px each side (drawTrendLanes' padding).
+  canvasTrends.addEventListener("pointermove", (e) => {
+    const r = canvasTrends.getBoundingClientRect();
+    trendHoverFrac = (e.clientX - r.left - 8) / Math.max(1, r.width - 16);
+    drawTrendLanes(canvasTrends, trendRec, laneIds, trendWindowS, trendHoverFrac);
+  });
+  canvasTrends.addEventListener("pointerleave", () => {
+    trendHoverFrac = null;
+    drawTrendLanes(canvasTrends, trendRec, laneIds, trendWindowS, trendHoverFrac);
+  });
+
+  const renderEventLog = () => {
+    eventLogDirty = false;
+    const ev = eventLog.events;
+    eventCountEl.textContent = `${ev.length} event${ev.length === 1 ? "" : "s"}`;
+    const frag = document.createDocumentFragment();
+    if (ev.length === 0) {
+      const li = document.createElement("li");
+      li.className = "ev-empty";
+      li.textContent = "No events yet.";
+      frag.appendChild(li);
+    }
+    for (let i = ev.length - 1; i >= Math.max(0, ev.length - 300); i--) {
+      const e = ev[i]!;
+      const li = document.createElement("li");
+      li.className = `ev-${e.kind}`;
+      const tm = document.createElement("time");
+      tm.textContent = formatSimTime(e.t);
+      const sp = document.createElement("span");
+      sp.textContent = e.text;
+      li.append(tm, sp);
+      frag.appendChild(li);
+    }
+    eventLogEl.replaceChildren(frag);
+  };
+
+  const csvStamp = () => `t${Math.round(sim.snapshot()[0] ?? 0)}s`;
+  byId<HTMLButtonElement>("btn-csv-fine").addEventListener("click", () => {
+    downloadText(`turbine-trend-60s-20ms-${csvStamp()}.csv`, trendCsv(trendRec.fine));
+  });
+  byId<HTMLButtonElement>("btn-csv-coarse").addEventListener("click", () => {
+    downloadText(`turbine-trend-2h-0.5s-${csvStamp()}.csv`, trendCsv(trendRec.coarse));
+  });
+  byId<HTMLButtonElement>("btn-csv-events").addEventListener("click", () => {
+    downloadText(`turbine-events-${csvStamp()}.csv`, eventsCsv(eventLog));
+  });
 
   // ---------- Engine errors ----------
   // A step the engine refuses leaves the plant at its last accepted state: say so and pause,
@@ -1017,6 +1164,9 @@ async function boot(): Promise<void> {
         { k: "DIN 45692 Sharpness", v: `${snap.sharpnessAcum.toFixed(2)} acum` },
         { k: "LP Last-Stage BPF", v: `${snap.bpfLpHz.toFixed(0)} Hz (44×)` },
       ]);
+    } else if (activeRightTab === "trends") {
+      drawTrendLanes(canvasTrends, trendRec, laneIds, trendWindowS, trendHoverFrac);
+      if (eventLogDirty) renderEventLog();
     } else if (activeRightTab === "ledger") {
       const relE = Math.abs(snap.ledgerEnergyResJ) / (Math.abs(snap.ledgerBoundaryMj) * 1e6 + 1);
       renderMetricGrid(gridLedger, [
@@ -1065,25 +1215,51 @@ async function boot(): Promise<void> {
   setTimeout(() => bootOverlay.remove(), 340);
 
   let lastCampbellMs = 0;
+  // One fixed engine step; every accepted step is recorded and checked for events.
+  const stepOnce = (): boolean => {
+    if (!sim.step(FIXED_DT_S)) {
+      showEngineError();
+      return false;
+    }
+    const snap = decodeSnapshot(sim.snapshot());
+    trendRec.record(snap);
+    eventLog.observe(snap);
+    return true;
+  };
+
   const tick = (nowMs: number) => {
-    const dtWallS = Math.min(0.05, Math.max(0.001, (nowMs - lastWallMs) * 0.001));
+    const rawWallS = Math.max(0, (nowMs - lastWallMs) * 0.001);
+    const dtWallS = Math.min(0.05, Math.max(0.001, rawWallS));
     lastWallMs = nowMs;
 
-    if (fastForwardRemainingS > 0) {
-      const tStart = performance.now();
-      while (fastForwardRemainingS > 0 && performance.now() - tStart < 10.0) {
-        const chunk = Math.min(0.05, fastForwardRemainingS);
-        if (!sim.step(chunk)) {
+    const tFrame0 = performance.now();
+    if (fastForwardRemainingS > 0.5 * FIXED_DT_S) {
+      simDebtS = 0;
+      while (fastForwardRemainingS > 0.5 * FIXED_DT_S && performance.now() - tFrame0 < 10.0) {
+        if (!stepOnce()) {
           fastForwardRemainingS = 0;
-          showEngineError();
           break;
         }
-        fastForwardRemainingS -= chunk;
+        fastForwardRemainingS -= FIXED_DT_S;
       }
+      if (fastForwardRemainingS <= 0.5 * FIXED_DT_S) fastForwardRemainingS = 0;
     } else if (running) {
-      if (!sim.step(dtWallS * simRate)) {
-        showEngineError();
+      simDebtS += dtWallS * simRate;
+      while (simDebtS > FIXED_DT_S - 1e-9) {
+        if (performance.now() - tFrame0 > FRAME_ENGINE_BUDGET_MS) {
+          // The engine cannot keep up with the requested rate on this machine: drop the backlog
+          // rather than spiral; the measured RTF reports the rate actually achieved.
+          simDebtS = Math.min(simDebtS, FIXED_DT_S);
+          break;
+        }
+        if (!stepOnce()) {
+          simDebtS = 0;
+          break;
+        }
+        simDebtS -= FIXED_DT_S;
       }
+    } else {
+      simDebtS = 0;
     }
 
     // The Campbell diagram depends on speed and bearing temperatures: refresh it once a second
@@ -1099,6 +1275,17 @@ async function boot(): Promise<void> {
     scene.setMicVisible(micActive);
     audio.pump(sim, running || fastForwardRemainingS > 0, activeRightTab === "audio" || acousticOn);
     const snap = decodeSnapshot(sim.snapshot());
+    // Real-time factor from the engine's own clock (a restart's jump back is not counted).
+    const dSim = snap.timeS - rtfLastSimT;
+    rtfLastSimT = snap.timeS;
+    if (dSim > 0) rtfSimS += dSim;
+    rtfWallS += rawWallS;
+    if (rtfWallS >= 0.5) {
+      const ff = fastForwardRemainingS > 0;
+      valRtf.textContent = running || ff ? `RTF ${(rtfSimS / rtfWallS).toFixed(2)}×${ff ? " (fast-forward)" : ""}` : "paused";
+      rtfSimS = 0;
+      rtfWallS = 0;
+    }
     const stages = decodeStageProfile(sim.stage_profile_flat());
     const continuumFlat = sim.continuum_field_flat();
     const orbitFlat = sim.orbit_history();
