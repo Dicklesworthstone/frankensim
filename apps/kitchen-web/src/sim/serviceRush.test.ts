@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { KEEPERS, RUSH_MENU, SERVICE, modesFor, runRush, rushMenu, simulateService, type RushSettings } from "./serviceRush";
+import { KEEPERS, PLANS, RUSH_MENU, SERVICE, modesFor, planOf, planSettings, runRush, rushMenu, simulateService, type RushSettings } from "./serviceRush";
 
 const toOrder: RushSettings = { modes: modesFor([]), day: "busy", sigma: 0 };
 const held: RushSettings = { modes: modesFor([...KEEPERS]), day: "busy", sigma: 0 };
@@ -47,6 +47,17 @@ describe("one service", () => {
     };
     expect(p90(held)).toBeLessThan(p90(toOrder) / 3);
   });
+});
+
+test("every plan (dishes held, plating, the thighs' station) has its own number, and back", () => {
+  expect(PLANS).toBe(128);
+  const seen = new Set<string>();
+  for (let i = 0; i < PLANS; i++) {
+    const p = planSettings(i);
+    expect(planOf({ modes: modesFor(p.hold), day: "busy", sigma: 0, pool: p.pool, menu: p.menu })).toBe(i);
+    seen.add(JSON.stringify(p));
+  }
+  expect(seen.size).toBe(PLANS);
 });
 
 describe("the levers, across many days", () => {

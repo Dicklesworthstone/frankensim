@@ -365,6 +365,12 @@ async function main() {
         if (!(held < order && pooled < held)) {
           throw new Error(`The rush levers did not cut the long waits: ${order} -> ${held} -> ${pooled}`);
         }
+        // Every plan for the day, run in a worker: all 128 must arrive and a frontier be drawn.
+        await page.waitForFunction(() => document.querySelectorAll("[data-rush-map] [data-plan]").length >= 128, { timeout: 90000 });
+        const front = await page.$$eval("[data-rush-map] .pt.on", (els) => els.length);
+        const mapNote = await page.$eval("[data-rush-map-note]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Rush plan map: 128 plans, ${front} on the frontier | ${mapNote.slice(0, 90)}`);
+        if (front < 2) throw new Error(`The rush plan map has no frontier (${front} points)`);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-rush.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-rush.png");
       }

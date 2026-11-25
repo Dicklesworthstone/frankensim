@@ -13,7 +13,8 @@
  *     Routines).
  */
 import * as THREE from "three";
-import { KEEPERS, RUSH_MENU, SERVICE, modesFor, runRush, rushMenu, type DayRun, type Mode, type PanLook, type RushDay, type RushRun, type RushSettings } from "../sim/serviceRush";
+import { KEEPERS, PLANS, RUSH_MENU, SERVICE, modesFor, planOf, planSettings, runRush, rushMenu, type DayRun, type Mode, type PanLook, type RushDay, type RushRun, type RushSettings } from "../sim/serviceRush";
+import type { PlanAsk, PlanScore } from "../sim/rushPlans.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { T, hotelPan as tilePan } from "./models/cold";
@@ -557,6 +558,162 @@ export function mountRushLab(root: HTMLElement): void {
   }
 
   /* ---------------------------------------------------------------------------------------------------------- */
+  /* Every plan for the day: run in a worker, plotted as waste against the long waits, the frontier drawn.       */
+  /* ---------------------------------------------------------------------------------------------------------- */
+
+  const mapEl = q("[data-rush-map]");
+  const mapNote = q("[data-rush-map-note]");
+  const scores = new Map<number, PlanScore>();
+  let mapKey = "";
+  let worker: Worker | null = null;
+  let mapTimer = 0;
+  let mapQueued = false;
+  const describe = (plan: number) => {
+    const p = planSettings(plan);
+    const menu = rushMenu(p.menu);
+    const held = menu.filter((d) => p.hold.includes(d.key)).map((d) => d.name.toLowerCase());
+    return `${held.length ? `Hold ${held.join(", ")}` : "Everything to order"}; ${p.pool ? "whoever is free plates" : "each cook plates their own"}; thighs ${p.menu === "balanced" ? "in the combi" : "on the griddle"}`;
+  };
+  /** Plans no other beats on both counts: none waits less and throws out no more, or the same and less. */
+  const frontier = (): Set<number> => {
+    const all = [...scores.values()];
+    const out = new Set<number>();
+    for (const a of all)
+      if (!all.some((b) => b !== a && b.waitP90 <= a.waitP90 && b.waste <= a.waste && (b.waitP90 < a.waitP90 || b.waste < a.waste))) out.add(a.plan);
+    return out;
+  };
+  function askPlans(): void {
+    const key = JSON.stringify([settings.day, settings.sigma]);
+    if (!mapEl || key === mapKey) return;
+    mapKey = key;
+    scores.clear();
+    worker?.terminate();
+    worker = null;
+    // Dragging the forecast-error slider changes the day every 90 ms: start the run once it rests.
+    const ask: PlanAsk = { key, day: settings.day, sigma: settings.sigma, days: DAYS_N };
+    clearTimeout(mapTimer);
+    mapTimer = window.setTimeout(() => startPlans(ask), 250);
+  }
+  /** No worker (blocked, or it failed): the map goes, and the rest of the figure stays. */
+  const mapFailed = () => {
+    const wrap = mapEl?.closest<HTMLElement>(".rs-map-wrap");
+    if (wrap) wrap.hidden = true;
+  };
+  function startPlans(ask: PlanAsk): void {
+    let w: Worker;
+    try {
+      w = new Worker(new URL("../sim/rushPlans.worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      mapFailed();
+      return;
+    }
+    worker = w;
+    w.onerror = () => {
+      w.terminate();
+      if (worker === w) {
+        worker = null;
+        mapFailed();
+      }
+    };
+    w.onmessage = (e: MessageEvent<PlanScore>) => {
+      if (e.data.key !== mapKey) return;
+      scores.set(e.data.plan, e.data);
+      if (scores.size === PLANS) {
+        w.terminate();
+        if (worker === w) worker = null;
+      }
+      if (!mapQueued) {
+        mapQueued = true;
+        requestAnimationFrame(() => {
+          mapQueued = false;
+          renderMap();
+        });
+      }
+    };
+    w.postMessage(ask);
+  }
+  function renderMap(): void {
+    if (!mapEl) return;
+    const W = Math.max(280, Math.round(mapEl.clientWidth));
+    const H = 230;
+    const L = 44;
+    const R = W - 10;
+    const T = 12;
+    const B = H - 34;
+    const all = [...scores.values()];
+    const nice = (v: number, steps: number[]) => steps.find((x) => x >= v) ?? Math.ceil(v / 50) * 50;
+    const xMax = nice(Math.max(10, ...all.map((a) => a.waste)), [10, 20, 30, 40, 60, 80, 100, 150, 200, 300]);
+    const yMax = nice(Math.max(10, ...all.map((a) => a.waitP90)), [10, 20, 30, 40, 60, 80, 100, 120]);
+    const X = (v: number) => L + (v / xMax) * (R - L);
+    const Y = (v: number) => B - (v / yMax) * (B - T);
+    const front = scores.size === PLANS ? frontier() : new Set<number>();
+    const cur = planOf(settings);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="rs-svg rs-mapsvg">`;
+    for (const v of [0, yMax / 2, yMax]) svg += `<line class="g" x1="${L}" x2="${R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="ya" x="${L - 6}" y="${Y(v) + 3.5}">${v}</text>`;
+    for (const v of [0, xMax / 2, xMax]) svg += `<line class="g v" x1="${X(v)}" x2="${X(v)}" y1="${T}" y2="${B}"/><text class="xa" x="${X(v)}" y="${B + 14}">${v}</text>`;
+    svg += `<text class="ax" x="${(L + R) / 2}" y="${H - 4}">Portions thrown out a day</text><text class="ax" transform="translate(11 ${(T + B) / 2}) rotate(-90)">1 guest in 10 waits, min</text>`;
+    if (front.size > 1) {
+      const pts = all.filter((a) => front.has(a.plan)).sort((a, b) => a.waste - b.waste);
+      svg += `<path class="front" d="${pts.map((a, k) => `${k ? "L" : "M"}${X(a.waste).toFixed(1)} ${Y(a.waitP90).toFixed(1)}`).join("")}"/>`;
+    }
+    for (const a of all) {
+      const x = X(a.waste);
+      const y = Y(a.waitP90);
+      const p = planSettings(a.plan);
+      const cls = `pt ${p.pool ? "pool" : "own"}${front.has(a.plan) ? " on" : ""}`;
+      const tip = `<title>${describe(a.plan)}. 1 guest in 10 waits ${fmtMin(a.waitP90)}; ${Math.round(a.waste)} portions thrown out; crew busy ${Math.round(a.prepLoad * 100)}% before 11.</title>`;
+      svg +=
+        p.menu === "balanced"
+          ? `<path class="${cls}" data-plan="${a.plan}" d="M${x.toFixed(1)} ${(y - 5).toFixed(1)}l5 5l-5 5l-5 -5z">${tip}</path>`
+          : `<circle class="${cls}" data-plan="${a.plan}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4">${tip}</circle>`;
+    }
+    const me = scores.get(cur);
+    if (me) {
+      const x = X(me.waste);
+      const y = Y(me.waitP90);
+      // The label to the right of the ring, or to its left near the right edge; never above the plot.
+      const left = x > R - 80;
+      svg += `<circle class="cur" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"/><text class="curl${left ? " l" : ""}" x="${(left ? x - 12 : x + 12).toFixed(1)}" y="${Math.max(T + 10, y - 8).toFixed(1)}">This plan</text>`;
+    }
+    mapEl.innerHTML = svg + "</svg>";
+    if (mapNote) {
+      if (scores.size < PLANS) mapNote.textContent = `Running plan ${scores.size + 1} of ${PLANS}, each over ${DAYS_N} days…`;
+      else if (front.has(cur)) mapNote.textContent = `This plan is on the frontier: no plan does better on one count without doing worse on the other. Click any dot to run it.`;
+      else {
+        const better = all.filter((b) => me && b.waitP90 <= me.waitP90 && b.waste <= me.waste && (b.waitP90 < me.waitP90 || b.waste < me.waste)).length;
+        mapNote.textContent = `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other. Click any dot to run it.`;
+      }
+    }
+  }
+  mapEl?.addEventListener("click", (e) => {
+    // The nearest dot within a fingertip of the click (the dots are 8 px across).
+    let t: SVGElement | null = null;
+    let best = 22;
+    for (const el of mapEl.querySelectorAll<SVGElement>("[data-plan]")) {
+      const r = el.getBoundingClientRect();
+      const d = Math.hypot(r.x + r.width / 2 - e.clientX, r.y + r.height / 2 - e.clientY);
+      if (d < best) {
+        best = d;
+        t = el;
+      }
+    }
+    if (!t) return;
+    const p = planSettings(Number(t.dataset.plan));
+    settings.modes = modesFor(p.hold);
+    settings.pool = p.pool;
+    settings.menu = p.menu;
+    update();
+  });
+  if (mapEl) {
+    let lastMapW = mapEl.clientWidth;
+    new ResizeObserver(() => {
+      if (Math.abs(mapEl.clientWidth - lastMapW) < 4) return;
+      lastMapW = mapEl.clientWidth;
+      renderMap();
+    }).observe(mapEl);
+  }
+
+  /* ---------------------------------------------------------------------------------------------------------- */
   /* Running it.                                                                                                 */
   /* ---------------------------------------------------------------------------------------------------------- */
 
@@ -616,6 +773,8 @@ export function mountRushLab(root: HTMLElement): void {
     renderChart(day, endMin);
     renderTiles(run, base);
     renderStatus(run);
+    askPlans();
+    renderMap();
     if (errVal && settings.sigma !== undefined) errVal.textContent = settings.sigma > 0 ? `±${Math.round(settings.sigma * 100)}%` : "Exact";
     lastMinute = -1;
   }

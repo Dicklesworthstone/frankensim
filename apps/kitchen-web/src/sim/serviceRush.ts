@@ -48,7 +48,7 @@ export const RUSH_MENU: readonly RushDish[] = [
   { key: "burger", name: "Smash burger", station: "griddle", share: 0.24, batch: 8, cookMin: 4, loadBase: 0.2, loadPer: 0.25, holdMin: 8, perPan: 8, look: "braise" },
   { key: "thighs", name: "Grilled chicken thighs", station: "griddle", share: 0.16, batch: 16, cookMin: 8, loadBase: 0.3, loadPer: 0.06, holdMin: 45, perPan: 12, look: "chicken" },
   { key: "mac", name: "Mac and cheese", station: "combi", share: 0.14, batch: 24, cookMin: 9, loadBase: 0.4, loadPer: 0.05, holdMin: 60, perPan: 12, look: "mac" },
-  { key: "beef", name: "Braised beef, reheated", station: "combi", share: 0.18, batch: 24, cookMin: 7, loadBase: 0.4, loadPer: 0.05, holdMin: 120, perPan: 12, look: "braise" },
+  { key: "beef", name: "Reheated braised beef", station: "combi", share: 0.18, batch: 24, cookMin: 7, loadBase: 0.4, loadPer: 0.05, holdMin: 120, perPan: 12, look: "braise" },
 ];
 
 /**
@@ -501,3 +501,13 @@ export function runRush(settings: RushSettings, days = 200, seed = 20261124): Ru
 }
 
 export const modesFor = (hold: readonly string[]): Record<string, Mode> => Object.fromEntries(RUSH_MENU.map((d) => [d.key, hold.includes(d.key) ? "hold" : "order"]));
+
+/** Every plan for a service: bits 0 to 4 the dishes held (menu order), bit 5 pooled plating, bit 6 the thighs in the combi. */
+export const PLANS = 1 << (RUSH_MENU.length + 2);
+export const planSettings = (plan: number) => ({
+  hold: RUSH_MENU.filter((_, k) => (plan >> k) & 1).map((d) => d.key),
+  pool: ((plan >> RUSH_MENU.length) & 1) === 1,
+  menu: ((plan >> (RUSH_MENU.length + 1)) & 1 ? "balanced" : "written") as RushMenu,
+});
+export const planOf = (s: RushSettings) =>
+  RUSH_MENU.reduce((p, d, k) => p | (s.modes[d.key] === "hold" ? 1 << k : 0), 0) | (s.pool ? 1 << RUSH_MENU.length : 0) | (s.menu === "balanced" ? 1 << (RUSH_MENU.length + 1) : 0);

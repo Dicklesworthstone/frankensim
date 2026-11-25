@@ -981,6 +981,11 @@
                     <div class="wk-tile"><span>Crew busy before 11</span><b><i data-rs-rush>…</i><em data-rs-rush-d hidden></em></b><small>Busiest hour: <i data-rs-rush-p90>…</i></small></div>
                     <div class="wk-tile"><span>Portions thrown out</span><b><i data-rs-waste>…</i><em data-rs-waste-d hidden></em></b><small>1 day in 10: <i data-rs-waste-p90>…</i></small></div>
                   </div>
+                  <div class="rs-map-wrap">
+                    <p class="rs-map-head"><b>All 128 plans for this day</b><span class="wk-keys rs-map-keys"><span class="pool">Whoever is free plates</span><span class="own">Each cook their own</span><span class="bal">Thighs in the combi</span><span class="cap">Frontier</span></span></p>
+                    <div class="rs-map" data-rush-map role="img" aria-label="Every plan for this day, each run over the same simulated days: portions thrown out against how long 1 guest in 10 waits, with the plans no other beats on both joined up"></div>
+                    <p class="rs-map-note" data-rush-map-note></p>
+                  </div>
                 </div>
                 <div class="lab-side">
                   <div class="seg fill" role="group" aria-label="Day">
@@ -1018,7 +1023,7 @@
               <div>
                 <p class="how-title">How it's computed</p>
                 <p>The service is stepped every 15 seconds from 10:00. Orders come in at random from 11:00 to 14:00 around a peak at 12:20, and the forecast error moves both the day's size and the peak's time. Each cook runs one station. A free cook starts a batch for the guests waiting, then plates the oldest order whose food is ready, then tops up the held dishes. A held dish is cooked to cover most of its holding time's forecast orders while the cabinet has room; it is boxed with its batch and only bagged at the order. Held food past its time, and whatever is left at close, is thrown out.</p>
-                <p>The tiles are the middle of 120 simulated days. The line plays one of them: the tickets are the orders waiting, the pans are the portions held, and the cooks act out each ten minutes of computed work.</p>
+                <p>The tiles are the middle of 120 simulated days. The line plays one of them: the tickets are the orders waiting, the pans are the portions held, and the cooks act out each ten minutes of computed work. The map runs all 128 plans the controls allow over the same days, and joins up the ones no other plan beats on both counts.</p>
               </div>
               <div>
                 <code class="formula">wait = plated − ordered<br />short_dish(t) = forecast orders in [t, done + 0.7 · hold] − held − cooking + waiting</code>

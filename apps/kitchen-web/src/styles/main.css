@@ -2852,6 +2852,100 @@ button.wk-dish[aria-pressed="true"] {
 .rs-keys .busy {
   --k: var(--chapter);
 }
+.rs-map-wrap {
+  padding: 0.7rem 0.75rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: rgb(0 0 0 / 0.2);
+  overflow: hidden;
+}
+.rs-map-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+}
+.rs-map-head b {
+  color: var(--text);
+  font-weight: 600;
+}
+.rs-map-keys {
+  margin: 0;
+}
+.rs-map-keys .pool {
+  --k: var(--muted);
+}
+.rs-map-keys .own::before {
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+}
+.rs-map-keys .pool::before {
+  border-radius: 50%;
+}
+.rs-map-keys .bal::before {
+  background: var(--muted);
+  transform: rotate(45deg) scale(0.85);
+  border-radius: 1px;
+}
+.rs-map-keys .cap::before {
+  border-color: var(--chapter);
+  border-style: dashed;
+}
+.rs-map svg {
+  display: block;
+}
+.rs-mapsvg .ax {
+  text-anchor: middle;
+}
+.rs-mapsvg .pt {
+  cursor: pointer;
+  stroke-width: 1.3;
+}
+.rs-mapsvg .pt.pool {
+  fill: rgb(255 255 255 / 0.32);
+}
+.rs-mapsvg .pt.own {
+  fill: rgb(0 0 0 / 0.3);
+  stroke: rgb(255 255 255 / 0.36);
+}
+.rs-mapsvg .pt.on.pool {
+  fill: var(--chapter);
+}
+.rs-mapsvg .pt.on.own {
+  stroke: var(--chapter);
+}
+.rs-mapsvg .pt:hover {
+  stroke: #fff;
+  stroke-width: 2;
+}
+.rs-mapsvg .front {
+  fill: none;
+  stroke: var(--chapter);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+  opacity: 0.75;
+}
+.rs-mapsvg .cur {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.6;
+  pointer-events: none;
+}
+.rs-mapsvg .curl {
+  fill: var(--text);
+  pointer-events: none;
+}
+.rs-mapsvg .curl.l {
+  text-anchor: end;
+}
+.rs-map-note {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
 .rs-dish em {
   min-width: 4.6em;
   text-align: center;
