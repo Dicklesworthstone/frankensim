@@ -3,7 +3,7 @@
  *
  * The room is the commissary exemplar, built from its own manifest (every fixture at its catalogue size and its
  * place in the plan). Along the walls a strip shows, for every spot a chiller fits, how far the week's cooked-ahead
- * pans would be walked to reach it (commissaryFloor: distance fields over the free floor). The routes drawn are A*
+ * pans would be carried to reach it (commissaryFloor: distance fields over the free floor). The routes drawn are A*
  * paths with the chiller in place, as wide as their traffic, and a cook walks them with a full hotel pan, at the pace
  * the walking time is quoted at. The cook's motion is a kinematic illustration: posed for reach and stride.
  */
@@ -18,6 +18,7 @@ import {
   routesFor,
   trafficOf,
   wallSpots,
+  type FloorAnswer,
   type Fields,
   type Floor,
   type FloorManifest,
@@ -28,7 +29,7 @@ import {
 } from "../sim/commissaryFloor";
 import { menuFor, runCommissary } from "../sim/commissaryWeek";
 import { ASSET_BASE, bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Model } from "./models/all";
+import { buildFixture } from "./models/all";
 import { palette } from "./models/materials";
 import { Routine, makeStaff, panSeconds, type RoutineStep, type Staff } from "./models/people";
 import { placeFixture } from "./models/shop";
@@ -40,8 +41,8 @@ const HOT = /KETTLE|SKILLET|COMBI|BLAST/;
 const CHILLER_ID = "NSF-BLAST-CHILLER-15PAN";
 const PAN_EXT = { w: 0.53, d: 0.325, h: 0.1 };
 const SWAPS = ["chicken", "pasta", "salad"];
-/** Where the rim of a pan is set down or taken from, in front of each kind of fixture (height, and depth in). */
-const RAIL = { combi: { y: 0.93, inset: 0.42 }, kettle: { y: 0.9, inset: 0.32 }, skillet: { y: 0.9, inset: 0.36 }, chiller: { y: 0.95, inset: 0.3 } };
+/** Where a pan is taken from or set down at each kind of fixture: the height, and how far in from the fixture's front. */
+const RAIL = { combi: { y: 0.93, inset: 0.32 }, kettle: { y: 0.9, inset: 0.32 }, skillet: { y: 0.9, inset: 0.31 }, prep: { y: 0.914, inset: 0.3 }, chiller: { y: 0.95, inset: 0.3 } };
 
 function tilePlane(w: number, h: number): THREE.Mesh {
   const g = new THREE.PlaneGeometry(w, h);
@@ -104,7 +105,8 @@ function ribbon(path: readonly (readonly [number, number])[], width: number, y: 
 
 /** Every plain mesh under the groups, merged into one mesh per material in world space; the rest left in place. */
 function mergeStatic(groups: THREE.Object3D[], into: THREE.Object3D): void {
-  const bins = new Map<THREE.Material, THREE.BufferGeometry[]>();
+  // One bin per material and shadow setting, so a mesh that cast no shadow (a lamp, a glass door) still casts none.
+  const bins = new Map<string, { mat: THREE.Material; cast: boolean; receive: boolean; geos: THREE.BufferGeometry[] }>();
   const taken: THREE.Mesh[] = [];
   for (const g of groups) {
     g.updateMatrixWorld(true);
@@ -123,18 +125,19 @@ function mergeStatic(groups: THREE.Object3D[], into: THREE.Object3D): void {
       if (!geo.index) geo.setIndex([...Array(geo.getAttribute("position").count).keys()]);
       geo.clearGroups();
       const mat = m.material as THREE.Material;
-      if (!bins.has(mat)) bins.set(mat, []);
-      bins.get(mat)!.push(geo);
+      const key = `${mat.uuid}|${m.castShadow ? 1 : 0}${m.receiveShadow ? 1 : 0}`;
+      if (!bins.has(key)) bins.set(key, { mat, cast: m.castShadow, receive: m.receiveShadow, geos: [] });
+      bins.get(key)!.geos.push(geo);
       taken.push(m);
     });
   }
   for (const m of taken) m.parent?.remove(m);
-  for (const [mat, geos] of bins) {
+  for (const { mat, cast, receive, geos } of bins.values()) {
     const g = geos.length === 1 ? geos[0]! : mergeGeometries(geos, false);
     if (!g) continue;
     const mesh = new THREE.Mesh(g, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
     mesh.matrixAutoUpdate = false;
     into.add(mesh);
   }
@@ -215,7 +218,6 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
 
   /* The fixtures, from the manifest, merged per material (the chiller is built on its own: it moves). */
   const statics: THREE.Object3D[] = [];
-  const models = new Map<string, Model>();
   for (const f of manifest.fixtures) {
     if (SMALL.test(f.archetype_id) || f.archetype_id === CHILLER_ID) continue;
     const [w, d, h] = f.local_extents_m;
@@ -224,7 +226,6 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
     m.hooks.set?.("lights", 1);
     if (/WALKIN-COOLER/.test(f.archetype_id)) m.hooks.set?.("roof", 1);
     if (/WIRE-SHELVING/.test(f.archetype_id)) m.hooks.set?.("stock", 0.34);
-    models.set(f.fixture_id, m);
     statics.push(m.group);
   }
   const room = new THREE.Group();
@@ -336,32 +337,40 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
   let carrying: [number, number][] = [];
   let doorOpen: [number, number][] = [];
 
-  const kindOf = (id: string): keyof typeof RAIL => (/combi/.test(id) ? "combi" : /kettle/.test(id) ? "kettle" : "skillet");
-  const sourceYaw = (id: string) => {
-    const f = manifest.fixtures.find((x) => x.fixture_id === id)!;
-    return f.pose.yaw_rad + Math.PI;
-  };
+  const kindOf = (id: string): Exclude<keyof typeof RAIL, "chiller"> => (/combi/.test(id) ? "combi" : /kettle/.test(id) ? "kettle" : /skillet/.test(id) ? "skillet" : "prep");
+  /** The way a cook faces to work a fixture: towards its front. */
+  const sourceYaw = (id: string) => floor.stations.get(id)!.yaw + Math.PI;
 
-  /** The cook's loop: a pan from each source in turn, as often as the week sends one, to the chiller and back. */
+  /** The cook's loop: a pan from each station in turn, as often as the week sends one, to the chiller and back. */
   const buildRoutine = (routes: Route[], spot: { stance: readonly [number, number]; yaw: number }) => {
-    const hot = routes.filter((r) => r.to === "chiller" && r.trips > 0);
-    const total = hot.reduce((s, r) => s + r.trips, 0);
-    // Six trips a loop, shared out by traffic (largest remainder), then interleaved.
+    // Six trips a loop, shared between the stations by their pans (largest remainder), each station's fixtures taken in
+    // turn, busiest first, and the stations interleaved.
     const n = 6;
-    const raw = hot.map((r) => (r.trips / total) * n);
+    const byKind = new Map<string, Route[]>();
+    for (const r of routes) {
+      if (r.to !== "chiller" || r.trips <= 0) continue;
+      const k = kindOf(r.from);
+      if (!byKind.has(k)) byKind.set(k, []);
+      byKind.get(k)!.push(r);
+    }
+    const groups = [...byKind.values()].map((rs) => rs.sort((a, b) => b.trips - a.trips));
+    const weight = groups.map((rs) => rs.reduce((s, r) => s + r.trips, 0));
+    const total = weight.reduce((s, w) => s + w, 0);
+    const raw = weight.map((w) => (w / Math.max(1e-9, total)) * n);
     const counts = raw.map(Math.floor);
-    let left = n - counts.reduce((s, c) => s + c, 0);
+    let left = total > 0 ? n - counts.reduce((s, c) => s + c, 0) : 0;
     raw.map((v, i) => [v - Math.floor(v), i] as const).sort((a, b) => b[0] - a[0]).forEach(([, i]) => {
       if (left-- > 0) counts[i]!++;
     });
     const order: Route[] = [];
-    for (let k = 0; order.length < n && k < n * 4; k++) for (let i = 0; i < hot.length; i++) if (counts[i]! > 0 && order.filter((r) => r === hot[i]).length < counts[i]! && order.length < n) order.push(hot[i]!);
+    for (let k = 0; k < Math.max(0, ...counts); k++) groups.forEach((rs, i) => k < counts[i]! && order.push(rs[k % rs.length]!));
     if (!order.length) {
       routine = null;
       return;
     }
     const steps: RoutineStep[] = [];
-    // The chiller's runners: in from its front face, which is half a metre past the stance.
+    // The chiller's runners: in from its front face, which is half a metre past the stance (wallSpots, and the plan's own
+    // stance socket).
     const [sfx, sfz] = fwd(spot.yaw);
     const reach = 0.5 + RAIL.chiller.inset;
     const chillAt = new THREE.Vector3(spot.stance[0] - sfx * reach, RAIL.chiller.y, spot.stance[1] - sfz * reach);
@@ -372,12 +381,13 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
     doorOpen = [];
     const push = (s: RoutineStep) => steps.push(s);
     order.forEach((r, i) => {
-      const src = floor.stations.get(r.from)!.stance;
+      const station = floor.stations.get(r.from)!;
+      const src = station.stance;
       const yaw = sourceYaw(r.from);
       const [fx, fz] = fwd(yaw);
       const rail = RAIL[kindOf(r.from)];
-      // The stance is about half a metre out from the fixture's front; the rail is `inset` in from it.
-      const at = new THREE.Vector3(src[0] + fx * (0.45 + rail.inset), rail.y, src[1] + fz * (0.45 + rail.inset));
+      // The stance is `out` in front of the fixture's front, and the pan `inset` in from it.
+      const at = new THREE.Vector3(src[0] + fx * (station.out + rail.inset), rail.y, src[1] + fz * (station.out + rail.inset));
       if (i > 0) {
         // Back from the chiller to this source, empty-handed: the reverse of its own route.
         const back = [...r.path].reverse();
@@ -447,7 +457,12 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
   const out = (k: string) => root.querySelector<HTMLElement>(`[data-fl-${k}]`);
   let swapped = false;
   let choice: "drawn" | "best" | number = "drawn";
-  let answer = placeChiller(floor, fields, trafficFor(false), spots);
+  const answers = new Map<boolean, FloorAnswer>();
+  const answerFor = (sw: boolean): FloorAnswer => {
+    if (!answers.has(sw)) answers.set(sw, placeChiller(floor, fields, trafficFor(sw), spots));
+    return answers.get(sw)!;
+  };
+  let answer = answerFor(false);
   let current = answer.drawn;
 
   const km = (m: number) => `${(m / 1000).toFixed(m < 10000 ? 2 : 1)} km`;
@@ -457,7 +472,7 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
     const mm = Math.round((s - h * 3600) / 60);
     return h ? `${h} h ${String(mm).padStart(2, "0")} min` : `${mm} min`;
   };
-  /** The hot pans' walk to the chiller, metres per pan, averaged over the week's pans. */
+  /** The walk to the chiller, metres per pan, averaged over the week's pans. */
   const perPan = (routes: Route[]) => {
     const hot = routes.filter((r) => r.to === "chiller");
     const n = hot.reduce((s, r) => s + r.trips, 0);
@@ -490,7 +505,7 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
 
   const update = () => {
     const t = trafficFor(swapped);
-    answer = placeChiller(floor, fields, t, spots);
+    answer = answerFor(swapped);
     paintStrip(answer.cost);
     const spot = choice === "drawn" ? drawn : choice === "best" ? answer.spots[answer.best]! : answer.spots[choice]!;
     current = choice === "drawn" ? answer.drawn : choice === "best" ? answer.atBest : routesFor(floor, t, spot);
@@ -521,12 +536,12 @@ function start(root: HTMLElement, stageEl: HTMLElement, canvas: HTMLCanvasElemen
       dEl.dataset.good = String(dm < 0);
     }
     if (hudSpot) hudSpot.textContent = choice === "drawn" ? "Chiller as drawn" : choice === "best" ? "Chiller at the best spot" : "Chiller where you put it";
-    if (hudPan) hudPan.textContent = `${perPan(current.routes).toFixed(1)} m per hot pan`;
+    if (hudPan) hudPan.textContent = `${perPan(current.routes).toFixed(1)} m per pan`;
     if (statusEl) {
       const p0 = perPan(answer.drawn.routes);
       const pb = perPan(answer.atBest.routes);
       statusEl.textContent =
-        `As drawn, the chiller stands by ${where(drawn)} and a hot pan walks ${p0.toFixed(1)} m to it. ` +
+        `As drawn, the chiller stands by ${where(drawn)} and a pan is carried ${p0.toFixed(1)} m to it. ` +
         `With this menu the shortest walk is beside ${where(bestSpot)}: ${pb.toFixed(1)} m a pan, ${km(d0 - answer.atBest.metres)} a week less.`;
       statusEl.dataset.state = "ok";
     }

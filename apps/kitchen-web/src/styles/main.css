@@ -2438,13 +2438,6 @@ footer.end {
   pointer-events: none;
   z-index: 1;
 }
-.wk-cap span {
-  position: absolute;
-  right: 0;
-  bottom: 0.2rem;
-  font: 500 0.66rem var(--mono);
-  color: var(--faint);
-}
 .wk-arcs {
   position: absolute;
   inset: 0;

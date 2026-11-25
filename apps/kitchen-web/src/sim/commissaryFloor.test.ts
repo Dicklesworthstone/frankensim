@@ -59,13 +59,15 @@ describe("commissary floor", () => {
     }
   });
 
-  test("the week's traffic is the cooked-ahead batches: every hot pan once, and a rack for every chiller load", () => {
+  test("the week's traffic is what the week puts through the chiller: every pan once, and a rack for every load", () => {
     for (const swaps of [[], SWAPS]) {
       const run = runCommissary({ strategy: "ahead", swaps, sigma: 0.1 });
       const t = trafficOf(run.plan.days, menuFor(swaps));
-      const hot = run.plan.days.reduce((s, d) => s + d.batches.filter((b) => menuFor(swaps).find((m) => m.key === b.dish)!.station !== "prep").reduce((u, b) => u + b.pans, 0), 0);
-      expect([...t.pans.values()].reduce((s, v) => s + v, 0)).toBeCloseTo(hot, 9);
-      expect(t.loads).toBeGreaterThanOrEqual(Math.ceil(hot / CHILL_LOAD / run.plan.days.length));
+      const chilled = run.plan.days.reduce((s, d) => s + d.pansChilled, 0);
+      expect(chilled).toBeGreaterThan(0);
+      expect([...t.pans.values()].reduce((s, v) => s + v, 0)).toBeCloseTo(chilled, 9);
+      expect(t.totalPans).toBe(chilled);
+      expect(t.loads).toBe(run.plan.days.reduce((s, d) => s + Math.ceil(d.pansChilled / CHILL_LOAD), 0));
     }
     // Cooking on the day chills nothing.
     expect(trafficOf(runCommissary({ strategy: "day", swaps: [], sigma: 0.1 }).plan.days, menuFor([])).totalPans).toBe(0);

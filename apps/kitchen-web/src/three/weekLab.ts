@@ -378,7 +378,7 @@ export function mountWeekLab(root: HTMLElement): void {
     const m = buildFixture(RACK.id, RACK, 1);
     scene.add(place(m, rackX(d), RACK_Z, true));
     // Hung on the rack's bottom front rail, under the lowest pan.
-    const mat = new THREE.MeshBasicMaterial({ map: dayLabel(DAYS[d]!, forecast[d]!), transparent: true, opacity: 0.6, toneMapped: false });
+    const mat = new THREE.MeshBasicMaterial({ map: dayLabel(DAYS[d]!, forecast[d]!), transparent: true, opacity: 0.62, toneMapped: false });
     labelMats.push(mat);
     const lab = new THREE.Mesh(labelGeo, mat);
     lab.position.set(rackX(d) + RACK.w / 2, 0.165, RACK_Z + 0.014);
@@ -922,6 +922,7 @@ export function mountWeekLab(root: HTMLElement): void {
         tris: renderer.info.render.triangles,
         calls: renderer.info.render.calls,
         weekS: +spans.total.toFixed(2),
+        loopS: cooks.map((k) => +(k.routine?.duration ?? 0).toFixed(2)),
         t: +weekT.toFixed(2),
         plan: run.plan.days.map((r) => ({ dayOf: Math.round(r.dayOfMin), ahead: Math.round(r.aheadMin), ot: Math.round(r.otMin), idle: Math.round(r.idleMin) })),
       }),

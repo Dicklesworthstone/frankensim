@@ -6,9 +6,9 @@
  * site metadata (the corridors that must stay clear). Floor frame: three.js x and z, metres; the manifest's Blender y
  * becomes -z.
  *
- * The trips are the week's cooked-ahead batches (commissaryWeek): each pan leaves its kettle, skillet or combi hot and
- * is carried to the chiller one at a time, and the cook walks back; a chilled load goes to the walk-in on a rack, and
- * the rack comes back. Every walk is measured on the floor round the fixtures for a cook with a pan (NavGrid paths in
+ * The trips are the week's cooked-ahead batches (commissaryWeek), every one of which goes through the blast chiller: each
+ * pan is carried from its kettle, skillet, combi or prep table to the chiller one at a time, and the cook walks back; a
+ * chilled load goes to the walk-in on a rack, and the rack comes back. Every walk is measured on the floor round the fixtures for a cook with a pan (NavGrid paths in
  * crowd.ts): distance fields over the free floor rank every spot at once, and the routes drawn and quoted are the
  * string-pulled A* paths with the chiller in place.
  *
@@ -36,7 +36,7 @@ export interface FloorMeta {
 
 /** A cook carrying a full hotel pan, half its width plus a little (the hero's walkers use the same idea). */
 export const CARRY_R = 0.32;
-/** Walking pace with a hot pan or a loaded rack, m/s (named, not fitted). */
+/** Walking pace with a pan or a loaded rack, m/s (named, not fitted). */
 export const CARRY_MPS = 0.9;
 /** Pans in one blast-chiller load, wheeled to the walk-in on one rack. */
 export const CHILL_LOAD = 15;
@@ -54,7 +54,11 @@ export function toFloor(p: ManifestFixture["pose"], lx: number, ly: number): XZ 
 
 export interface Station {
   id: string;
+  /** Where a cook stands to work it. */
   stance: XZ;
+  /** The way its front faces (people.ts convention: 0 faces +z), and how far in front of it the stance is, metres. */
+  yaw: number;
+  out: number;
 }
 
 export interface Floor {
@@ -89,7 +93,8 @@ export function buildFloor(m: FloorManifest, meta: FloorMeta | null, cell = 0.08
     const b = f.world_aabb_m!;
     keepOut.push(r);
     const stance = f.sockets?.find((s) => s.socket_id === "stance_front");
-    if (stance) stations.set(f.fixture_id, { id: f.fixture_id, stance: toFloor(f.pose, stance.local_pos_m[0], stance.local_pos_m[1]) });
+    if (stance)
+      stations.set(f.fixture_id, { id: f.fixture_id, stance: toFloor(f.pose, stance.local_pos_m[0], stance.local_pos_m[1]), yaw: f.pose.yaw_rad, out: -stance.local_pos_m[1] });
     if (/BLAST-CHILLER/.test(f.archetype_id)) {
       const [w, d] = f.local_extents_m;
       chiller = { rect: r, stance: stations.get(f.fixture_id)!.stance, yaw: f.pose.yaw_rad, w, d };
@@ -266,16 +271,17 @@ export function wallSpots(f: Floor, step = 0.1): Spot[] {
   return out;
 }
 
-export type HotStation = "kettle" | "skillet" | "combi";
-/** The fixtures each cooking station's pans come from (a combi dish is split evenly across the three combis). */
-export const SOURCES: Record<HotStation, string[]> = {
+/** The fixtures each station's pans come from: a combi dish is split evenly across the three combis, a prep dish across
+ *  the six prep tables. */
+export const SOURCES: Record<Dish["station"], string[]> = {
   kettle: ["kettle-40gal-1"],
   skillet: ["tilt-skillet-40gal-1"],
   combi: ["combi-rollin-1", "combi-rollin-2", "combi-rollin-3"],
+  prep: ["preptable-prep-1", "preptable-prep-2", "preptable-prep-3", "preptable-prep-4", "preptable-prep-5", "preptable-prep-6"],
 };
 export const WALKIN = "walkin-cooler-14x16";
 
-/** The week's cook-chill traffic: hot pans per source fixture, and chilled loads to the walk-in. */
+/** The week's cook-chill traffic: pans to the chiller per source fixture, and chilled loads to the walk-in. */
 export interface Traffic {
   pans: Map<string, number>;
   loads: number;
@@ -290,8 +296,8 @@ export function trafficOf(days: readonly { batches: readonly Batch[] }[], menu: 
     let chilled = 0;
     for (const b of day.batches) {
       const dish = menu.find((m) => m.key === b.dish);
-      if (!dish || dish.station === "prep") continue;
-      const src = SOURCES[dish.station as HotStation];
+      if (!dish) throw new Error(`a batch of ${b.dish}, which is not on the menu`);
+      const src = SOURCES[dish.station];
       for (const id of src) pans.set(id, (pans.get(id) ?? 0) + b.pans / src.length);
       chilled += b.pans;
       total += b.pans;
@@ -301,7 +307,7 @@ export function trafficOf(days: readonly { batches: readonly Batch[] }[], menu: 
   return { pans, loads, totalPans: total };
 }
 
-/** Distance fields from the walk-in and from every hot source, for ranking spots. */
+/** Distance fields from the walk-in and from every source, for ranking spots. */
 export interface Fields {
   walkin: Float64Array;
   sources: Map<string, Float64Array>;

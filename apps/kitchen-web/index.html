@@ -902,7 +902,7 @@
                 <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes.</p>
               </div>
               <div>
-                <code class="formula">work_d = setup + packing + Σ_dish (portions_d − from stock_d) · min/portion<br />overtime_d = max(0, work_d − 3 cooks × 8 h)</code>
+                <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − 3 cooks × 8 h)</code>
                 <p class="model">Model: <code>runCommissary</code>. Minutes per meal, keeping times and pan yields are set for a catering commissary.</p>
               </div>
             </figcaption>
@@ -915,16 +915,16 @@
             </header>
             <div class="fig-body">
               <div class="stage fl-stage" data-floor-stage>
-                <canvas data-floor-canvas tabindex="0" aria-label="The commissary's floor plan from above. Glowing routes run from the kettle, the skillet and the combi ovens to the blast chiller and on to the walk-in, and a coloured strip along the walls shows how far the week's pans would walk to a chiller at each spot. Drag to look around."></canvas>
+                <canvas data-floor-canvas tabindex="0" aria-label="The commissary's floor plan from above. Glowing routes run from the kettle, the skillet, the combi ovens and the prep tables to the blast chiller and on to the walk-in, and a coloured strip along the walls shows how far the week's pans would walk to a chiller at each spot. Drag to look around."></canvas>
                 <div class="wk-hud fl-hud" aria-hidden="true"><b data-fl-hud-spot>Chiller as drawn</b><em data-fl-hud-pan>…</em></div>
-                <p class="wk-legend fl-legend" aria-hidden="true"><span class="hot">Hot pan to the chiller</span><span class="ahead">Chilled load to the walk-in</span><span class="walls">Walls: short walk to long</span></p>
+                <p class="wk-legend fl-legend" aria-hidden="true"><span class="hot">Pan to the chiller</span><span class="ahead">Chilled load to the walk-in</span><span class="walls">Walls: short walk to long</span></p>
               </div>
               <div class="lab fl-lab">
                 <div class="lab-view">
                   <div class="status" data-fl-status data-state="warn">Building the commissary…</div>
                   <div class="wk-tiles fl-tiles">
                     <div class="wk-tile"><span>Walked a week</span><b><i data-fl-km>…</i><em data-fl-km-d hidden></em></b><small>pans there, cook back</small></div>
-                    <div class="wk-tile"><span>Each hot pan</span><b><i data-fl-pan>…</i></b><small>to the chiller</small></div>
+                    <div class="wk-tile"><span>Each pan</span><b><i data-fl-pan>…</i></b><small>to the chiller</small></div>
                     <div class="wk-tile"><span>Crew time a week</span><b><i data-fl-time>…</i></b><small>at 0.9 m/s</small></div>
                     <div class="wk-tile"><span>Pans chilled a week</span><b><i data-fl-pans>…</i></b><small>cooked ahead</small></div>
                   </div>
@@ -951,7 +951,7 @@
             <figcaption class="fig-foot how" id="floor-how">
               <div>
                 <p class="how-title">How it's computed</p>
-                <p>The room is the commissary's own plan, with every fixture where its build manifest puts it. The pans are the forecast week's cooked-ahead batches from the model above. Each leaves the kettle, the skillet or a combi hot, one at a time, and the cook walks back. Each 15-pan chiller load goes to the walk-in on a rack, and the rack comes back.</p>
+                <p>The room is the commissary's own plan, with every fixture where its build manifest puts it. The pans are the forecast week's cooked-ahead batches from the model above, every one chilled. Each is carried from the kettle, the skillet, a combi or a prep table to the chiller, one at a time, and the cook walks back. Each 15-pan chiller load goes to the walk-in on a rack, and the rack comes back.</p>
                 <p>Every walk is measured on the free floor round the fixtures, for a cook carrying a pan. A chiller may stand on any wall where it fits, clear of the site plan's corridors and out from under the hoods. The cook on screen is a kinematic illustration, walking at the 0.9 m/s the times are quoted at.</p>
               </div>
               <div>

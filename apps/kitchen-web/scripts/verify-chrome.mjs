@@ -313,8 +313,10 @@ async function main() {
       }
 
       if (sid === "floor") {
-        // The shortest-walk spot must walk less than the chiller as drawn, for both menus.
+        // The shortest-walk spot must walk less than the chiller as drawn, for both menus. The figure builds once the
+        // commissary's plan has loaded: wait for its first answer before using its buttons.
         const kmOf = () => page.$eval("[data-fl-km]", (el) => parseFloat(el.textContent || "NaN"));
+        await page.waitForFunction(() => /\d/.test(document.querySelector("[data-fl-km]")?.textContent || ""), { timeout: 30000 });
         for (const menu of ["written", "swapped"]) {
           await page.click(`[data-fl-menu="${menu}"]`);
           await page.click('[data-fl-spot="drawn"]');
