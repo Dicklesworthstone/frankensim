@@ -8,6 +8,23 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
+
+The seven default lumped elements used by `LoweringRegistry::with_kernel_defaults`
+implement `fs_ports::component::StageResidual`:
+
+- Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`.
+- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`.
+
+`LoweringGraph::add_with_tangent_and_residual` registers components carrying both
+`PortTangent` and `StageResidual`; the default lumped constructors in `lowering.rs`
+use it for these seven elements while leaving `Storage` (and all other non-default
+elements such as `Admittance`, `FlowSource`, `Gyrator`, `GapField`, `ControlledSource`,
+`Slider`, `Restriction`, `GasVolume`, `ConductanceMatrix`) without `StageResidual` so
+`AnalysisError::MissingTier(StageResidual)` remains pinned. Direct `SystemBuilder::add`
+and `add_with_tangent` callers do not attach `StageResidual`. Verification lives in
+`tests/elements_stage_residual.rs`.
+
 ## Live passive constitutive laws for scalar dissipation
 
 A Damper can follow an `Arc<dyn DissipationLaw>` through `Damper::following`.

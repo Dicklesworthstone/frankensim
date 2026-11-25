@@ -46,6 +46,7 @@ pub(crate) struct RunTrace {
     pub(crate) modal_modes: Vec<(f64, f64, f64)>,
     pub(crate) harmonic_points: Vec<(f64, f64, f64)>,
     pub(crate) stationary_norm: Option<f64>,
+    pub(crate) stationary_state: Vec<(String, f64)>,
 }
 
 fn push_f64_list(out: &mut String, vals: &[f64]) {
@@ -108,6 +109,16 @@ impl RunTrace {
         if let Some(res) = self.stationary_norm {
             let _ = write!(out, ",\"stationary_residual\":{res:.17e}");
         }
+        if !self.stationary_state.is_empty() {
+            out.push_str(",\"stationary_state\":[");
+            for (i, (label, val)) in self.stationary_state.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "[{},{val:.17e}]", json_string(label));
+            }
+            out.push(']');
+        }
         out.push('}');
         out
     }
@@ -155,6 +166,18 @@ impl RunTrace {
                 }
             }
         }
+        let stationary_state = root
+            .get("stationary_state")
+            .and_then(JsonValue::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|row| {
+                        let r = row.as_array()?;
+                        Some((r.first()?.as_str()?.to_string(), r.get(1)?.as_f64()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             analysis: root
                 .str_field("analysis")
@@ -169,6 +192,7 @@ impl RunTrace {
             modal_modes: parse_triples("modal_modes"),
             harmonic_points: parse_triples("harmonic_points"),
             stationary_norm: root.f64_field("stationary_residual"),
+            stationary_state,
         })
     }
 }
@@ -415,6 +439,14 @@ pub(crate) fn evaluate_probes(
             "SI",
             vec![res],
         ));
+        for (label, val) in &trace.stationary_state {
+            evaluated.push(make_probe(
+                format!("stationary.state.{label}"),
+                "stationary-equilibrium",
+                "SI",
+                vec![*val],
+            ));
+        }
     }
 
     let mut json = format!(

@@ -1662,6 +1662,36 @@ impl LoweringGraph {
         Ok(node)
     }
 
+    /// Add a [`fs_ports::component::Component`] with both
+    /// [`fs_ports::component::PortTangent`] and
+    /// [`fs_ports::component::StageResidual`], recording its node name in the
+    /// lowering index.
+    ///
+    /// # Errors
+    /// Propagates [`AdmissionError`].
+    pub fn add_with_tangent_and_residual<C>(
+        &mut self,
+        name: &str,
+        owner: Option<EntityId>,
+        component: C,
+        state: C::State,
+    ) -> Result<NodeId, LoweringError>
+    where
+        C: fs_ports::component::PortTangent + fs_ports::component::StageResidual + 'static,
+        C::State: 'static,
+    {
+        let specs: Vec<(Carrier, PortRole)> = component
+            .ports()
+            .iter()
+            .map(|p| (p.carrier(), p.role()))
+            .collect();
+        let node = self
+            .builder
+            .add_with_tangent_and_stage_residual(name, component, state)?;
+        self.register_node_meta(name, owner, node, &specs);
+        Ok(node)
+    }
+
     /// Add a plain [`fs_ports::component::Component`], recording its node name
     /// in the lowering index.
     ///
@@ -3144,7 +3174,7 @@ fn lower_source(
             // Attach a Force (effort source) to the target's common_flow hub.
             let waveform = time_history_to_waveform(&scope, &src.history)?;
             let node_name = format!("source.{}", src.name);
-            let node = graph.add_with_tangent(
+            let node = graph.add_with_tangent_and_residual(
                 &node_name,
                 None,
                 Force::in_domain(kind, waveform),
@@ -3168,8 +3198,12 @@ fn lower_source(
                 source,
             })?;
             let node_name = format!("source.{}", src.name);
-            let node =
-                graph.add_with_tangent(&node_name, None, heater, SourceAccount::default())?;
+            let node = graph.add_with_tangent_and_residual(
+                &node_name,
+                None,
+                heater,
+                SourceAccount::default(),
+            )?;
             let src_port = graph.port(node, "heat")?;
             graph.attach_common_effort(target_port, src_port, 1.0);
             let (_, parameter_sources) = recorder.finish();
@@ -3553,7 +3587,8 @@ fn lower_lumped_rigid_body(
         position_m: 0.0,
         velocity_m_s: 0.0,
     };
-    let node = graph.add_with_tangent(&node_name, Some(ctx.part.entity), component, init)?;
+    let node =
+        graph.add_with_tangent_and_residual(&node_name, Some(ctx.part.entity), component, init)?;
     let p = graph.port(node, "p")?;
     graph.expose_port(ctx.part.entity, port_name, p);
     if port_name == "rotation" {
@@ -3635,7 +3670,7 @@ fn lower_lumped_rigid_thermal_body(
         source,
     })?;
 
-    let mech_node = graph.add_with_tangent(
+    let mech_node = graph.add_with_tangent_and_residual(
         &mech_name,
         Some(ctx.part.entity),
         mass,
@@ -3644,7 +3679,8 @@ fn lower_lumped_rigid_thermal_body(
             velocity_m_s: 0.0,
         },
     )?;
-    let therm_node = graph.add_with_tangent(&therm_name, Some(ctx.part.entity), cap, t_init)?;
+    let therm_node =
+        graph.add_with_tangent_and_residual(&therm_name, Some(ctx.part.entity), cap, t_init)?;
 
     let mech_port = graph.port(mech_node, "p")?;
     let therm_port = graph.port(therm_node, "heat")?;
@@ -3709,7 +3745,8 @@ fn lower_lumped_thermal_solid(
         item: scope,
         source,
     })?;
-    let node = graph.add_with_tangent(&ctx.part.name, Some(ctx.part.entity), cap, t_init)?;
+    let node =
+        graph.add_with_tangent_and_residual(&ctx.part.name, Some(ctx.part.entity), cap, t_init)?;
     let port = graph.port(node, "heat")?;
     graph.expose_port(ctx.part.entity, "thermal", port);
 
@@ -3769,7 +3806,8 @@ fn lower_lumped_spring_beam(
         })?
     };
 
-    let node = graph.add_with_tangent(&ctx.part.name, Some(ctx.part.entity), spring, 0.0)?;
+    let node =
+        graph.add_with_tangent_and_residual(&ctx.part.name, Some(ctx.part.entity), spring, 0.0)?;
     let port_a = graph.port(node, "a")?;
     let port_b = graph.port(node, "b")?;
     graph.expose_port(ctx.part.entity, "a", port_a);
@@ -3865,7 +3903,7 @@ fn lower_fixed_joint(
         source,
     })?;
     let node_name = format!("joint.{}.tie", ctx.joint.name);
-    let node = graph.add_with_tangent(&node_name, None, spring, 0.0)?;
+    let node = graph.add_with_tangent_and_residual(&node_name, None, spring, 0.0)?;
     let a = graph.port(node, "a")?;
     let b = graph.port(node, "b")?;
     graph.attach_common_flow(child_port, a, 1.0);
@@ -3934,7 +3972,7 @@ fn lower_1dof_joint(
                 source,
             })?;
         let name = format!("joint.{}.spring", ctx.joint.name);
-        let node = graph.add_with_tangent(&name, None, spring, 0.0)?;
+        let node = graph.add_with_tangent_and_residual(&name, None, spring, 0.0)?;
         let a = graph.port(node, "a")?;
         let b = graph.port(node, "b")?;
         graph.attach_common_flow(child_port, a, 1.0);
@@ -3955,7 +3993,7 @@ fn lower_1dof_joint(
                 source,
             })?;
         let name = format!("joint.{}.damper", ctx.joint.name);
-        let node = graph.add_with_tangent(&name, None, damper, ())?;
+        let node = graph.add_with_tangent_and_residual(&name, None, damper, ())?;
         let a = graph.port(node, "a")?;
         let b = graph.port(node, "b")?;
         let heat = graph.port(node, "heat")?;
@@ -4059,7 +4097,7 @@ fn lower_involute_gear_mesh(
             source,
         })?;
     let name = format!("gear_mesh.{}.compliance", ctx.mesh.name);
-    let node = graph.add_with_tangent(&name, None, spring, 0.0)?;
+    let node = graph.add_with_tangent_and_residual(&name, None, spring, 0.0)?;
     let a = graph.port(node, "a")?;
     let b = graph.port(node, "b")?;
     graph.attach_common_flow(driver_port, a, 1.0);
@@ -4166,7 +4204,8 @@ fn lower_thermal_conductance_interface(
         source,
     })?;
     let node_name = format!("interface.{}", ctx.interface.name);
-    let node = graph.add_with_tangent(&node_name, Some(ctx.interface.entity), cond, ())?;
+    let node =
+        graph.add_with_tangent_and_residual(&node_name, Some(ctx.interface.entity), cond, ())?;
     let a = graph.port(node, "a")?;
     let b = graph.port(node, "b")?;
     graph.attach_common_effort(port_a_target, a, 1.0);
@@ -4212,7 +4251,8 @@ fn lower_viscous_damper_interface(
         source,
     })?;
     let node_name = format!("interface.{}", ctx.interface.name);
-    let node = graph.add_with_tangent(&node_name, Some(ctx.interface.entity), damper, ())?;
+    let node =
+        graph.add_with_tangent_and_residual(&node_name, Some(ctx.interface.entity), damper, ())?;
     let a = graph.port(node, "a")?;
     let b = graph.port(node, "b")?;
     let heat = graph.port(node, "heat")?;
@@ -4284,8 +4324,10 @@ fn lower_kelvin_voigt_interface(
     })?;
     let s_name = format!("interface.{}.spring", ctx.interface.name);
     let d_name = format!("interface.{}.damper", ctx.interface.name);
-    let s_node = graph.add_with_tangent(&s_name, Some(ctx.interface.entity), spring, 0.0)?;
-    let d_node = graph.add_with_tangent(&d_name, Some(ctx.interface.entity), damper, ())?;
+    let s_node =
+        graph.add_with_tangent_and_residual(&s_name, Some(ctx.interface.entity), spring, 0.0)?;
+    let d_node =
+        graph.add_with_tangent_and_residual(&d_name, Some(ctx.interface.entity), damper, ())?;
 
     let (sa, sb) = (graph.port(s_node, "a")?, graph.port(s_node, "b")?);
     let (da, db, d_heat) = (
@@ -4345,7 +4387,8 @@ fn lower_elastic_glue_interface(
         source,
     })?;
     let node_name = format!("interface.{}", ctx.interface.name);
-    let node = graph.add_with_tangent(&node_name, Some(ctx.interface.entity), spring, 0.0)?;
+    let node =
+        graph.add_with_tangent_and_residual(&node_name, Some(ctx.interface.entity), spring, 0.0)?;
     let a = graph.port(node, "a")?;
     let b = graph.port(node, "b")?;
     attach_mech_endpoint(graph, catalog, ctx.interface.feature_a, root, a, &scope)?;
@@ -4585,7 +4628,7 @@ fn lower_acoustic_string_family(
     let m_name = format!("{}.mass", ctx.member.name);
     let s_name = format!("{}.spring", ctx.member.name);
     let d_name = format!("{}.damper", ctx.member.name);
-    let m_node = graph.add_with_tangent(
+    let m_node = graph.add_with_tangent_and_residual(
         &m_name,
         None,
         Mass::new(m_eff).map_err(|source| LoweringError::Element {
@@ -4597,7 +4640,7 @@ fn lower_acoustic_string_family(
             velocity_m_s: 0.0,
         },
     )?;
-    let s_node = graph.add_with_tangent(
+    let s_node = graph.add_with_tangent_and_residual(
         &s_name,
         None,
         Spring::new(k_eff, 0.0).map_err(|source| LoweringError::Element {
@@ -4606,7 +4649,7 @@ fn lower_acoustic_string_family(
         })?,
         0.0,
     )?;
-    let d_node = graph.add_with_tangent(
+    let d_node = graph.add_with_tangent_and_residual(
         &d_name,
         None,
         Damper::new(damping).map_err(|source| LoweringError::Element {
@@ -4680,7 +4723,7 @@ fn lower_acoustic_plate_family(
     let m_name = format!("{}.modal_mass", ctx.member.name);
     let s_name = format!("{}.modal_spring", ctx.member.name);
     let d_name = format!("{}.modal_damper", ctx.member.name);
-    let m_node = graph.add_with_tangent(
+    let m_node = graph.add_with_tangent_and_residual(
         &m_name,
         None,
         Mass::new(modal_mass).map_err(|source| LoweringError::Element {
@@ -4692,7 +4735,7 @@ fn lower_acoustic_plate_family(
             velocity_m_s: 0.0,
         },
     )?;
-    let s_node = graph.add_with_tangent(
+    let s_node = graph.add_with_tangent_and_residual(
         &s_name,
         None,
         Spring::new(k_modal, 0.0).map_err(|source| LoweringError::Element {
@@ -4701,7 +4744,7 @@ fn lower_acoustic_plate_family(
         })?,
         0.0,
     )?;
-    let d_node = graph.add_with_tangent(
+    let d_node = graph.add_with_tangent_and_residual(
         &d_name,
         None,
         Damper::new(modal_damping).map_err(|source| LoweringError::Element {
@@ -4749,7 +4792,7 @@ fn lower_acoustic_duct_family(
 
     let l_name = format!("{}.inertance", ctx.member.name);
     let r_name = format!("{}.resistance", ctx.member.name);
-    let l_node = graph.add_with_tangent(
+    let l_node = graph.add_with_tangent_and_residual(
         &l_name,
         None,
         Mass::in_domain(PortKind::FluidPressureFlux, inertance).map_err(|source| {
@@ -4763,7 +4806,7 @@ fn lower_acoustic_duct_family(
             velocity_m_s: 0.0,
         },
     )?;
-    let r_node = graph.add_with_tangent(
+    let r_node = graph.add_with_tangent_and_residual(
         &r_name,
         None,
         Damper::in_domain(PortKind::FluidPressureFlux, resistance).map_err(|source| {

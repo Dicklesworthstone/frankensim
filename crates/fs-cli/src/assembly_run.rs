@@ -209,17 +209,19 @@ impl LegacySolverStateV1 for AssemblyStateEnvelope {
 }
 
 struct LoweredStateMap {
-    coords: Vec<(NodeId, bool, bool, String)>, // (node, is_motion, is_vel, label)
+    coords: Vec<(NodeId, bool, String)>, // (node, is_motion_velocity, label)
 }
 impl LoweredStateMap {
     fn from_lowered(lowered: &LoweredSystem) -> Self {
         let mut coords = Vec::new();
         for (name, &node) in &lowered.node_map {
             if lowered.system.state::<Motion>(node).is_some() {
-                coords.push((node, true, false, format!("{name}.position_m")));
-                coords.push((node, true, true, format!("{name}.velocity_m_s")));
+                // `Motion::position_m` is an output integral absent from port laws;
+                // mapping only `velocity_m_s` keeps the state Jacobian nonsingular
+                // (matching `Mech2Map` / `ThermoMechMap` in `fs-system`).
+                coords.push((node, true, format!("{name}.velocity_m_s")));
             } else if lowered.system.state::<f64>(node).is_some() {
-                coords.push((node, false, false, format!("{name}.state")));
+                coords.push((node, false, format!("{name}.state")));
             }
         }
         Self { coords }
@@ -235,14 +237,14 @@ impl StateMap for LoweredStateMap {
                 what: "state length mismatch",
             });
         }
-        for (slot, (node, is_m, is_v, _)) in out.iter_mut().zip(&self.coords) {
-            *slot = if *is_m {
-                let m = system
+        for (slot, (node, is_motion, _)) in out.iter_mut().zip(&self.coords) {
+            *slot = if *is_motion {
+                system
                     .state::<Motion>(*node)
                     .ok_or(AnalysisError::Invalid {
                         what: "missing Motion",
-                    })?;
-                if *is_v { m.velocity_m_s } else { m.position_m }
+                    })?
+                    .velocity_m_s
             } else {
                 *system.state::<f64>(*node).ok_or(AnalysisError::Invalid {
                     what: "missing f64",
@@ -257,26 +259,23 @@ impl StateMap for LoweredStateMap {
                 what: "state length mismatch",
             });
         }
-        let mut i = 0;
-        while i < self.coords.len() {
-            if self.coords[i].1 {
-                system.set_accepted_state(
-                    self.coords[i].0,
-                    Motion {
-                        position_m: state[i],
-                        velocity_m_s: state[i + 1],
-                    },
-                )?;
-                i += 2;
+        for ((node, is_motion, _), &val) in self.coords.iter().zip(state) {
+            if *is_motion {
+                let mut motion = *system
+                    .state::<Motion>(*node)
+                    .ok_or(AnalysisError::Invalid {
+                        what: "missing Motion",
+                    })?;
+                motion.velocity_m_s = val;
+                system.set_accepted_state(*node, motion)?;
             } else {
-                system.set_accepted_state(self.coords[i].0, state[i])?;
-                i += 1;
+                system.set_accepted_state(*node, val)?;
             }
         }
         Ok(())
     }
     fn labels(&self) -> Vec<String> {
-        self.coords.iter().map(|c| c.3.clone()).collect()
+        self.coords.iter().map(|c| c.2.clone()).collect()
     }
 }
 
@@ -414,6 +413,7 @@ impl AssemblyPipeline<'_> {
                 modal_modes: Vec::new(),
                 harmonic_points: Vec::new(),
                 stationary_norm: None,
+                stationary_state: Vec::new(),
             },
             lowered.system.ledger().export(),
         ))
@@ -494,6 +494,7 @@ impl AssemblyPipeline<'_> {
             modal_modes: Vec::new(),
             harmonic_points: Vec::new(),
             stationary_norm: None,
+            stationary_state: Vec::new(),
         };
         match outcome {
             AnalysisOutcome::Modal(m) => {
@@ -514,6 +515,7 @@ impl AssemblyPipeline<'_> {
             }
             AnalysisOutcome::Stationary(s) => {
                 trace.stationary_norm = Some(s.residual_norm);
+                trace.stationary_state = smap.labels().into_iter().zip(s.state).collect();
             }
             _ => {}
         }

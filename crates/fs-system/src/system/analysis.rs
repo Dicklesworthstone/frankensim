@@ -1552,8 +1552,12 @@ impl System {
             relative_tolerance: config.relative_tolerance,
             linear_restart: config.linear_restart.max(n).min(64),
             max_linear_cycles: config.max_linear_cycles,
-            forcing_minimum: 1.0e-13,
-            forcing_maximum: 1.0e-6,
+            // Central-FD JFNK on `(Phi_dt(x) - x) / dt` has linearity floor
+            // `O(eps_mach / (dt * fd_eps))`; keep the Eisenstat-Walker forcing
+            // floor above that cancellation noise while still achieving >= 1e4
+            // residual reduction per Newton step.
+            forcing_minimum: 1.0e-4,
+            forcing_maximum: 1.0e-3,
             ..NewtonKrylovConfig::default()
         };
 

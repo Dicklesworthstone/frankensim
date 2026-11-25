@@ -1,8 +1,8 @@
-//! Real no-mock integration tests for `.11.7` Stage 2:
+//! Real no-mock integration tests for `.11.7` Stage 2 + S2-B:
 //! three real lowered coupled assemblies on `stage_driver`, kill/resume at
-//! every stage `0..=5`, `Modal`/`Harmonic` analytic checks, S2-A `Stationary`
-//! capability refusal, `explain_assembly_run`, and explicit `admit`/`probe`
-//! refusals.
+//! every stage `0..=5`, `Modal`/`Harmonic` analytic checks, S2-B `Stationary`
+//! equilibrium convergence (`|x*| = F/k`), `explain_assembly_run`, and
+//! explicit `admit`/`probe` refusals.
 
 use std::f64::consts::TAU;
 
@@ -401,7 +401,7 @@ fn assembly2_two_body_thermal_with_interface_card_and_timing_probe() {
 }
 
 #[test]
-fn assembly3_oscillator_modal_harmonic_analytic_and_stationary_s2a_refusal() {
+fn assembly3_oscillator_modal_harmonic_analytic_and_stationary_equilibrium() {
     let packs =
         CardPackSet::admit(vec![material_pack("AISI-304", 8000.0, 500.0, 193.0e9)]).unwrap();
     // m = 8000 * 0.1 * 0.05 * 0.05 = 2.0 kg, k = 200 N/m, c = 4 N*s/m
@@ -453,26 +453,60 @@ fn assembly3_oscillator_modal_harmonic_analytic_and_stationary_s2a_refusal() {
     assert_eq!(harm.status, SolveRunStatus::Completed);
     assert_ne!(harm.run, modal.run, "analysis mode enters run identity");
 
-    // S2-A: Stationary routes to System::run_analysis and records MissingTier(StageResidual) durably.
-    let stat_err = run_assembly(
+    // S2-B: Stationary converges on a lowered forced spring-mass (F = 10 N, k = 200 N/m =>
+    // |x*| = F/k = 0.05 m, v* = 0; joint lowering attaches port `a` to child so e* = -F/k).
+    let forced_osc = OSCILLATOR_ASSEMBLY.replace(
+        "(analysis-options :harmonic-frequencies (1.0 2.0 5.0) :modal-max 4)",
+        "(source \"load\" :part \"mass\" :port \"mechanics\" :history (constant 10N))",
+    );
+    let (stat, _) = run_assembly(
         &ledger,
-        OSCILLATOR_ASSEMBLY.as_bytes(),
+        forced_osc.as_bytes(),
         &packs,
         AssemblyAnalysisMode::Stationary,
         &mut step_clock(0.1),
         AssemblyCancelPlan::default(),
     )
-    .expect_err("stationary refuses under S2-A");
+    .expect("stationary converges on lowered forced spring-mass under S2-B");
     assert_eq!(
-        (stat_err.code, stat_err.stage),
-        ("cli-assembly-analysis-capability", Some("run"))
+        (stat.status, stat.stages.len()),
+        (SolveRunStatus::Completed, 6)
+    );
+    let stat_probe_r = read_report_receipt(&ledger, &stat.stages[4].receipt);
+    let stat_series_h =
+        ContentHash::from_hex(json_str_field(&stat_probe_r, "series_artifact")).unwrap();
+    let stat_series =
+        String::from_utf8(ledger.get_artifact(&stat_series_h).unwrap().unwrap()).unwrap();
+    let probe_final = |name: &str| -> f64 {
+        let needle = format!("\"name\":\"{name}\"");
+        stat_series
+            .split(&needle)
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing `{name}` in {stat_series}"))
+            .split("\"final\":")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let stat_res = probe_final("stationary.residual_norm");
+    let stat_ext = probe_final("stationary.state.joint.spring_damper.spring.state");
+    let stat_vel = probe_final("stationary.state.mass.velocity_m_s");
+    assert!(
+        stat_res < 1.0e-10,
+        "stationary residual too large: {stat_res}"
     );
     assert!(
-        stat_err.what.contains("StageResidual"),
-        "got: {}",
-        stat_err.what
+        (stat_ext - (-10.0 / 200.0)).abs() < 1.0e-9,
+        "expected e* = -F/k = -0.05 m, got {stat_ext}"
     );
-    assert!(stat_err.recorded_op.is_some());
+    assert!(stat_vel.abs() < 1.0e-9, "expected v* = 0, got {stat_vel}");
+    let stat_rep = read_report_receipt(&ledger, &stat.stages[5].receipt);
+    let stat_pkg_root = json_str_field(&stat_rep, "package_root");
+    check_retained_package(&ledger, stat.stages[5].op_id, stat_pkg_root);
 }
 
 #[test]

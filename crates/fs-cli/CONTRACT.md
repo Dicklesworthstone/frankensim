@@ -22,10 +22,11 @@ identity domain (`org.frankensim.fs-cli.assembly-run-identity.v1`), and
 - `run` executes the unchanged lowered `System` through `System::step`
   (`Transient`, retaining `fs_system::ledger::LedgerExport` + energy metrics +
   real entity trace) or `System::run_analysis` (`Modal`, `Harmonic`,
-  `Stationary`). Under S2-A, `Stationary` delegates directly to
-  `System::run_analysis` and durably records `AnalysisError::MissingTier`
-  (`cli-assembly-analysis-capability`) when a lowered component lacks
-  `StageResidual`.
+  `Stationary`). Under S2-B, default lowered lumped assemblies satisfy
+  `StageResidual`, so `Stationary` converges through `System::solve_stationary`
+  and retains the residual norm and equilibrium state coordinates in the trace,
+  probe series, report QoIs, and format-9 evidence package; components without
+  `StageResidual` continue to refuse durably with `cli-assembly-analysis-capability`.
 - `probe` evaluates declared probes (`Thermocouple`, `Timing`, `FieldQuantity`)
   and analysis outputs strictly from retained kernel outputs; any probe whose
   observable was not lowered refuses explicitly (`cli-assembly-probe-unsupported`)
@@ -35,12 +36,12 @@ identity domain (`org.frankensim.fs-cli.assembly-run-identity.v1`), and
 - `explain_assembly_run` projects the retained lowering receipt, execution plan,
   causalization audit, and window energy ledger without replaying physics.
 
-No-claim boundary: Stage 2 exposes library entry points (`run_assembly`,
-`resume_assembly`, `explain_assembly_run`) with Estimate-only probe authority;
-`StageResidual` on default `fs-system::elements` (S2-B), CLI verb dispatch
-(`frankensim run <assembly.fsim>`, `frankensim explain`), FrankenScript
-`assembly.run` (Stage 3), and generalized 8-term QoI budgets (`.11.8`) remain
-subsequent packages.
+No-claim boundary: Stage 2 + S2-B expose library entry points (`run_assembly`,
+`resume_assembly`, `explain_assembly_run`) with Estimate-only probe authority
+and `StageResidual`-backed stationary equilibria on default lumped assemblies;
+CLI verb dispatch (`frankensim run <assembly.fsim>`, `frankensim explain`),
+FrankenScript `assembly.run` (Stage 3), and generalized 8-term QoI budgets
+(`.11.8`) remain subsequent packages.
 
 ## Reusable durable stage driver (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 1)
 
