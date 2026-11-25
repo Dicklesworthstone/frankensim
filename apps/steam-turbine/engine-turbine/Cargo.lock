@@ -1173,10 +1173,12 @@ name = "fs-system"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-evidence",
  "fs-exec",
  "fs-math",
  "fs-phs",
  "fs-ports",
+ "fs-solver",
 ]
 
 [[package]]
