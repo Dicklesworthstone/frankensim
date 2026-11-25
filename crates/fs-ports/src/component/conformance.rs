@@ -31,12 +31,19 @@
 //! both residual and outputs, and `vjp_z` against `jvp_z` by the dot-product
 //! test.
 //!
-//! Not covered yet (bead `frankensim-rc-1109-root-3gc12.5.11`):
-//! the temporal order hook (bead `.14.1`) and property shrinking.
+//! Temporal convergence, seeded shrinking, and zero-allocation gates:
+//! [`check_temporal_order`] runs a refinement ladder through `fs-mms`
+//! ([`RefinementLadder`], [`OrderGate`]); [`check_component_sweep`] runs a
+//! deterministic `fs-propcheck` seeded sweep and shrinks any counterexample
+//! with [`fs_propcheck::minimize_with_budget`]; [`check_zero_alloc_propose`]
+//! verifies zero heap allocations after warm-up via an injected counting
+//! allocator hook.
 
 use core::fmt;
 
 use fs_exec::{CancelGate, Cx};
+pub use fs_mms::{LadderSide, OrderFit, OrderGate, OrderVerdict, RefinementLadder};
+pub use fs_propcheck::{MinimizeBudget, Shrink, Stream};
 use fs_qty::{DIMENSION_COUNT, Dims, Energy, Mass, Power, Temperature, Time};
 
 use super::{
@@ -1539,7 +1546,13 @@ where
     // 4. accept matches audit_step, admit, and propose candidate state.
     let mut accepted_state = case.stale.clone();
     let receipt = component
-        .accept(case.state, case.dt_s, case.inputs, z_solution, &mut accepted_state)
+        .accept(
+            case.state,
+            case.dt_s,
+            case.inputs,
+            z_solution,
+            &mut accepted_state,
+        )
         .map_err(Failure::Owner)?;
     if accepted_state != prop_state {
         return Err(law(
@@ -1590,13 +1603,38 @@ where
         let z_plus: Vec<f64> = z_probe.iter().zip(&dz).map(|(z, d)| z + step * d).collect();
         let z_minus: Vec<f64> = z_probe.iter().zip(&dz).map(|(z, d)| z - step * d).collect();
         component
-            .residual(case.state, case.dt_s, case.inputs, &z_plus, &mut r_plus, &mut out_plus, cx)
+            .residual(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &z_plus,
+                &mut r_plus,
+                &mut out_plus,
+                cx,
+            )
             .map_err(Failure::Owner)?;
         component
-            .residual(case.state, case.dt_s, case.inputs, &z_minus, &mut r_minus, &mut out_minus, cx)
+            .residual(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &z_minus,
+                &mut r_minus,
+                &mut out_minus,
+                cx,
+            )
             .map_err(Failure::Owner)?;
         component
-            .jvp_z(case.state, case.dt_s, case.inputs, &z_probe, &dz, &mut dr, &mut d_out, cx)
+            .jvp_z(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &z_probe,
+                &dz,
+                &mut dr,
+                &mut d_out,
+                cx,
+            )
             .map_err(Failure::Owner)?;
 
         let (mut r_err, mut r_size) = (0.0_f64, 0.0_f64);
@@ -1628,20 +1666,434 @@ where
         let bar_r = direction(n_z, seed + 200);
         let bar_out = direction(n_out, seed + 300);
         component
-            .vjp_z(case.state, case.dt_s, case.inputs, &z_probe, &bar_r, &bar_out, &mut bar_z, cx)
+            .vjp_z(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &z_probe,
+                &bar_r,
+                &bar_out,
+                &mut bar_z,
+                cx,
+            )
             .map_err(Failure::Owner)?;
         let left: f64 = bar_r.iter().zip(&dr).map(|(a, b)| a * b).sum::<f64>()
             + bar_out.iter().zip(&d_out).map(|(a, b)| a * b).sum::<f64>();
         let right: f64 = bar_z.iter().zip(&dz).map(|(a, b)| a * b).sum();
-        let magnitude: f64 = bar_r.iter().zip(&dr).map(|(a, b)| (a * b).abs()).sum::<f64>()
-            + bar_out.iter().zip(&d_out).map(|(a, b)| (a * b).abs()).sum::<f64>()
-            + bar_z.iter().zip(&dz).map(|(a, b)| (a * b).abs()).sum::<f64>();
+        let magnitude: f64 = bar_r
+            .iter()
+            .zip(&dr)
+            .map(|(a, b)| (a * b).abs())
+            .sum::<f64>()
+            + bar_out
+                .iter()
+                .zip(&d_out)
+                .map(|(a, b)| (a * b).abs())
+                .sum::<f64>()
+            + bar_z
+                .iter()
+                .zip(&dz)
+                .map(|(a, b)| (a * b).abs())
+                .sum::<f64>();
         if !((left - right).abs() <= 64.0 * f64::EPSILON * magnitude + f64::MIN_POSITIVE) {
             return Err(law(
                 "vjp_z is the transpose of jvp_z",
                 format!("<bar_r, dr> + <bar_out, d_out> = {left}, <bar_z, dz> = {right}"),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Output of a passing [`check_temporal_order`] convergence ladder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalOrderReport {
+    /// Passing `fs-mms` convergence verdict (`OrderGate`).
+    pub verdict: OrderVerdict,
+    /// Step sizes `dt = horizon_s / n` for each rung [s], strictly decreasing.
+    pub dts_s: Vec<f64>,
+    /// Final-time error norms corresponding to each rung.
+    pub errors: Vec<f64>,
+}
+
+/// Check a component's temporal convergence order over a fixed `horizon_s` using
+/// `fs-mms` ([`RefinementLadder`] and [`OrderGate`]).
+///
+/// For each step count `n` in `step_counts` (at least three strictly increasing
+/// positive integers), the component is marched `n` steps of length
+/// `dt = horizon_s / n` from `initial_state` under `inputs_at(t, dt, inputs)`.
+/// Every step is audited through [`audit_step`] and [`Component::admit`]; the
+/// final state is scored by `error_of(&final_state, horizon_s)`. The resulting
+/// `(dt, error)` ladder is gated against `expected_order` within
+/// [`fs_mms::ORDER_GATE_TOLERANCE`] (0.2).
+///
+/// # Errors
+/// Refuses invalid horizon/step counts, shortened steps, audit/owner failures,
+/// non-positive errors, or a fitted order outside the `fs-mms` gate.
+#[allow(clippy::too_many_arguments)]
+pub fn check_temporal_order<C, F, G>(
+    component: &C,
+    case_name: &str,
+    initial_state: &C::State,
+    horizon_s: f64,
+    step_counts: &[usize],
+    expected_order: f64,
+    mut inputs_at: F,
+    mut error_of: G,
+    cx: &Cx<'_>,
+) -> Result<TemporalOrderReport, Failure<C::Error>>
+where
+    C: Component,
+    F: FnMut(f64, f64, &mut [f64]),
+    G: FnMut(&C::State, f64) -> f64,
+{
+    let ports = component.ports();
+    let layout = PortLayout::new(ports).map_err(Failure::Contract)?;
+    if !(horizon_s.is_finite() && horizon_s > 0.0) {
+        return Err(law(
+            "temporal order requires a positive finite horizon",
+            format!("got horizon_s = {horizon_s:e}"),
+        ));
+    }
+    if step_counts.len() < 3
+        || step_counts.contains(&0)
+        || !step_counts.windows(2).all(|w| w[1] > w[0])
+    {
+        return Err(law(
+            "temporal order requires at least three strictly increasing positive step counts",
+            format!("got step_counts = {step_counts:?}"),
+        ));
+    }
+
+    let mut dts_s = Vec::with_capacity(step_counts.len());
+    let mut errors = Vec::with_capacity(step_counts.len());
+    let mut inputs = vec![0.0; layout.input_len()];
+    let mut outputs = vec![0.0; layout.output_len()];
+
+    for &steps in step_counts {
+        let dt_s = horizon_s / (steps as f64);
+        if !(dt_s.is_finite() && dt_s > 0.0) {
+            return Err(law(
+                "temporal order requires representable positive step sizes",
+                format!("horizon_s={horizon_s:e} / steps={steps} produced dt_s={dt_s:e}"),
+            ));
+        }
+        let mut state = initial_state.clone();
+        let mut candidate = initial_state.clone();
+        for step in 0..steps {
+            let t_s = (step as f64) * dt_s;
+            inputs.fill(0.0);
+            inputs_at(t_s, dt_s, &mut inputs);
+            let proposal = component
+                .propose(&state, dt_s, &inputs, &mut candidate, &mut outputs, cx)
+                .map_err(Failure::Owner)?;
+            let receipt = match proposal {
+                Proposal::Step(receipt) => receipt,
+                Proposal::Shorten { dt_s: shorter } => {
+                    return Err(law(
+                        "temporal order is checked where the component takes every step",
+                        format!("rung {steps} step {step} asked to shorten to {shorter:e} s"),
+                    ));
+                }
+            };
+            let stored_old = component.stored_energy_j(&state).map_err(Failure::Owner)?;
+            let stored_new = component
+                .stored_energy_j(&candidate)
+                .map_err(Failure::Owner)?;
+            audit_step(
+                ports, &layout, dt_s, &inputs, &outputs, &receipt, stored_old, stored_new,
+            )
+            .map_err(Failure::Contract)?;
+            let mass_old = component.stored_mass_kg(&state).map_err(Failure::Owner)?;
+            let mass_new = component
+                .stored_mass_kg(&candidate)
+                .map_err(Failure::Owner)?;
+            audit_mass_step(ports, &layout, dt_s, &inputs, &outputs, mass_old, mass_new)
+                .map_err(Failure::Contract)?;
+            component
+                .admit(&state, &candidate, &receipt)
+                .map_err(Failure::Owner)?;
+            core::mem::swap(&mut state, &mut candidate);
+        }
+        let err = error_of(&state, horizon_s);
+        dts_s.push(dt_s);
+        errors.push(err);
+    }
+
+    let ladder = RefinementLadder::new(dts_s.clone(), errors.clone()).map_err(|e| {
+        law(
+            "temporal order matches theoretical convergence rate",
+            e.to_string(),
+        )
+    })?;
+    let verdict = OrderGate {
+        theoretical: expected_order,
+    }
+    .check(case_name, LadderSide::Primal, &ladder)
+    .map_err(|e| {
+        law(
+            "temporal order matches theoretical convergence rate",
+            e.to_string(),
+        )
+    })?;
+
+    Ok(TemporalOrderReport {
+        verdict,
+        dts_s,
+        errors,
+    })
+}
+
+/// Owned operating point built from a generated/shrunk property-test input.
+#[derive(Debug, Clone)]
+pub struct OwnedCase<S> {
+    /// Accepted state the step starts from.
+    pub state: S,
+    /// Stale candidate state used for candidate-slot purity verification.
+    pub stale: S,
+    /// Step length [s].
+    pub dt_s: f64,
+    /// Held inputs in port-layout order.
+    pub inputs: Vec<f64>,
+}
+
+impl<S> OwnedCase<S> {
+    /// Borrow this owned operating point as a [`Case`].
+    #[must_use]
+    pub fn as_case(&self) -> Case<'_, S> {
+        Case {
+            state: &self.state,
+            stale: &self.stale,
+            dt_s: self.dt_s,
+            inputs: &self.inputs,
+        }
+    }
+}
+
+/// Configuration for [`check_component_sweep`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepConfig {
+    /// Deterministic `fs-propcheck` suite seed.
+    pub suite_seed: u64,
+    /// Number of generated cases to check.
+    pub cases: u64,
+    /// Maximum accepted shrink descents on a failing input.
+    pub max_shrink_steps: usize,
+    /// Maximum property evaluations during shrinking.
+    pub max_shrink_evaluations: usize,
+}
+
+impl Default for SweepConfig {
+    fn default() -> Self {
+        Self {
+            suite_seed: 0x05EE_D511,
+            cases: 64,
+            max_shrink_steps: 64,
+            max_shrink_evaluations: 512,
+        }
+    }
+}
+
+/// Minimized counterexample returned when [`check_component_sweep`] catches a
+/// conformance violation.
+#[derive(Debug)]
+pub struct ShrunkFailure<T, E> {
+    /// Suite seed used to run the sweep.
+    pub suite_seed: u64,
+    /// Index of the first failing generated case.
+    pub case_index: u64,
+    /// Original unshrunk failing input.
+    pub initial_input: T,
+    /// Minimized failing input produced by `fs-propcheck` shrinking.
+    pub minimized: T,
+    /// Accepted shrink steps taken.
+    pub shrink_steps: usize,
+    /// Total evaluations spent during shrinking.
+    pub shrink_evaluations: usize,
+    /// Whether shrinking reached a fixpoint within budget.
+    pub converged: bool,
+    /// Exact [`Failure`] observed at `minimized`.
+    pub failure: Failure<E>,
+}
+
+impl<T: fmt::Debug, E: fmt::Debug> fmt::Display for ShrunkFailure<T, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "conformance sweep failed on case {} (suite_seed={:#x}, shrunk in {} steps / {} evals, converged={}): \
+             minimized={:?}; {}",
+            self.case_index,
+            self.suite_seed,
+            self.shrink_steps,
+            self.shrink_evaluations,
+            self.converged,
+            self.minimized,
+            self.failure
+        )
+    }
+}
+
+/// Discriminant tag of a [`Failure`] used to keep shrinking locked onto the
+/// same violated law or contract class (preventing shrinks toward zero from
+/// escaping into unrelated out-of-domain owner refusals).
+fn same_failure_kind<E>(a: &Failure<E>, b: &Failure<E>) -> bool {
+    match (a, b) {
+        (Failure::Owner(_), Failure::Owner(_)) => true,
+        (Failure::Law { law: la, .. }, Failure::Law { law: lb, .. }) => la == lb,
+        (Failure::Contract(ca), Failure::Contract(cb)) => {
+            core::mem::discriminant(ca) == core::mem::discriminant(cb)
+        }
+        _ => false,
+    }
+}
+
+/// Run [`check_component`] across `config.cases` deterministic `fs-propcheck`
+/// seeded operating points, shrinking the first counterexample via
+/// [`fs_propcheck::minimize_with_budget`] while staying locked onto the same
+/// failure class.
+///
+/// Returns the number of passing cases on success, or [`ShrunkFailure`] naming
+/// the replay key, minimized input, and violated law.
+///
+/// # Errors
+/// Returns [`ShrunkFailure`] on the first conformance violation.
+pub fn check_component_sweep<C, T, G, B>(
+    component: &C,
+    config: SweepConfig,
+    mut generate: G,
+    build_case: B,
+    cx: &Cx<'_>,
+) -> Result<u64, Box<ShrunkFailure<T, C::Error>>>
+where
+    C: Component,
+    C::State: PartialEq + fmt::Debug,
+    T: Shrink + fmt::Debug,
+    G: FnMut(&mut Stream) -> T,
+    B: Fn(&T) -> OwnedCase<C::State>,
+{
+    for case_index in 0..config.cases {
+        let mut stream = Stream::for_case(config.suite_seed, case_index);
+        let initial = generate(&mut stream);
+        let owned = build_case(&initial);
+        if let Err(initial_err) = check_component(component, &owned.as_case(), cx) {
+            let budget = MinimizeBudget {
+                max_steps: config.max_shrink_steps,
+                max_evaluations: config.max_shrink_evaluations.max(1),
+                max_candidates_per_step: fs_propcheck::DEFAULT_MAX_SHRINK_CANDIDATES_PER_STEP,
+            };
+            let report = fs_propcheck::minimize_with_budget(
+                initial.clone(),
+                |cand| {
+                    let built = build_case(cand);
+                    match check_component(component, &built.as_case(), cx) {
+                        Ok(_) => true,
+                        Err(err) => !same_failure_kind(&err, &initial_err),
+                    }
+                },
+                budget,
+            );
+            let (minimized, shrink_steps, shrink_evaluations, converged) = match report {
+                Ok(r) => (r.minimized, r.steps, r.tried, r.converged),
+                Err(_) => (initial.clone(), 0, 1, false),
+            };
+            let min_owned = build_case(&minimized);
+            let failure = match check_component(component, &min_owned.as_case(), cx) {
+                Err(err) => err,
+                Ok(_) => law(
+                    "propose is deterministic across shrink replay",
+                    format!("minimized candidate {minimized:?} passed on replay"),
+                ),
+            };
+            return Err(Box::new(ShrunkFailure {
+                suite_seed: config.suite_seed,
+                case_index,
+                initial_input: initial,
+                minimized,
+                shrink_steps,
+                shrink_evaluations,
+                converged,
+                failure,
+            }));
+        }
+    }
+    Ok(config.cases)
+}
+
+/// Conformance-kit zero-allocation gate for [`Component::propose`] (bead `.15.1`):
+/// runs `warmup_steps` calls and then asserts zero heap allocations across
+/// `measured_steps` repeated calls, using a caller-supplied counting-allocator
+/// measurement closure `measure_allocations`.
+///
+/// Keeping allocation counting injected avoids any `unsafe` global allocator
+/// inside `fs-ports` while letting every test binary enforce the exact same law.
+///
+/// # Errors
+/// Fails if layout/input sizes mismatch, if `measured_steps == 0`, if `propose`
+/// returns an error, or if `measure_allocations` reports any nonzero allocation.
+pub fn check_zero_alloc_propose<C, M>(
+    component: &C,
+    case: &Case<'_, C::State>,
+    warmup_steps: usize,
+    measured_steps: usize,
+    mut measure_allocations: M,
+    cx: &Cx<'_>,
+) -> Result<(), Failure<C::Error>>
+where
+    C: Component,
+    M: FnMut(&mut dyn FnMut()) -> usize,
+{
+    let layout = PortLayout::new(component.ports()).map_err(Failure::Contract)?;
+    if case.inputs.len() != layout.input_len() {
+        return Err(Failure::Contract(ContractViolation::VectorLength {
+            vector: "inputs",
+            expected: layout.input_len(),
+            actual: case.inputs.len(),
+        }));
+    }
+    if measured_steps == 0 {
+        return Err(law(
+            "zero-allocation check requires at least one measured call",
+            "measured_steps was 0".to_owned(),
+        ));
+    }
+    let mut candidate = case.stale.clone();
+    let mut outputs = vec![0.0; layout.output_len()];
+    for _ in 0..warmup_steps {
+        component
+            .propose(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &mut candidate,
+                &mut outputs,
+                cx,
+            )
+            .map_err(Failure::Owner)?;
+    }
+    let mut owner_err: Option<C::Error> = None;
+    let allocs = measure_allocations(&mut || {
+        for _ in 0..measured_steps {
+            if let Err(err) = component.propose(
+                case.state,
+                case.dt_s,
+                case.inputs,
+                &mut candidate,
+                &mut outputs,
+                cx,
+            ) {
+                owner_err = Some(err);
+                break;
+            }
+        }
+    });
+    if let Some(err) = owner_err {
+        return Err(Failure::Owner(err));
+    }
+    if allocs > 0 {
+        return Err(law(
+            "propose allocates no heap memory after warm-up",
+            format!("{allocs} heap allocations across {measured_steps} warm calls"),
+        ));
     }
     Ok(())
 }

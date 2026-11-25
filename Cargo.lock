@@ -2506,6 +2506,8 @@ dependencies = [
  "fs-alloc",
  "fs-exec",
  "fs-iface",
+ "fs-mms",
+ "fs-propcheck",
  "fs-qty",
 ]
 

@@ -31,9 +31,10 @@ use core::num::NonZeroUsize;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{
-    Case, Failure, Observed, ReversalAllowance, UnitExponents, check_component, check_exact_linear,
-    check_port_tangent, check_stage_residual, check_time_reversal, check_unit_rescaling,
-    unit_factor,
+    Case, Failure, Observed, OwnedCase, ReversalAllowance, SweepConfig, UnitExponents,
+    check_component, check_component_sweep, check_exact_linear, check_port_tangent,
+    check_stage_residual, check_temporal_order, check_time_reversal, check_unit_rescaling,
+    check_zero_alloc_propose, unit_factor,
 };
 use fs_ports::component::{
     Carrier, Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, PortTangent,
@@ -731,7 +732,9 @@ fn a_stream_port_books_the_enthalpy_and_mass_that_cross_it_on_either_side() {
     let transport = PortSpec::stream(id(), PortRole::EffortIn, 2).expect("transport side");
     assert_eq!((storage.width(), storage.carrier()), (4, Carrier::Stream));
     assert_eq!(
-        PortSpec::stream(id(), PortRole::FlowIn, 0).expect("bare stream").width(),
+        PortSpec::stream(id(), PortRole::FlowIn, 0)
+            .expect("bare stream")
+            .width(),
         2
     );
     assert!(matches!(
@@ -1088,7 +1091,11 @@ impl StageResidual for SpringMassDamper {
         let half = 0.5 * dt_s / self.mass_kg;
         let denominator = 1.0 + half * self.damping_n_s_m + 0.5 * dt_s * half * self.stiffness_n_m;
         let mean = z[0];
-        let sign = if self.fault == Fault::VjpSign { -1.0 } else { 1.0 };
+        let sign = if self.fault == Fault::VjpSign {
+            -1.0
+        } else {
+            1.0
+        };
         bar_z[0] = sign
             * (denominator * bar_r[0] + bar_outputs[0]
                 - 2.0 * self.damping_n_s_m * mean * bar_outputs[1]);
@@ -1174,6 +1181,243 @@ fn reference_stage_residual_passes_and_planted_faults_fail() {
         err,
         Failure::Law {
             law: "StageResidual::residual polls cx: a call under a cancelled context is refused",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn reference_passes_temporal_order_gate_and_wrong_expected_order_fails() {
+    let gate = CancelGate::new_clock_free();
+    let clean = SpringMassDamper::new(Fault::None);
+    // Exact closed-form response of unforced damped harmonic oscillator:
+    // m x'' + c x' + k x = 0 with m=0.25, c=1.5, k=400.0 => gamma = c/(2m) = 3.0,
+    // omega0 = sqrt(k/m) = 40.0, omega_d = sqrt(omega0^2 - gamma^2).
+    let x0 = 0.05;
+    let v0 = -0.3;
+    let gamma = clean.damping_n_s_m / (2.0 * clean.mass_kg);
+    let omega_d = (clean.stiffness_n_m / clean.mass_kg - gamma * gamma).sqrt();
+    let a = x0;
+    let b = (v0 + gamma * x0) / omega_d;
+    let exact_pos =
+        |t: f64| (-gamma * t).exp() * (a * (omega_d * t).cos() + b * (omega_d * t).sin());
+    let init = Oscillator {
+        position_m: x0,
+        velocity_m_s: v0,
+    };
+
+    let report = with_cx(&gate, |cx| {
+        check_temporal_order(
+            &clean,
+            "spring_mass_damper_midpoint",
+            &init,
+            0.08,
+            &[80, 160, 320, 640],
+            2.0,
+            |_, _, inputs| {
+                inputs[0] = 0.0;
+                inputs[1] = 300.0;
+            },
+            |state, t| (state.position_m - exact_pos(t)).abs(),
+            cx,
+        )
+    })
+    .expect("implicit midpoint passes 2nd-order fs-mms gate");
+    assert!(
+        (report.verdict.fit.observed - 2.0).abs() <= 0.05,
+        "{report:?}"
+    );
+
+    // Claiming 3rd-order convergence for a 2nd-order scheme must fail the gate.
+    let err = with_cx(&gate, |cx| {
+        check_temporal_order(
+            &clean,
+            "spring_mass_damper_overclaimed",
+            &init,
+            0.08,
+            &[80, 160, 320, 640],
+            3.0,
+            |_, _, inputs| {
+                inputs[0] = 0.0;
+                inputs[1] = 300.0;
+            },
+            |state, t| (state.position_m - exact_pos(t)).abs(),
+            cx,
+        )
+    })
+    .expect_err("overclaimed order must fail");
+    assert!(matches!(
+        err,
+        Failure::Law {
+            law: "temporal order matches theoretical convergence rate",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn seeded_sweep_passes_clean_and_shrinks_faulty_component_counterexample() {
+    let gate = CancelGate::new_clock_free();
+    let clean = SpringMassDamper::new(Fault::None);
+    let draw_input = |s: &mut fs_ports::component::conformance::Stream| {
+        (
+            s.f64_in(-2.0, 2.0),
+            s.f64_in(-5.0, 5.0),
+            s.f64_in(-10.0, 10.0),
+        )
+    };
+    let build = |&(pos, vel, force): &(f64, f64, f64)| OwnedCase {
+        state: Oscillator {
+            position_m: pos,
+            velocity_m_s: vel,
+        },
+        stale: Oscillator {
+            position_m: -7.5,
+            velocity_m_s: 11.25,
+        },
+        dt_s: 1.0e-3,
+        inputs: vec![force, 300.0],
+    };
+
+    let passed = with_cx(&gate, |cx| {
+        check_component_sweep(
+            &clean,
+            SweepConfig {
+                suite_seed: 0xCAFE_BABE,
+                cases: 48,
+                max_shrink_steps: 32,
+                max_shrink_evaluations: 256,
+            },
+            draw_input,
+            build,
+            cx,
+        )
+    })
+    .expect("clean oscillator passes seeded sweep");
+    assert_eq!(passed, 48);
+
+    // HeatLeak fails energy balance and fs-propcheck shrinks the failing input.
+    let leaky = SpringMassDamper::new(Fault::HeatLeak);
+    let shrunk = with_cx(&gate, |cx| {
+        check_component_sweep(
+            &leaky,
+            SweepConfig {
+                suite_seed: 0xCAFE_BABE,
+                cases: 48,
+                max_shrink_steps: 48,
+                max_shrink_evaluations: 512,
+            },
+            draw_input,
+            build,
+            cx,
+        )
+    })
+    .expect_err("leaky oscillator must fail seeded sweep");
+    assert!(
+        shrunk.shrink_steps > 0,
+        "expected shrinking progress: {shrunk}"
+    );
+    let init_norm =
+        shrunk.initial_input.0.abs() + shrunk.initial_input.1.abs() + shrunk.initial_input.2.abs();
+    let min_norm = shrunk.minimized.0.abs() + shrunk.minimized.1.abs() + shrunk.minimized.2.abs();
+    assert!(
+        min_norm < init_norm,
+        "expected shrunk norm < initial: {shrunk}"
+    );
+    assert!(matches!(
+        shrunk.failure,
+        Failure::Contract(ContractViolation::EnergyBalance { .. })
+    ));
+}
+
+#[test]
+fn seeded_sweep_shrinking_stays_locked_to_energy_balance_class() {
+    let gate = CancelGate::new_clock_free();
+    let leaky = SpringMassDamper::new(Fault::HeatLeak);
+    // Regression: when temperature is part of the shrunk tuple, shrinking must
+    // stay locked onto EnergyBalance and never escape into a bogus T <= 0 K
+    // domain violation.
+    let draw_with_temp = |s: &mut fs_ports::component::conformance::Stream| {
+        (
+            s.f64_in(-2.0, 2.0),
+            s.f64_in(-5.0, 5.0),
+            s.f64_in(250.0, 450.0),
+        )
+    };
+    let build_with_temp = |&(pos, vel, temp_k): &(f64, f64, f64)| OwnedCase {
+        state: Oscillator {
+            position_m: pos,
+            velocity_m_s: vel,
+        },
+        stale: Oscillator {
+            position_m: -7.5,
+            velocity_m_s: 11.25,
+        },
+        dt_s: 1.0e-3,
+        inputs: vec![1.0, temp_k],
+    };
+    let shrunk_temp = with_cx(&gate, |cx| {
+        check_component_sweep(
+            &leaky,
+            SweepConfig {
+                suite_seed: 0xDEAD_BEEF,
+                cases: 32,
+                max_shrink_steps: 48,
+                max_shrink_evaluations: 512,
+            },
+            draw_with_temp,
+            build_with_temp,
+            cx,
+        )
+    })
+    .expect_err("leaky oscillator must fail with EnergyBalance");
+    assert!(
+        shrunk_temp.minimized.2 > 0.0,
+        "shrinking must not jump into T <= 0 K domain error: {shrunk_temp}"
+    );
+    assert!(matches!(
+        shrunk_temp.failure,
+        Failure::Contract(ContractViolation::EnergyBalance { .. })
+    ));
+}
+
+#[test]
+fn zero_alloc_propose_hook_accepts_zero_and_refuses_nonzero_allocations() {
+    let gate = CancelGate::new_clock_free();
+    let clean = SpringMassDamper::new(Fault::None);
+    with_cx(&gate, |cx| {
+        check_zero_alloc_propose(
+            &clean,
+            &case(),
+            2,
+            10,
+            |f| {
+                f();
+                0
+            },
+            cx,
+        )
+    })
+    .expect("zero-allocation report passes");
+
+    let err = with_cx(&gate, |cx| {
+        check_zero_alloc_propose(
+            &clean,
+            &case(),
+            2,
+            10,
+            |f| {
+                f();
+                3
+            },
+            cx,
+        )
+    })
+    .expect_err("nonzero allocation report must fail");
+    assert!(matches!(
+        err,
+        Failure::Law {
+            law: "propose allocates no heap memory after warm-up",
             ..
         }
     ));
