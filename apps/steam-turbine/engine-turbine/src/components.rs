@@ -1,5 +1,5 @@
 //! Convergence-architecture `fs_ports::component::Component` implementations for the
-//! Siemens SST-600 industrial steam turbine digital twin.
+//! industrial steam turbine simulation.
 //!
 //! Every physics domain owns its own accepted state, typed ports (`Power`, `Stream`,
 //! `Heat`, `Signal`), and pure `propose` transition, and is composed exclusively via
@@ -188,7 +188,7 @@ impl Component for SteamControlValveComponent {
         // Exact Second-Law throttling entropy production: s_dot = m_dot * (s_out - s_in) >= 0
         let s_gen_w_k = if m_dot > 0.0 && p_in > p_out {
             let st_out = eval_ph(p_out, h_donor);
-            (m_dot * (st_out.s_j_kg_k - st_in.s_j_kg_k)).max(0.0)
+            m_dot * (st_out.s_j_kg_k - st_in.s_j_kg_k)
         } else {
             0.0
         };
@@ -402,6 +402,8 @@ pub struct StageGroupState {
     pub leakage_kg_s: f64,
     pub windage_w: f64,
     pub q_to_metal_w: f64,
+    /// Entropy produced in the section over the last step [W/K] (heat leaves at the wall temperature).
+    pub s_gen_w_k: f64,
 }
 
 impl TurbineStageGroupComponent {
@@ -640,8 +642,7 @@ impl Component for TurbineStageGroupComponent {
 
         // Internal aerodynamic + moisture dissipation & Second-Law entropy generation
         let aero_diss_w = (m_pos * (h_out - st_is.h_j_kg).max(0.0) + p_windage).max(0.0);
-        let s_gen_w_k =
-            (m_pos * (st_out.s_j_kg_k - st_in.s_j_kg_k) + q_exact / t_wall.max(290.0)).max(0.0);
+        let s_gen_w_k = m_pos * (st_out.s_j_kg_k - st_in.s_j_kg_k) + q_exact / t_wall;
 
         *new = StageGroupState {
             m_dot_kg_s: m_dot,
@@ -662,6 +663,7 @@ impl Component for TurbineStageGroupComponent {
             leakage_kg_s: leakage,
             windage_w: p_windage,
             q_to_metal_w: q_exact,
+            s_gen_w_k,
         };
 
         let e_scale = (dt_s * (m_dot.abs() * h_in.abs() + p_shaft_exact.abs() + q_exact.abs())).max(1.0);
@@ -714,6 +716,9 @@ pub struct CondenserState {
     pub u_overall_w_m2_k: f64,
     pub m_condensate_kg_s: f64,
     pub air_mass_fraction: f64,
+    /// Entropy produced inside the shell over the last step [W/K], from the exact
+    /// control-volume balance (heat leaves at the cooling water's mean temperature).
+    pub s_gen_w_k: f64,
 }
 
 impl CondenserState {
@@ -738,56 +743,84 @@ impl CondenserState {
             u_overall_w_m2_k: 3_600.0,
             m_condensate_kg_s: 38.0,
             air_mass_fraction: 0.0005,
+            s_gen_w_k: 0.0,
         }
     }
 }
 
-/// Invert saturated vapor density `rho_g(P)` to condenser pressure `P` [Pa] via smooth
-/// safeguarded log-secant iteration on exact IAPWS-IF97 Region 4 to `< 1e-13` relative accuracy.
-fn invert_sat_vapor_density(rho_target: f64) -> (f64, If97SaturationPair) {
-    let rho_clamped = rho_target.clamp(0.011, 2.25);
-    let ln_rho_t = rho_clamped.ln();
-    let ln_lo = 1_500.0_f64.ln();
-    let ln_hi = 400_000.0_f64.ln();
-    // Initial Clausius-Clapeyron power-law estimate: rho_g ≈ 0.051 * (P / 7500)^0.945
-    let mut x0 = (7_500.0 * (rho_clamped / 0.051).powf(1.0 / 0.945))
-        .clamp(1_500.0, 400_000.0)
-        .ln();
-    let eval_f = |ln_p: f64| -> (f64, If97SaturationPair) {
-        let p = ln_p.exp().clamp(1_500.0, 400_000.0);
-        let pair = If97SaturationPair::at_pressure(Pressure::new(p)).expect("sat pair");
-        let rho = 1.0 / pair.vapor().specific_volume().value();
-        (rho.ln() - ln_rho_t, pair)
+/// Pressure range of the condenser shell model [Pa]: from just above the triple point
+/// (IF97 Region 4 starts at 611.657 Pa) to a 4 bar relief limit.
+const COND_P_MIN_PA: f64 = 700.0;
+const COND_P_MAX_PA: f64 = 4.0e5;
+
+/// Energy function of the saturated vapour space, `G(p) = V rho_g(p) (u_g(p) - h_f)`,
+/// with the liquid enthalpy `h_f` held at its start-of-step value.
+fn condenser_energy_function(
+    volume_m3: f64,
+    h_f_frozen: f64,
+    p_pa: f64,
+) -> (f64, If97SaturationPair) {
+    let pair = If97SaturationPair::at_pressure(Pressure::new(p_pa))
+        .expect("IF97 condenser saturation pair");
+    let vap = pair.vapor();
+    let rho_g = 1.0 / vap.specific_volume().value();
+    let u_g = vap.specific_internal_energy().value();
+    (volume_m3 * rho_g * (u_g - h_f_frozen), pair)
+}
+
+/// Solve `G(p) = g_target` for the shell pressure by safeguarded secant iteration in
+/// `ln p` (G rises monotonically with p). Returns `None` when the target lies outside
+/// `[COND_P_MIN_PA, COND_P_MAX_PA]`, so the caller shortens the step instead of clamping.
+fn solve_condenser_pressure(
+    volume_m3: f64,
+    h_f_frozen: f64,
+    g_target: f64,
+    p_guess_pa: f64,
+) -> Option<(f64, If97SaturationPair)> {
+    if !(g_target.is_finite() && g_target > 0.0) {
+        return None;
+    }
+    let ln_g_t = g_target.ln();
+    let f = |ln_p: f64| {
+        let (g, pair) = condenser_energy_function(volume_m3, h_f_frozen, ln_p.exp());
+        (g.max(1.0e-300).ln() - ln_g_t, pair)
     };
-    let (mut f0, mut pair0) = eval_f(x0);
-    if f0.abs() < 1.0e-13 {
-        return (x0.exp(), pair0);
+    let mut lo = COND_P_MIN_PA.ln();
+    let mut hi = COND_P_MAX_PA.ln();
+    let (f_lo, _) = f(lo);
+    let (f_hi, _) = f(hi);
+    if f_lo > 0.0 || f_hi < 0.0 {
+        return None;
     }
-    let mut x1 = (x0 - f0 / 0.945).clamp(ln_lo, ln_hi);
-    if (x1 - x0).abs() < 1.0e-9 {
-        x1 = (x0 + 1.0e-5).min(ln_hi);
-    }
-    for _ in 0..16 {
-        let (f1, pair1) = eval_f(x1);
-        if f1.abs() < 1.0e-13 {
-            return (x1.exp(), pair1);
+    // ln G grows about as ln p (rho_g ~ p^0.95), so a unit-slope Newton guess starts the secant.
+    let mut x0 = p_guess_pa.clamp(COND_P_MIN_PA, COND_P_MAX_PA).ln();
+    let (mut f0, mut pair0) = f(x0);
+    let mut x1 = (x0 - f0).clamp(lo, hi);
+    for _ in 0..60 {
+        if f0.abs() < 1.0e-14 {
+            return Some((x0.exp(), pair0));
         }
-        let df = f1 - f0;
-        let dx = if df.abs() > 1.0e-15 {
-            -f1 * (x1 - x0) / df
+        if f0 < 0.0 {
+            lo = lo.max(x0);
         } else {
-            -f1 / 0.945
+            hi = hi.min(x0);
+        }
+        if (x1 - x0).abs() < 1.0e-15 || !(x1 > lo && x1 < hi) {
+            x1 = 0.5 * (lo + hi);
+        }
+        let (f1, pair1) = f(x1);
+        let slope = (f1 - f0) / (x1 - x0);
+        let x2 = if slope.is_finite() && slope > 0.0 {
+            x1 - f1 / slope
+        } else {
+            0.5 * (lo + hi)
         };
-        let x2 = (x1 + dx.clamp(-0.8, 0.8)).clamp(ln_lo, ln_hi);
         x0 = x1;
         f0 = f1;
         pair0 = pair1;
-        if (x2 - x1).abs() < 1.0e-14 {
-            return (x1.exp(), pair0);
-        }
         x1 = x2;
     }
-    (x0.exp(), pair0)
+    (f0.abs() < 1.0e-10).then(|| (x0.exp(), pair0))
 }
 
 impl SurfaceCondenserComponent {
@@ -973,39 +1006,59 @@ impl Component for SurfaceCondenserComponent {
         // cooling_heat [T_sink] (6), controls [t_cw_in_k, cw_flow_frac, air_mass_frac] (7..10)
         let m_in = inputs[STREAM_MASS_RATE];
         let h_dot_in = inputs[STREAM_ENTHALPY_RATE];
-        let t_sink = inputs[6].clamp(274.0, 400.0);
         let t_cw_in = inputs[7].clamp(278.0, 325.0);
         let cw_flow_frac = inputs[8].clamp(0.15, 1.5);
         let w_air = inputs[9].clamp(0.0, 0.45);
 
-        let pair_old =
-            If97SaturationPair::at_pressure(Pressure::new(old.p_cond_pa.clamp(1_500.0, 4.0e5)))
-                .expect("condenser old sat pair");
+        // The shell is a saturated control volume: vapour of mass M = V rho_g(p) over its own
+        // condensate. Mass:   dM/dt = m_in - m_out
+        //             Energy: dU/dt = H_in - m_out h_f - q,   U = M u_g(p).
+        // Eliminating the condensate flow m_out gives one equation for p,
+        //   d/dt [V rho_g (u_g - h_f)] = H_in - m_in h_f - q,
+        // so wet exhaust (h_in < h_g) needs no separate rule: its liquid simply leaves as
+        // condensate, and the duty settles at m_in (h_in - h_f).
+        let pair_old = If97SaturationPair::at_pressure(Pressure::new(
+            old.p_cond_pa.clamp(COND_P_MIN_PA, COND_P_MAX_PA),
+        ))
+        .expect("condenser old sat pair");
         let h_f = pair_old.liquid().specific_enthalpy().value();
+        let s_f = pair_old.liquid().specific_entropy().value();
         let h_g = pair_old.vapor().specific_enthalpy().value();
-        let h_fg = (h_g - h_f).max(1.0e5);
         let t_sat_old = pair_old.vapor().temperature().value();
 
         let (q_cond, t_wall, t_cw_out, h_cond, h_cw, u_overall) =
             self.evaluate_heat_transfer(old.p_cond_pa, t_sat_old, t_cw_in, cw_flow_frac, w_air);
 
-        // Steam mass condensed into hotwell liquid condensate [kg/s]
-        let m_cond = (q_cond / h_fg).max(0.0);
-
-        // Exact unsteady mass and internal energy balance of the condenser vapor space
-        let m_new = old.vapor_mass_kg + dt_s * (m_in - m_cond);
-        if m_new <= 0.05 || !m_new.is_finite() {
+        let g_old = old.total_u_j - h_f * old.vapor_mass_kg;
+        let g_target = g_old + dt_s * (h_dot_in - m_in * h_f - q_cond);
+        let Some((p_new, pair_new)) =
+            solve_condenser_pressure(self.vapor_volume_m3, h_f, g_target, old.p_cond_pa)
+        else {
             return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
-        }
-        let u_new = old.total_u_j + dt_s * (h_dot_in - m_cond * h_f - q_cond);
-        if !u_new.is_finite() {
-            return Ok(Proposal::Shorten { dt_s: 0.5 * dt_s });
-        }
+        };
+        let vap_new = pair_new.vapor();
+        let m_new = self.vapor_volume_m3 / vap_new.specific_volume().value();
+        let u_new = m_new * vap_new.specific_internal_energy().value();
+        let t_sat_new = vap_new.temperature().value();
+        let h_g_new = vap_new.specific_enthalpy().value();
+        // Condensate leaving to the hotwell [kg/s] (negative while the shell flashes liquid back).
+        let m_out = m_in - (m_new - old.vapor_mass_kg) / dt_s;
 
-        // Updated condenser saturation pressure directly from vapor density `m_new / V_shell`!
-        let (p_new, pair_new) = invert_sat_vapor_density(m_new / self.vapor_volume_m3);
-        let t_sat_new = pair_new.vapor().temperature().value();
-        let h_g_new = pair_new.vapor().specific_enthalpy().value();
+        // Entropy produced in the shell, from its exact balance
+        //   S_gen = dS - dt (m_in s_in - m_out s_f - q / T_cw),   S = M s_g(p),
+        // with the heat leaving at the cooling water's mean temperature.
+        let p_mid = 0.5 * (old.p_cond_pa + p_new);
+        let s_in = if m_in.abs() > 1.0e-12 {
+            eval_ph(p_mid, h_dot_in / m_in).s_j_kg_k
+        } else {
+            0.0
+        };
+        let s_old = old.vapor_mass_kg * pair_old.vapor().specific_entropy().value();
+        let s_new = m_new * vap_new.specific_entropy().value();
+        let t_cw_mean = 0.5 * (t_cw_in + t_cw_out);
+        let s_gen_w_k = (s_new - s_old) / dt_s - m_in * s_in + m_out * s_f + q_cond / t_cw_mean;
+        // (The heat route still delivers q to the cooling-water sink at its fixed route
+        // temperature, input 6; production between the water and that sink is the route's.)
 
         *new = CondenserState {
             vapor_mass_kg: m_new,
@@ -1018,26 +1071,25 @@ impl Component for SurfaceCondenserComponent {
             h_cond_w_m2_k: h_cond,
             h_cw_w_m2_k: h_cw,
             u_overall_w_m2_k: u_overall,
-            m_condensate_kg_s: m_cond,
+            m_condensate_kg_s: m_out,
             air_mass_fraction: w_air,
+            s_gen_w_k,
         };
 
         // Outputs:
         // 0..3 steam_in (FlowIn -> returns [P_mid, h_g_mid, 1.0])
-        outputs[STREAM_PRESSURE] = 0.5 * (old.p_cond_pa + p_new);
+        outputs[STREAM_PRESSURE] = p_mid;
         outputs[STREAM_SPECIFIC_ENTHALPY] = 0.5 * (h_g + h_g_new);
         outputs[STREAM_CARRIED] = 1.0;
 
-        // 3..6 condensate_out (EffortIn -> returns [-m_cond, -m_cond*h_f, -m_cond], leaving condenser!)
-        outputs[3 + STREAM_MASS_RATE] = -m_cond;
-        outputs[3 + STREAM_ENTHALPY_RATE] = -m_cond * h_f;
-        outputs[3 + STREAM_CARRIED] = -m_cond;
+        // 3..6 condensate_out (EffortIn -> returns [-m_out, -m_out*h_f, -m_out], leaving condenser!)
+        outputs[3 + STREAM_MASS_RATE] = -m_out;
+        outputs[3 + STREAM_ENTHALPY_RATE] = -m_out * h_f;
+        outputs[3 + STREAM_CARRIED] = -m_out;
 
         // 6 cooling_heat (EffortIn -> returns -q_cond leaving condenser into cooling-water sink!)
         outputs[6] = -q_cond;
 
-        // Second-Law entropy production in condenser heat transfer (T_sat -> T_sink)
-        let s_gen_w_k = (q_cond * (1.0 / t_sink - 1.0 / t_sat_old.max(t_sink))).max(0.0);
         let du = u_new - old.total_u_j;
         let e_tol = 1.0e-7 * (u_new.abs() + old.total_u_j.abs() + dt_s * q_cond.abs() + 1.0);
         Ok(Proposal::Step(Receipt {
@@ -1063,7 +1115,7 @@ impl Component for SurfaceCondenserComponent {
 /// `dt * tau_net * omega_mid` to machine precision (zero numerical energy drift!).
 pub struct RotorShaftComponent {
     ports: [PortSpec; 1],
-    /// Combined polar moment of inertia (forged SST-600 rotor + 17 NURBS blade rows + generator rotor) [kg·m²].
+    /// Combined polar moment of inertia (forged rotor + 17 NURBS blade rows + generator rotor) [kg·m²].
     pub polar_inertia_kg_m2: f64,
 }
 
@@ -1637,7 +1689,7 @@ pub const TH_FRONT_BEARING: usize = 5;
 pub const TH_REAR_BEARING: usize = 6;
 pub const TH_LUBE_OIL: usize = 7;
 
-/// Multi-node metal and lube-oil thermal mass network of the Siemens SST-600.
+/// Multi-node metal and lube-oil thermal mass network of the model turbine.
 ///
 /// Computes exact heat storage across 8 physical thermal capacitances (derived from
 /// `geometry::build_turbine_geometry()` casing/rotor masses and matdb `cp`), ambient
@@ -1652,6 +1704,43 @@ pub struct TurbineCasingThermalComponent {
     pub casing_ext_area_m2: f64,
     /// Lube-oil cooler UA conductance [W/K] at nominal oil flow.
     pub oil_cooler_ua_w_k: f64,
+    /// Share of the HP steam-path heat that enters the HP rotor; the rest enters the HP
+    /// casing. From the wetted areas of the flow path (`r_hub L` against `r_tip L`).
+    pub hp_rotor_share: f64,
+    /// Shares of the IP/LP steam-path heat entering the IP/LP rotor, the IP casing and the
+    /// LP hood, from the same wetted areas.
+    pub iplp_shares: [f64; 3],
+}
+
+/// Flow-path section of the blade rows: axial length and mean hub/tip radii [m].
+struct FlowSection {
+    length_m: f64,
+    r_hub_m: f64,
+    r_tip_m: f64,
+}
+
+fn flow_section(
+    rows: &[crate::geometry::BladeRowSpec],
+    stages: core::ops::RangeInclusive<usize>,
+) -> FlowSection {
+    let sec: Vec<_> = rows
+        .iter()
+        .filter(|r| stages.contains(&r.stage_index))
+        .collect();
+    let z_min = sec
+        .iter()
+        .map(|r| r.z_center_m - 0.5 * r.axial_chord_m)
+        .fold(f64::INFINITY, f64::min);
+    let z_max = sec
+        .iter()
+        .map(|r| r.z_center_m + 0.5 * r.axial_chord_m)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let n = sec.len().max(1) as f64;
+    FlowSection {
+        length_m: (z_max - z_min).max(0.0),
+        r_hub_m: sec.iter().map(|r| r.r_hub_m).sum::<f64>() / n,
+        r_tip_m: sec.iter().map(|r| r.r_tip_m).sum::<f64>() / n,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1671,8 +1760,20 @@ pub struct ThermalNetworkState {
 }
 
 impl TurbineCasingThermalComponent {
+    /// Lumped thermal network whose node capacities are the full `m cp` of the parts.
+    ///
+    /// The rotor forging is split between the HP and IP/LP rotor nodes in proportion to
+    /// `r_hub^2 L` of each flow-path section (a solid forging), and the HP/IP casing between
+    /// the HP and IP casing nodes in proportion to `r_tip L` (a shell around the flow path).
+    /// No capacity is scaled down to make transients quicker: thermal time constants are
+    /// what the masses give, and the page offers faster simulation rates instead.
     #[must_use]
-    pub fn new(rotor_mass_kg: f64, hp_casing_mass_kg: f64, lp_hood_mass_kg: f64) -> Self {
+    pub fn new(
+        rotor_mass_kg: f64,
+        hp_casing_mass_kg: f64,
+        lp_hood_mass_kg: f64,
+        rows: &[crate::geometry::BladeRowSpec],
+    ) -> Self {
         let lib = library();
         let cp_r = lib.rotor_steel.cp_j_kg_k;
         let cp_c = lib.hp_casing_steel.cp_j_kg_k;
@@ -1680,20 +1781,32 @@ impl TurbineCasingThermalComponent {
         let cp_brg = lib.bearing_bronze.cp_j_kg_k;
         let cp_oil = lib.lube_oil.cp(333.15);
 
-        // Scaled slightly (realistic active thermal skin depth) so thermal transients respond
-        // visibly over a 10–120 s interactive session while staying physically ordered
-        // (rotor thinner thermal inertia than massive thick-walled cast HP casing -> positive
-        // differential expansion during hot startup!).
+        let hp = flow_section(rows, 0..=5);
+        let ip = flow_section(rows, 6..=13);
+        let lp = flow_section(rows, 14..=16);
+        let w_rotor = |s: &FlowSection| s.r_hub_m * s.r_hub_m * s.length_m;
+        let w_shell = |s: &FlowSection| s.r_tip_m * s.length_m;
+        let rotor_hp_frac = w_rotor(&hp) / (w_rotor(&hp) + w_rotor(&ip) + w_rotor(&lp));
+        let casing_hp_frac = w_shell(&hp) / (w_shell(&hp) + w_shell(&ip));
+
         let caps_j_k = [
-            (0.28 * rotor_mass_kg * cp_r).clamp(2.5e5, 2.0e6),     // 0: HP rotor
-            (0.45 * hp_casing_mass_kg * cp_c).clamp(8.0e5, 6.0e6), // 1: HP casing (heavier!)
-            (0.32 * rotor_mass_kg * cp_r).clamp(3.0e5, 2.2e6),     // 2: IP rotor
-            (0.40 * hp_casing_mass_kg * cp_c).clamp(7.0e5, 5.0e6), // 3: IP casing
-            (0.50 * lp_hood_mass_kg * cp_lp).clamp(4.0e5, 4.0e6),  // 4: LP exhaust hood
-            (65.0 * cp_brg),                                       // 5: Front Babbitt/bronze pads
-            (70.0 * cp_brg),                                       // 6: Rear Babbitt/bronze pads
-            (420.0 * cp_oil),                                      // 7: Active lube oil header loop
+            rotor_hp_frac * rotor_mass_kg * cp_r,              // 0: HP rotor
+            casing_hp_frac * hp_casing_mass_kg * cp_c,         // 1: HP casing
+            (1.0 - rotor_hp_frac) * rotor_mass_kg * cp_r,      // 2: IP/LP rotor
+            (1.0 - casing_hp_frac) * hp_casing_mass_kg * cp_c, // 3: IP casing
+            lp_hood_mass_kg * cp_lp,                           // 4: LP exhaust hood
+            65.0 * cp_brg,                                     // 5: Front Babbitt/bronze pads
+            70.0 * cp_brg,                                     // 6: Rear Babbitt/bronze pads
+            420.0 * cp_oil,                                    // 7: Lube-oil inventory
         ];
+
+        // Steam-side heat splits by wetted area of each section.
+        let hp_rotor_share = hp.r_hub_m / (hp.r_hub_m + hp.r_tip_m);
+        let a_rotor = ip.r_hub_m * ip.length_m + lp.r_hub_m * lp.length_m;
+        let a_ip_cas = ip.r_tip_m * ip.length_m;
+        let a_lp_hood = lp.r_tip_m * lp.length_m;
+        let a_tot = a_rotor + a_ip_cas + a_lp_hood;
+        let iplp_shares = [a_rotor / a_tot, a_ip_cas / a_tot, a_lp_hood / a_tot];
 
         Self {
             ports: [
@@ -1708,6 +1821,8 @@ impl TurbineCasingThermalComponent {
             caps_j_k,
             casing_ext_area_m2: 24.0,
             oil_cooler_ua_w_k: 9_500.0,
+            hp_rotor_share,
+            iplp_shares,
         }
     }
 
@@ -1846,11 +1961,11 @@ impl Component for TurbineCasingThermalComponent {
 
         // Net heat rate into each of the 8 nodes (sum over all 8 == q_hp + q_iplp + q_brg - q_total_out IDENTICALLY!)
         let q_node = [
-            0.42 * q_hp - q_hpr_ipr - q_hpr_fb,                              // 0: HP rotor
-            0.58 * q_hp - q_hpc_ipc - q_amb_hp,                              // 1: HP casing
-            0.35 * q_iplp + q_hpr_ipr - q_ipr_rb,                            // 2: IP rotor
-            0.35 * q_iplp + q_hpc_ipc - q_ipc_lph - q_amb_ip,                // 3: IP casing
-            0.30 * q_iplp + q_ipc_lph - q_amb_lp,                            // 4: LP hood
+            self.hp_rotor_share * q_hp - q_hpr_ipr - q_hpr_fb,               // 0: HP rotor
+            (1.0 - self.hp_rotor_share) * q_hp - q_hpc_ipc - q_amb_hp,       // 1: HP casing
+            self.iplp_shares[0] * q_iplp + q_hpr_ipr - q_ipr_rb,             // 2: IP/LP rotor
+            self.iplp_shares[1] * q_iplp + q_hpc_ipc - q_ipc_lph - q_amb_ip, // 3: IP casing
+            self.iplp_shares[2] * q_iplp + q_ipc_lph - q_amb_lp,             // 4: LP hood
             0.48 * q_brg + q_hpr_fb - q_fb_oil,                              // 5: Front bearing
             0.52 * q_brg + q_ipr_rb - q_rb_oil,                              // 6: Rear bearing
             q_fb_oil + q_rb_oil - q_oil_cooler,                              // 7: Lube oil sump
@@ -1913,7 +2028,8 @@ impl Component for TurbineCasingThermalComponent {
             (q_fb_oil, t[TH_FRONT_BEARING], t[TH_LUBE_OIL]),
             (q_rb_oil, t[TH_REAR_BEARING], t[TH_LUBE_OIL]),
         ] {
-            s_gen_w_k += (q * (1.0 / tb - 1.0 / ta)).max(0.0);
+            // q has the sign of (ta - tb), so each term is >= 0 without clamping.
+            s_gen_w_k += q * (1.0 / tb - 1.0 / ta);
         }
         let e_total = self.stored_energy_j(new)?;
         Ok(Proposal::Step(Receipt {
@@ -1941,8 +2057,8 @@ impl PortTangent for TurbineCasingThermalComponent {
         check_cx(cx)?;
         // Exact analytical linearization wrt the 3 coupled FlowIn heat ports!
         // (ambient_out T_amb and controls are fixed boundaries, not loop unknowns.)
-        let k0 = 0.5 * dt_s * 0.58 / self.caps_j_k[TH_HP_CASING];
-        let k1 = 0.5 * dt_s * 0.35 / self.caps_j_k[TH_IP_CASING];
+        let k0 = 0.5 * dt_s * (1.0 - self.hp_rotor_share) / self.caps_j_k[TH_HP_CASING];
+        let k1 = 0.5 * dt_s * self.iplp_shares[1] / self.caps_j_k[TH_IP_CASING];
         let k2 = 0.5 * dt_s * 0.5 * (0.48 / self.caps_j_k[TH_FRONT_BEARING] + 0.52 / self.caps_j_k[TH_REAR_BEARING]);
         d_outputs[0] = k0 * d_inputs[0];
         d_outputs[1] = k1 * d_inputs[1];
@@ -1961,8 +2077,8 @@ impl PortTangent for TurbineCasingThermalComponent {
         cx: &Cx<'_>,
     ) -> Result<(), Self::Error> {
         check_cx(cx)?;
-        let k0 = 0.5 * dt_s * 0.58 / self.caps_j_k[TH_HP_CASING];
-        let k1 = 0.5 * dt_s * 0.35 / self.caps_j_k[TH_IP_CASING];
+        let k0 = 0.5 * dt_s * (1.0 - self.hp_rotor_share) / self.caps_j_k[TH_HP_CASING];
+        let k1 = 0.5 * dt_s * self.iplp_shares[1] / self.caps_j_k[TH_IP_CASING];
         let k2 = 0.5 * dt_s * 0.5 * (0.48 / self.caps_j_k[TH_FRONT_BEARING] + 0.52 / self.caps_j_k[TH_REAR_BEARING]);
         bar_inputs.fill(0.0);
         bar_inputs[0] = k0 * bar_outputs[0];

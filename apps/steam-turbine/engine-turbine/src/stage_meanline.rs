@@ -1,6 +1,6 @@
 //! Row-by-row 17-stage IAPWS-IF97 meanline aerothermodynamics, Euler velocity triangles,
 //! Ainley-Mathieson/tip-clearance/Baumann loss breakdown, and blade-root mechanical stress
-//! & Norton creep integrity for the Siemens SST-600 steam turbine.
+//! & Norton creep integrity for the model turbine steam turbine.
 //!
 //! Covers every physical blade stage from the Stage 0 Curtis impulse control wheel through
 //! HP (1..=5), IP1 (6..=9), IP2 (10..=13), and LP flared stages (14..=16) using exact
@@ -13,13 +13,13 @@ use crate::geometry::BladeRowSpec;
 use crate::materials::library;
 use crate::steam::{eval_ph, eval_ps};
 
-/// Number of turbine expansion stages in the Siemens SST-600 flowpath (Stage 0..=16).
+/// Number of turbine expansion stages in the model turbine flowpath (Stage 0..=16).
 pub const NUM_STAGES: usize = 17;
 
 /// Number of `f64` telemetry fields exported per stage in [`StageMeanlineReport::to_flat_vec`].
 pub const STAGE_ROW_STRIDE: usize = 16;
 
-/// Engineer-editable physical machine design parameters for the SST-600 digital twin.
+/// Engineer-editable physical machine design parameters for the turbine model.
 ///
 /// Mutating these parameters directly alters the 17-stage meanline aerothermodynamics,
 /// tip-leakage efficiency, blade centrifugal root stress, 4-DOF rotordynamics & oil-whip
@@ -113,7 +113,7 @@ impl TurbineDesignParams {
     }
 }
 
-/// Complete aerodynamic & mechanical operating point of one SST-600 stage (`0..=16`).
+/// Complete aerodynamic & mechanical operating point of one stage (`0..=16`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StageState {
     pub stage_index: usize,
@@ -161,7 +161,7 @@ pub struct StageState {
     pub creep_rate_per_s: f64,
 }
 
-/// Complete 17-stage meanline solution across the entire Siemens SST-600 flowpath.
+/// Complete 17-stage meanline solution across the entire flowpath.
 #[derive(Debug, Clone)]
 pub struct StageMeanlineReport {
     pub stages: [StageState; NUM_STAGES],

@@ -1,8 +1,8 @@
 //! Real 2D Axisymmetric `(r, z)` Finite-Volume Thermal Conduction, Fourier Heat-Flux,
 //! and Coupled Centrifugal + Pressure-Hoop + Thermal-Gradient Thermo-Elastic Stress PDE Solver
-//! for the Siemens SST-600 Steam Turbine (`64 × 24 = 1,536` continuum cells).
+//! for the steam turbine model (`64 × 24 = 1,536` continuum cells).
 //!
-//! Solves the cylindrical heat equation directly on the physical SST-600 cross-section:
+//! Solves the cylindrical heat equation directly on the physical cross-section:
 //!
 //!   ρ c_p ∂T/∂t = (1/r) ∂(r k(T) ∂T/∂r)/∂r + ∂(k(T) ∂T/∂z)/∂z + q'''(r, z)
 //!
@@ -34,7 +34,7 @@ pub const GRID_Z_MAX_M: f64 = 5.55;
 /// Radial domain outer bound [m] (covers giant 1.38 m exhaust hood outer flange).
 pub const GRID_R_MAX_M: f64 = 1.52;
 
-/// Material region tag of each `(iz, ir)` cell in the axisymmetric SST-600 cross-section.
+/// Material region tag of each `(iz, ir)` cell in the axisymmetric cross-section.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellRegion {
@@ -72,7 +72,7 @@ pub struct AxisymmetricContinuum2D {
 }
 
 impl AxisymmetricContinuum2D {
-    /// Construct and classify the 64 × 24 axisymmetric cross-section of the Siemens SST-600.
+    /// Construct and classify the 64 × 24 axisymmetric cross-section of the model turbine.
     #[must_use]
     pub fn new(cold_start: bool, design: &TurbineDesignParams) -> Self {
         let mut region = [CellRegion::SteamOrAir; GRID_CELLS];
@@ -86,7 +86,7 @@ impl AxisymmetricContinuum2D {
             for iz in 0..GRID_NZ {
                 let z = GRID_Z_MIN_M + (iz as f64 + 0.5) * dz;
                 let idx = ir * GRID_NZ + iz;
-                let reg = classify_sst600_cell(z, r, wall_m);
+                let reg = classify_section_cell(z, r, wall_m);
                 region[idx] = reg;
                 temp_k[idx] = initial_temp_for_cell(z, r, reg, cold_start);
             }
@@ -121,7 +121,7 @@ impl AxisymmetricContinuum2D {
             let r = (ir as f64 + 0.5) * dr;
             for iz in 0..GRID_NZ {
                 let z = GRID_Z_MIN_M + (iz as f64 + 0.5) * dz;
-                self.region[ir * GRID_NZ + iz] = classify_sst600_cell(z, r, wall_m);
+                self.region[ir * GRID_NZ + iz] = classify_section_cell(z, r, wall_m);
             }
         }
     }
@@ -163,9 +163,12 @@ impl AxisymmetricContinuum2D {
         }
 
         // Thermal diffusivity of CrMoV steel α = k/(ρ cp) ≈ 7.8e-6 m²/s; explicit CFL on dr = 0.063 m
-        // allows dt <= ~80 s, so 2 sub-steps per physics step is unconditionally stable with huge margin!
-        let n_sub = 2_usize;
-        let h_dt = dt_s.clamp(1.0e-4, 0.5) / n_sub as f64;
+        // allows dt <= ~80 s; the stiffest term (bearing-pedestal exchange, 38 kW/m³K into bronze) allows
+        // ~90 s. Sub-steps of at most 0.25 s therefore keep a wide margin, and the whole `dt_s` is
+        // covered (the plant calls with up to 2 s; a clamp here would drop field time).
+        let dt_s = dt_s.clamp(1.0e-4, 2.0);
+        let n_sub = ((dt_s / 0.25).ceil() as usize).max(2);
+        let h_dt = dt_s / n_sub as f64;
 
         for _ in 0..n_sub {
             self.scratch_t.copy_from_slice(&self.temp_k);
@@ -277,10 +280,7 @@ impl AxisymmetricContinuum2D {
                         q_vol += rub_power_w / 0.045;
                     }
 
-                    // Accelerate slow solid thermal diffusivity slightly (x3.5 effective skin depth)
-                    // so cold-start & load-ramp thermal waves propagate visibly in real-time engineering sessions
-                    let dt_eff = h_dt * 3.5;
-                    let t_next = (t_c + dt_eff * (lap_k + q_vol) / rho_cp).clamp(280.0, 1_150.0);
+                    let t_next = (t_c + h_dt * (lap_k + q_vol) / rho_cp).clamp(280.0, 1_150.0);
                     self.scratch_t[idx] = t_next;
                 }
             }
@@ -532,7 +532,7 @@ fn steam_outer_radius(z: f64) -> f64 {
     }
 }
 
-fn classify_sst600_cell(z: f64, r: f64, wall_m: f64) -> CellRegion {
+fn classify_section_cell(z: f64, r: f64, wall_m: f64) -> CellRegion {
     // Bearing pedestals matched strictly to geometry.rs: front (z = 0.145..0.635), rear cone (z = 3.98..5.14)
     if (0.145..=0.635).contains(&z) && (0.135..=0.325).contains(&r) {
         return CellRegion::BearingPedestal;

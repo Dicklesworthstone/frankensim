@@ -1,4 +1,4 @@
-// 9 Guided Physics Experiments for the Siemens SST-600 Digital Twin.
+// 9 Guided Physics Experiments for the Steam Turbine Simulation.
 // Every preset injects genuine boundary conditions or physical faults into the
 // 12-component fs-system convergence graph; all responses are emergent.
 

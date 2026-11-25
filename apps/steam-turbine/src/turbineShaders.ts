@@ -212,7 +212,7 @@ export interface IndustrialTextures {
   castSteelNormal: THREE.CanvasTexture;
   castSteelRoughness: THREE.CanvasTexture;
   milledSectionNormal: THREE.CanvasTexture;
-  siemensEnamelNormal: THREE.CanvasTexture;
+  enamelNormal: THREE.CanvasTexture;
   skidPlateNormal: THREE.CanvasTexture;
   softGlowTex: THREE.CanvasTexture;
 }
@@ -234,7 +234,7 @@ function makeRepeatTex(canvas: HTMLCanvasElement, rx: number, ry: number): THREE
 /**
  * Procedural industrial machining normal & roughness maps (analogous to Chronometer's Geneva
  * stripes & Perlage) so every CrMoV forging, cast steel casing, face-milled cutaway cap,
- * brushed 12Cr/Ti airfoil, and painted Siemens exhaust hood reflects realistic micro-structure!
+ * brushed 12Cr/Ti airfoil, and painted exhaust hood reflects realistic micro-structure!
  */
 export function buildIndustrialMachiningTextures(): IndustrialTextures {
   const N = 512;
@@ -342,7 +342,7 @@ export function buildIndustrialMachiningTextures(): IndustrialTextures {
   mCtx.putImageData(mImg, 0, 0);
   const milledSectionNormal = makeRepeatTex(cMill, 3.5, 3.5);
 
-  // 5. Siemens Industrial Satin Enamel Paint (exhaust hood micro-grain)
+  // 5. Industrial Satin Enamel Paint (exhaust hood micro-grain)
   const cEnam = document.createElement("canvas");
   cEnam.width = 256; cEnam.height = 256;
   const eCtx = cEnam.getContext("2d")!;
@@ -359,7 +359,7 @@ export function buildIndustrialMachiningTextures(): IndustrialTextures {
     }
   }
   eCtx.putImageData(eImg, 0, 0);
-  const siemensEnamelNormal = makeRepeatTex(cEnam, 5.0, 5.0);
+  const enamelNormal = makeRepeatTex(cEnam, 5.0, 5.0);
 
   // 6. Hot-Rolled Welded Matte Black Skid Plate Grain
   const cSkid = document.createElement("canvas");
@@ -397,7 +397,7 @@ export function buildIndustrialMachiningTextures(): IndustrialTextures {
     castSteelNormal,
     castSteelRoughness,
     milledSectionNormal,
-    siemensEnamelNormal,
+    enamelNormal,
     skidPlateNormal,
     softGlowTex,
   };
@@ -407,7 +407,7 @@ export function buildIndustrialMachiningTextures(): IndustrialTextures {
  * Inject GPU `onBeforeCompile` per-pixel continuum field colormaps & Planck blackbody radiance
  * into any Three.js MeshStandardMaterial / MeshPhysicalMaterial on the turbine assembly.
  *
- * Transforms every fragment's world position into exact SST-600 axisymmetric `(z_m, r_m)` via
+ * Transforms every fragment's world position into exact axisymmetric `(z_m, r_m)` via
  * `uTurbineInvMat`, bilinearly samples the `64 × 24` WASM PDE textures (`uFieldA`, `uFieldB`),
  * draws calibrated scientific iso-contours, and blends seamlessly with HDR PBR studio lighting!
  */
@@ -416,7 +416,7 @@ export function installContinuumFieldShader(
   uniforms: ContinuumShaderUniforms,
   cacheKeySuffix: string,
 ): void {
-  mat.customProgramCacheKey = () => `fs-sst600-continuum-${cacheKeySuffix}`;
+  mat.customProgramCacheKey = () => `fs-turbine-continuum-${cacheKeySuffix}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uFieldA = uniforms.uFieldA;
     shader.uniforms.uFieldB = uniforms.uFieldB;

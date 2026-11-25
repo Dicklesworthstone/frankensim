@@ -1,4 +1,4 @@
-// Main application controller for the Siemens SST-600 FrankenSim Multiphysics Digital Twin
+// Main application controller for the FrankenSim Multiphysics Steam Turbine Simulation
 // & L4 ASCENT Design Studio.
 //
 // Boots WebAssembly, binds all plant controls + 6 parametric machine hardware dimensions +
@@ -836,7 +836,7 @@ async function boot(): Promise<void> {
   });
 
   // Expose debug handle on window for automated Playwright / live QA verification
-  (window as unknown as Record<string, unknown>).__SST600__ = {
+  (window as unknown as Record<string, unknown>).__TURBINE__ = {
     sim,
     scene,
     setCutaway: applyCutaway,

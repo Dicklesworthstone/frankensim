@@ -1,17 +1,17 @@
-// Photoreal Chronometer-grade 3D CAD & Multiphysics Visualization of the Siemens SST-600
-// Industrial Steam Turbine Digital Twin.
+// Photoreal Chronometer-grade 3D CAD & Multiphysics Visualization of the model turbine
+// Industrial Steam Turbine Simulation.
 //
 // Rendering & Engineering Architecture:
 // - HDR HalfFloat EffectComposer (MSAA WebGL2 + Selective UnrealBloomPass + SMAAPass + NeutralToneMapping)
 // - Industrial studio photographic lightbox PMREM (overhead softbox + tall left/right specular strip lights)
 // - 7 procedural high-DPI machining PBR normal & roughness maps (CNC lathe-turned forged steel,
 //   brushed 12Cr/Ti airfoils, sand-cast CrMoV casing, face-milled bright cutaway cross-section steel,
-//   Siemens slate-blue satin enamel, hot-rolled matte-black structural baseplate)
+//   slate-blue satin enamel, hot-rolled matte-black structural baseplate)
 // - Split multi-material cutaway caps (exterior shell vs gleaming face-milled cross-section steel!)
 // - GPU onBeforeCompile per-pixel 6-mode continuum field shader reading 64×24 WASM PDE DataTextures
 //   (Temperature T(r,z), von Mises Stress σ_vM, Steam Pressure P(z), Mach Ma, LP Wetness / HP Creep)
 //   with 10-level scientific iso-contours and exact CIE 1931 Planck blackbody incandescence
-// - Rich Siemens CAD mechanical details: 68 3D hex split-joint bolts + counterbores, visible 5-pad
+// - Rich CAD mechanical details: 68 3D hex split-joint bolts + counterbores, visible 5-pad
 //   bronze/Babbitt tilting-pad journal bearings + Kingsbury thrust collar, inter-stage gland carriers,
 //   LP Stage 16 stainless mid-span damping wire (rebuilt live on design parameter changes!), bolted
 //   raised-face pipe flanges, 32-bolt exhaust exit ring, cutaway 60 MVA synchronous generator revealing
@@ -74,7 +74,7 @@ interface CameraTargetState {
 }
 
 const CAMERA_PRESETS: Record<CameraPreset, { pos: [number, number, number]; target: [number, number, number] }> = {
-  // Signature Siemens SST-600 front-left 3/4 cutaway hero angle with full breathing room between HUD drawers
+  // Signature front-left 3/4 cutaway hero angle with full breathing room between HUD drawers
   overview: { pos: [-4.25, 3.25, 9.55], target: [-0.08, 1.16, 0.0] },
   // Close-up of the iconic giant twisted golden LP Stage 16 titanium wheel + damping wire
   lp_stage: { pos: [-2.45, 1.92, 2.68], target: [-1.18, 1.38, 0.0] },
@@ -163,7 +163,7 @@ function classifyPartAtZR(z: number, r: number): string {
   if (z >= 3.66 && r >= 0.42) return "S355 Slate-Blue Axial Exhaust Diffuser";
   if (z >= 0.88 && z <= 3.38 && r >= 0.44 && r <= 0.64) return "GX12CrMoV12 Inner Blade Carrier";
   if (z >= 0.60 && z <= 3.68 && r >= 0.56) return "Cast CrMoV Outer Pressure Casing";
-  return "SST-600 Structural Assembly";
+  return "Structural Assembly";
 }
 
 export class TurbineScene {
@@ -231,7 +231,7 @@ export class TurbineScene {
   private cvRod2Mesh!: THREE.Mesh;
   private extRodMesh!: THREE.Mesh;
 
-  // Photoreal Siemens industrial PBR materials (with GPU continuum field shader injection!)
+  // Photoreal industrial PBR materials (with GPU continuum field shader injection!)
   private readonly matRotor: THREE.MeshPhysicalMaterial;
   private readonly matBladesHp: THREE.MeshStandardMaterial;
   private readonly matBladesLp: THREE.MeshStandardMaterial;
@@ -526,7 +526,7 @@ export class TurbineScene {
       side: THREE.DoubleSide,
     });
     this.matBladesLp = new THREE.MeshStandardMaterial({
-      color: "#d4c192", // Iconic Siemens golden champagne Ti-6Al-4V LP last-stage wheel!
+      color: "#d4c192", // Iconic golden champagne Ti-6Al-4V LP last-stage wheel!
       metalness: 0.82,
       roughness: 0.27,
       normalMap: this.textures.bladeBrushNormal,
@@ -567,12 +567,12 @@ export class TurbineScene {
       side: THREE.DoubleSide,
     });
     this.matExhaustBlue = new THREE.MeshPhysicalMaterial({
-      color: "#527893", // Authentic Siemens Energy slate-blue enamel
+      color: "#527893", // Authentic slate-blue enamel
       metalness: 0.28,
       roughness: 0.38,
       clearcoat: 0.26,
       clearcoatRoughness: 0.34,
-      normalMap: this.textures.siemensEnamelNormal,
+      normalMap: this.textures.enamelNormal,
       normalScale: new THREE.Vector2(0.14, 0.14),
       side: THREE.DoubleSide,
     });
@@ -647,7 +647,7 @@ export class TurbineScene {
       roughness: 0.40,
       clearcoat: 0.22,
       clearcoatRoughness: 0.38,
-      normalMap: this.textures.siemensEnamelNormal,
+      normalMap: this.textures.enamelNormal,
       normalScale: new THREE.Vector2(0.14, 0.14),
     });
 
@@ -705,7 +705,7 @@ export class TurbineScene {
     // 1. Load all 24 FrankenSim WASM meshes (with UVs & split machined section caps!) + 34 NURBS blade rows
     this.buildFromWasmGeometry(sim);
 
-    // 2. Build precision Siemens SST-600 mechanical CAD sub-assemblies
+    // 2. Build precision mechanical CAD sub-assemblies
     this.buildTiltingPadBearingsAndSeals();
     this.buildBoltedFlangesAndHardware();
     this.buildBaseplateSkidAndActuators();
@@ -893,7 +893,7 @@ export class TurbineScene {
         this.rotorBladesGroup.add(ring);
       }
 
-      // Signature Siemens stainless mid-span damping / lacing wire on free-standing LP Stage 16!
+      // Signature stainless mid-span damping / lacing wire on free-standing LP Stage 16!
       if (row.isRotating && row.stageIndex === 16) {
         const rWire = row.rHubM + span * 0.62;
         const wireGeo = new THREE.TorusGeometry(rWire, 0.0075, 10, 64);
@@ -1137,7 +1137,7 @@ export class TurbineScene {
     this.outerCasingUpperBack.add(backStuds, backNuts, backWashers);
   }
 
-  /** Heavy matte-black welded Siemens structural baseplate skid, anchor bolts, twin hydraulic accumulators & lube lines. */
+  /** Heavy matte-black welded structural baseplate skid, anchor bolts, twin hydraulic accumulators & lube lines. */
   private buildBaseplateSkidAndActuators(): void {
     const g = this.skidAndPipesGroup;
     const beamLen = 4.42;

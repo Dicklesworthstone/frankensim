@@ -3,7 +3,7 @@ name = "fs-steam-turbine"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "FrankenSim Siemens SST-600 industrial steam turbine digital twin: geometry generated from fs-rep-frep AxisymmetricChart and fs-rep-nurbs NurbsSurface, coupled multiphysics composed on fs-ports and fs-system with IAPWS-IF97 steam, fs-multiphase condensation, fs-mbd rotordynamics, fs-tribo bearings, fs-phs synchronous generator, and 48 kHz modal/aeroacoustic synthesis."
+description = "FrankenSim industrial steam turbine simulation: geometry generated from fs-rep-frep AxisymmetricChart and fs-rep-nurbs NurbsSurface, coupled multiphysics composed on fs-ports and fs-system with IAPWS-IF97 steam, fs-multiphase condensation, fs-mbd rotordynamics, fs-tribo bearings, fs-phs synchronous generator, and 48 kHz modal/aeroacoustic synthesis."
 
 [workspace]
 

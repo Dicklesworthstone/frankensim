@@ -1,5 +1,5 @@
 //! 48 kHz multiphysics acoustic synthesizer and ISO 532-1 / DIN 45692 psychoacoustic
-//! meter for the Siemens SST-600 steam turbine digital twin.
+//! meter for the steam turbine simulation.
 //!
 //! Combines:
 //! - [`fs_modal::time::ModalAcousticTimeModel`] for exact ZOH state-space structural
@@ -35,7 +35,7 @@ use fs_psycho::{
 
 use crate::materials::{P_ATM_PA, T_REF_K, library};
 
-/// Certified FEM structural eigenfrequencies of the Siemens SST-600 fabricated S355 steel
+/// Certified FEM structural eigenfrequencies of the model turbine fabricated S355 steel
 /// axial exhaust diffuser hood, solved directly via `fs_plate::shell::{generate_bell_shell,
 /// assemble_shell, modes_shell}` with Sylvester inertia certification.
 #[derive(Debug, Clone, Copy)]
@@ -50,13 +50,13 @@ pub struct ExhaustHoodFemSpectrum {
     pub certified_from_fem: bool,
 }
 
-/// Solve (once per process) the lowest flexural eigenfrequencies of the SST-600 conical-to-cylindrical
+/// Solve (once per process) the lowest flexural eigenfrequencies of the conical-to-cylindrical
 /// S355 steel exhaust diffuser hood (`r = 0.68..1.35 m`, `t = 28 mm`) via `fs-plate::shell` + `fs-modal`!
 #[must_use]
 pub fn exhaust_hood_fem_spectrum() -> &'static ExhaustHoodFemSpectrum {
     static SPECTRUM: OnceLock<ExhaustHoodFemSpectrum> = OnceLock::new();
     SPECTRUM.get_or_init(|| {
-        // Exact conical-to-cylindrical SST-600 exhaust hood meridian profile [(r_m, z_m)]
+        // Exact conical-to-cylindrical exhaust hood meridian profile [(r_m, z_m)]
         let hood_profile = [
             (0.68_f64, 0.00_f64),
             (0.98_f64, 0.35_f64),
@@ -280,7 +280,7 @@ fn soft_clip(x: f64) -> f64 {
     }
 }
 
-/// Real-time 48 kHz Siemens SST-600 acoustic synthesizer.
+/// Real-time 48 kHz acoustic synthesizer.
 #[derive(Debug, Clone)]
 pub struct TurbineAcousticSynth {
     modal_model: ModalAcousticTimeModel,
@@ -324,7 +324,7 @@ impl TurbineAcousticSynth {
     /// Construct a fresh 48 kHz turbine acoustic engine.
     #[must_use]
     pub fn new() -> Self {
-        // 10 structural resonances of the Siemens SST-600:
+        // 10 structural resonances of the model turbine:
         // - Modes 0..3: FEM-certified exhaust hood shell breathing/ovalizing modes from `fs_plate::shell::modes_shell`!
         // - Modes 3..6: cast CrMoV HP/IP barrel modes (680, 1180, 1950 Hz)
         // - Modes 6..10: LP last-stage free-standing blade bending/torsion & labyrinth ring modes (2850..8400 Hz)

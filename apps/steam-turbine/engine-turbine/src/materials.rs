@@ -1,4 +1,4 @@
-//! Sourced material library for the Siemens SST-600 steam turbine digital twin.
+//! Sourced material library for the steam turbine simulation.
 //!
 //! Every mechanical, thermal, tribological, and electromagnetic constant is
 //! loaded from FrankenSim's `data/matdb/seed-v1` packs embedded via [`crate::matdb_src`],
@@ -128,7 +128,7 @@ impl TurbineLubeOil {
         let cp_curve = db::SHELL_OIL_S2.require_curve("cp-0-200c");
         let k_curve = db::SHELL_OIL_S2.require_curve("k-0-200c");
         let nu_curve = db::SHELL_OIL_S2.require_curve("nu-0-200c");
-        // Shell Heat Transfer Oil S2 has nu(40 C) = 25 mm^2/s; standard Siemens SST-600
+        // Shell Heat Transfer Oil S2 has nu(40 C) = 25 mm^2/s; standard model
         // turbine oil is ISO VG 32 (32 mm^2/s at 40 C), scaled cleanly on the same mineral base curve.
         let vg32_scale = 32.0e-6 / nu_curve.eval(313.15);
         Self {
@@ -411,7 +411,7 @@ impl BlackbodyLut {
     }
 }
 
-/// Complete material library for the Siemens SST-600 steam turbine digital twin.
+/// Complete material library for the steam turbine simulation.
 pub struct TurbineMaterialLibrary {
     /// Forged CrMoV rotor shaft (AISI 4140/4130 + 1018 thermal + 1.4016 high-T E/alpha curves).
     pub rotor_steel: TurbineSolid,

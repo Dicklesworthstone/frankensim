@@ -1,8 +1,8 @@
-//! FrankenSim Siemens SST-600 Industrial Steam Turbine Digital Twin Engine
+//! FrankenSim Industrial Steam Turbine Simulation Engine
 //! (native Rust + `wasm32-unknown-unknown` WebAssembly).
 //!
 //! Architecture:
-//! - [`geometry`]: Exact Siemens SST-600 3D CAD solids built from FrankenSim L2 primitives
+//! - [`geometry`]: Exact 3D CAD solids built from FrankenSim L2 primitives
 //!   (`fs_rep_frep::AxisymmetricChart` + `tessellate_axisymmetric` + `mass_properties` +
 //!   `surface_area`, and `fs_rep_nurbs::NurbsSurface` with exact `partials` normals across
 //!   7 twisted airfoil families and 34 blade/vane rows).
@@ -114,7 +114,7 @@ fn mesh_by_id(cat: &TurbineGeometryCatalog, id: usize) -> Option<&ExportMesh> {
     }
 }
 
-/// Top-level interactive Siemens SST-600 digital twin exported to native Rust & WebAssembly.
+/// Top-level interactive steam turbine model exported to native Rust & WebAssembly.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct SteamTurbineSim {
     plant: AssembledTurbinePlant,
@@ -133,7 +133,7 @@ impl Default for SteamTurbineSim {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl SteamTurbineSim {
-    /// Create a warm, synchronized 50 MW Siemens SST-600 steam turbine running at 3,000 rpm.
+    /// Create a warm, synchronized 50 MW steam turbine running at 3,000 rpm.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     #[must_use]
     pub fn new() -> Self {
@@ -880,6 +880,174 @@ mod tests {
         );
     }
 
+    /// Wet exhaust at a fixed inflow: the shell must settle where its duty equals
+    /// `m_in (h_in - h_f)` and the condensate equals the inflow, and its internal energy must
+    /// stay exactly `M u_g(p)` (the old model condensed `q / h_fg` and lost the wet fraction).
+    #[test]
+    fn condenser_wet_exhaust_settles_on_the_enthalpy_balance() {
+        use crate::components::{CondenserState, SurfaceCondenserComponent};
+        use fs_ports::component::{Component, Proposal};
+        let cond = SurfaceCondenserComponent::new();
+        let mut st = CondenserState::at_vacuum_pressure(7_500.0, cond.vapor_volume_m3);
+        let m_in = 38.0;
+        let mut h_in = 0.0;
+        for _ in 0..3_000 {
+            // Inlet steam of quality 0.90 at the current shell pressure.
+            let pair = crate::steam::sat_pair_at_p(st.p_cond_pa);
+            let h_f = pair.liquid().specific_enthalpy().value();
+            let h_g = pair.vapor().specific_enthalpy().value();
+            h_in = h_f + 0.90 * (h_g - h_f);
+            let inputs = [
+                m_in,
+                m_in * h_in,
+                m_in,
+                5_000.0,
+                165_000.0,
+                1.0,
+                293.15,
+                293.15,
+                1.0,
+                0.0005,
+            ];
+            let mut outputs = [0.0; 7];
+            let mut next = st;
+            let prop = with_clock_free_cx(|cx| {
+                cond.propose(&st, 0.02, &inputs, &mut next, &mut outputs, cx)
+            })
+            .expect("condenser proposal");
+            assert!(
+                matches!(prop, Proposal::Step(_)),
+                "condenser refused a 20 ms step at {} Pa",
+                st.p_cond_pa
+            );
+            st = next;
+        }
+        let pair = crate::steam::sat_pair_at_p(st.p_cond_pa);
+        let h_f = pair.liquid().specific_enthalpy().value();
+        let u_g = pair.vapor().specific_internal_energy().value();
+        let duty_expected = m_in * (h_in - h_f);
+        assert!(
+            (st.q_cond_w - duty_expected).abs() < 2.0e-3 * duty_expected,
+            "steady duty {:.4} MW vs m_in (h_in - h_f) = {:.4} MW",
+            st.q_cond_w * 1.0e-6,
+            duty_expected * 1.0e-6
+        );
+        assert!(
+            (st.m_condensate_kg_s - m_in).abs() < 2.0e-3 * m_in,
+            "condensate {} vs inflow {m_in}",
+            st.m_condensate_kg_s
+        );
+        assert!(
+            (st.total_u_j - st.vapor_mass_kg * u_g).abs() < 1.0e-6 * st.total_u_j.abs(),
+            "U = {} must equal M u_g = {}",
+            st.total_u_j,
+            st.vapor_mass_kg * u_g
+        );
+        assert!(
+            st.s_gen_w_k > 0.0,
+            "condensing to colder water must produce entropy: {}",
+            st.s_gen_w_k
+        );
+    }
+
+    /// Entropy production of every valve, stage section and the condenser is computed, not
+    /// clamped, and must not go negative through a load rejection, an ESV trip or air ingress.
+    #[test]
+    fn component_entropy_production_never_negative_through_transients() {
+        fn check(sim: &SteamTurbineSim, label: &str) {
+            let p = &sim.plant;
+            let parts = [
+                ("hp_valve", p.hp_valve_state().s_gen_w_k),
+                ("ext_valve", p.ext_valve_state().s_gen_w_k),
+                ("hp_stages", p.hp_stages_state().s_gen_w_k),
+                ("ip_lp_stages", p.ip_lp_stages_state().s_gen_w_k),
+                ("condenser", p.condenser_state().s_gen_w_k),
+            ];
+            for (name, s) in parts {
+                assert!(
+                    s.is_finite() && s > -1.0e-3,
+                    "{label}: {name} entropy production {s} W/K"
+                );
+            }
+        }
+        let mut sim = SteamTurbineSim::new();
+        for _ in 0..20 {
+            assert!(sim.step(0.05));
+            check(&sim, "nominal");
+        }
+        sim.set_grid_breaker(false);
+        for _ in 0..40 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+            check(&sim, "load rejection");
+        }
+        let mut sim = SteamTurbineSim::new();
+        sim.set_manual_trip(true);
+        for _ in 0..40 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+            check(&sim, "ESV trip");
+        }
+        let mut sim = SteamTurbineSim::new();
+        sim.set_condenser_air_fraction(0.18);
+        for _ in 0..40 {
+            assert!(sim.step(0.10), "{}", sim.last_error());
+            check(&sim, "air ingress");
+        }
+    }
+
+    /// The plant clock must advance by exactly the requested time, however the convergence
+    /// kernel splits it.
+    #[test]
+    fn plant_clock_advances_by_the_requested_time() {
+        let mut sim = SteamTurbineSim::new();
+        let t0 = sim.plant.system.time_s();
+        for _ in 0..30 {
+            assert!(sim.step(0.07));
+        }
+        let advanced = sim.plant.system.time_s() - t0;
+        assert!(
+            (advanced - 30.0 * 0.07).abs() < 1.0e-9,
+            "advanced {advanced} s for 2.1 s requested"
+        );
+    }
+
+    /// The 2-D metal field must advance by the whole plant step: ten 1 s steps and a hundred
+    /// 0.1 s steps of a cold start must warm the metal by the same amount (the field once
+    /// clamped each call to 0.5 s, so 1 s steps lost half the heating).
+    #[test]
+    fn continuum_field_covers_the_whole_plant_step() {
+        fn mean_metal_k(sim: &SteamTurbineSim) -> f64 {
+            let c = &sim.plant.continuum;
+            let (mut sum, mut n) = (0.0, 0.0);
+            for (t, r) in c.temp_k.iter().zip(c.region.iter()) {
+                if *r != crate::continuum_2d::CellRegion::SteamOrAir {
+                    sum += t;
+                    n += 1.0;
+                }
+            }
+            sum / n
+        }
+        let mut coarse = SteamTurbineSim::new();
+        coarse.reset(true);
+        let mut fine = SteamTurbineSim::new();
+        fine.reset(true);
+        let t0 = mean_metal_k(&coarse);
+        for _ in 0..10 {
+            assert!(coarse.step(1.0), "{}", coarse.last_error());
+        }
+        for _ in 0..100 {
+            assert!(fine.step(0.1), "{}", fine.last_error());
+        }
+        let (dc, df) = (mean_metal_k(&coarse) - t0, mean_metal_k(&fine) - t0);
+        assert!(
+            df.abs() > 1.0e-3,
+            "the cold-start field must warm measurably in 10 s: {df} K"
+        );
+        assert!(
+            (dc - df).abs() < 0.05 * df.abs(),
+            "1 s steps warmed {dc} K, 0.1 s steps {df} K"
+        );
+    }
+
     #[test]
     fn load_rejection_triggers_speed_surge_and_governor_catch() {
         let mut sim = SteamTurbineSim::new();
@@ -925,8 +1093,11 @@ mod tests {
             assert!(sim.step(0.10), "air ingress step failed: {}", sim.last_error());
         }
         let degraded = sim.snapshot();
+        // Thresholds restated 2026-11-25 with the condenser energy fix (frankensim-89y9b.1): the
+        // shell now rejects m (h_in - h_f), about 7% less than the old q = m h_fg, so the same
+        // air raises the pressure less (8.8 -> 13.7 kPa) and costs 1.46 MW, not more.
         assert!(
-            degraded[29] < base[29] * 0.5,
+            degraded[29] < base[29] * 0.6,
             "Colburn-Hougen condensation HTC must plunge under air ingress: before={}, after={}",
             base[29],
             degraded[29]
@@ -938,7 +1109,7 @@ mod tests {
             degraded[19]
         );
         assert!(
-            degraded[5] < base[5] - 1.5,
+            degraded[5] < base[5] - 1.0,
             "Lost condenser vacuum must reduce emergent electrical MW: before={}, after={}",
             base[5],
             degraded[5]

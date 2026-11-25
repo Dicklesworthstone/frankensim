@@ -1,6 +1,12 @@
-# Siemens SST-600 Industrial Steam Turbine Digital Twin (`apps/steam-turbine`)
+# Industrial Steam Turbine Simulation (`apps/steam-turbine`)
 
-Interactive WebAssembly + HDR 3D Three.js + 48 kHz WebAudio multiphysics digital twin and L4 Design Studio for a **50 MW Siemens SST-600 industrial extraction-condensing steam turbine**, built on **26 FrankenSim crates** across the convergence architecture (`fs-ports` + `fs-system`), L2 MORPH CAD geometry (`fs-rep-frep`, `fs-rep-nurbs`, `fs-rep-mesh`, `fs-topo`), L3 FLUX physics (`fs-thermochem`, `fs-multiphase`, `fs-mbd`, `fs-tribo`, `fs-phs`, `fs-control`, `fs-plate`, `fs-duct`, `fs-modal`, `fs-aeroac`, `fs-psycho`), and L4 ASCENT derivative-free optimization (`fs-dfo`).
+Interactive WebAssembly + HDR 3D Three.js + 48 kHz WebAudio multiphysics simulation and L4 Design Studio for a **50 MW industrial extraction-condensing steam turbine**, built on **26 FrankenSim crates** across the convergence architecture (`fs-ports` + `fs-system`), L2 MORPH CAD geometry (`fs-rep-frep`, `fs-rep-nurbs`, `fs-rep-mesh`, `fs-topo`), L3 FLUX physics (`fs-thermochem`, `fs-multiphase`, `fs-mbd`, `fs-tribo`, `fs-phs`, `fs-control`, `fs-plate`, `fs-duct`, `fs-modal`, `fs-aeroac`, `fs-psycho`), and L4 ASCENT derivative-free optimization (`fs-dfo`).
+
+The machine is a generic 50 MW extraction-condensing unit: its flow path, masses and ratings are this model's own, not those of any manufacturer's product.
+
+Time runs at physical speed. The metal and oil thermal nodes carry the full `m·cp` of the parts the geometry builds (about 1.1 MJ/K for the HP rotor and 5.3 MJ/K for the IP casing), and the 2-D field steps with the same clock, so a load change moves the HP rotor by tens of kelvin over minutes, not seconds; use the fast-forward buttons to watch it. One simulated second costs 150 to 160 ms of native release CPU (nearly all in `fs_system::System::step`, whose steam components are differenced, having no declared tangent), which is why the page offers at most 3×.
+
+The condenser shell is a saturated control volume: vapour of mass `V·ρ_g(p)` over its condensate, with pressure solved each step from the energy balance `d/dt[V·ρ_g·(u_g − h_f)] = H_in − ṁ_in·h_f − q`. Wet exhaust therefore leaves its liquid as condensate, and at steady state the duty equals `ṁ_in·(h_in − h_f)` exactly. Entropy production of the valves, stage sections and condenser is reported as computed, never clamped at zero.
 
 ## Quick Start
 

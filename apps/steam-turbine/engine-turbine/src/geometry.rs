@@ -1,8 +1,8 @@
-//! Siemens SST-600 3D CAD geometry generated directly from FrankenSim L2 MORPH primitives:
+//! 3D CAD geometry generated directly from FrankenSim L2 MORPH primitives:
 //!
 //! - [`fs_rep_frep::AxisymmetricChart`] (`MeridianSegment::Line` and exact circular
 //!   `MeridianSegment::Arc` fillets) for the forged CrMoV rotor, labyrinth seal rings,
-//!   inner guide-blade carrier, horizontally-split HP/IP outer casing, Siemens slate-blue
+//!   inner guide-blade carrier, horizontally-split HP/IP outer casing, slate-blue
 //!   axial exhaust diffuser hood, cantilevered rear bearing cone, and front bearing housing.
 //! - [`AxisymmetricChart::mass_properties`] and [`AxisymmetricChart::surface_area`]
 //!   compute exact Green's-theorem rotor mass `m`, center of mass `z_com`, polar inertia
@@ -29,7 +29,7 @@ use fs_rep_nurbs::{KnotVector, NurbsSurface};
 
 use crate::materials::library;
 
-/// Total axial length of the Siemens SST-600 turbine assembly [m] (front coupling to exhaust face).
+/// Total axial length of the model turbine turbine assembly [m] (front coupling to exhaust face).
 pub const TURBINE_LENGTH_M: f64 = 5.45;
 /// Center of front radial/thrust journal bearing along rotor axis z [m].
 pub const FRONT_BEARING_Z_M: f64 = 0.50;
@@ -106,7 +106,7 @@ pub struct BladeRowSpec {
 }
 
 /// Exact geometry-derived mass, inertia, and surface-area properties of the complete
-/// SST-600 rotating assembly (forged shaft + all 17 NURBS blade rows + shrouds).
+/// rotating assembly (forged shaft + all 17 NURBS blade rows + shrouds).
 #[derive(Debug, Clone, Copy)]
 pub struct RotorGeometryProps {
     /// Forged CrMoV rotor shaft mass from `AxisymmetricChart::mass_properties` [kg].
@@ -135,7 +135,7 @@ pub struct RotorGeometryProps {
     pub rotor_watertight: bool,
 }
 
-/// Complete FrankenSim-generated geometry catalog for the Siemens SST-600 digital twin.
+/// Complete FrankenSim-generated geometry catalog for the steam turbine model.
 #[derive(Debug, Clone)]
 pub struct TurbineGeometryCatalog {
     pub rotor_props: RotorGeometryProps,
@@ -149,7 +149,7 @@ pub struct TurbineGeometryCatalog {
     /// 7 distinct 3D NURBS airfoil families:
     /// 0: Curtis impulse, 1: HP reaction, 2: IP1, 3: IP2, 4: LP mid, 5: LP giant last stage, 6: Stator vane.
     pub nurbs_airfoils: Vec<ExportMesh>,
-    /// All 17 rotor rows + 17 stator guide-vane rows (34 rows) along the exact SST-600 flow path.
+    /// All 17 rotor rows + 17 stator guide-vane rows (34 rows) along the exact flow path.
     pub blade_rows: Vec<BladeRowSpec>,
     /// Total FrankenSim-generated triangles across all base solids + NURBS airfoil templates.
     pub total_base_triangles: usize,
@@ -198,7 +198,7 @@ fn polyline_to_segments(pts: &[(f64, f64)]) -> Vec<MeridianSegment> {
     segs
 }
 
-/// Build the exact Siemens SST-600 forged CrMoV rotor shaft as a validated
+/// Build the exact forged CrMoV rotor shaft as a validated
 /// [`AxisymmetricChart`] with true circular `MeridianSegment::Arc` fillets at high-stress
 /// transitions (thrust collar, twin balance pistons, Curtis wheel, and giant LP last-stage disc).
 pub fn build_rotor_chart() -> AxisymmetricChart {
@@ -262,7 +262,7 @@ pub fn build_rotor_chart() -> AxisymmetricChart {
     push_line(&mut segs, &mut cur, mp(0.156, 0.650));
     push_line(&mut segs, &mut cur, mp(0.156, 0.880));
 
-    // 5. Twin stepped balance pistons (z = 0.880..1.195 — matches SST-600 CAD cutaway!)
+    // 5. Twin stepped balance pistons (z = 0.880..1.195 — matches CAD cutaway!)
     // Balance piston #1 (r = 0.258)
     push_arc(&mut segs, &mut cur, 0.176, 0.880, 0.020, PI, FRAC_PI_2, true);
     push_line(&mut segs, &mut cur, mp(0.258, 0.900));
@@ -322,7 +322,7 @@ pub fn build_rotor_chart() -> AxisymmetricChart {
     push_line(&mut segs, &mut cur, mp(0.0, 4.780));
     push_line(&mut segs, &mut cur, mp(0.0, 0.0));
 
-    AxisymmetricChart::try_new(segs).expect("valid Siemens SST-600 forged rotor AxisymmetricChart")
+    AxisymmetricChart::try_new(segs).expect("valid forged rotor AxisymmetricChart")
 }
 
 /// Build the annular multi-fin Inconel labyrinth seal carrier ring chart (front gland + balance pistons).
@@ -358,7 +358,7 @@ pub fn build_balance_labyrinth_chart() -> AxisymmetricChart {
         pts.push((0.278, z_lo));
     }
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 labyrinth seal AxisymmetricChart")
+        .expect("valid labyrinth seal AxisymmetricChart")
 }
 
 /// Build the cast CrMoV inner guide-blade carrier (annular stepped stator shell holding
@@ -396,7 +396,7 @@ pub fn build_inner_carrier_chart() -> AxisymmetricChart {
         (0.396, 1.210),
     ];
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 inner guide-blade carrier AxisymmetricChart")
+        .expect("valid inner guide-blade carrier AxisymmetricChart")
 }
 
 /// Build the thick horizontally-split cast CrMoV outer HP/IP casing (`z = 0.62..3.68 m`),
@@ -442,10 +442,10 @@ pub fn build_outer_hp_ip_casing_chart() -> AxisymmetricChart {
         (0.172, 0.670),
     ];
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 outer HP/IP casing AxisymmetricChart")
+        .expect("valid outer HP/IP casing AxisymmetricChart")
 }
 
-/// Build the iconic Siemens slate-blue fabricated axial exhaust diffuser hood (`z = 3.66..5.45 m`),
+/// Build the iconic slate-blue fabricated axial exhaust diffuser hood (`z = 3.66..5.45 m`),
 /// with flared diffuser outer wall, bolted front mating flange, circumferential stiffener rings,
 /// and circular condenser-mating mouth flange (matching `image-0011.jpg` and `image-0031.jpg`).
 pub fn build_exhaust_diffuser_chart() -> AxisymmetricChart {
@@ -482,7 +482,7 @@ pub fn build_exhaust_diffuser_chart() -> AxisymmetricChart {
         (0.925, 3.720),
     ];
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 axial exhaust diffuser AxisymmetricChart")
+        .expect("valid axial exhaust diffuser AxisymmetricChart")
 }
 
 /// Build the cantilevered central rear bearing housing tunnel & aerodynamic exhaust cone
@@ -510,7 +510,7 @@ pub fn build_rear_bearing_cone_chart() -> AxisymmetricChart {
         (0.184, 4.020),
     ];
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 rear bearing cone AxisymmetricChart")
+        .expect("valid rear bearing cone AxisymmetricChart")
 }
 
 /// Build the front combined radial + Kingsbury thrust bearing pedestal shell (`z = 0.14..0.64 m`).
@@ -532,7 +532,7 @@ pub fn build_front_bearing_housing_chart() -> AxisymmetricChart {
         (0.132, 0.190),
     ];
     AxisymmetricChart::try_new(polyline_to_segments(&pts))
-        .expect("valid SST-600 front bearing housing AxisymmetricChart")
+        .expect("valid front bearing housing AxisymmetricChart")
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,8 +1069,8 @@ fn build_nurbs_airfoil_mesh(p: AirfoilFamilyParams) -> ExportMesh {
     }
 }
 
-/// Build the full 17-stage rotor + 16-stage stator flow-path schedule matching the Siemens
-/// SST-600 condensing/extraction cutaway (`image-0031.jpg` and `image-0009.jpg`).
+/// Build the full 17-stage rotor + 16-stage stator flow-path schedule after the
+/// condensing/extraction cutaway (`image-0031.jpg` and `image-0009.jpg`).
 pub fn build_blade_rows() -> Vec<BladeRowSpec> {
     let mut rows = Vec::with_capacity(33);
     let mut push_row = |stage_index: usize,
@@ -1147,7 +1147,7 @@ pub fn build_blade_rows() -> Vec<BladeRowSpec> {
     rows
 }
 
-/// Build the complete FrankenSim Siemens SST-600 geometry catalog once, returning
+/// Build the complete FrankenSim geometry catalog once, returning
 /// GPU-ready meshes, verified axisymmetric receipts, and exact rotor inertia properties.
 pub fn build_turbine_geometry(cx: &Cx<'_>) -> TurbineGeometryCatalog {
     let lib = library();
@@ -1167,7 +1167,7 @@ pub fn build_turbine_geometry(cx: &Cx<'_>) -> TurbineGeometryCatalog {
     rotor_cfg.min_azimuthal_sectors = 56;
     rotor_cfg.max_azimuthal_sectors = 72;
     let rotor_raw = tessellate_axisymmetric(&rotor_chart, rotor_cfg, cx)
-        .expect("tessellate SST-600 forged rotor");
+        .expect("tessellate forged rotor");
     let rotor_receipt = rotor_raw.receipt.clone();
     let rotor_mesh = axisymmetric_to_export("rotor_forging", rotor_raw);
 
@@ -1179,7 +1179,7 @@ pub fn build_turbine_geometry(cx: &Cx<'_>) -> TurbineGeometryCatalog {
     lab_cfg.min_azimuthal_sectors = 48;
     lab_cfg.max_azimuthal_sectors = 64;
     let lab_raw = tessellate_axisymmetric(&lab_chart, lab_cfg, cx)
-        .expect("tessellate SST-600 labyrinth seals");
+        .expect("tessellate labyrinth seals");
     let labyrinth_seals = axisymmetric_to_export("labyrinth_seals", lab_raw);
 
     // 3. Stationary housings as validated AxisymmetricCharts + 3 solid cutaway sub-shells each
@@ -1314,7 +1314,7 @@ pub fn build_turbine_geometry(cx: &Cx<'_>) -> TurbineGeometryCatalog {
         AirfoilFamilyParams {
             name: "nurbs_blade_lp_last",
             stagger_root_deg: 22.0,
-            stagger_tip_deg: 78.0, // Dramatic 56° free-vortex twist matching SST-600 last stage!
+            stagger_tip_deg: 78.0, // Dramatic 56° free-vortex twist of a large last stage!
             camber_root: 0.14,
             camber_tip: 0.05,
             thickness_root: 0.15,
@@ -1456,7 +1456,7 @@ mod tests {
     fn rotor_and_housings_are_watertight_axisymmetric_solids_with_physical_inertia() {
         let cat = with_clock_free_cx(build_turbine_geometry);
 
-        // Forged CrMoV rotor + 17 blade rows: realistic industrial 50 MW SST-600 rotor
+        // Forged CrMoV rotor + 17 blade rows: realistic industrial 50 MW rotor
         // (~6,000..12,000 kg total mass, J_p ~ 400..1,200 kg·m², J_d ~ 6,000..25,000 kg·m²)
         assert!(cat.rotor_props.rotor_watertight);
         assert_eq!(cat.rotor_props.rotor_euler_characteristic, 2);

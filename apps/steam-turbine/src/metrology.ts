@@ -1,4 +1,4 @@
-// High-DPI Canvas2D scientific metrology plots for the Siemens SST-600 digital twin:
+// High-DPI Canvas2D scientific metrology plots for the steam turbine model:
 // 1. Exact IAPWS-IF97 Mollier (h-s) steam expansion diagram with saturation dome & moisture lines
 // 2. 17-Stage Axial Flowpath Profile (Pressure & Temp, Mach & Wetness x, Blade σ_vM & Stage MW)
 // 3. 4-DOF gyroscopic Campbell diagram (fs-mbd::rotordynamics) with 1x / 0.46x rays & criticals

@@ -1,5 +1,5 @@
 // 48 kHz live virtual microphone audio engine + triggered oscilloscope + radix-2 FFT
-// for the Siemens SST-600 FrankenSim digital twin.
+// for the FrankenSim steam turbine simulation.
 
 import type { SteamTurbineSim } from "./wasm-pkg/fs_steam_turbine";
 import type { TurbineSnapshot } from "./snapshotLayout";

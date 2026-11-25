@@ -1,5 +1,5 @@
 //! Exact IAPWS-IF97 steam/water thermodynamic helpers and canonical `water-if97-v1`
-//! `fs-ports` stream basis for the Siemens SST-600 steam turbine digital twin.
+//! `fs-ports` stream basis for the steam turbine simulation.
 //!
 //! All properties evaluate `fs_thermochem::water::if97` directly (IAPWS R7-97(2012)
 //! Regions 1, 2, and 4). No ideal-gas steam approximations.
@@ -14,11 +14,11 @@ use fs_thermochem::water::if97::{
 
 /// Minimum admitted steam pressure [Pa] (0.8 kPa deep condenser vacuum).
 pub const MIN_STEAM_P_PA: f64 = 800.0;
-/// Maximum admitted steam pressure [Pa] (20 MPa subcritical envelope for SST-600).
+/// Maximum admitted steam pressure [Pa] (20 MPa subcritical envelope of the model).
 pub const MAX_STEAM_P_PA: f64 = 20.0e6;
 /// Minimum admitted steam/water temperature [K] (274 K).
 pub const MIN_STEAM_T_K: f64 = 274.0;
-/// Maximum admitted steam temperature [K] (1050 K, well above 565 °C SST-600 rating).
+/// Maximum admitted steam temperature [K] (1050 K, well above the 565 °C design rating).
 pub const MAX_STEAM_T_K: f64 = 1_050.0;
 
 /// Canonical `fs-ports` stream basis for pure water/steam on the IAPWS-IF97 triple-point
@@ -150,7 +150,7 @@ pub fn eval_ph(p_pa: f64, h_j_kg: f64) -> SteamPoint {
     let p = p_pa.clamp(MIN_STEAM_P_PA, MAX_STEAM_P_PA);
     let h_target = h_j_kg.clamp(10_000.0, 4_150_000.0);
 
-    // Subcritical two-phase check (covers full SST-600 live steam envelope up to 165 bar)
+    // Subcritical two-phase check (covers full live steam envelope up to 165 bar)
     if p <= 16.52e6 {
         let pair = sat_pair_at_p(p);
         let liq = pair.liquid();
@@ -230,7 +230,7 @@ pub fn eval_ph(p_pa: f64, h_j_kg: f64) -> SteamPoint {
         return eval_pt(p, t);
     }
 
-    // High-pressure Region 2 (> 16.4 MPa, superheated SST-600 top rating)
+    // High-pressure Region 2 (> 16.4 MPa, superheated top rating)
     let mut t = 780.0_f64;
     for _ in 0..16 {
         if let Ok(st) = If97State::at_pressure_temperature(
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn if97_ph_ps_uv_inversions_round_trip_to_high_precision() {
-        // Siemens SST-600 live steam: 110 bar (11 MPa), 525 °C (798.15 K)
+        // live steam: 110 bar (11 MPa), 525 °C (798.15 K)
         let live = eval_pt(11.0e6, 798.15);
         assert!(!live.is_two_phase);
         assert!((live.h_j_kg - 3_432_000.0).abs() < 15_000.0, "h={}", live.h_j_kg);
@@ -493,7 +493,7 @@ mod tests {
         assert!(throttled.s_j_kg_k > live.s_j_kg_k);
         assert!((throttled.h_j_kg - live.h_j_kg).abs() < 1.0);
 
-        // Full SST-600 165 bar envelope: both subcooled (340 °C) and superheated (565 °C) stay exact!
+        // Full 165 bar envelope: both subcooled (340 °C) and superheated (565 °C) stay exact!
         let hi_sub = eval_pt(16.5e6, 340.0 + 273.15);
         assert_eq!(hi_sub.quality_x, 0.0);
         let rt_hi_sub = eval_ph(16.5e6, hi_sub.h_j_kg);

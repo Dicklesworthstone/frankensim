@@ -2,7 +2,7 @@
   "name": "steam-turbine",
   "private": true,
   "version": "0.1.0",
-  "description": "Siemens SST-600 Industrial Steam Turbine Digital Twin — FrankenSim convergence-kernel multiphysics (IAPWS-IF97 steam, Colburn-Hougen condensation, 4-DOF gyroscopic rotordynamics, PHS synchronous generator, AxisymmetricChart & NurbsSurface geometry, 48 kHz acoustics).",
+  "description": "Industrial Steam Turbine Simulation — FrankenSim convergence-kernel multiphysics (IAPWS-IF97 steam, Colburn-Hougen condensation, 4-DOF gyroscopic rotordynamics, PHS synchronous generator, AxisymmetricChart & NurbsSurface geometry, 48 kHz acoustics).",
   "type": "module",
   "scripts": {
     "dev": "vite",

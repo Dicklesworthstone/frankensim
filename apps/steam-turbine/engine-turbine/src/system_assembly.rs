@@ -1,4 +1,4 @@
-//! Composition of the Siemens SST-600 steam turbine digital twin on FrankenSim's
+//! Composition of the steam turbine simulation on FrankenSim's
 //! convergence kernel (`fs_system::SystemBuilder` -> `fs_system::System`).
 //!
 //! All 12 physics component instances are connected purely through typed `Power`,
@@ -29,9 +29,9 @@ use crate::steam::{eval_ph, eval_pt};
 /// with the sealed `System` boundary closures.
 #[derive(Debug, Clone, Copy)]
 pub struct OperatorControls {
-    /// Live boiler steam pressure [Pa] (nominal 110 bar = 11.0 MPa; SST-600 max 165 bar).
+    /// Live boiler steam pressure [Pa] (nominal 110 bar = 11.0 MPa; design max 165 bar).
     pub live_steam_p_pa: f64,
-    /// Live boiler steam temperature [K] (nominal 525 °C = 798.15 K; SST-600 max 565 °C).
+    /// Live boiler steam temperature [K] (nominal 525 °C = 798.15 K; design max 565 °C).
     pub live_steam_t_k: f64,
     /// Governor speed reference [rad/s] (nominal 3,000 rpm = 314.159 rad/s).
     pub speed_ref_rad_s: f64,
@@ -138,13 +138,13 @@ pub struct AssembledTurbinePlant {
 }
 
 impl AssembledTurbinePlant {
-    /// Build and seal the complete 12-component Siemens SST-600 `fs_system::System`
+    /// Build and seal the complete 12-component `fs_system::System`
     /// using default nominal engineering design parameters.
     pub fn build(geom: &TurbineGeometryCatalog, cold_start: bool) -> Self {
         Self::build_with_design(geom, cold_start, TurbineDesignParams::default())
     }
 
-    /// Build and seal the complete 12-component Siemens SST-600 `fs_system::System`
+    /// Build and seal the complete 12-component `fs_system::System`
     /// parameterized by live engineer-editable [`TurbineDesignParams`].
     pub fn build_with_design(
         geom: &TurbineGeometryCatalog,
@@ -183,7 +183,7 @@ impl AssembledTurbinePlant {
         let p_cond_init = if cold_start { 12_000.0 } else { 7_500.0 };
 
         let omega_init = ctrl.sampled_omega_rad_s;
-        // Total shaft polar inertia = exact forged SST-600 rotor + 17 NURBS blade rows (~515 kg·m²)
+        // Total shaft polar inertia = exact forged rotor + 17 NURBS blade rows (~515 kg·m²)
         // + 60 MVA 2-pole synchronous generator field rotor & exciter (~2,100 kg·m² -> H ≈ 2.2 s, textbook!).
         let j_total = geom.rotor_props.polar_inertia_kg_m2 + 2_100.0;
 
@@ -203,6 +203,7 @@ impl AssembledTurbinePlant {
             (geom.outer_hp_ip_casing.mass_props.mass + geom.inner_carrier.mass_props.mass)
                 * casing_mass_scale,
             geom.exhaust_diffuser.mass_props.mass,
+            &geom.blade_rows,
         );
         let governor_c = GovernorControlComponent::new();
 
@@ -488,7 +489,7 @@ impl AssembledTurbinePlant {
             .expect("governor sensor boundary");
         }
 
-        let mut system = b.seal().expect("seal SST-600 convergence System");
+        let mut system = b.seal().expect("seal convergence System");
         system.set_config(SolveConfig {
             relative_tolerance: 1.0e-7,
             absolute_tolerance: 1.0e-5,
@@ -571,22 +572,54 @@ impl AssembledTurbinePlant {
         let n_sub = ((total / 0.020).ceil() as usize).clamp(1, 100);
         let h = total / n_sub as f64;
 
-        for _ in 0..n_sub {
+        // `System::step(dt_max)` takes ONE step of at most `dt_max` (shorter when a component
+        // asks), so keep stepping until the whole interval is covered: every sub-model below
+        // then advances by the same simulated time.
+        let mut remaining = total;
+        let mut taken = 0_usize;
+        while remaining > 1.0e-12 * total {
+            taken += 1;
+            if taken > 16 * n_sub + 64 {
+                return Err(format!(
+                    "fs_system::System::step kept shortening: {remaining:.3e} s of {total:.3e} s left after {} steps",
+                    taken - 1
+                ));
+            }
+            let dt_try = if remaining <= 1.25 * h { remaining } else { h };
             // 1. Atomic convergence-kernel multiphysics step!
             let rep = self
                 .system
-                .step(h, cx)
+                .step(dt_try, cx)
                 .map_err(|e| format!("fs_system::System::step failed: {e}"))?;
+            remaining -= rep.dt_s;
             self.last_newton_iters = rep.iterations;
             self.last_shortenings = rep.shortenings;
 
             // 2. Read accepted states from the sealed System
-            let shaft = *self.system.state::<RotorShaftState>(self.nodes.rotor_shaft).expect("shaft");
-            let hp = *self.system.state::<StageGroupState>(self.nodes.hp_stages).expect("hp");
-            let iplp = *self.system.state::<StageGroupState>(self.nodes.ip_lp_stages).expect("iplp");
-            let brg = *self.system.state::<BearingSystemState>(self.nodes.bearings).expect("brg");
-            let th = *self.system.state::<ThermalNetworkState>(self.nodes.thermal).expect("thermal");
-            let gov = *self.system.state::<GovernorState>(self.nodes.governor).expect("gov");
+            let shaft = *self
+                .system
+                .state::<RotorShaftState>(self.nodes.rotor_shaft)
+                .expect("shaft");
+            let hp = *self
+                .system
+                .state::<StageGroupState>(self.nodes.hp_stages)
+                .expect("hp");
+            let iplp = *self
+                .system
+                .state::<StageGroupState>(self.nodes.ip_lp_stages)
+                .expect("iplp");
+            let brg = *self
+                .system
+                .state::<BearingSystemState>(self.nodes.bearings)
+                .expect("brg");
+            let th = *self
+                .system
+                .state::<ThermalNetworkState>(self.nodes.thermal)
+                .expect("thermal");
+            let gov = *self
+                .system
+                .state::<GovernorState>(self.nodes.governor)
+                .expect("gov");
 
             // 3. Advance 4-DOF gyroscopic lateral whirl & Stribeck rub using live bearing (K, C) + Alford Kxy!
             let alford_total = hp.alford_kxy_n_per_m + iplp.alford_kxy_n_per_m;

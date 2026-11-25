@@ -1,5 +1,5 @@
 //! 4-DOF gyroscopic lateral rotordynamics, Campbell diagram, oil-whip / Alford steam-whirl
-//! eigenvalue stability, and Stribeck labyrinth rub contact for the Siemens SST-600 rotor.
+//! eigenvalue stability, and Stribeck labyrinth rub contact for the model turbine rotor.
 //!
 //! Powered directly by:
 //! - [`fs_mbd::rotordynamics::RotorBearingModel`] (`M q'' + (C + Ω G) q' + K q = f` with full
@@ -133,7 +133,7 @@ pub fn evaluate_journal_bearing(
         * (PI * PI + 2.0 * (24.0 - PI * PI) * e2 + (16.0 - PI * PI) * e2 * e2);
     let c_xy_bar = a0 * 2.0 * (PI * PI + (32.0 - PI * PI) * e2) / om;
 
-    // Healthy Siemens SST-600 uses 5-pad tilting-pad / elliptical bearings that suppress
+    // Healthy uses 5-pad tilting-pad / elliptical bearings that suppress
     // cross-coupled Ocvirk stiffness to ~12% of a plain cylindrical sleeve; pad lockup,
     // wear, or low preload (`oil_whip_destabilize > 0`) restores amplified plain-sleeve
     // fluid-circulation cross-coupling and lowers film damping, crossing the true Hopf
@@ -291,7 +291,7 @@ pub fn assemble_4dof_rotor_model(
     c_mat[15] += 2.0e4;
 
     RotorBearingModel::new(4, &mass, &c_mat, &k_mat, &gyro, || false)
-        .expect("valid 4-DOF gyroscopic SST-600 RotorBearingModel")
+        .expect("valid 4-DOF gyroscopic RotorBearingModel")
 }
 
 /// Live lateral rotor state integrated alongside the `fs_system::System` torsional/thermo step.

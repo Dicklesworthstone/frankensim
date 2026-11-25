@@ -1,4 +1,4 @@
-//! L4 ASCENT Multi-Variable Engineering Design Optimization for the Siemens SST-600
+//! L4 ASCENT Multi-Variable Engineering Design Optimization for the model turbine
 //! powered directly by [`fs_dfo::cma::cmaes`] (Information-Geometric Natural-Gradient CMA-ES)
 //! and [`fs_dfo::nelder_mead`] local simplex polish.
 //!
@@ -41,7 +41,7 @@ impl DesignObjective {
     }
 }
 
-/// Complete physical evaluation of one candidate SST-600 design at the current operating envelope.
+/// Complete physical evaluation of one candidate design at the current operating envelope.
 #[derive(Debug, Clone, Copy)]
 pub struct DesignMetrics {
     pub elec_eff_pct: f64,
@@ -206,7 +206,7 @@ pub fn evaluate_design_candidate(
 }
 
 /// Run FrankenSim's L4 ASCENT [`fs_dfo::cma::cmaes`] followed by [`fs_dfo::nelder_mead`] polish
-/// directly in native Rust or WebAssembly to optimize the 6 SST-600 design parameters!
+/// directly in native Rust or WebAssembly to optimize the 6 design parameters!
 #[must_use]
 pub fn optimize_turbine_design(
     geom: &TurbineGeometryCatalog,

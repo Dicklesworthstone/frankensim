@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /**
- * Top-level interactive Siemens SST-600 digital twin exported to native Rust & WebAssembly.
+ * Top-level interactive steam turbine model exported to native Rust & WebAssembly.
  */
 export class SteamTurbineSim {
     free(): void;
@@ -71,7 +71,7 @@ export class SteamTurbineSim {
      */
     mollier_path(): Float64Array;
     /**
-     * Create a warm, synchronized 50 MW Siemens SST-600 steam turbine running at 3,000 rpm.
+     * Create a warm, synchronized 50 MW steam turbine running at 3,000 rpm.
      */
     constructor();
     /**
