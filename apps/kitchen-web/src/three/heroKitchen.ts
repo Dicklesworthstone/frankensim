@@ -4893,7 +4893,8 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     }
   }
   requestAnimationFrame(animate);
-  const ready = loadExemplar(initialSpec.id).catch(() => undefined);
+  // Settles either way, for what waits on it; a failure is still reported, as it was before anything waited.
+  const ready = loadExemplar(initialSpec.id).catch((e: unknown) => console.error(e));
   void activeCameraPreset;
   void wide;
 

@@ -150,9 +150,6 @@ function initFleetMatrix(hero: HeroController | null): void {
 
 function initRangeTrackFills(): void {
   const sliders = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="range"]'));
-  // A browser that keeps form values over a reload (Firefox) or a history step puts a slider where the chapter
-  // behind it does not start: every chapter starts at its HTML default, so the sliders do too.
-  for (const el of sliders) el.value = el.defaultValue;
   const syncSlider = (el: HTMLInputElement) => {
     const min = Number(el.min || 0);
     const max = Number(el.max || 100);
@@ -216,6 +213,10 @@ function bootstrap(): void {
   document.documentElement.classList.add("booted");
   initScrollChrome();
   initReveal();
+  // A browser that keeps form values over a reload (Firefox) or a history step puts a control where the chapter
+  // behind it does not start: a slider elsewhere, a search the equipment's chips do not show. Every chapter starts at
+  // its HTML default, so its controls do too.
+  for (const el of document.querySelectorAll<HTMLInputElement>("input")) el.value = el.defaultValue;
   initRangeTrackFills();
   initHowLinks();
   // The stove chapter's ribeye texture is the heaviest single build on the page: start it on another thread now,
