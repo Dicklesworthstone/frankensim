@@ -452,3 +452,42 @@ export function runCommissary(settings: Settings, kitchen: Kitchen = KITCHEN, we
     dayWork: dayWork.map(spread),
   };
 }
+
+/* ------------------------------------------------------------------------------------------------------------ */
+/* Every plan the week figure can show: the crew, when to cook, the walk-in's racks, and which dishes are swapped. */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+export const PLAN_CREWS: readonly number[] = [2, 3, 4];
+export const PLAN_RACKS = 5;
+const SWAP_KEYS = Object.keys(SWAPS);
+export const WEEK_PLANS = PLAN_CREWS.length * 2 * PLAN_RACKS * (1 << SWAP_KEYS.length);
+
+export interface WeekPlan {
+  cooks: number;
+  strategy: Strategy;
+  racks: number;
+  swaps: string[];
+}
+
+/** Plan `i` of WEEK_PLANS: swaps vary fastest, then racks, then when to cook, then the crew. */
+export function weekPlan(i: number): WeekPlan {
+  const nm = 1 << SWAP_KEYS.length;
+  const m = i % nm;
+  const racks = 1 + (Math.floor(i / nm) % PLAN_RACKS);
+  const strategy: Strategy = Math.floor(i / (nm * PLAN_RACKS)) % 2 === 0 ? "day" : "ahead";
+  const cooks = PLAN_CREWS[Math.floor(i / (nm * PLAN_RACKS * 2))]!;
+  return { cooks, strategy, racks, swaps: SWAP_KEYS.filter((_, b) => m & (1 << b)) };
+}
+
+/** The number of a plan (see weekPlan). */
+export function weekPlanIndex(p: WeekPlan): number {
+  const nm = 1 << SWAP_KEYS.length;
+  const m = SWAP_KEYS.reduce((a, k, b) => (p.swaps.includes(k) ? a | (1 << b) : a), 0);
+  return ((PLAN_CREWS.indexOf(p.cooks) * 2 + (p.strategy === "ahead" ? 1 : 0)) * PLAN_RACKS + (p.racks - 1)) * nm + m;
+}
+
+/** The kitchen with this many cooks. */
+export const withCooks = (cooks: number, kitchen: Kitchen = KITCHEN): Kitchen => (cooks === kitchen.cooks ? kitchen : { ...kitchen, cooks });
+
+/** Crew-hours paid in a week: every cook's shift on every day, and the overtime of a median week. */
+export const paidHours = (run: CommissaryRun, cooks: number, kitchen: Kitchen = KITCHEN): number => (cooks * kitchen.shiftMin * kitchen.forecast.length) / 60 + run.ot.p50;

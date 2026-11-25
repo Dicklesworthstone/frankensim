@@ -2941,6 +2941,37 @@ button.wk-dish[aria-pressed="true"] {
 .rs-mapsvg .curl.l {
   text-anchor: end;
 }
+.rs-map-keys :is(.dayof, .ahead)::before {
+  border-radius: 50%;
+}
+.wk-mapsvg .pt {
+  stroke: rgb(0 0 0 / 0.55);
+  stroke-width: 1;
+  opacity: 0.42;
+}
+.wk-mapsvg .pt.day {
+  fill: var(--gold);
+}
+.wk-mapsvg .pt.ahead {
+  fill: var(--ice);
+}
+.wk-mapsvg .pt.on {
+  opacity: 1;
+  stroke: #fff;
+  stroke-width: 1.2;
+}
+.wk-mapsvg .pt:hover {
+  opacity: 1;
+}
+.wk-mapsvg .crew {
+  fill: var(--muted);
+}
+.wk-mapsvg .curl {
+  paint-order: stroke;
+  stroke: rgb(0 0 0 / 0.8);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
 .rs-map-note {
   margin: 0.3rem 0 0;
   color: var(--muted);

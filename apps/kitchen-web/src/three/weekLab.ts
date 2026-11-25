@@ -12,7 +12,24 @@
  *   - the kettle, tilting skillet, combi and blast chiller behind them run by the minutes each station cooks that day.
  */
 import * as THREE from "three";
-import { DAYS, KITCHEN, MENU, SWAPS, runCommissary, type CommissaryRun, type DayResult, type Settings, type Strategy } from "../sim/commissaryWeek";
+import {
+  DAYS,
+  KITCHEN,
+  MENU,
+  PLAN_CREWS,
+  SWAPS,
+  WEEK_PLANS,
+  paidHours,
+  runCommissary,
+  weekPlan,
+  weekPlanIndex,
+  withCooks,
+  type CommissaryRun,
+  type DayResult,
+  type Settings,
+  type Strategy,
+} from "../sim/commissaryWeek";
+import type { WeekPlanAsk, WeekPlanScore } from "../sim/weekPlans.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { speedRackSlides } from "./models/cold";
@@ -48,7 +65,7 @@ export type Crew = 2 | 3 | 4;
 /** Where each cook stands along the table: three as drawn, 0.74 m apart; four 0.6 m apart; two, the first two places. */
 const CREW_X: Record<Crew, readonly number[]> = { 2: [-2.32, -1.58], 3: [-2.32, -1.58, -0.84], 4: [-2.53, -1.93, -1.33, -0.73] };
 /** The kitchen with this many cooks: shift, overtime cap and setup are per cook (commissaryWeek's Kitchen). */
-const kitchenFor = (crew: Crew) => (crew === KITCHEN.cooks ? KITCHEN : { ...KITCHEN, cooks: crew });
+const kitchenFor = (crew: Crew) => withCooks(crew);
 
 /** The cooking line along the back, fronts facing +z. */
 const LINE_Z = -1.45;
@@ -745,7 +762,7 @@ export function mountWeekLab(root: HTMLElement): void {
       state = w.lateMeals > 0.5 ? "danger" : w.otMin > 1 ? "warn" : "ok";
     }
     // A fourth cook against cooking ahead with three: the meals out late, and the paid crew-hours.
-    const paid = (r: CommissaryRun, n: number) => n * SHIFT_H * DAYS.length + r.ot.p50;
+    const paid = (r: CommissaryRun, n: number) => paidHours(r, n);
     if (crew === 4) {
       const three = runCommissary({ ...settings, strategy: "ahead" });
       const more = paid(run, 4) - paid(three, 3);
@@ -803,6 +820,8 @@ export function mountWeekLab(root: HTMLElement): void {
     if (racksVal) racksVal.textContent = `${settings.racks} ${settings.racks === 1 ? "rack" : "racks"} · ${(settings.racks ?? 3) * KITCHEN.rackPans} pans`;
     if (errVal) errVal.textContent = settings.sigma > 0 ? `±${Math.round(settings.sigma * 100)}%` : "Exact";
     lastDay = -1;
+    askPlans();
+    renderMap();
   }
 
   for (const b of planBtns)
@@ -823,6 +842,186 @@ export function mountWeekLab(root: HTMLElement): void {
     settings.sigma = Number(errIn.value) / 100;
     update();
   });
+
+  /* ---------------------------------------------------------------------------------------------------------- */
+  /* Every plan for the week: run in a worker, plotted as crew-hours paid against meals out late, frontier drawn. */
+  /* ---------------------------------------------------------------------------------------------------------- */
+
+  const mapEl = root.querySelector<HTMLElement>("[data-wk-map]");
+  const mapNote = root.querySelector<HTMLElement>("[data-wk-map-note]");
+  const scores = new Map<number, WeekPlanScore>();
+  let mapKey = "";
+  let worker: Worker | null = null;
+  let mapTimer = 0;
+  let mapQueued = false;
+  const SHORT: Record<string, string> = { chicken: "braised thighs", pasta: "baked rigatoni", salad: "farro salad" };
+  const describe = (plan: number) => {
+    const p = weekPlan(plan);
+    const sw = p.swaps.map((k) => SHORT[k] ?? SWAPS[k]!.name.toLowerCase());
+    const list = sw.length > 1 ? `${sw.slice(0, -1).join(", ")} and ${sw[sw.length - 1]}` : (sw[0] ?? "");
+    return `${p.cooks} cooks ${p.strategy === "ahead" ? "cooking ahead" : "cooking on the day"} with ${p.racks} ${p.racks === 1 ? "rack" : "racks"}${list ? `, ${list}` : ""}`;
+  };
+  /** b beats a: no more crew-hours and no more meals late 1 week in 10, and fewer of one (whole hours, whole meals). */
+  const hrs = (a: WeekPlanScore) => Math.round(a.paid);
+  const lateOf = (a: WeekPlanScore) => Math.round(a.lateP90);
+  const beats = (b: WeekPlanScore, a: WeekPlanScore) =>
+    hrs(b) <= hrs(a) && lateOf(b) <= lateOf(a) && (hrs(b) < hrs(a) || lateOf(b) < lateOf(a));
+  const frontier = (): Set<number> => {
+    const all = [...scores.values()];
+    const out = new Set<number>();
+    for (const a of all) if (!all.some((b) => b !== a && beats(b, a))) out.add(a.plan);
+    return out;
+  };
+  const curPlan = () => weekPlanIndex({ cooks: crew, strategy: settings.strategy, racks: settings.racks ?? KITCHEN.racks, swaps: settings.swaps });
+  function askPlans(): void {
+    const key = String(settings.sigma);
+    if (!mapEl || key === mapKey) return;
+    mapKey = key;
+    scores.clear();
+    worker?.terminate();
+    worker = null;
+    // Dragging the forecast-error slider asks again at every step: start the run once it rests.
+    const ask: WeekPlanAsk = { key, sigma: settings.sigma };
+    clearTimeout(mapTimer);
+    mapTimer = window.setTimeout(() => startPlans(ask), 250);
+  }
+  /** No worker (blocked, or it failed): the map goes, and the rest of the figure stays. */
+  const mapFailed = () => {
+    const wrap = mapEl?.closest<HTMLElement>(".rs-map-wrap");
+    if (wrap) wrap.hidden = true;
+  };
+  function startPlans(ask: WeekPlanAsk): void {
+    let w: Worker;
+    try {
+      w = new Worker(new URL("../sim/weekPlans.worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      mapFailed();
+      return;
+    }
+    worker = w;
+    w.onerror = () => {
+      w.terminate();
+      if (worker === w) {
+        worker = null;
+        mapFailed();
+      }
+    };
+    w.onmessage = (e: MessageEvent<WeekPlanScore>) => {
+      if (e.data.key !== mapKey) return;
+      scores.set(e.data.plan, e.data);
+      if (scores.size === WEEK_PLANS) {
+        w.terminate();
+        if (worker === w) worker = null;
+      }
+      if (!mapQueued) {
+        mapQueued = true;
+        requestAnimationFrame(() => {
+          mapQueued = false;
+          renderMap();
+        });
+      }
+    };
+    w.postMessage(ask);
+  }
+  function renderMap(): void {
+    if (!mapEl) return;
+    const W = Math.max(280, Math.round(mapEl.clientWidth));
+    const H = 240;
+    const L = 54;
+    const R = W - 10;
+    const T = 12;
+    const B = H - 46;
+    const all = [...scores.values()];
+    // Crew-hours from just under two cooks' shifts to past the longest week; each crew's shifts are a tick.
+    const base = PLAN_CREWS.map((n) => (n * KITCHEN.shiftMin * KITCHEN.forecast.length) / 60);
+    const x0 = Math.floor((base[0]! - 12) / 10) * 10;
+    const x1 = Math.ceil((Math.max(base[base.length - 1]! + 12, ...all.map((a) => a.paid)) + 4) / 10) * 10;
+    const nice = (v: number) => [10, 20, 50, 100, 200, 300, 500, 1000, 1500, 2000, 3000].find((x) => x >= v) ?? Math.ceil(v / 1000) * 1000;
+    const yMax = nice(Math.max(10, ...all.map((a) => a.lateP90)));
+    const X = (v: number) => L + ((v - x0) / (x1 - x0)) * (R - L);
+    // A square-root scale: the plans that leave a few meals late stand apart from those that leave none.
+    const Y = (v: number) => B - Math.sqrt(Math.max(0, v) / yMax) * (B - T);
+    const yTicks: number[] = [];
+    for (const v of [0, 10, 50, 100, 500, 1000, 2000, yMax]) if (v <= yMax && !yTicks.includes(v) && (yTicks.length === 0 || Y(yTicks[yTicks.length - 1]!) - Y(v) >= 22)) yTicks.push(v);
+    if (yTicks[yTicks.length - 1] !== yMax) yTicks[yTicks.length - 1] = yMax;
+    const front = scores.size === WEEK_PLANS ? frontier() : new Set<number>();
+    const cur = curPlan();
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="rs-svg rs-mapsvg wk-mapsvg">`;
+    for (const v of yTicks) svg += `<line class="g" x1="${L}" x2="${R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="ya" x="${L - 6}" y="${Y(v) + 3.5}">${v}</text>`;
+    base.forEach((v, i) => {
+      svg += `<line class="g v" x1="${X(v)}" x2="${X(v)}" y1="${T}" y2="${B}"/><text class="xa" x="${X(v)}" y="${B + 14}">${v} h</text>`;
+      svg += `<text class="xa crew" x="${X(v)}" y="${B + 26}">${PLAN_CREWS[i]} cooks</text>`;
+    });
+    svg += `<text class="ax" x="${(L + R) / 2}" y="${H - 4}">Crew-hours paid a week</text><text class="ax" transform="translate(11 ${(T + B) / 2}) rotate(-90)">Meals late, 1 week in 10</text>`;
+    if (front.size > 1) {
+      const pts = all.filter((a) => front.has(a.plan)).sort((a, b) => a.paid - b.paid || b.lateP90 - a.lateP90);
+      // Plans tied on both counts are all on the frontier; the line joins one of each.
+      for (let k = pts.length - 1; k > 0; k--) if (hrs(pts[k]!) === hrs(pts[k - 1]!) && lateOf(pts[k]!) === lateOf(pts[k - 1]!)) pts.splice(k, 1);
+      svg += `<path class="front" d="${pts.map((a, k) => `${k ? "L" : "M"}${X(a.paid).toFixed(1)} ${Y(a.lateP90).toFixed(1)}`).join("")}"/>`;
+    }
+    // Frontier dots last, so the plans worth picking are on top.
+    const order = all.slice().sort((a, b) => Number(front.has(a.plan)) - Number(front.has(b.plan)));
+    for (const a of order) {
+      const x = X(a.paid);
+      const y = Y(a.lateP90);
+      const p = weekPlan(a.plan);
+      const cls = `pt ${p.strategy}${front.has(a.plan) ? " on" : ""}`;
+      const tip = `<title>${describe(a.plan)}: ${hrs(a)} crew-hours a week; meals late ${Math.round(a.late)} in a typical week, ${lateOf(a)} 1 week in 10; ${Math.round(a.waste)} portions thrown out.</title>`;
+      svg += p.swaps.length
+        ? `<path class="${cls}" data-plan="${a.plan}" d="M${x.toFixed(1)} ${(y - 5).toFixed(1)}l5 5l-5 5l-5 -5z">${tip}</path>`
+        : `<circle class="${cls}" data-plan="${a.plan}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4">${tip}</circle>`;
+    }
+    const me = scores.get(cur);
+    if (me) {
+      const x = X(me.paid);
+      const y = Y(me.lateP90);
+      const left = x > R - 80;
+      svg += `<circle class="cur" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"/><text class="curl${left ? " l" : ""}" x="${(left ? x - 12 : x + 12).toFixed(1)}" y="${Math.max(T + 10, y - 8).toFixed(1)}">This plan</text>`;
+    }
+    mapEl.innerHTML = svg + "</svg>";
+    if (!mapNote) return;
+    if (scores.size < WEEK_PLANS) {
+      mapNote.textContent = `Running plan ${scores.size + 1} of ${WEEK_PLANS}, each over the same 400 weeks…`;
+      return;
+    }
+    const onTime = all.filter((a) => lateOf(a) === 0).sort((a, b) => hrs(a) - hrs(b) || a.waste - b.waste || a.paid - b.paid)[0];
+    let text = onTime ? `Cheapest with no meal late 9 weeks in 10: ${describe(onTime.plan)}, ${hrs(onTime)}\u00a0h. ` : "No plan gets every meal out on time 9 weeks in 10. ";
+    if (front.has(cur)) text += "This plan is on the frontier.";
+    else if (me) {
+      const better = all.filter((b) => beats(b, me)).length;
+      text += `${better} ${better === 1 ? "plan does" : "plans do"} better on one count and no worse on the other.`;
+    }
+    mapNote.textContent = `${text} Pick a dot to run it.`;
+  }
+  mapEl?.addEventListener("click", (e) => {
+    // The nearest dot within a fingertip of the click (the dots are 8 px across).
+    let t: SVGElement | null = null;
+    let best = 22;
+    for (const el of mapEl.querySelectorAll<SVGElement>("[data-plan]")) {
+      const r = el.getBoundingClientRect();
+      const d = Math.hypot(r.x + r.width / 2 - e.clientX, r.y + r.height / 2 - e.clientY);
+      if (d < best) {
+        best = d;
+        t = el;
+      }
+    }
+    if (!t) return;
+    const p = weekPlan(Number(t.dataset.plan));
+    crew = p.cooks as Crew;
+    for (const b of planBtns) b.setAttribute("aria-pressed", String(b.dataset.wkPlan === p.strategy));
+    settings.racks = p.racks;
+    if (racksIn) racksIn.value = String(p.racks);
+    settings.swaps = [...p.swaps];
+    update();
+  });
+  if (mapEl) {
+    let lastMapW = mapEl.clientWidth;
+    new ResizeObserver(() => {
+      if (Math.abs(mapEl.clientWidth - lastMapW) < 4) return;
+      lastMapW = mapEl.clientWidth;
+      renderMap();
+    }).observe(mapEl);
+  }
 
   function jumpTo(d: number): void {
     weekT = spans.days[d]!.t0 + 0.01;

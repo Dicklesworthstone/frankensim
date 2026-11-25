@@ -1,5 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { DAYS, KITCHEN, MENU, SWAPS, menuFor, rng, runCommissary, simulateWeek, type Kitchen, type Strategy } from "./commissaryWeek";
+import {
+  DAYS,
+  KITCHEN,
+  MENU,
+  SWAPS,
+  WEEK_PLANS,
+  menuFor,
+  paidHours,
+  rng,
+  runCommissary,
+  simulateWeek,
+  weekPlan,
+  weekPlanIndex,
+  withCooks,
+  type Kitchen,
+  type Strategy,
+} from "./commissaryWeek";
 
 const ALL_SWAPS = Object.keys(SWAPS);
 const share = (swaps: readonly string[]) => menuFor(swaps).reduce((s, d) => s + d.share, 0);
@@ -149,4 +165,25 @@ test("a fourth cook on the day and three cooking ahead both get the week's meals
   expect(fourDay.idle.p50).toBeGreaterThan(threeAhead.idle.p50 + 30);
   // Two cooks cannot carry the week, whatever is cooked ahead or swapped.
   expect(plan("ahead", 2, ALL_SWAPS, 5).late.p50).toBeGreaterThan(100);
+});
+
+test("the plan map's plans: every crew, timing, rack count and set of swaps once, numbered both ways", () => {
+  const seen = new Set<string>();
+  for (let i = 0; i < WEEK_PLANS; i++) {
+    const p = weekPlan(i);
+    expect(weekPlanIndex(p)).toBe(i);
+    seen.add(`${p.cooks}|${p.strategy}|${p.racks}|${[...p.swaps].sort().join("+")}`);
+  }
+  expect(WEEK_PLANS).toBe(3 * 2 * 5 * 8);
+  expect(seen.size).toBe(WEEK_PLANS);
+  // The order the swaps are listed in does not change the plan.
+  expect(weekPlanIndex({ cooks: 3, strategy: "ahead", racks: 2, swaps: ["salad", "chicken"] })).toBe(weekPlanIndex({ cooks: 3, strategy: "ahead", racks: 2, swaps: ["chicken", "salad"] }));
+});
+
+test("paid crew-hours: every cook's shift on every day, plus a median week's overtime", () => {
+  for (const cooks of [2, 3, 4]) {
+    const r = runCommissary({ strategy: "day", swaps: [], sigma: 0.1 }, withCooks(cooks));
+    expect(paidHours(r, cooks)).toBeCloseTo(cooks * 8 * DAYS.length + r.ot.p50, 9);
+  }
+  expect(withCooks(KITCHEN.cooks)).toBe(KITCHEN);
 });

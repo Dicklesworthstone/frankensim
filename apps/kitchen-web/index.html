@@ -878,6 +878,11 @@
                     <div class="wk-tile"><span>Meals out late</span><b><i data-wk-late>…</i><em data-wk-late-d hidden></em></b><small>1 week in 10: <i data-wk-late-p90>…</i></small></div>
                     <div class="wk-tile"><span>Portions thrown out</span><b><i data-wk-waste>…</i><em data-wk-waste-d hidden></em></b><small>1 week in 10: <i data-wk-waste-p90>…</i></small></div>
                   </div>
+                  <div class="rs-map-wrap">
+                    <p class="rs-map-head"><b>All 240 plans for this week</b><span class="wk-keys rs-map-keys"><span class="dayof">Cook on the day</span><span class="ahead">Cook ahead</span><span class="bal">Dishes swapped</span><span class="cap">Frontier</span></span></p>
+                    <div class="rs-map" data-wk-map role="img" aria-label="Every plan for this week, each run over the same 400 simulated weeks: crew-hours paid against meals out late 1 week in 10, with the plans no other beats on both joined up"></div>
+                    <p class="rs-map-note" data-wk-map-note></p>
+                  </div>
                 </div>
 
                 <div class="lab-side">
@@ -908,6 +913,7 @@
                 <p class="how-title">How it's computed</p>
                 <p>Each morning the day's orders are known and the rest of the week is a forecast. Every dish costs the crew minutes per meal. To cook ahead, the planner takes the time left after the day's own work and cooks dishes that keep for the days the forecast says will run over, as close to that day as each dish allows. It works within the blast chiller's 75 pans a day and the racks in the walk-in. Chilled food goes out oldest first and is thrown out once it passes its keeping time.</p>
                 <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes.</p>
+                  <p>The plan map runs all 240 plans over the same 400 weeks: two, three or four cooks, cooking on the day or ahead, one to five racks, and any of the three swaps. Crew-hours are every shift plus a middle week's overtime; meals late are the count one week in ten reaches.</p>
               </div>
               <div>
                 <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − cooks × 8 h)</code>

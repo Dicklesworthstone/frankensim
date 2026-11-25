@@ -337,6 +337,28 @@ async function main() {
         }
         await page.click('[data-wk-crew="3"]');
         await sleep(300);
+        // Every plan for the week, run in a worker: all 240 must arrive, a frontier be drawn, and a dot set the plan.
+        await page.waitForFunction(() => document.querySelectorAll("[data-wk-map] [data-plan]").length >= 240, { timeout: 90000 });
+        await sleep(200);
+        const wkFront = await page.$$eval("[data-wk-map] .pt.on", (els) => els.length);
+        const wkNote = await page.$eval("[data-wk-map-note]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Week plan map: 240 plans, ${wkFront} on the frontier | ${wkNote.slice(0, 110)}`);
+        if (wkFront < 2 || !/^Cheapest with no meal late/.test(wkNote)) throw new Error(`The week plan map did not finish: ${wkFront} on the frontier, "${wkNote}"`);
+        await page.$eval("[data-wk-map]", (el) => el.scrollIntoView({ block: "center" }));
+        await sleep(300);
+        const wkDot = await page.$$eval("[data-wk-map] .pt.on", (els) => {
+          const el = els.find((e) => /^2 cooks/.test(e.querySelector("title")?.textContent || ""));
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        });
+        if (!wkDot) throw new Error("The week plan map has no two-cook plan on its frontier");
+        await page.mouse.click(wkDot.x, wkDot.y);
+        await sleep(400);
+        const wkCrew = await page.$eval('[data-wk-crew][aria-pressed="true"]', (el) => el.textContent || "");
+        if (!/2 cooks/.test(wkCrew)) throw new Error(`A two-cook dot on the week map set "${wkCrew}"`);
+        await page.click('[data-wk-crew="3"]');
+        await sleep(300);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-week.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-week.png");
       }
