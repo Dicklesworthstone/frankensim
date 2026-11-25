@@ -16,7 +16,7 @@
 import * as THREE from "three";
 import { createInitialOvenState, stepOvenKernel, type OvenConfig, type OvenState } from "../sim/physicsKernels";
 import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, glOf, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Ext, type Model } from "./models/all";
+import { buildFixture, type Ext, type Model, type Piece } from "./models/all";
 import { palette, perforation } from "./models/materials";
 import { combiCavity, vessel } from "./models/ovens";
 import { Shop } from "./models/shop";
@@ -31,6 +31,11 @@ const BOULE_EXT: Ext = { w: 0.18, d: 0.18, h: 0.088 };
 export const OVEN_BOULE_DETAIL = 2;
 const TABLE_ID = "NSF-PREPTABLE-48";
 const TABLE_EXT: Ext = { w: 1.219, d: 0.762, h: 0.914 };
+/** The pieces mountOvenLab builds, for main.ts to build ahead (the loaf waits for its crust, built on another thread). */
+export const OVEN_PIECES: readonly Piece[] = [
+  [COMBI_ID, COMBI_EXT, 2],
+  [TABLE_ID, TABLE_EXT, 1],
+];
 
 /** The runner level the tray rides on, counted from the bottom. */
 const RAIL = 1;

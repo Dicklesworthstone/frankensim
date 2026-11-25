@@ -29,7 +29,7 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { FLAGSHIP_EQUIPMENT, categorizeCatalogEntry, type CatalogEntry, type EquipmentTabId } from "../sim/exemplars";
 import { createScrollSafeOrbit, glOf, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Model } from "./models/all";
+import { buildFixture, type Model, type Piece } from "./models/all";
 import "./models/electricHob";
 import { palette } from "./models/materials";
 import { makeRenderer, studioEnvironment } from "./models/stage";
@@ -148,6 +148,13 @@ const ARCH: Arch[] = [
 ];
 
 const BY_ID = new Map(ARCH.map((a) => [a.id, a]));
+/** The piece the turntable opens on. */
+const FIRST_ID = "NSF-RANGE-GAS-6B";
+/** The piece mountEquipmentTurntable builds as it mounts, for main.ts to build ahead (as show() builds it). */
+export const EQUIPMENT_PIECES: readonly Piece[] = (() => {
+  const ext = BY_ID.get(FIRST_ID)?.ext;
+  return ext ? [[FIRST_ID, { w: ext[0], d: ext[1], h: ext[2] }, 2, true]] : [];
+})();
 const FLAGSHIP_IDS = new Set(FLAGSHIP_EQUIPMENT.map((f) => f.id));
 
 function tabOf(a: Arch): EquipmentTabId {
@@ -1114,7 +1121,7 @@ export function mountEquipmentTurntable(root: HTMLElement): void {
   /** Dev only: hold the model as it stands (no choreography), for page checks. */
   let debugHold = false;
   let activeTab: EquipmentTabId = "hot_line";
-  let activeId = "NSF-RANGE-GAS-6B";
+  let activeId = FIRST_ID;
   let inView = false;
   let dragging = false;
   let lastInteract = -1e9;

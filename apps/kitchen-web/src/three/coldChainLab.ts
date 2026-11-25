@@ -43,7 +43,7 @@ import {
   type WalkinState,
 } from "../sim/physicsKernels";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, drawStripChart, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Ext, type Model } from "./models/all";
+import { buildFixture, type Ext, type Model, type Piece } from "./models/all";
 import { speedRackSlides } from "./models/cold";
 import { palette } from "./models/materials";
 import { vessel } from "./models/ovens";
@@ -285,6 +285,11 @@ function slidesPerPan(depthM: number): number {
 }
 const FOODS: PanFood[] = [0, 1, 3, 2];
 const RACK_EXT: Ext = { w: 0.521, d: 0.66, h: 1.753 };
+const WI_EXT: Ext = { w: 2.438, d: 3.048, h: 2.438 };
+/** The carrier's worktable. */
+const TABLE_EXT: Ext = { w: 1.219, d: 0.762, h: 0.914 };
+/** The room close up on a laptop, a step coarser on a phone. */
+const roomDetailFor = (): Detail => (Math.min(window.innerWidth, window.innerHeight) < 600 ? 1 : 2);
 const RACK_SLIDES = speedRackSlides(RACK_EXT.h);
 /**
  * Where the racks stand once rolled in, world (x, z) of each rack's centre, in the order they fill: two down the right
@@ -309,6 +314,16 @@ interface LoadKind {
 /* ------------------------------------------------------------------------------------------------------------ */
 
 const CAR_EXT: Ext = { w: 0.46, d: 0.635, h: 0.625 };
+/** The pieces mountColdChainLab builds, for main.ts to build ahead: the walk-in, a rack for each spot, the carrier's
+ * table and the carrier. */
+export function coldPieces(): Piece[] {
+  return [
+    ["NSF-WALKIN-COOLER", WI_EXT, roomDetailFor()],
+    ...RACK_SPOTS.map((): Piece => ["NSF-SPEEDRACK-20PAN", RACK_EXT, 1]),
+    ["NSF-PREPTABLE-48", TABLE_EXT, 1],
+    ["NSF-CARRIER-INSULATED", CAR_EXT, 2],
+  ];
+}
 /** The section plane, in the carrier's frame: just inside the cavity's right wall (x 0.05..0.41). */
 const CAR_CUT_X = 0.4;
 
@@ -357,7 +372,7 @@ export function mountColdChainLab(root: HTMLElement): void {
   renderer.localClippingEnabled = true;
   const phone = Math.min(window.innerWidth, window.innerHeight) < 600;
   // The room close up on a laptop, a step coarser on a phone; racks and their loads, many of them, a step coarser still.
-  const roomDetail: Detail = phone ? 1 : 2;
+  const roomDetail = roomDetailFor();
   const detail: Detail = 1;
 
   const camera = new THREE.PerspectiveCamera(36, 16 / 10, 0.03, 40);
@@ -372,7 +387,6 @@ export function mountColdChainLab(root: HTMLElement): void {
   // =========================================================================
   // WALK-IN COOLER
   // =========================================================================
-  const WI_EXT: Ext = { w: 2.438, d: 3.048, h: 2.438 };
   const wiSet = studioScene(renderer, new THREE.Vector3(0.2, 1.0, 0), 3.4, 0.5);
   const wiScene = wiSet.scene;
   // A warm kitchen outside, a cold room inside: the key a little warm and lower, the sky fill and the rim cool.
@@ -515,7 +529,6 @@ export function mountColdChainLab(root: HTMLElement): void {
   // =========================================================================
   // INSULATED CATERING CARRIER
   // =========================================================================
-  const TABLE_EXT: Ext = { w: 1.219, d: 0.762, h: 0.914 };
   const carSet = studioScene(renderer, new THREE.Vector3(0, 1.1, 0), 1.2, 0.7);
   const carScene = carSet.scene;
   carSet.lights.key.intensity = 1.5;

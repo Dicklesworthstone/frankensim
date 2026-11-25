@@ -37,7 +37,7 @@ import {
   type StoveState,
 } from "../sim/physicsKernels";
 import { bindCanvasResize, createScrollSafeOrbit, createStudioRenderer, drawStripChart, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Ext, type Model } from "./models/all";
+import { buildFixture, type Ext, type Model, type Piece } from "./models/all";
 import "./models/electricHob";
 import { palette } from "./models/materials";
 import { Shop, rbox, cyl, turnJoint } from "./models/shop";
@@ -65,6 +65,13 @@ const STEAK_YAW = 0.35;
 /** The steak's mass, and the box its ribeye is built in: the slab's thickness, with room to thicken as it cooks. */
 const STEAK_MASS_G = 340;
 export const STOVE_STEAK = { w: STEAK_W, d: STEAK_D, h: (STEAK_MASS_G / 1000 / (MEAT_RHO * SLAB_AREA_M2)) * (1 + 0.35 * 0.3), detail: 2 as const };
+/** The pieces mountStoveLab builds, for main.ts to build ahead once the steak's tissue has arrived from its worker:
+ * the induction hob it starts on, the steak and the wine bottle (a range or hotplate is built when it is picked). */
+export const STOVE_PIECES: readonly Piece[] = [
+  ["NSF-INDUCTION-HOB-2Z", HOB, 2],
+  ["ARCH-FOOD-STEAK-RIBEYE", { w: STOVE_STEAK.w, d: STOVE_STEAK.d, h: STOVE_STEAK.h }, STOVE_STEAK.detail],
+  ["NSF-DEGLAZE-BOTTLE", BOTTLE, 2],
+];
 /** The induction zone's rating, and the hotplate element's: what the kernel's coupled power is a fraction of. */
 const ZONE_RATED_W = 3500;
 /** Wine: 120 g per press of the button, from a 750 mL bottle; ~0.99 g/mL. */

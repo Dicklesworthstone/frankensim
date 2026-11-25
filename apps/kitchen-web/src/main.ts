@@ -3,17 +3,18 @@ import "@fontsource-variable/jetbrains-mono";
 import "./styles/main.css";
 
 import { EXEMPLARS, computeKitchenTelemetry, type ExemplarId } from "./sim/exemplars";
-import { mountBrigadeStage } from "./three/brigadeStage";
-import { mountColdChainLab } from "./three/coldChainLab";
-import { mountEquipmentTurntable } from "./three/equipmentTurntable";
+import { BRIGADE_PIECES, mountBrigadeStage } from "./three/brigadeStage";
+import { coldPieces, mountColdChainLab } from "./three/coldChainLab";
+import { EQUIPMENT_PIECES, mountEquipmentTurntable } from "./three/equipmentTurntable";
 import { mountHeroKitchen, type HeroController } from "./three/heroKitchen";
-import { OVEN_BOULE_DETAIL, mountOvenLab } from "./three/ovenLab";
-import { STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
+import { OVEN_BOULE_DETAIL, OVEN_PIECES, mountOvenLab } from "./three/ovenLab";
+import { STOVE_PIECES, STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { prefetchBouleLayers } from "./three/models/boulePrefetch";
-import { mountWeekLab } from "./three/weekLab";
-import { mountFloorLab } from "./three/floorLab";
-import { mountRushLab } from "./three/rushLab";
+import { buildAhead, type Piece } from "./three/models/all";
+import { WEEK_PIECES, mountWeekLab } from "./three/weekLab";
+import { floorPieces, mountFloorLab } from "./three/floorLab";
+import { RUSH_PIECES, mountRushLab } from "./three/rushLab";
 
 declare global {
   interface Window {
@@ -228,15 +229,25 @@ function bootstrap(): void {
   initFleetMatrix(hero);
 
   const mountedChapters: string[] = hero ? ["hero"] : [];
-  const pendingMounts: Array<{ id: string; el: HTMLElement; mount: (el: HTMLElement) => void; done: boolean; after?: Promise<void> }> = [
-    { id: "equipment", el: document.getElementById("equipment")!, mount: mountEquipmentTurntable, done: false },
-    { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false, after: steakReady },
-    { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false },
-    { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false },
-    { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false },
-    { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false },
-    { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false },
-    { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false },
+  /** A chapter to mount: `done` once asked for, `ran` once its mount has run; `pieces` what it builds (see below). */
+  type Pending = {
+    id: string;
+    el: HTMLElement;
+    mount: (el: HTMLElement) => void;
+    done: boolean;
+    ran?: boolean;
+    after?: Promise<void>;
+    pieces?: readonly Piece[] | (() => Promise<readonly Piece[]>);
+  };
+  const pendingMounts: Pending[] = [
+    { id: "equipment", el: document.getElementById("equipment")!, mount: mountEquipmentTurntable, done: false, pieces: EQUIPMENT_PIECES },
+    { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false, after: steakReady, pieces: () => steakReady.then(() => STOVE_PIECES) },
+    { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false, pieces: OVEN_PIECES },
+    { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false, pieces: coldPieces() },
+    { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false, pieces: BRIGADE_PIECES },
+    { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false, pieces: WEEK_PIECES },
+    { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false, pieces: floorPieces },
+    { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false, pieces: RUSH_PIECES },
   ].filter((entry) => entry.el !== null);
 
   // Each chapter mounts in a task of its own, in the order asked. Two that come into range together, or the stove
@@ -256,10 +267,11 @@ function bootstrap(): void {
       setTimeout(drain, 0);
     }
   };
-  const mountOne = (entry: (typeof pendingMounts)[number]) => {
+  const mountOne = (entry: Pending) => {
     if (entry.done) return;
     entry.done = true;
     const go = () => {
+      entry.ran = true;
       if (tryMount(entry.id, () => (entry.mount(entry.el), true))) mountedChapters.push(entry.id);
     };
     if (entry.after) void entry.after.then(() => enqueue(go));
@@ -283,6 +295,59 @@ function bootstrap(): void {
   for (const entry of pendingMounts) {
     lazyObserver.observe(entry.el);
   }
+
+  // Building its pieces of equipment is most of the task that mounts a chapter. Once the hero's first kitchen is up,
+  // each chapter within three screens has its pieces built ahead, one to an idle moment, for its mount to take; a
+  // chapter that mounts first builds whatever is not ready itself. (The floor's pieces come from the plan it fetches.)
+  const aheadQueue: Array<{ entry: Pending; piece: Piece }> = [];
+  let aheadBusy = false;
+  const idle = (cb: (d: IdleDeadline) => void) => {
+    if ("requestIdleCallback" in window) requestIdleCallback(cb, { timeout: 250 });
+    else setTimeout(() => cb({ didTimeout: true, timeRemaining: () => 0 }), 50);
+  };
+  const buildSome = (d: IdleDeadline) => {
+    let built = 0;
+    // While the browser has 10 ms to spare before its next frame. A chapter on screen that animates leaves little of
+    // that on a slow phone, so after a quarter of a second's wait one piece is built anyway: a frame or two late now
+    // and then while the reader is mid-chapter, against a second's freeze on reaching the next.
+    while (aheadQueue.length && (d.didTimeout ? built === 0 : d.timeRemaining() >= 10)) {
+      const { entry, piece } = aheadQueue.shift()!;
+      if (entry.ran) continue;
+      try {
+        buildAhead(piece);
+      } catch {
+        // Left to the chapter's mount, which builds it itself and reports any failure in its own place.
+      }
+      built++;
+    }
+    if (aheadQueue.length) idle(buildSome);
+    else aheadBusy = false;
+  };
+  const queueAhead = (entry: Pending, pieces: readonly Piece[]) => {
+    if (entry.ran) return;
+    for (const piece of pieces) aheadQueue.push({ entry, piece });
+    if (aheadQueue.length && !aheadBusy) {
+      aheadBusy = true;
+      idle(buildSome);
+    }
+  };
+  const aheadObserver = new IntersectionObserver(
+    (entries) => {
+      for (const ioEntry of entries) {
+        if (!ioEntry.isIntersecting) continue;
+        aheadObserver.unobserve(ioEntry.target);
+        const entry = pendingMounts.find((p) => p.el === ioEntry.target);
+        const pieces = entry?.pieces;
+        if (!entry || !pieces) continue;
+        if (typeof pieces === "function") void pieces().then((list) => queueAhead(entry, list), () => undefined);
+        else queueAhead(entry, pieces);
+      }
+    },
+    { rootMargin: "300% 0px" },
+  );
+  void (hero?.ready ?? Promise.resolve()).then(() => {
+    for (const entry of pendingMounts) if (entry.pieces) aheadObserver.observe(entry.el);
+  });
 
   window.__KITCHEN_LAB__ = {
     hero,

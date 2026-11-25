@@ -29,7 +29,7 @@ import {
 } from "../sim/commissaryFloor";
 import { menuFor, runCommissary } from "../sim/commissaryWeek";
 import { ASSET_BASE, bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { buildFixture } from "./models/all";
+import { buildFixture, type Piece } from "./models/all";
 import { palette } from "./models/materials";
 import { Routine, makeStaff, panSeconds, type RoutineStep, type Staff } from "./models/people";
 import { placeFixture } from "./models/shop";
@@ -146,6 +146,40 @@ function mergeStatic(groups: THREE.Object3D[], into: THREE.Object3D): void {
 
 const fwd = (yaw: number): [number, number] => [Math.sin(yaw), Math.cos(yaw)];
 
+type PlanManifest = FloorManifest & { fixtures: (FloorManifest["fixtures"][number] & { local_extents_m: [number, number, number] })[] };
+const floorPhone = () => window.matchMedia("(max-width: 720px)").matches;
+/** The commissary's plan and site notes: fetched once, for the mount and for building its pieces ahead. */
+let planReq: Promise<[PlanManifest | null, FloorMeta | null]> | null = null;
+function fetchPlan(): Promise<[PlanManifest | null, FloorMeta | null]> {
+  const base = `${ASSET_BASE}/exemplars/${ID}/${ID}`;
+  const json = (url: string) => fetch(url).then((r) => (r.ok ? r.json() : null));
+  planReq ??= Promise.all([json(`${base}.scene3d.v1.json`), json(`${base}.site_metadata.json`)]).catch((e: unknown) => {
+    planReq = null;
+    throw e;
+  });
+  return planReq;
+}
+
+/** The pieces start() builds the room from, once the plan has arrived, for main.ts to build ahead. */
+export async function floorPieces(): Promise<Piece[]> {
+  const [manifest] = await fetchPlan();
+  if (!manifest) return [];
+  const phone = floorPhone();
+  const out: Piece[] = [];
+  for (const f of manifest.fixtures) {
+    if (SMALL.test(f.archetype_id) || f.archetype_id === CHILLER_ID) continue;
+    const [w, d, h] = f.local_extents_m;
+    out.push([f.archetype_id, { w, d, h }, phone ? 0 : HOT.test(f.archetype_id) ? 1 : 0, true]);
+  }
+  const chiller = manifest.fixtures.find((f) => f.archetype_id === CHILLER_ID);
+  if (chiller) {
+    const [w, d, h] = chiller.local_extents_m;
+    out.push([CHILLER_ID, { w, d, h }, phone ? 1 : 2, true], [CHILLER_ID, { w, d, h }, 0, false]);
+  }
+  out.push(["NSF-HOTEL-PAN-FULL-4IN", PAN_EXT, 1]);
+  return out;
+}
+
 export function mountFloorLab(root: HTMLElement): void {
   const stageEl = root.querySelector<HTMLElement>("[data-floor-stage]");
   const canvas = root.querySelector<HTMLCanvasElement>("[data-floor-canvas]");
@@ -153,14 +187,13 @@ export function mountFloorLab(root: HTMLElement): void {
   const maybeRenderer = createStudioRenderer(canvas, false);
   if (!maybeRenderer) return;
   const renderer = maybeRenderer;
-  const phone = window.matchMedia("(max-width: 720px)").matches;
+  const phone = floorPhone();
   const statusEl = root.querySelector<HTMLElement>("[data-fl-status]");
-  const base = `${ASSET_BASE}/exemplars/${ID}/${ID}`;
   if (statusEl) statusEl.textContent = "Building the commissary…";
-  void Promise.all([fetch(`${base}.scene3d.v1.json`).then((r) => (r.ok ? r.json() : null)), fetch(`${base}.site_metadata.json`).then((r) => (r.ok ? r.json() : null))])
+  void fetchPlan()
     .then(([manifest, meta]) => {
       if (!manifest) throw new Error("manifest unavailable");
-      start(root, stageEl, canvas, renderer, manifest as FloorManifest & { fixtures: (FloorManifest["fixtures"][number] & { local_extents_m: [number, number, number] })[] }, meta as FloorMeta | null, phone);
+      start(root, stageEl, canvas, renderer, manifest, meta, phone);
     })
     .catch(() => {
       if (statusEl) {

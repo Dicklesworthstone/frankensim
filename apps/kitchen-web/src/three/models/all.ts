@@ -6,4 +6,4 @@ import "./cold";
 import "./support";
 import "./smallwares";
 
-export { buildFixture, hasBuilder, type Ext, type Hooks, type Model } from "./index";
+export { buildAhead, buildFixture, hasBuilder, type Ext, type Hooks, type Model, type Piece } from "./index";

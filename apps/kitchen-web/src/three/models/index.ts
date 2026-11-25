@@ -63,8 +63,33 @@ export function hasBuilder(id: string): boolean {
   return registry.has(id) || fallbacks.some(([re]) => re.test(id));
 }
 
-/** Build one archetype in its fixture frame. */
+/** Build one archetype in its fixture frame: one built ahead with the same arguments (see buildAhead), or now. */
 export function buildFixture(id: string, e: Ext, detail: Detail, shadows = true): Model {
+  const made = ahead.get(pieceKey(id, e, detail, shadows))?.pop();
+  return made ? { ...made, ext: e } : buildNow(id, e, detail, shadows);
+}
+
+/** What buildFixture takes: one piece for a chapter to build. */
+export type Piece = readonly [id: string, e: Ext, detail: Detail, shadows?: boolean];
+
+/** Pieces built ahead, by their arguments, each for one buildFixture call to take. */
+const ahead = new Map<string, Model[]>();
+const pieceKey = (id: string, e: Ext, detail: Detail, shadows: boolean) => `${id}|${e.w}|${e.d}|${e.h}|${detail}|${shadows}`;
+
+/**
+ * Build a piece now, for the next buildFixture call with the same arguments to take. A chapter's pieces built ahead,
+ * one to an idle moment, come off the long task that mounts it. Each is built once and taken once, so its taker owns
+ * it exactly as if it had built it itself.
+ */
+export function buildAhead([id, e, detail, shadows = true]: Piece): void {
+  const key = pieceKey(id, e, detail, shadows);
+  const made = buildNow(id, e, detail, shadows);
+  const list = ahead.get(key);
+  if (list) list.push(made);
+  else ahead.set(key, [made]);
+}
+
+function buildNow(id: string, e: Ext, detail: Detail, shadows: boolean): Model {
   const b = registry.get(id) ?? fallbacks.find(([re]) => re.test(id))?.[1] ?? plainCase;
   const shop = new Shop(detail, id);
   const after = b(shop, e);

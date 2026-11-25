@@ -16,7 +16,7 @@ import * as THREE from "three";
 import { KEEPERS, PLANS, RUSH_MENU, SERVICE, modesFor, planOf, planSettings, runRush, rushMenu, type DayRun, type Mode, type PanLook, type RushDay, type RushRun, type RushSettings } from "../sim/serviceRush";
 import type { PlanAsk, PlanScore } from "../sim/rushPlans.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Model } from "./models/all";
+import { buildFixture, type Model, type Piece } from "./models/all";
 import { T, hotelPan as tilePan } from "./models/cold";
 import { Shop } from "./models/shop";
 import { palette } from "./models/materials";
@@ -50,6 +50,16 @@ const COMBI = { id: "NSF-COMBI-6PAN", w: 0.847, d: 0.776, h: 0.782, x0: 0.04 };
 const PASS = { id: "NSF-PREPTABLE-96", w: 2.438, d: 0.762, h: 0.914, x0: -1.62 };
 const LAMP = { id: "NSF-HEATLAMP-STRIP-48", w: 1.219, d: 0.0636, h: 0.152 };
 const PAN = { id: "NSF-HOTEL-PAN-HALF-4IN", w: 0.325, d: 0.265, h: 0.065 };
+/** The fills a cabinet's pans are drawn at: a template of each food at each. */
+const FILLS = [0.85, 0.55, 0.28];
+/** The pieces mountRushLab builds, for main.ts to build ahead: the line, the pass and its two lamps, and the braise's
+ * pan at each fill (the other foods' pans are drawn without a fixture). */
+export const RUSH_PIECES: readonly Piece[] = [
+  ...[CAB, FRYER, GRIDDLE, TABLE, COMBI, PASS].map((f): Piece => [f.id, f, 2]),
+  [LAMP.id, LAMP, 1],
+  [LAMP.id, LAMP, 1],
+  ...FILLS.map((): Piece => [PAN.id, PAN, 1]),
+];
 /** The overshelf above the pass: its underside, its depth, centred over the table. */
 const SHELF_Y = 1.5;
 const SHELF_D = 0.3;
@@ -294,7 +304,6 @@ export function mountRushLab(root: HTMLElement): void {
   /* The cabinet's pans: per look, three fills (full, part, last scrapings). */
   const panGroup = new THREE.Group();
   scene.add(panGroup);
-  const FILLS = [0.85, 0.55, 0.28];
   const panSets = new Map(PAN_LOOKS.map((look) => [look, FILLS.map((f) => new Instances(panTemplate(look, f), SERVICE.cabinetPans, panGroup))] as const));
   // Rails as the cabinet builds them (models/ovens.ts holdingCabinet), less the lowest, over its water pan.
   const cavY0 = 0.17 + 0.065;

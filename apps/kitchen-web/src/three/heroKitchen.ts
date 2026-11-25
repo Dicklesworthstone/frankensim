@@ -31,6 +31,8 @@ import { combiCavity } from "./models/ovens";
 type OverlayMode = "pbr" | "thermal" | "plumes" | "aisles";
 
 export interface HeroController {
+  /** Settles once the first kitchen is built (or could not be). */
+  ready: Promise<void>;
   setExemplar(id: ExemplarId): Promise<void>;
   getLoadedExemplarId(): ExemplarId;
   getDrawCalls(): number;
@@ -4462,7 +4464,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
   if (!maybeRenderer) {
     // The poster stays as a still of the kitchen.
     if (statusEl) statusEl.textContent = "A still: the live kitchen needs WebGL";
-    return { setExemplar: async () => {}, getLoadedExemplarId: () => "mall_qsr_400", getDrawCalls: () => 0 };
+    return { ready: Promise.resolve(), setExemplar: async () => {}, getLoadedExemplarId: () => "mall_qsr_400", getDrawCalls: () => 0 };
   }
   const renderer = maybeRenderer;
   renderer.toneMappingExposure = 1.0;
@@ -4891,11 +4893,12 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     }
   }
   requestAnimationFrame(animate);
-  void loadExemplar(initialSpec.id);
+  const ready = loadExemplar(initialSpec.id).catch(() => undefined);
   void activeCameraPreset;
   void wide;
 
   return {
+    ready,
     setExemplar: loadExemplar,
     getLoadedExemplarId: () => currentSpec.id,
     getDrawCalls: () => lastDraws,

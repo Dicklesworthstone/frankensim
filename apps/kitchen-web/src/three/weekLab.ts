@@ -33,7 +33,7 @@ import {
 } from "../sim/commissaryWeek";
 import type { WeekPlanAsk, WeekPlanScore } from "../sim/weekPlans.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, getSoftParticleTexture, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Model } from "./models/all";
+import { buildFixture, type Model, type Piece } from "./models/all";
 import { speedRackSlides } from "./models/cold";
 import { palette } from "./models/materials";
 import { Routine, TOOLS, makeStaff, type Cohort, type RoutineStep, type Staff } from "./models/people";
@@ -90,6 +90,16 @@ const RACK_X0 = 1.32;
 const RACK_STEP = 0.66;
 const RACK_Z = 0.62;
 const HALF = { id: "NSF-HOTEL-PAN-HALF-4IN", w: 0.325, d: 0.265, h: 0.1 };
+/** The pieces mountWeekLab builds, for main.ts to build ahead: the table, cabinet and carrier, the line, a rack a
+ * day, and nine half pans (six pan templates, one in front of each of the three cooks it starts with). */
+export const WEEK_PIECES: readonly Piece[] = [
+  [TABLE.id, TABLE, 2],
+  [HOLD.id, HOLD, 2],
+  [CARRIER.id, CARRIER, 1],
+  ...LINE.map((f): Piece => [f.id, f, 2]),
+  ...DAYS.map((): Piece => [RACK.id, RACK, 1]),
+  ...Array.from({ length: 9 }, (): Piece => [HALF.id, HALF, 1]),
+];
 const SLIDES = speedRackSlides(RACK.h);
 const TRAY = { w: 0.457, d: 0.66, h: 0.025 };
 

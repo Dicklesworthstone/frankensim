@@ -23,7 +23,7 @@
 import * as THREE from "three";
 import { estimateLumbarTorqueNm } from "../sim/physicsKernels";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { buildFixture, type Model } from "./models/all";
+import { buildFixture, type Model, type Piece } from "./models/all";
 import { wireShelving } from "./models/cold";
 import { palette } from "./models/materials";
 import { Shop } from "./models/shop";
@@ -59,6 +59,12 @@ const TABLE_EXT = { w: 1.829, d: 0.762, h: 1.016 };
 const RANGE_EXT = { w: 0.914, d: 0.864, h: 1.473 };
 const RACK_EXT = { w: 0.521, d: 0.66, h: 1.753 };
 const PAN_EXT = { w: 0.53, d: 0.325, h: 0.1 };
+const BOARD = { id: "NSF-CUTTING-BOARD-HDPE-24X18", w: 0.61, d: 0.457, h: 0.019 };
+const KNIFE = { id: "NSF-CHEF-KNIFE-10IN", w: 0.052, d: 0.385, h: 0.024 };
+const SCALE = { id: "NSF-PORTION-SCALE-DIGI", w: 0.33, d: 0.356, h: 0.114 };
+const HALF = { id: "NSF-HOTEL-PAN-HALF-4IN", w: 0.325, d: 0.265, h: 0.1 };
+const SPARE = { id: "NSF-HOTEL-PAN-FULL-2IN", w: 0.53, d: 0.325, h: 0.065 };
+const POT = { id: "NSF-STOCKPOT-20QT", w: 0.31, d: 0.38, h: 0.295 };
 /** 36 x 14 in chrome wire shelving on 14 in posts, two shelves: the top one the pan's. */
 const SHELF = { L: 36 * IN, D: 14 * IN, H: 14 * IN, tiers: [0.17, 0.33] };
 /** The shelf's back edge, tucked under the table top's 60 mm front overhang, clear of its legs. */
@@ -74,6 +80,17 @@ const LINE_B = [
   { kind: "range", x: 0, name: "the range" },
   { kind: "rack", x: 1.2, name: "the speed rack" },
 ] as const;
+/** The pieces mountBrigadeStage builds, for main.ts to build ahead: line A's two tables and what stands on them, a
+ * spare pan on each cook's shelf, line B, the stockpot, and the pan each cook carries. */
+export const BRIGADE_PIECES: readonly Piece[] = [
+  ["NSF-PREPTABLE-72", TABLE_EXT, 1],
+  ["NSF-PREPTABLE-72", TABLE_EXT, 1],
+  ...[BOARD, KNIFE, SCALE, HALF, HALF].map((p): Piece => [p.id, p, 1]),
+  ...COHORTS.map((): Piece => [SPARE.id, SPARE, 1]),
+  ...LINE_B.map((b): Piece => (b.kind === "range" ? ["NSF-RANGE-GAS-6B", RANGE_EXT, 1] : ["NSF-SPEEDRACK-20PAN", RACK_EXT, 1])),
+  [POT.id, POT, 1],
+  ...COHORTS.map((): Piece => ["NSF-HOTEL-PAN-FULL-4IN", PAN_EXT, 2]),
+];
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* The pan: its steel and its food                                                                                */
@@ -362,13 +379,13 @@ export function mountBrigadeStage(root: HTMLElement): void {
     return m;
   };
   const TOP = 0.914;
-  prop("NSF-CUTTING-BOARD-HDPE-24X18", { w: 0.61, d: 0.457, h: 0.019 }, -1.25, TOP, -0.36, 0.04);
-  prop("NSF-CHEF-KNIFE-10IN", { w: 0.052, d: 0.385, h: 0.024 }, -1.08, TOP + 0.019, -0.36, 1.2);
-  prop("NSF-PORTION-SCALE-DIGI", { w: 0.33, d: 0.356, h: 0.114 }, 0.34, TOP, -0.42, -0.1);
-  const half = prop("NSF-HOTEL-PAN-HALF-4IN", { w: 0.325, d: 0.265, h: 0.1 }, -0.32, TOP, -0.4, 0.05);
+  prop(BOARD.id, BOARD, -1.25, TOP, -0.36, 0.04);
+  prop(KNIFE.id, KNIFE, -1.08, TOP + 0.019, -0.36, 1.2);
+  prop(SCALE.id, SCALE, 0.34, TOP, -0.42, -0.1);
+  const half = prop(HALF.id, HALF, -0.32, TOP, -0.4, 0.05);
   half.hooks.set?.("food", 2);
   half.hooks.set?.("fill", 0.7);
-  const half2 = prop("NSF-HOTEL-PAN-HALF-4IN", { w: 0.325, d: 0.265, h: 0.1 }, 1.25, TOP, -0.42, -0.03);
+  const half2 = prop(HALF.id, HALF, 1.25, TOP, -0.42, -0.03);
   half2.hooks.set?.("food", 1);
   half2.hooks.set?.("fill", 0.55);
   const shelfTpl = lowShelf();
@@ -377,7 +394,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
     s.position.set((i - 1) * SPACING - SHELF.L / 2, 0, SHELF_BACK + SHELF.D);
     scene.add(s);
     // Spare 2½ in pans nested on the lower shelf.
-    const spare = prop("NSF-HOTEL-PAN-FULL-2IN", { w: 0.53, d: 0.325, h: 0.065 }, (i - 1) * SPACING + 0.04, SHELF.tiers[0]!, PAN_Z + 0.005, 0.02);
+    const spare = prop(SPARE.id, SPARE, (i - 1) * SPACING + 0.04, SHELF.tiers[0]!, PAN_Z + 0.005, 0.02);
     spare.hooks.set?.("fill", 0);
   }
 
@@ -400,7 +417,7 @@ export function mountBrigadeStage(root: HTMLElement): void {
     // The stockpot on the second range's back-left burner (burner 3), simmering.
     const r = ranges[1]!;
     const bx = LINE_B[1].x + RANGE_EXT.w / 2 - 0.18;
-    const pot = buildFixture("NSF-STOCKPOT-20QT", { w: 0.31, d: 0.38, h: 0.295 }, 1);
+    const pot = buildFixture(POT.id, POT, 1);
     pot.group.position.set(bx - 0.31 / 2, 0.914, 0.58 + 0.38 / 2);
     pot.group.rotation.y = 0;
     lineB.add(pot.group);
