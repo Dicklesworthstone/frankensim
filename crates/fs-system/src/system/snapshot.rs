@@ -38,10 +38,11 @@ const IMAGE_CHARTER: StateIdentityCharterV2 = StateIdentityCharterV2 {
         absolute_tolerance f64, max_iterations u32, max_shortenings u32, \
         interface_energy_tolerance f64; ledger: [u64], every account as the hi and lo \
         bits of its normalized double-double total, the absolute defect accounts beside \
-        the signed ones, steps u64, and the window duration as sum and compensation bits",
+        the signed ones, steps u64, and the window duration as sum and compensation bits; \
+        controller: [u64], optional adaptive step-size memory and per-block accelerator state",
     codec_grammar: "v2 framed little-endian: [u8; 32] as four u64; u64 count of members; \
         [u64] as an f64 slice of the words' bits; [f64] as an f64 slice",
-    codec_version: 3,
+    codec_version: 4,
 };
 
 const IMAGE_TYPE_ID: SnapshotStateTypeIdV2 = SnapshotStateTypeIdV2::from_bytes(PINNED_TYPE);
@@ -55,12 +56,12 @@ const PINNED_TYPE: [u8; 32] = [
     0x57, 0xba, 0x20, 0x74, 0xa0, 0x3c, 0x78, 0xd8, 0x26, 0x56, 0x92, 0xce, 0xb2, 0x2c, 0x76, 0xf3,
 ];
 const PINNED_SCHEMA: [u8; 32] = [
-    0xf0, 0xd2, 0xf9, 0x72, 0xa0, 0x50, 0xc8, 0xf3, 0x99, 0x86, 0x6e, 0x4b, 0x59, 0xfc, 0x4b, 0x6d,
-    0x95, 0xa7, 0x5f, 0x73, 0x19, 0x8f, 0x1d, 0xc5, 0xef, 0x3b, 0xcb, 0x84, 0xb6, 0xed, 0x7e, 0x8e,
+    0xbe, 0x1b, 0xce, 0x76, 0xa9, 0xf2, 0x96, 0xcc, 0xfb, 0x2c, 0x75, 0x1b, 0x81, 0x6f, 0x6d, 0x75,
+    0x1e, 0x27, 0xbb, 0x0f, 0xbb, 0xd5, 0x69, 0x56, 0x88, 0xfb, 0xe5, 0x91, 0xca, 0x35, 0x03, 0xd2,
 ];
 const PINNED_CODEC: [u8; 32] = [
-    0xc6, 0x8f, 0x72, 0xc2, 0xde, 0x24, 0x9f, 0xb3, 0xb4, 0x19, 0x6e, 0x9d, 0x3a, 0x5a, 0xbd, 0x79,
-    0xad, 0xe3, 0x5b, 0xae, 0x36, 0x31, 0x5e, 0xe7, 0xa4, 0xd9, 0x05, 0xda, 0x9d, 0x55, 0xc0, 0x2a,
+    0xd1, 0x91, 0x43, 0xe8, 0x17, 0x9e, 0x70, 0x80, 0x70, 0x2b, 0x8e, 0xf1, 0x14, 0x2d, 0x63, 0x83,
+    0xf6, 0xd8, 0xd2, 0x20, 0x46, 0xe6, 0x1c, 0xf6, 0xd7, 0x0b, 0xf5, 0x76, 0x35, 0x69, 0x19, 0x8b,
 ];
 
 /// The accepted generation of a [`System`] as plain data: what a durable
@@ -79,6 +80,7 @@ pub struct SystemImage {
     steps: u64,
     config: SolveConfig,
     ledger: Vec<u64>,
+    controller: Vec<u64>,
 }
 
 impl SystemImage {
@@ -183,7 +185,8 @@ impl SolverStateV2 for SystemImage {
         encoder.put_u32(self.config.max_iterations)?;
         encoder.put_u32(self.config.max_shortenings)?;
         encoder.put_f64(self.config.interface_energy_tolerance)?;
-        put_words(encoder, &self.ledger)
+        put_words(encoder, &self.ledger)?;
+        put_words(encoder, &self.controller)
     }
 
     fn decode_v2(decoder: &mut SnapshotDecoderV2<'_, '_>) -> Result<Self, SnapshotV2Error> {
@@ -218,6 +221,7 @@ impl SolverStateV2 for SystemImage {
                 interface_energy_tolerance: decoder.get_f64()?,
             },
             ledger: get_words(decoder)?,
+            controller: get_words(decoder)?,
         })
     }
 }
@@ -267,6 +271,10 @@ impl System {
                 node.line_ends(),
             );
             field(&mut preimage, text.as_bytes());
+            if node.has_stage_residual() {
+                field(&mut preimage, b"stage-residual-v0");
+                field(&mut preimage, &(node.stage_unknowns() as u64).to_le_bytes());
+            }
             match node.state_charter() {
                 None => field(&mut preimage, &[]),
                 Some(charter) => {
@@ -355,6 +363,8 @@ impl System {
         }
         let mut ledger = Vec::new();
         self.ledger.push_words(&mut ledger);
+        let mut controller = Vec::new();
+        self.accepted_controller.push_words(&mut controller);
         Ok(SystemImage {
             problem: *self.problem_id().as_bytes(),
             members,
@@ -364,6 +374,7 @@ impl System {
             steps: self.steps,
             config: self.config,
             ledger,
+            controller,
         })
     }
 
@@ -418,6 +429,10 @@ impl System {
             .ledger
             .read(&image.ledger)
             .ok_or(CheckpointError::Image)?;
+        let controller = self
+            .accepted_controller
+            .read_words(&image.controller)
+            .ok_or(CheckpointError::Image)?;
 
         self.accepted = accepted;
         self.accepted_inputs.copy_from_slice(&image.inputs);
@@ -429,6 +444,11 @@ impl System {
         self.steps = image.steps;
         self.ledger = ledger;
         self.config = image.config;
+        self.accepted_controller = controller;
+        self.candidate_controller
+            .copy_from(&self.accepted_controller);
+        self.accepted_generation = self.accepted_generation.wrapping_add(1);
+        self.invalidate_caches();
         Ok(())
     }
 }

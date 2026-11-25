@@ -25,6 +25,8 @@ pub mod block;
 pub mod checked_cg;
 /// Bounded parameter stepping through existing source-owned nonlinear correctors.
 pub mod continuation;
+/// Fallible matrix-free Newton--Krylov carrying `Result` without `NaN` refusal encoding.
+pub mod fallible_nonlinear;
 /// Source-refusing numerical Jacobian actions for the existing nonlinear owner.
 pub mod finite_difference;
 /// Outward residual evaluation and checked discrete algebraic goal bounds.
@@ -45,6 +47,10 @@ pub use block::{
     RealEquivalentComplexOp, RectLinearOp, SchurSolveSign, SquareBlock, ZeroBlock,
 };
 pub use checked_cg::{CheckedCgConfig, CheckedCgError, CheckedCgSolution, checked_cg};
+pub use fallible_nonlinear::{
+    FallibleNewtonError, FallibleNewtonSolution, FallibleNonlinearProblem,
+    solve_fallible_newton_krylov,
+};
 pub use krylov::{
     CgState, GmresState, MinresState, PminresState, ResidualClaim, SolveReport, StallDiagnosis,
 };

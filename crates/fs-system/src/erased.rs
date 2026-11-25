@@ -12,7 +12,7 @@ use core::fmt;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
-    Class, Component, EndOfStep, LoadLine, PortSpec, PortTangent, Proposal, Receipt,
+    Class, Component, EndOfStep, LoadLine, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
 };
 
 /// A value that is both printable and recoverable by its concrete type.
@@ -46,6 +46,11 @@ pub struct TangentNotOffered;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineNotOffered;
 
+/// Marker error for a stage residual asked of a component that does not offer
+/// [`StageResidual`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageResidualNotOffered;
+
 impl OwnerError {
     fn new<E: fmt::Debug + 'static>(error: E) -> Self {
         Self(Box::new(error))
@@ -61,6 +66,10 @@ impl OwnerError {
 
     fn line_not_offered() -> Self {
         Self(Box::new(LineNotOffered))
+    }
+
+    fn stage_residual_not_offered() -> Self {
+        Self(Box::new(StageResidualNotOffered))
     }
 
     /// The owner's error, if it is of type `E`.
@@ -121,6 +130,20 @@ pub(crate) trait Node {
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), OwnerError>;
+    /// Adjoint (vector-Jacobian product) of the port map; only called when
+    /// [`Node::has_tangent`] is true.
+    #[allow(dead_code)]
+    fn vjp(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _bar_outputs: &[f64],
+        _bar_inputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::tangent_not_offered())
+    }
     /// The ports of its load line, for a component added on one.
     fn line_ports(&self) -> Option<&[usize]> {
         None
@@ -144,6 +167,64 @@ pub(crate) trait Node {
     ) -> Result<Proposal, OwnerError> {
         Err(OwnerError::line_not_offered())
     }
+    /// Whether this component offers the [`StageResidual`] monolithic tier.
+    fn has_stage_residual(&self) -> bool {
+        false
+    }
+    /// Number of internal stage unknowns `z` (`0` unless [`Self::has_stage_residual`]).
+    fn stage_unknowns(&self) -> usize {
+        0
+    }
+    /// Initial guess `z` for monolithic stage solve.
+    fn stage_initial_guess(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::stage_residual_not_offered())
+    }
+    /// Evaluate stage residual `r(z)` and port outputs implied by `z`.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_residual(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        _outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::stage_residual_not_offered())
+    }
+    /// Directional derivative of stage residual and outputs along `dz` at `z`.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_jvp_z(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        _d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::stage_residual_not_offered())
+    }
+    /// Build candidate state and receipt from converged monolithic unknowns `z`.
+    fn stage_accept(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _new: &mut dyn Any,
+    ) -> Result<Receipt, OwnerError> {
+        Err(OwnerError::stage_residual_not_offered())
+    }
 }
 
 fn state_of<S: 'static>(state: &dyn Any) -> Result<&S, OwnerError> {
@@ -158,6 +239,12 @@ pub(crate) struct Tangent<C>(pub(crate) C);
 
 /// A component stepped on its [`LoadLine`].
 pub(crate) struct OnLine<C>(pub(crate) C);
+
+/// A component that offers [`StageResidual`].
+pub(crate) struct Stage<C>(pub(crate) C);
+
+/// A component that offers both [`PortTangent`] and [`StageResidual`].
+pub(crate) struct TangentStage<C>(pub(crate) C);
 
 macro_rules! mandatory_tier {
     () => {
@@ -366,4 +453,188 @@ where
             )
             .map_err(OwnerError::new)
     }
+
+    fn vjp(
+        &self,
+        old: &dyn Any,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        self.0
+            .vjp(
+                state_of::<C::State>(old)?,
+                dt_s,
+                inputs,
+                bar_outputs,
+                bar_inputs,
+                cx,
+            )
+            .map_err(OwnerError::new)
+    }
+}
+
+macro_rules! stage_residual_tier {
+    () => {
+        fn has_stage_residual(&self) -> bool {
+            true
+        }
+
+        fn stage_unknowns(&self) -> usize {
+            self.0.unknowns()
+        }
+
+        fn stage_initial_guess(
+            &self,
+            old: &dyn Any,
+            dt_s: f64,
+            inputs: &[f64],
+            z: &mut [f64],
+        ) -> Result<(), OwnerError> {
+            self.0
+                .initial_guess(state_of::<C::State>(old)?, dt_s, inputs, z)
+                .map_err(OwnerError::new)
+        }
+
+        fn stage_residual(
+            &self,
+            old: &dyn Any,
+            dt_s: f64,
+            inputs: &[f64],
+            z: &[f64],
+            r: &mut [f64],
+            outputs: &mut [f64],
+            cx: &Cx<'_>,
+        ) -> Result<(), OwnerError> {
+            self.0
+                .residual(state_of::<C::State>(old)?, dt_s, inputs, z, r, outputs, cx)
+                .map_err(OwnerError::new)
+        }
+
+        fn stage_jvp_z(
+            &self,
+            old: &dyn Any,
+            dt_s: f64,
+            inputs: &[f64],
+            z: &[f64],
+            dz: &[f64],
+            dr: &mut [f64],
+            d_outputs: &mut [f64],
+            cx: &Cx<'_>,
+        ) -> Result<(), OwnerError> {
+            self.0
+                .jvp_z(
+                    state_of::<C::State>(old)?,
+                    dt_s,
+                    inputs,
+                    z,
+                    dz,
+                    dr,
+                    d_outputs,
+                    cx,
+                )
+                .map_err(OwnerError::new)
+        }
+
+        fn stage_accept(
+            &self,
+            old: &dyn Any,
+            dt_s: f64,
+            inputs: &[f64],
+            z: &[f64],
+            new: &mut dyn Any,
+        ) -> Result<Receipt, OwnerError> {
+            let old = state_of::<C::State>(old)?;
+            let new = new
+                .downcast_mut::<C::State>()
+                .ok_or_else(OwnerError::state_type)?;
+            self.0
+                .accept(old, dt_s, inputs, z, new)
+                .map_err(OwnerError::new)
+        }
+    };
+}
+
+impl<C> Node for Stage<C>
+where
+    C: StageResidual + 'static,
+    C::State: 'static,
+{
+    mandatory_tier!();
+
+    fn has_tangent(&self) -> bool {
+        false
+    }
+
+    fn jvp(
+        &self,
+        _old: &dyn Any,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _d_inputs: &[f64],
+        _d_outputs: &mut [f64],
+        _cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        Err(OwnerError::tangent_not_offered())
+    }
+
+    stage_residual_tier!();
+}
+
+impl<C> Node for TangentStage<C>
+where
+    C: PortTangent + StageResidual + 'static,
+    C::State: 'static,
+{
+    mandatory_tier!();
+
+    fn has_tangent(&self) -> bool {
+        true
+    }
+
+    fn jvp(
+        &self,
+        old: &dyn Any,
+        dt_s: f64,
+        inputs: &[f64],
+        d_inputs: &[f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        self.0
+            .jvp(
+                state_of::<C::State>(old)?,
+                dt_s,
+                inputs,
+                d_inputs,
+                d_outputs,
+                cx,
+            )
+            .map_err(OwnerError::new)
+    }
+
+    fn vjp(
+        &self,
+        old: &dyn Any,
+        dt_s: f64,
+        inputs: &[f64],
+        bar_outputs: &[f64],
+        bar_inputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), OwnerError> {
+        self.0
+            .vjp(
+                state_of::<C::State>(old)?,
+                dt_s,
+                inputs,
+                bar_outputs,
+                bar_inputs,
+                cx,
+            )
+            .map_err(OwnerError::new)
+    }
+
+    stage_residual_tier!();
 }

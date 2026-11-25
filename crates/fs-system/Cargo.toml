@@ -31,6 +31,7 @@ fs-mbd = { path = "../fs-mbd", optional = true }
 fs-nlmodal = { path = "../fs-nlmodal", optional = true }
 fs-phs = { path = "../fs-phs", optional = true }
 fs-ports = { path = "../fs-ports" }
+fs-solver = { path = "../fs-solver" }
 fs-thermal = { path = "../fs-thermal", optional = true }
 
 [dev-dependencies]

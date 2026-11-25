@@ -389,6 +389,7 @@ impl System {
             };
             let suggested_dt_s = (h * factor).min(f64::MAX).max(config.min_step_s);
             if error_norm <= 1.0 {
+                self.set_accepted_suggested_dt_s(Some(suggested_dt_s));
                 return Ok(AdaptiveReport {
                     dt_s: h,
                     time_s: second.time_s,

@@ -3020,6 +3020,7 @@ dependencies = [
  "fs-nlmodal",
  "fs-phs",
  "fs-ports",
+ "fs-solver",
  "fs-qty",
  "fs-thermal",
 ]

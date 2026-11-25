@@ -1308,37 +1308,56 @@ fn the_image_charter_derives_its_pinned_identities() {
     );
     assert!(snapshot_v2::verify_state_charter::<SystemImage>().is_ok());
     // Codec version 1 (7a35133254) wrote each ledger account as a sum and
-    // its compensation. Its image names the same state type and another
-    // schema and codec, so a resume expecting this charter refuses it.
-    // The carried (06a4a2d4ba) and entropy (17c5438df5) accounts entered
-    // the words under version 2's number. Version 3 keeps the type and
-    // schema and moves the codec.
-    assert_eq!(charter.codec_version, 3);
+    // its compensation. The carried (06a4a2d4ba) and entropy (17c5438df5)
+    // accounts entered under v2, and v3 moved the codec. Version 4 adds
+    // accepted controller & accelerator state words, moving both schema and
+    // codec ids while keeping the state type id so older snapshots are refused.
+    assert_eq!(charter.codec_version, 4);
     assert_eq!(
         hex(charter.state_type_id().as_bytes()),
         "48da3c2f4172ca570c03fff02710ddf757ba2074a03c78d8265692ceb22c76f3"
     );
     assert_eq!(
         hex(charter.state_schema_id().as_bytes()),
-        "f0d2f972a050c8f399866e4b59fc4b6d95a75f73198f1dc5ef3bcb84b6ed7e8e"
+        "be1bce76a9f296ccfb2c751b816f6d751e27bb0fbbd5695688fbe591ca3503d2"
     );
     assert_ne!(hex(charter.state_codec_id().as_bytes()), PREVIOUS_CODEC);
+    assert_ne!(
+        hex(charter.state_codec_id().as_bytes()),
+        "c68f72c2de249fb3b4196e9d3a5abd79ade35bae36315ee7a4d905da9d55c02a"
+    );
     assert_ne!(
         hex(charter.state_schema_id().as_bytes()),
         "c6babd96283371b55c6ebb51d1f09277f3bd70366818671fa3e5e69d522ab499"
     );
     assert_ne!(
+        hex(charter.state_schema_id().as_bytes()),
+        "f0d2f972a050c8f399866e4b59fc4b6d95a75f73198f1dc5ef3bcb84b6ed7e8e"
+    );
+    assert_ne!(
         hex(charter.state_codec_id().as_bytes()),
         "d1db2647a701d3f951fa8e8af095a92d1404bdef940ad975ea277598a385d4e3"
+    );
+    assert_ne!(
+        hex(charter.state_codec_id().as_bytes()),
+        "f8584656769c289057c35efaf340f217ea9b24fb5b089151fd6c7af7f32ea3e8"
     );
 }
 
 /// The image codec identity of version 2, which version 3 replaced.
 const PREVIOUS_CODEC: &str = "f8584656769c289057c35efaf340f217ea9b24fb5b089151fd6c7af7f32ea3e8";
 
-/// `SystemImage`'s charter at codec version 2.
+/// `SystemImage`'s charter at codec version 2 (before controller words entered in v4).
 static PREVIOUS_CHARTER: LazyLock<StateIdentityCharterV2> =
     LazyLock::new(|| StateIdentityCharterV2 {
+        schema_grammar: "problem: [u8; 32]; members: per component in index order, \
+        {state type id [u8; 32], state schema id [u8; 32], state codec id [u8; 32], \
+        codec version u32, words: [u64]}; accepted inputs: [f64]; accepted outputs: [f64]; \
+        clock: sum and compensation as two u64 bits; steps: u64; config: relative_tolerance f64, \
+        absolute_tolerance f64, max_iterations u32, max_shortenings u32, \
+        interface_energy_tolerance f64; ledger: [u64], every account as the hi and lo \
+        bits of its normalized double-double total, the absolute defect accounts beside \
+        the signed ones, steps u64, and the window duration as sum and compensation bits",
         codec_version: 2,
         ..*SystemImage::charter().expect("a chartered family")
     });
@@ -1350,7 +1369,11 @@ struct PreviousImage(SystemImage);
 
 impl SolverStateV2 for PreviousImage {
     const STATE_TYPE_ID_V2: SnapshotStateTypeIdV2 = SystemImage::STATE_TYPE_ID_V2;
-    const STATE_SCHEMA_ID_V2: SnapshotStateSchemaIdV2 = SystemImage::STATE_SCHEMA_ID_V2;
+    const STATE_SCHEMA_ID_V2: SnapshotStateSchemaIdV2 = SnapshotStateSchemaIdV2::from_bytes([
+        0xf0, 0xd2, 0xf9, 0x72, 0xa0, 0x50, 0xc8, 0xf3, 0x99, 0x86, 0x6e, 0x4b, 0x59, 0xfc, 0x4b,
+        0x6d, 0x95, 0xa7, 0x5f, 0x73, 0x19, 0x8f, 0x1d, 0xc5, 0xef, 0x3b, 0xcb, 0x84, 0xb6, 0xed,
+        0x7e, 0x8e,
+    ]);
     const STATE_CODEC_ID_V2: SnapshotStateCodecIdV2 = SnapshotStateCodecIdV2::from_bytes([
         0xf8, 0x58, 0x46, 0x56, 0x76, 0x9c, 0x28, 0x90, 0x57, 0xc3, 0x5e, 0xfa, 0xf3, 0x40, 0xf2,
         0x17, 0xea, 0x9b, 0x24, 0xfb, 0x5b, 0x08, 0x91, 0x51, 0xfd, 0x6c, 0x7a, 0xf7, 0xf3, 0x2e,

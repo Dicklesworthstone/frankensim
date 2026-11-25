@@ -54,6 +54,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod accelerator;
 mod adaptive;
 #[cfg(feature = "phs")]
 pub mod battery;
@@ -63,6 +64,7 @@ pub mod circuit;
 pub mod commutated_drive;
 #[cfg(feature = "constitutive")]
 pub mod constitutive;
+pub mod diagnostics;
 pub mod elements;
 mod erased;
 pub mod ledger;
@@ -74,8 +76,19 @@ mod solve;
 mod system;
 mod wiring;
 
+pub use accelerator::{
+    AcceptedStateCache, AitkenConfig, BlockAcceleratorState, ControllerState, IqnIlsConfig,
+    MAX_IQN_HISTORY, StateCacheKey,
+};
 pub use adaptive::{AdaptiveConfig, AdaptiveError, AdaptiveReport, ErrorNorm, ErrorTolerance};
-pub use erased::{LineNotOffered, OwnerError, StateTypeMismatch, TangentNotOffered};
+pub use diagnostics::{
+    BlockSolveMode, BlockSolverPolicy, BlockStepDiagnostic, BudgetKind, FixedPointMethod,
+    MonolithicConfig, PartialStepOutcome, ReceiptDiagnostic, StepBudgets, StepDiagnostic,
+    StepVerdict,
+};
+pub use erased::{
+    LineNotOffered, OwnerError, StageResidualNotOffered, StateTypeMismatch, TangentNotOffered,
+};
 pub use ledger::{
     CarriedInventoryOutcome, EnergyLeakAttribution, Ledger, LedgerExport, WindowLedgerOutcome,
 };

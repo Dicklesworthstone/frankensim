@@ -11,11 +11,18 @@ use fs_ports::StableId;
 use fs_ports::component::{
     CarriedStepAudit, Carrier, Class, Component, ContractViolation, EndOfStep, EntropyStepAudit,
     LoadLine, MassStepAudit, PortLayout, PortRole, PortSpec, PortTangent, Proposal, Receipt,
-    STREAM_CARRIED, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, audit_carried_step, audit_entropy_step,
-    audit_mass_step, audit_step,
+    STREAM_CARRIED, STREAM_ENTHALPY_RATE, STREAM_MASS_RATE, StageResidual, audit_carried_step,
+    audit_entropy_step, audit_mass_step, audit_step,
 };
 
-use crate::erased::{Node, OnLine, OwnerError, Plain, Tangent};
+use crate::accelerator::{
+    AitkenConfig, BlockAcceleratorState, ControllerState, IqnIlsScratch, MAX_IQN_HISTORY,
+};
+use crate::diagnostics::{
+    BlockSolveMode, BlockSolverPolicy, BlockStepDiagnostic, BudgetKind, PartialStepOutcome,
+    ReceiptDiagnostic, StepBudgets, StepDiagnostic, StepVerdict,
+};
+use crate::erased::{Node, OnLine, OwnerError, Plain, Stage, Tangent, TangentStage};
 use crate::ledger::{
     Account, BoundaryAccount, ConnectionAccount, Ledger, NodeAccount, SinkAccount, Sum,
 };
@@ -27,6 +34,7 @@ use crate::wiring::{
 
 mod events;
 mod line;
+mod modes;
 mod scalar;
 mod snapshot;
 
@@ -322,6 +330,9 @@ pub enum SystemError {
         /// The rejected step [s].
         dt_s: f64,
     },
+    /// An explicit step budget (evaluations, work units, or wall time) ran out
+    /// before convergence or publication. Nothing was published.
+    BudgetExhausted(PartialStepOutcome),
     /// Cancellation was requested.
     Cancelled,
 }
@@ -392,6 +403,17 @@ impl fmt::Display for SystemError {
                 write!(f, "the step was shortened too often (last {dt_s} s)")
             }
             Self::Step { dt_s } => write!(f, "step {dt_s} s is not positive and finite"),
+            Self::BudgetExhausted(partial) => write!(
+                f,
+                "step {} budget exhausted on block {} ({}) after {} iterations ({} evals, {} work, worst residual {})",
+                partial.budget,
+                partial.block_index,
+                partial.mode,
+                partial.iterations,
+                partial.spent_evaluations,
+                partial.spent_work_units,
+                partial.worst_residual
+            ),
             Self::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -481,6 +503,7 @@ pub struct Checkpoint {
     steps: u64,
     ledger: Ledger,
     config: SolveConfig,
+    controller: ControllerState,
 }
 
 impl fmt::Debug for Checkpoint {
@@ -524,6 +547,21 @@ impl Checkpoint {
     #[must_use]
     pub fn config(&self) -> SolveConfig {
         self.config
+    }
+
+    /// Adaptive step-size controller memory captured by this checkpoint [s].
+    #[must_use]
+    pub fn suggested_dt_s(&self) -> Option<f64> {
+        self.controller.suggested_dt_s
+    }
+
+    /// Fixed-point dynamic relaxation weight stored for `block` in this checkpoint.
+    #[must_use]
+    pub fn block_relaxation_omega(&self, block: usize) -> Option<f64> {
+        self.controller
+            .blocks
+            .get(block)
+            .map(BlockAcceleratorState::relaxation_omega)
     }
 }
 
@@ -687,6 +725,55 @@ impl SystemBuilder {
         }
         let candidate = Box::new(state.clone());
         self.insert(name, Box::new(OnLine(component)), Box::new(state), candidate)
+    }
+
+    /// Add a component that offers the [`StageResidual`] monolithic tier.
+    ///
+    /// When every component in a looped block offers [`StageResidual`], the
+    /// coupled-step driver solves the block monolithically through `fs-solver`'s
+    /// fallible Newton--Krylov adapter.
+    ///
+    /// # Errors
+    /// A repeated name or an invalid port list.
+    #[allow(clippy::result_large_err)]
+    pub fn add_with_stage_residual<C>(
+        &mut self,
+        name: &str,
+        component: C,
+        state: C::State,
+    ) -> Result<NodeId, AdmissionError>
+    where
+        C: StageResidual + 'static,
+        C::State: 'static,
+    {
+        let candidate = Box::new(state.clone());
+        self.insert(name, Box::new(Stage(component)), Box::new(state), candidate)
+    }
+
+    /// Add a component offering both [`PortTangent`] and [`StageResidual`],
+    /// enabling runtime selection between interface Newton, fixed-point, and
+    /// monolithic Newton--Krylov solve modes on the same sealed graph.
+    ///
+    /// # Errors
+    /// A repeated name or an invalid port list.
+    #[allow(clippy::result_large_err)]
+    pub fn add_with_tangent_and_stage_residual<C>(
+        &mut self,
+        name: &str,
+        component: C,
+        state: C::State,
+    ) -> Result<NodeId, AdmissionError>
+    where
+        C: PortTangent + StageResidual + 'static,
+        C::State: 'static,
+    {
+        let candidate = Box::new(state.clone());
+        self.insert(
+            name,
+            Box::new(TangentStage(component)),
+            Box::new(state),
+            candidate,
+        )
     }
 
     /// The port of `node` with identifier `id`.
@@ -1996,7 +2083,7 @@ impl SystemBuilder {
                 .collect(),
             ..Ledger::default()
         };
-        let boundary_values = self
+        let boundary_values: Vec<Vec<f64>> = self
             .boundaries
             .iter()
             .map(|(port, _)| vec![0.0; self.spec(*port).input_width()])
@@ -2065,6 +2152,24 @@ impl SystemBuilder {
             .iter()
             .map(|connection| vec![0.0; connection.carried_defect.len()])
             .collect();
+        let init_omega = AitkenConfig::default().initial_relaxation;
+        let controller_blocks: Vec<BlockAcceleratorState> = blocks
+            .iter()
+            .map(|block| {
+                let hist = if block.looped() { MAX_IQN_HISTORY } else { 0 };
+                BlockAcceleratorState::new(block.unknowns.len(), hist, init_omega)
+            })
+            .collect();
+        let accepted_controller = ControllerState {
+            suggested_dt_s: None,
+            blocks: controller_blocks,
+        };
+        let candidate_controller = accepted_controller.clone();
+        let block_count = blocks.len();
+        let boundary_bias: Vec<Vec<f64>> = boundary_values
+            .iter()
+            .map(|vals| vec![0.0; vals.len()])
+            .collect();
         Ok(System {
             identity: Rc::new(()),
             names: self.names,
@@ -2077,6 +2182,7 @@ impl SystemBuilder {
             boundaries: self.boundaries,
             boundary_events: self.boundary_events,
             boundary_values,
+            boundary_bias,
             drivers,
             blocks,
             block_work,
@@ -2099,6 +2205,7 @@ impl SystemBuilder {
             input_allowance: vec![0.0; inputs],
             accepted_allowance: vec![0.0; inputs],
             receipts: vec![Receipt::lossless(0.0, 0.0); count],
+            accepted_receipts: vec![Receipt::lossless(0.0, 0.0); count],
             port_energy: vec![0.0; ports],
             port_entropy: vec![0.0; ports],
             port_mass: vec![0.0; ports],
@@ -2115,6 +2222,12 @@ impl SystemBuilder {
             steps: 0,
             ledger,
             config: SolveConfig::default(),
+            accepted_controller,
+            candidate_controller,
+            accepted_generation: 0,
+            solver_policy: BlockSolverPolicy::default(),
+            budgets: StepBudgets::default(),
+            step_tracker: StepTracker::with_capacity(block_count),
         })
     }
 }
@@ -2207,11 +2320,24 @@ struct BlockWork {
     /// What finding the block's load line evaluated, kept for the solve's
     /// first pass. Empty for a block without a load line.
     found: Found,
+    /// Pre-allocated fixed-point iterate vectors (current `x`, image `G(x)`,
+    /// next `x_next`) and IQN-ILS scratch so warm fixed-point steps allocate nothing.
+    fp_current: Vec<f64>,
+    fp_image: Vec<f64>,
+    fp_next: Vec<f64>,
+    iqn_scratch: IqnIlsScratch,
 }
 
 impl BlockWork {
+    /// Drop any cached Jacobian/load-line factors so the next solve rebuilds
+    /// them freshly from the accepted state.
+    fn invalidate_caches(&mut self) {
+        self.kept_dt_s = f64::NAN;
+        self.found.clear();
+    }
     /// Workspaces and reader lists of `block`. `affine` says whether every
     /// component of it is exactly linear and declares its tangent.
+    #[allow(clippy::too_many_lines)]
     fn plan(
         block: &Block,
         drivers: &[Driver],
@@ -2321,6 +2447,14 @@ impl BlockWork {
             scale: vec![0.0; m],
             kind_rounding: vec![0.0; m],
             found: Found::default(),
+            fp_current: vec![0.0; m],
+            fp_image: vec![0.0; m],
+            fp_next: vec![0.0; m],
+            iqn_scratch: if m > 0 {
+                IqnIlsScratch::new(m, MAX_IQN_HISTORY)
+            } else {
+                IqnIlsScratch::default()
+            },
         }
     }
 }
@@ -2442,6 +2576,39 @@ impl Found {
     }
 }
 
+/// Zero-allocation per-step evaluation, work, wall-clock, and block-diagnostic
+/// tracker owned by [`System`].
+#[derive(Default)]
+struct StepTracker {
+    evaluations: u64,
+    work_units: u64,
+    wall_start: Option<std::time::Instant>,
+    blocks: Vec<BlockStepDiagnostic>,
+}
+
+impl StepTracker {
+    fn with_capacity(block_count: usize) -> Self {
+        Self {
+            evaluations: 0,
+            work_units: 0,
+            wall_start: None,
+            blocks: Vec::with_capacity(block_count),
+        }
+    }
+
+    fn reset(&mut self, budgets: StepBudgets) {
+        self.evaluations = 0;
+        self.work_units = 0;
+        self.wall_start = budgets.max_wall_ns.map(|_| std::time::Instant::now());
+        self.blocks.clear();
+    }
+
+    fn elapsed_wall_ns(&self) -> u64 {
+        self.wall_start
+            .map_or(0, |start| u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+}
+
 /// Components joined by connections, stepped as one.
 ///
 /// The system owns every state in two generations, accepted and candidate. A
@@ -2465,6 +2632,7 @@ pub struct System {
     boundaries: Vec<(PortRef, BoundaryFn)>,
     boundary_events: Vec<Vec<f64>>,
     boundary_values: Vec<Vec<f64>>,
+    boundary_bias: Vec<Vec<f64>>,
     drivers: Vec<Driver>,
     blocks: Vec<Block>,
     /// Per block, what its solve keeps between steps.
@@ -2501,6 +2669,8 @@ pub struct System {
     /// `input_allowance` of the last accepted step; zero after a restore.
     accepted_allowance: Vec<f64>,
     receipts: Vec<Receipt>,
+    /// Receipts of the last accepted step, in declared component order.
+    accepted_receipts: Vec<Receipt>,
     port_energy: Vec<f64>,
     port_entropy: Vec<f64>,
     port_mass: Vec<f64>,
@@ -2521,6 +2691,18 @@ pub struct System {
     steps: u64,
     ledger: Ledger,
     config: SolveConfig,
+    /// Accepted numerical controller and fixed-point accelerator state (two-generation).
+    accepted_controller: ControllerState,
+    /// Trial candidate numerical controller and accelerator state.
+    candidate_controller: ControllerState,
+    /// Monotonic accepted-state generation counter (advanced on publish, restore, resume).
+    accepted_generation: u64,
+    /// Active solve-mode selection policy.
+    solver_policy: BlockSolverPolicy,
+    /// Explicit step resource budgets (evaluations, work units, wall time).
+    budgets: StepBudgets,
+    /// Pre-allocated per-step evaluation/work/diagnostic tracker.
+    step_tracker: StepTracker,
 }
 
 impl System {
@@ -2541,6 +2723,7 @@ impl System {
             steps: self.steps,
             ledger: self.ledger.clone(),
             config: self.config,
+            controller: self.accepted_controller.clone(),
         })
     }
 
@@ -2561,6 +2744,7 @@ impl System {
         let inputs = checkpoint.inputs.clone();
         let outputs = checkpoint.outputs.clone();
         let ledger = checkpoint.ledger.clone();
+        let controller = checkpoint.controller.clone();
 
         self.accepted = accepted;
         self.accepted_inputs = inputs;
@@ -2572,6 +2756,10 @@ impl System {
         self.steps = checkpoint.steps;
         self.ledger = ledger;
         self.config = checkpoint.config;
+        self.accepted_controller = controller;
+        self.candidate_controller.copy_from(&self.accepted_controller);
+        self.accepted_generation = self.accepted_generation.wrapping_add(1);
+        self.invalidate_caches();
         Ok(())
     }
 
@@ -2593,6 +2781,284 @@ impl System {
     /// Replace the driver's limits.
     pub fn set_config(&mut self, config: SolveConfig) {
         self.config = config;
+    }
+
+    /// Configure the block solve-mode selection policy.
+    pub fn set_solver_policy(&mut self, policy: BlockSolverPolicy) {
+        self.solver_policy = policy;
+    }
+
+    /// Active block solve-mode selection policy.
+    #[must_use]
+    pub fn solver_policy(&self) -> BlockSolverPolicy {
+        self.solver_policy
+    }
+
+    /// Configure explicit step resource budgets (evaluations, work units, wall time).
+    pub fn set_budgets(&mut self, budgets: StepBudgets) {
+        self.budgets = budgets;
+    }
+
+    /// Active step resource budgets.
+    #[must_use]
+    pub fn budgets(&self) -> StepBudgets {
+        self.budgets
+    }
+
+    /// Adaptive step-size controller memory retained in the accepted generation [s].
+    #[must_use]
+    pub fn suggested_dt_s(&self) -> Option<f64> {
+        self.accepted_controller.suggested_dt_s
+    }
+
+    pub(crate) fn set_accepted_suggested_dt_s(&mut self, dt_s: Option<f64>) {
+        self.accepted_controller.suggested_dt_s = dt_s;
+        self.candidate_controller.suggested_dt_s = dt_s;
+    }
+
+    /// Accepted dynamic Aitken relaxation weight for `block`.
+    #[must_use]
+    pub fn block_relaxation_omega(&self, block: usize) -> Option<f64> {
+        self.accepted_controller
+            .blocks
+            .get(block)
+            .map(BlockAcceleratorState::relaxation_omega)
+    }
+
+    /// Accepted IQN-ILS secant history depth for `block`.
+    #[must_use]
+    pub fn block_accelerator_history_len(&self, block: usize) -> Option<usize> {
+        self.accepted_controller
+            .blocks
+            .get(block)
+            .map(BlockAcceleratorState::history_len)
+    }
+
+    /// Monotonic accepted-state generation counter (increments on publish,
+    /// `restore`, and `resume`). Use with [`crate::StateCacheKey`] to bind
+    /// caches strictly to the accepted generation.
+    #[must_use]
+    pub fn accepted_generation(&self) -> u64 {
+        self.accepted_generation
+    }
+
+    /// Receipts of the last accepted step, in declared component order.
+    #[must_use]
+    pub fn last_receipts(&self) -> &[Receipt] {
+        &self.accepted_receipts
+    }
+
+    /// Solve mode currently selected for each block in execution order.
+    #[must_use]
+    pub fn block_modes(&self) -> Vec<BlockSolveMode> {
+        (0..self.blocks.len())
+            .map(|b| self.select_block_mode(b))
+            .collect()
+    }
+
+    /// Invalidate all internal Jacobian and load-line factor caches so the next
+    /// solve recomputes them freshly from the accepted state.
+    pub fn invalidate_caches(&mut self) {
+        for work in &mut self.block_work {
+            work.invalidate_caches();
+        }
+    }
+
+    pub(super) fn check_budgets_at(
+        &self,
+        evaluations: u64,
+        work_units: u64,
+        block_index: usize,
+        mode: BlockSolveMode,
+        iterations: u32,
+        worst_residual: f64,
+    ) -> Result<(), SystemError> {
+        let elapsed_wall_ns = self.step_tracker.elapsed_wall_ns();
+        if let Some(max_evals) = self.budgets.max_evaluations
+            && evaluations > max_evals
+        {
+            return Err(SystemError::BudgetExhausted(PartialStepOutcome {
+                budget: BudgetKind::Evaluations,
+                spent_evaluations: evaluations,
+                spent_work_units: work_units,
+                elapsed_wall_ns,
+                block_index,
+                mode,
+                iterations,
+                worst_residual,
+            }));
+        }
+        if let Some(max_work) = self.budgets.max_work_units
+            && work_units > max_work
+        {
+            return Err(SystemError::BudgetExhausted(PartialStepOutcome {
+                budget: BudgetKind::Work,
+                spent_evaluations: evaluations,
+                spent_work_units: work_units,
+                elapsed_wall_ns,
+                block_index,
+                mode,
+                iterations,
+                worst_residual,
+            }));
+        }
+        if let Some(max_wall) = self.budgets.max_wall_ns
+            && elapsed_wall_ns > max_wall
+        {
+            return Err(SystemError::BudgetExhausted(PartialStepOutcome {
+                budget: BudgetKind::WallTime,
+                spent_evaluations: evaluations,
+                spent_work_units: work_units,
+                elapsed_wall_ns,
+                block_index,
+                mode,
+                iterations,
+                worst_residual,
+            }));
+        }
+        Ok(())
+    }
+
+    pub(super) fn charge_eval(
+        &mut self,
+        weight: u64,
+        block_index: usize,
+        mode: BlockSolveMode,
+        iterations: u32,
+        worst_residual: f64,
+    ) -> Result<(), SystemError> {
+        self.step_tracker.evaluations = self.step_tracker.evaluations.saturating_add(1);
+        self.step_tracker.work_units = self.step_tracker.work_units.saturating_add(weight.max(1));
+        self.check_budgets_at(
+            self.step_tracker.evaluations,
+            self.step_tracker.work_units,
+            block_index,
+            mode,
+            iterations,
+            worst_residual,
+        )
+    }
+
+    pub(super) fn record_block_diag(&mut self, diag: BlockStepDiagnostic) {
+        if self.step_tracker.blocks.len() < self.step_tracker.blocks.capacity() {
+            self.step_tracker.blocks.push(diag);
+        }
+    }
+
+    /// Advance by at most `dt_max_s`, returning a complete per-step diagnostic
+    /// record (with deterministic JSONL rendering) on both acceptance and refusal.
+    ///
+    /// # Errors
+    /// Returns `(SystemError, StepDiagnostic)` on refusal, budget exhaustion,
+    /// or cancellation; accepted state remains bitwise untouched.
+    #[allow(clippy::result_large_err)]
+    pub fn step_diagnosed(
+        &mut self,
+        dt_max_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(StepReport, StepDiagnostic), (SystemError, StepDiagnostic)> {
+        match self.step(dt_max_s, cx) {
+            Ok(report) => {
+                let diag = self.build_step_diagnostic(
+                    report.dt_s,
+                    report.iterations,
+                    report.shortenings,
+                    StepVerdict::Accepted,
+                    true,
+                );
+                Ok((report, diag))
+            }
+            Err(err) => {
+                let (verdict, fallback_mode, extra_iters) = match &err {
+                    SystemError::Cancelled => (StepVerdict::Cancelled, None, 0),
+                    SystemError::BudgetExhausted(partial) => (
+                        StepVerdict::BudgetExhausted {
+                            budget: partial.budget,
+                        },
+                        Some(partial.mode.as_str()),
+                        partial.iterations,
+                    ),
+                    other => (
+                        StepVerdict::Refused {
+                            reason: other.to_string(),
+                        },
+                        None,
+                        0,
+                    ),
+                };
+                let iters: u32 = self
+                    .step_tracker
+                    .blocks
+                    .iter()
+                    .map(|b| b.iterations)
+                    .sum::<u32>()
+                    .saturating_add(extra_iters);
+                let mut diag = self.build_step_diagnostic(dt_max_s, iters, 0, verdict, false);
+                if diag.blocks.is_empty()
+                    && let Some(m) = fallback_mode
+                {
+                    diag.mode = m;
+                }
+                Err((err, diag))
+            }
+        }
+    }
+
+    fn build_step_diagnostic(
+        &self,
+        dt_s: f64,
+        iterations: u32,
+        shortenings: u32,
+        verdict: StepVerdict,
+        accepted: bool,
+    ) -> StepDiagnostic {
+        let blocks = self.step_tracker.blocks.clone();
+        let mode = match blocks.as_slice() {
+            [] => "none",
+            [single] => single.mode.as_str(),
+            many => {
+                let first = many[0].mode;
+                if many.iter().all(|b| b.mode == first) {
+                    first.as_str()
+                } else {
+                    "mixed"
+                }
+            }
+        };
+        let residual_l2 = blocks
+            .iter()
+            .map(|b| b.residual_l2 * b.residual_l2)
+            .sum::<f64>()
+            .sqrt();
+        let residual_linf = blocks
+            .iter()
+            .fold(0.0_f64, |acc, b| acc.max(b.residual_linf));
+        let receipts_src = if accepted {
+            &self.accepted_receipts
+        } else {
+            &self.receipts
+        };
+        let receipts = self
+            .names
+            .iter()
+            .zip(receipts_src)
+            .map(|(name, &receipt)| ReceiptDiagnostic::from_receipt(name.clone(), receipt))
+            .collect();
+        StepDiagnostic {
+            step: self.steps,
+            time_s: self.time.value(),
+            dt_s,
+            mode,
+            iterations,
+            shortenings,
+            evaluations: self.step_tracker.evaluations,
+            work_units: self.step_tracker.work_units,
+            residual_l2,
+            residual_linf,
+            blocks,
+            receipts,
+            verdict,
+        }
     }
 
     /// Simulated time [s].
@@ -3281,23 +3747,39 @@ impl System {
         true
     }
 
-    /// Solve one looped block by Newton iteration on its interface inputs.
+    /// Solve one looped block using the mode selected from its component tiers
+    /// and the configured [`BlockSolverPolicy`].
     fn solve_block(
         &mut self,
         block: usize,
         dt_s: f64,
         cx: &Cx<'_>,
     ) -> Result<Result<u32, f64>, SystemError> {
+        let mode = self.select_block_mode(block);
         // The block's lists and workspace are lent to the solve and handed
         // back, so a step allocates nothing for them.
         let unknowns = core::mem::take(&mut self.blocks[block].unknowns);
         let nodes = core::mem::take(&mut self.blocks[block].nodes);
         let mut work = core::mem::take(&mut self.block_work[block]);
-        let result = self.solve_lent(block, &unknowns, &nodes, &mut work, dt_s, cx);
+        let result = match mode {
+            BlockSolveMode::FixedPointAitken | BlockSolveMode::FixedPointIqnIls => {
+                self.solve_fixed_point_block(block, &unknowns, &nodes, &mut work, dt_s, mode, cx)
+            }
+            BlockSolveMode::MonolithicNewtonKrylov => {
+                self.solve_monolithic_block(block, &unknowns, &nodes, &mut work, dt_s, cx)
+            }
+            BlockSolveMode::InterfaceNewton
+            | BlockSolveMode::LoadLineNewton
+            | BlockSolveMode::OrderedSweep => {
+                self.solve_lent(block, &unknowns, &nodes, &mut work, dt_s, cx)
+            }
+        };
         self.blocks[block].unknowns = unknowns;
         self.blocks[block].nodes = nodes;
         self.block_work[block] = work;
-        if matches!(result, Ok(Ok(_))) {
+        if matches!(result, Ok(Ok(_)))
+            && matches!(mode, BlockSolveMode::LoadLineNewton | BlockSolveMode::InterfaceNewton)
+        {
             // The flow inputs of a load line held released flows during
             // the solve; what is published is what crossed.
             self.line_flows(block);
@@ -3377,8 +3859,15 @@ impl System {
             scale,
             kind_rounding,
             found,
+            ..
         } = work;
         let affine = *affine;
+        let mode = if self.lines[block].is_empty() {
+            BlockSolveMode::InterfaceNewton
+        } else {
+            BlockSolveMode::LoadLineNewton
+        };
+        let eval_start = self.step_tracker.evaluations;
         // Until the first update: the inputs of every component other than
         // the line component are those finding the line proposed it at,
         // unless shown otherwise below (`Found::repeats`).
@@ -3430,6 +3919,18 @@ impl System {
                     {
                         continue;
                     }
+                    let worst_prev = if iterations == 0 {
+                        f64::NAN
+                    } else {
+                        residual.iter().fold(0.0_f64, |acc, &r| acc.max(r.abs()))
+                    };
+                    self.charge_eval(
+                        self.node_inputs(node).len().max(1) as u64,
+                        block,
+                        mode,
+                        iterations,
+                        worst_prev,
+                    )?;
                     match self.propose(node, dt_s, cx) {
                         Ok(Some(shorter)) => return Ok(Err(shorter)),
                         Ok(None) => {}
@@ -3657,9 +4158,29 @@ impl System {
                 for (row, &index) in unknowns.iter().enumerate() {
                     self.input_allowance[index] = allowance[row];
                 }
+                let l2 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
+                let linf = residual.iter().fold(0.0_f64, |acc, &r| acc.max(r.abs()));
+                self.record_block_diag(BlockStepDiagnostic {
+                    block,
+                    mode,
+                    iterations,
+                    evaluations: self.step_tracker.evaluations - eval_start,
+                    residual_l2: l2,
+                    residual_linf: linf,
+                });
                 return Ok(Ok(iterations));
             }
             if iterations >= self.config.max_iterations && !judged_below {
+                let l2 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
+                let linf = residual.iter().fold(0.0_f64, |acc, &r| acc.max(r.abs()));
+                self.record_block_diag(BlockStepDiagnostic {
+                    block,
+                    mode,
+                    iterations,
+                    evaluations: self.step_tracker.evaluations - eval_start,
+                    residual_l2: l2,
+                    residual_linf: linf,
+                });
                 return Err(self.not_converged(nodes, unknowns, residual, iterations, worst.0));
             }
 
@@ -3780,9 +4301,29 @@ impl System {
                         told += kind_rounding[row];
                         self.input_allowance[index] = told;
                     }
+                    let l2 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
+                    let linf = residual.iter().fold(0.0_f64, |acc, &r| acc.max(r.abs()));
+                    self.record_block_diag(BlockStepDiagnostic {
+                        block,
+                        mode,
+                        iterations,
+                        evaluations: self.step_tracker.evaluations - eval_start,
+                        residual_l2: l2,
+                        residual_linf: linf,
+                    });
                     return Ok(Ok(iterations));
                 };
                 if iterations >= self.config.max_iterations {
+                    let l2 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
+                    let linf = residual.iter().fold(0.0_f64, |acc, &r| acc.max(r.abs()));
+                    self.record_block_diag(BlockStepDiagnostic {
+                        block,
+                        mode,
+                        iterations,
+                        evaluations: self.step_tracker.evaluations - eval_start,
+                        residual_l2: l2,
+                        residual_linf: linf,
+                    });
                     return Err(self.not_converged(nodes, unknowns, residual, iterations, open));
                 }
             }
@@ -3824,9 +4365,20 @@ impl System {
     /// Fill every candidate for a step of `dt_s`.
     fn trial(&mut self, dt_s: f64, cx: &Cx<'_>) -> Result<Trial, SystemError> {
         self.input_allowance.fill(0.0);
+        self.step_tracker.blocks.clear();
         let t0 = self.time.value();
-        for ((_, value), slot) in self.boundaries.iter().zip(&mut self.boundary_values) {
+        for (((_, value), slot), bias) in self
+            .boundaries
+            .iter()
+            .zip(&mut self.boundary_values)
+            .zip(&self.boundary_bias)
+        {
             value(t0, dt_s, slot);
+            for (v, &offset) in slot.iter_mut().zip(bias) {
+                if offset != 0.0 {
+                    *v += offset;
+                }
+            }
         }
         let mut iterations = 0_u32;
         for block in 0..self.blocks.len() {
@@ -3843,12 +4395,28 @@ impl System {
                     Err(shorter) => return Ok(Trial::Shorten { dt_s: shorter }),
                 }
             } else {
+                let eval_start = self.step_tracker.evaluations;
                 for position in 0..self.blocks[block].nodes.len() {
                     let node = self.blocks[block].nodes[position];
+                    self.charge_eval(
+                        self.node_inputs(node).len().max(1) as u64,
+                        block,
+                        BlockSolveMode::OrderedSweep,
+                        0,
+                        0.0,
+                    )?;
                     if let Some(shorter) = self.propose(node, dt_s, cx)? {
                         return Ok(Trial::Shorten { dt_s: shorter });
                     }
                 }
+                self.record_block_diag(BlockStepDiagnostic {
+                    block,
+                    mode: BlockSolveMode::OrderedSweep,
+                    iterations: 0,
+                    evaluations: self.step_tracker.evaluations - eval_start,
+                    residual_l2: 0.0,
+                    residual_linf: 0.0,
+                });
             }
         }
         Ok(Trial::Done { iterations })
@@ -4056,8 +4624,11 @@ impl System {
         }
 
         self.unresolved = 0;
+        self.step_tracker.reset(self.budgets);
         let mut shortenings = 0_u32;
         let iterations = loop {
+            self.candidate_controller
+                .copy_from(&self.accepted_controller);
             match self.trial(dt_s, cx)? {
                 Trial::Done { iterations } => break iterations,
                 // `shorter` was checked against `dt_s` where it was asked for.
@@ -4291,13 +4862,16 @@ impl System {
         }
         cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
 
-        // Publish: every state at once, then the clock and the ledger.
+        // Publish: every state and controller generation at once, then clock and ledger.
         for (accepted, candidate) in self.accepted.iter_mut().zip(&mut self.candidate) {
             core::mem::swap(accepted, candidate);
         }
+        core::mem::swap(&mut self.accepted_controller, &mut self.candidate_controller);
         self.accepted_inputs.copy_from_slice(&self.inputs);
         self.accepted_outputs.copy_from_slice(&self.outputs);
         self.accepted_allowance.copy_from_slice(&self.input_allowance);
+        self.accepted_receipts.copy_from_slice(&self.receipts);
+        self.accepted_generation = self.accepted_generation.wrapping_add(1);
         self.time.add(dt_s);
         self.steps += 1;
         self.ledger.steps += 1;
