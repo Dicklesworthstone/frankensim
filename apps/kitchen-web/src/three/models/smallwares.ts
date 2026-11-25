@@ -2808,10 +2808,8 @@ const bouleBuilder: Builder = (s, e) => {
   });
   const mat = phys({ map: tex.tex, bumpMap: canvasTex(bumpC, false), bumpScale: 1.3, roughness: 0.66, clearcoat: 0, clearcoatRoughness: 0.5, metalness: 0 }, "own");
   const rc = new Float64Array(3);
-  const repaint = () => {
-    const f = fOf();
-    const c = crust;
-    const L = prof.L;
+  /** Paint the crust for this browning, spring (as fOf) and meridian length. */
+  const paintCrust = (c: number, f: number, L: number) => {
     const d = tex.img.data;
     const flourT = 0.42 + 0.2 * f;
     const flourC: RGB = [lerp(242, 226, c), lerp(238, 206, c), lerp(228, 166, c)];
@@ -2860,13 +2858,41 @@ const bouleBuilder: Builder = (s, e) => {
       d[k * 4 + 2] = clamp(col[2], 0, 255);
     }
     tex.push();
-    mat.roughness = lerp(0.8, 0.66, c);
-    mat.clearcoat = 0.05 * c;
+  };
+  // A change of spring or crust asks for a repaint. The million texels are painted once, just before the loaf is next
+  // drawn, with the values of the last ask, so a frame that moves both (or the build followed by the oven's first
+  // settings) costs one paint, and the drawn crust is the one an immediate repaint would have left. The material
+  // follows at once, so the shader the loaf is compiled with is the one it is drawn with.
+  let ask: [number, number, number] | null = null;
+  // buildFixture hands the built loaf to the hooks below at once; they paint now if there is no mesh to wait for.
+  let deferred = true;
+  const flush = () => {
+    if (!ask) return;
+    const [c, f, L] = ask;
+    ask = null;
+    paintCrust(c, f, L);
+  };
+  const repaint = () => {
+    ask = [crust, fOf(), prof.L];
+    mat.roughness = lerp(0.8, 0.66, crust);
+    mat.clearcoat = 0.05 * crust;
+    if (!deferred) flush();
   };
   repaint();
   const j = s.joint("boule", [e.w / 2, 0, -e.d / 2]);
   j.add(mat, geo);
-  return () => {
+  return (b) => {
+    let drawn = false;
+    b.group.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === mat) {
+        o.onBeforeRender = flush;
+        drawn = true;
+      }
+    });
+    if (!drawn) {
+      deferred = false;
+      flush();
+    }
     let lastS = spring;
     let lastP = spring;
     let lastC = crust;
