@@ -8,6 +8,7 @@
 //! Nothing here integrates anything: every number comes from the kernel and its elements.
 
 mod adaptive_metric;
+mod battery;
 mod conduction;
 mod contact;
 mod dirac;
@@ -747,6 +748,25 @@ held-input owner of fs-system:
                  each port's returned mean and heat_w; adaptive tolerances
                  name <element>.x<i>. Exact for held inputs only. Its state
                  is saved by --checkpoint and resumed.)
+An OCV/SOC equivalent-circuit battery, stepped by its fs-system owner:
+  battery        capacity_c, soc_voltage = [[soc, V], ...] (soc from 0 to
+                 1), series_resistance_ohm, polarization_resistance_ohm,
+                 polarization_capacitance_f, bus_capacitance_f, soc,
+                 polarization_v = 0, bus_v, energy_tolerance_j,
+                 solve = {relative, absolute, max_iterations} (default
+                 1e-13, 1e-12, 40), backtracking_halvings = 10
+                                       [terminal, heat_series, heat_polarization]
+                 (terminal receives current, positive charging the battery,
+                 and returns the step's mean bus voltage; join it like a
+                 node_capacitor.p. Each heat port takes the temperature where
+                 that resistance's heat leaves. Reports the owner's state,
+                 remaining_charge_c, polarization_charge_c and bus_charge_c,
+                 then soc, polarization_v, bus_v, the last step's current_a,
+                 terminal_v, heat_series_w, heat_polarization_w (null
+                 initially) and the controls the run used. Adaptive
+                 tolerances name the three charges; order at most 2.
+                 Constant resistances: the owner's temperature laws are not
+                 exposed. A step leaving the curve's soc support refuses.)
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -1569,6 +1589,9 @@ enum Kind {
     /// Authored linear port-Hamiltonian matrices, stepped exactly for held
     /// inputs by the fs-system owner, with a heat port.
     PortHamiltonian,
+    /// An OCV/SOC equivalent-circuit battery stepped by its fs-system owner,
+    /// with a terminal and a heat port for each resistance.
+    Battery,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
     /// The same with Maxwell branches and actuators on the connectors.
@@ -1606,7 +1629,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 61] = [
+    const TABLE: [(&'static str, Self); 62] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1655,6 +1678,7 @@ impl Kind {
         ("modulated_transformer", Self::ModulatedTransformer),
         ("dirac_junction", Self::DiracJunction),
         ("port_hamiltonian", Self::PortHamiltonian),
+        ("battery", Self::Battery),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
@@ -1743,6 +1767,8 @@ struct Element {
     /// A card-backed pipe, for reporting its viscosity at the temperature
     /// its heat port read.
     laminar: Option<MaterialLaminarPipe>,
+    /// A battery's capacity, capacitances and the controls its run used.
+    battery: Option<battery::Declared>,
 }
 
 /// A controlled source's scalar command uses the SI unit of what its physical
@@ -1793,6 +1819,8 @@ enum Coordinate {
     Network(adaptive_metric::NetworkCoordinate),
     /// One coordinate of a port-Hamiltonian element's state vector.
     State(usize),
+    /// One of a battery's three charges.
+    Charge(usize),
     /// What a gas volume holds.
     Held(Held),
     /// A gas cavity's volume, and the temperature of its gas.
@@ -1843,6 +1871,9 @@ impl ErrorAccount {
                 .and_then(|state| state.get(index))
                 .copied()
                 .unwrap_or(f64::NAN),
+            Coordinate::Charge(index) => checkpoint
+                .state::<[f64; 3]>(self.node)
+                .map_or(f64::NAN, |state| state[index]),
             Coordinate::Held(held) => checkpoint
                 .state::<GasContents>(self.node)
                 .and_then(|gas| match held {
@@ -2006,7 +2037,12 @@ fn step_order(element: &Element) -> Option<u32> {
                 2
             },
         ),
-        Kind::ModalStructure | Kind::GasVolume | Kind::GapCapacitor | Kind::GapInductor => Some(2),
+        // A battery: the owner's discrete gradient of a separable energy.
+        Kind::ModalStructure
+        | Kind::GasVolume
+        | Kind::GapCapacitor
+        | Kind::GapInductor
+        | Kind::Battery => Some(2),
         _ => None,
     }
 }
@@ -3470,6 +3506,7 @@ fn element(
     let mut modal = None;
     let mut ohmic = None;
     let mut laminar = None;
+    let mut battery_declared = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -3675,6 +3712,16 @@ fn element(
             coordinates = state.len();
             add(builder, name, owner, state)?
         }
+        Kind::Battery => {
+            let (owner, state, declared) = battery::battery(definition, &what)?;
+            battery_declared = Some(declared);
+            // The owner offers no port tangent: it is added plainly.
+            let ports = owner.ports().to_vec();
+            let node = builder
+                .add(name, owner, state)
+                .map_err(|e| Refusal::Admission(e.to_string()))?;
+            (node, ports)
+        }
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
                 rigid_network(builder, name, definition, scene, &what)?
@@ -3831,6 +3878,7 @@ fn element(
         modal,
         ohmic,
         laminar,
+        battery: battery_declared,
     })
 }
 
@@ -4745,6 +4793,11 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             ],
             Kind::HeatCapacity => vec![("temperature_k", Coordinate::Scalar)],
             Kind::EnthalpyBody => vec![("specific_enthalpy_j_kg", Coordinate::Enthalpy)],
+            Kind::Battery => battery::CHARGES
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| (name, Coordinate::Charge(index)))
+                .collect(),
             Kind::Source(_)
             | Kind::VelocitySource
             | Kind::CurrentSource(_)
@@ -5387,6 +5440,21 @@ impl Device {
         if self
             .elements
             .iter()
+            .any(|element| element.kind == Kind::Battery)
+        {
+            let base = description.replace(
+                "constant parameters or",
+                "constant parameters, authored battery OCV/SOC curves or",
+            );
+            description = std::borrow::Cow::Owned(format!(
+                "{base}; a battery is stepped by its fs-system owner on its authored curve with \
+                 constant resistances: no temperature-dependent OCV or resistance, reversible \
+                 entropic heat, ageing or protection events"
+            ));
+        }
+        if self
+            .elements
+            .iter()
             .any(|element| !element.material_sources.is_empty())
         {
             let base = description
@@ -5693,6 +5761,9 @@ impl Device {
         }
         if element.kind == Kind::PortHamiltonian {
             return self.phs_values(element);
+        }
+        if let Some(declared) = &element.battery {
+            return battery::values(&self.system, element.node, declared);
         }
         if element.kind == Kind::DiracJunction {
             return self.dirac_values(element);
@@ -6143,6 +6214,7 @@ impl Device {
             | Kind::ResistanceMatrix
             | Kind::DiracJunction
             | Kind::PortHamiltonian
+            | Kind::Battery
             | Kind::ModalStructure
             | Kind::ThermalTimeline
             | Kind::ConductionBody

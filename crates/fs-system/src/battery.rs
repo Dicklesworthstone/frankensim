@@ -54,12 +54,17 @@ use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
-use fs_phs::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource};
-use fs_phs::{PhsError, PreparedStepError, SolveBudget, arithmetic_rounding_floor};
+use fs_phs::circuit::battery::{BatteryOcvCurve, BatterySource};
+use fs_phs::{PhsError, PreparedStepError, arithmetic_rounding_floor};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, Proposal, Receipt,
 };
 use fs_ports::{CoupleError, PortKind, StableId};
+
+/// The owner's Newton budget, which the CLI's `battery` scenes name through here.
+pub use fs_phs::SolveBudget;
+/// The owner's constants, which the CLI's `battery` scenes name through here.
+pub use fs_phs::circuit::battery::BatteryParameters;
 
 use crate::circuit::ResistanceLaw;
 

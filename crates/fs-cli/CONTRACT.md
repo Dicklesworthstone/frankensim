@@ -2158,6 +2158,39 @@ matrix. Not covered: nonlinear storage, switching or
 contact or exactness when inputs come from other elements (they are the
 kernel's step means). The hydraulic regression is described above.
 
+`battery` lowers to fs-system's `EquivalentCircuitBattery` (feature `phs`):
+the OCV/SOC curve of `fs_phs::circuit::battery` (`soc_voltage` knots, soc
+from 0 to 1) with `series_resistance_ohm`, one
+`polarization_resistance_ohm`/`polarization_capacitance_f` pair and a
+`bus_capacitance_f`. The start is `soc`, `polarization_v` (default 0) and
+`bus_v`, mapped by the owner's `state` to its three charges. The owner admits
+the curve, the constants and the start, and its refusals are reported under
+the element's name. `terminal` receives the current into the bus (positive
+charges the battery) and returns the step's mean bus voltage;
+`heat_series` and `heat_polarization` take a temperature and return minus
+that resistance's heat rate. Controls: `energy_tolerance_j` is required;
+`solve` (`relative`, `absolute`, `max_iterations`) and
+`backtracking_halvings` are optional, with fs-system's test values 1e-13,
+1e-12, 40 and 10 as defaults. Every report gives the controls the run used,
+authored or defaulted, beside the owner's three charges in its order
+(`remaining_charge_c`, `polarization_charge_c`, `bus_charge_c`, one table that
+also names the adaptive accounts), `soc`, `polarization_v`, `bus_v` and the
+last step's `current_a`, `terminal_v`, `heat_series_w` and
+`heat_polarization_w` (null before a step). Adaptive runs name the three
+charges, at order at most 2. fs-system re-exports `BatteryParameters` and `SolveBudget` from
+`battery`. Not exposed: the owner's resistance laws (the resistances are
+constant), so no temperature-dependent resistance; the owner claims no
+temperature-dependent OCV, entropic heat, ageing or protection events.
+Tested in `tests/system_command/battery.rs`: a flat curve discharging into a
+`resistor_branch` holds its stationary polarization and bus voltages and
+charges, moves its chemical charge by `i t`, and heats its two bodies and the
+load's body by `R i^2 t / C` (1e-9 relative), with the default controls
+reported exactly; an adaptive run at order 2 with its three charge accounts,
+order 3 and a missing account refused; authored controls reported exactly;
+refusals of a curve short of soc 1, a start soc of 1.5, a missing
+`energy_tolerance_j`, an unknown field and a fractional
+`backtracking_halvings`.
+
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
 `fs_mbd::component::network::ViscousNetwork` (rigid bodies in three
