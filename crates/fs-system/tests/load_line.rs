@@ -6729,3 +6729,121 @@ fn a_flow_of_the_line_no_effort_moves_is_not_differenced() {
         assert!(assembled >= 1, "no step of 200 assembled");
     }
 }
+
+fn build_affine_line_stick_slip_spring() -> (System, fs_system::NodeId, fs_system::NodeId) {
+    let mut builder = SystemBuilder::new();
+    let mass = builder
+        .add_with_tangent(
+            "mass",
+            Mass::new(MASS_KG).unwrap(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.08,
+            },
+        )
+        .unwrap();
+    let spring = builder
+        .add_with_tangent("spring", Spring::new(250.0, 0.0).unwrap(), 0.0)
+        .unwrap();
+    let rubbing = builder
+        .add_on_line("slider", slider(), Slip::sliding(-0.08))
+        .unwrap();
+    let pusher = builder
+        .add_with_tangent(
+            "push",
+            Force::new(Waveform::sine(3.5, 2.0 * PI * 2.0, 0.0, 0.0).unwrap()),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, mass, "p"),
+            &[
+                port(&builder, spring, "a"),
+                port(&builder, rubbing, "a"),
+                port(&builder, pusher, "p"),
+            ],
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, spring, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "b"),
+            Box::new(|_, _, values| values[0] = 0.0),
+        )
+        .unwrap();
+    builder
+        .boundary(
+            port(&builder, rubbing, "heat"),
+            Box::new(|_, _, values| values[0] = 300.0),
+        )
+        .unwrap();
+    (builder.seal().unwrap(), mass, rubbing)
+}
+
+#[test]
+fn affine_line_cache_matches_uncached_bitwise_under_alternating_step_lengths() {
+    // Regression for `affine_line` cache keying on `kept_line_dt_s == dt_s`:
+    // alternating two step lengths (`dt_a`, `dt_b`) across a single-load-line
+    // block whose smooth neighbours (`Mass`, `Spring`, `Force`) are `ExactLinear`
+    // must invalidate and rebuild the neighbour factors, compliance matrix, and
+    // tangent columns on every `dt` change, matching an uncached run bit for bit.
+    let (mut cached, cm, cs) = build_affine_line_stick_slip_spring();
+    let (mut uncached, um, us) = build_affine_line_stick_slip_spring();
+    assert!(
+        cached.execution_plan().blocks[0].affine_line_cached,
+        "single-line ExactLinear block must enable affine_line caching"
+    );
+
+    let dts = [1.0e-3_f64, 5.0e-3_f64];
+    let mut saw_stuck = false;
+    let mut saw_sliding = false;
+    with_cx(|cx| {
+        for step in 0..40 {
+            let dt = dts[step % 2];
+            uncached.invalidate_caches();
+            let rep_c = cached
+                .step(dt, cx)
+                .unwrap_or_else(|e| panic!("cached step {step} (dt={dt}): {e}"));
+            let rep_u = uncached
+                .step(dt, cx)
+                .unwrap_or_else(|e| panic!("uncached step {step} (dt={dt}): {e}"));
+            assert_eq!(rep_c.dt_s.to_bits(), rep_u.dt_s.to_bits(), "step {step} dt");
+            let mc = cached.state::<Motion>(cm).unwrap();
+            let mu = uncached.state::<Motion>(um).unwrap();
+            assert_eq!(
+                mc.position_m.to_bits(),
+                mu.position_m.to_bits(),
+                "step {step} (dt={dt}): cached position drifted from uncached"
+            );
+            assert_eq!(
+                mc.velocity_m_s.to_bits(),
+                mu.velocity_m_s.to_bits(),
+                "step {step} (dt={dt}): cached velocity drifted from uncached"
+            );
+            let stuck_c = cached.state::<Slip>(cs).unwrap().is_stuck();
+            let stuck_u = uncached.state::<Slip>(us).unwrap().is_stuck();
+            assert_eq!(
+                stuck_c, stuck_u,
+                "step {step} (dt={dt}): stick/slip state drifted"
+            );
+            assert_eq!(
+                cached.ledger().duration_s.value().to_bits(),
+                uncached.ledger().duration_s.value().to_bits(),
+                "step {step} (dt={dt}): duration drifted"
+            );
+            assert_eq!(
+                rep_c.iterations, rep_u.iterations,
+                "step {step} (dt={dt}): iteration count drifted from uncached"
+            );
+            saw_stuck |= stuck_c;
+            saw_sliding |= !stuck_c;
+        }
+    });
+    assert!(saw_stuck && saw_sliding, "expected both stuck and sliding steps");
+}

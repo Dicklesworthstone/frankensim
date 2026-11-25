@@ -23,13 +23,16 @@ phs = ["dep:fs-phs"]
 modal-slices = ["dep:fs-nlmodal"]
 
 [dependencies]
+fs-adjoint = { path = "../fs-adjoint" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd", optional = true }
 fs-nlmodal = { path = "../fs-nlmodal", optional = true }
 fs-phs = { path = "../fs-phs", optional = true }
+fs-orbit = { path = "../fs-orbit" }
 fs-ports = { path = "../fs-ports" }
 fs-solver = { path = "../fs-solver" }
 fs-thermal = { path = "../fs-thermal", optional = true }

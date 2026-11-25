@@ -32,6 +32,7 @@ use crate::wiring::{
     RouteTemperature, blocks_in_dependency_order, tolerance_group,
 };
 
+mod analysis;
 mod events;
 mod line;
 mod modes;
@@ -39,6 +40,14 @@ mod plan;
 mod scalar;
 mod snapshot;
 
+pub use analysis::{
+    AnalysisError, AnalysisKind, AnalysisOutcome, AnalysisRequest, BoundaryChannel,
+    HarmonicResponse, LinearizeConfig, ModalAnalysis, ModalConfig, ModalMode, OutputChannel,
+    PeriodicHbConfig, PeriodicHbSolution, PeriodicShootingConfig, PeriodicShootingSolution,
+    RequiredTier, SensitivityConfig, StateMap, StateSpaceLinearization, StationaryConfig,
+    StationarySolution, StepAdjointSensitivity, StepObjective, StepTangentSensitivity,
+    TrajectoryAdjointResult, TrajectoryStepPartials,
+};
 pub use events::{
     EventBracket, EventConfig, EventDirection, EventError, EventReport, EventSetConfig,
     EventSetError, EventSetReport, EventSetStatus, EventStatus, LocatedEvent,
