@@ -44,7 +44,7 @@ impl Score {
     fn midi(parsed: midi::Parsed, keys: &[u8], frames: u64, mapping: midi::Mapping) -> Result<Self, String> {
         let r = &parsed.report;
         let report = format!("MIDI: channel {}; velocity 127 -> {} m/s (uncalibrated); CC64 {}. {} selected note-ons, {} tracks, end at output sample {}; {} other-channel messages, {} ignored channel messages, {} skipped SysEx, {} synthetic end releases. No pitch-wheel retuning or audio-gain mapping.",
-            mapping.channel + 1, mapping.maximum_velocity_m_s,
+            mapping.channels, mapping.maximum_velocity_m_s,
             if mapping.continuous_sustain {"continuous travel"} else {"switch"},
             r.selected_note_ons, r.tracks, r.end_sample, r.other_channel_messages,
             r.ignored_channel_messages, r.ignored_sysex_events, r.end_releases);
@@ -67,9 +67,9 @@ mod tests {
     }
     #[test]
     fn explicit_mapping_and_score_selection_cannot_be_silently_ignored() {
-        let p = parse(&["--midi", "score.mid", "--midi-channel", "2", "--midi-velocity-max-m-s", "2",
+        let p = parse(&["--midi", "score.mid", "--midi-channel", "1,2", "--midi-velocity-max-m-s", "2",
             "--midi-half-pedal"]).unwrap();
-        assert_eq!(p.midi_mapping.channel,1);assert_eq!(p.midi_mapping.maximum_velocity_m_s,2.);
+        assert_eq!(p.midi_mapping.channels.to_string(),"1,2");assert_eq!(p.midi_mapping.maximum_velocity_m_s,2.);
         assert!(p.midi_mapping.continuous_sustain);
         for args in [vec!["--midi", "one.mid", "two.mid"], vec!["one.mid", "--midi", "two.mid"],
             vec!["--performance", "p.csv", "one.mid"], vec!["--midi-half-pedal"],

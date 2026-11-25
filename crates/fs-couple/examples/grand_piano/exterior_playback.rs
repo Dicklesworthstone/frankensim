@@ -162,8 +162,7 @@ impl Options {
                     if result.midi.replace(value.clone()).is_some() { return Err("duplicate MIDI score".into()); }
                 }
                 "--midi-channel" => {
-                    result.midi_mapping.channel = value.parse::<u8>().map_err(|_| invalid())?
-                        .checked_sub(1).ok_or_else(invalid)?;
+                    result.midi_mapping.channels = value.parse()?;
                     result.mapping_explicit = true;
                 }
                 "--midi-velocity-max-m-s" => {
@@ -244,7 +243,7 @@ impl Options {
         if self.mapping_explicit && self.midi.is_none() {
             return Err("MIDI mapping controls require a MIDI score".into());
         }
-        if self.midi_mapping.channel >= 16 || !self.midi_mapping.maximum_velocity_m_s.is_finite()
+        if !self.midi_mapping.maximum_velocity_m_s.is_finite()
             || self.midi_mapping.maximum_velocity_m_s <= 0. || self.midi_mapping.maximum_velocity_m_s > 8.
             || self.note.is_some_and(|k| !(21..=108).contains(&k))
             || self.velocity.is_some_and(|v| !v.is_finite() || v <= 0. || v > 8.) {

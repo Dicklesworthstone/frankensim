@@ -10,10 +10,11 @@ cargo run --release -p fs-couple --example grand_piano -- \
   --midi-velocity-max-m-s 4.5 --duration 30 --render piano.wav
 ```
 
-Select the actual piano channel with `--midi-channel 1..16` (default 1). Tracks
-are merged in time, but only the selected channel moves this piano's keys or
-pedals. Other-channel messages are counted and ignored: a drum channel cannot
-accidentally strike a nonexistent piano string or release this piano's sustain.
+By default, channel 1 plays the piano. Use `--midi-channel 2` to select another
+channel, or `--midi-channel 1,2` for a score whose hands occupy two channels.
+Channels range from 1 to 16. Tracks merge in score order. Only the selected
+channels move keys or pedals, and the report counts messages from other channels.
+
 The supplied scale, board, felt cards, hammer masses, flexible preset shanks and
 microphone options remain independently selectable. `--midi` requires `--render`
 and excludes `--performance`, `--note` and `--velocity`; MIDI-only mapping flags
@@ -45,8 +46,12 @@ the controller recorded continuous pedal depth. CC66 and CC67 use the same
 switch threshold for sostenuto and una corda. Same-time events preserve source
 order, including whether sostenuto captures a just-pressed key.
 
-CC123 releases held keys but respects the current pedals. CC121 resets the
-three mapped pedal controls without erasing resonator state. At the last
+When the hands use separate channels, sustain follows the deepest requested
+travel, and sostenuto and una corda stay down while any selected channel holds
+them. A note-off or CC123 releases only keys held by the sending channel. CC121
+releases that channel's three pedal claims. All channels share one action, so a
+second strike on an already held key still requires a preceding key release.
+At the last
 end-of-track timestamp the importer releases any still-held keys and pedals,
 so the remaining render is physical ringdown. It never mutes PCM or clears
 string, soundboard, felt or contact history. These final releases are reported.

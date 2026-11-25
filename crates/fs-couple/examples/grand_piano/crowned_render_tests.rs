@@ -29,7 +29,7 @@ fn supplied_geometry_overrides_only_the_preset_board_not_the_performance_or_mate
     assert_eq!(o.board_geometry.as_deref(),Some("measured.fss"));
     assert_eq!(o.hammers.as_deref(),Some("felt.fsh"));
     assert_eq!(o.dampers.as_deref(),Some("pads.fspd"));
-    assert_eq!(o.midi_mapping.channel,1);assert!(o.midi_mapping.continuous_sustain);
+    assert_eq!(o.midi_mapping.channels.to_string(),"2");assert!(o.midi_mapping.continuous_sustain);
     assert_eq!(o.microphone,Some([0.3,0.7,1.2]));
     assert_eq!(o.board_band_hz,800.);assert_eq!(o.modes,128);
     let scale=selected_scale(None,&o).unwrap();

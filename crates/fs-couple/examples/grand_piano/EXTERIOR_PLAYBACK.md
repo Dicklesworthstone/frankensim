@@ -196,8 +196,9 @@ cargo run --release -p fs-couple --example piano_exterior -- \
 ```
 
 `--midi score.mid` is equivalent to the legacy positional score path. Add
-`--midi-channel 1..16`, `--midi-velocity-max-m-s V` and `--midi-half-pedal`
-to select the existing importer's mappings. Defaults remain channel 1,
+`--midi-channel 2` for one channel or `--midi-channel 1,2` for two hands on
+separate channels. Use `--midi-velocity-max-m-s V` and `--midi-half-pedal`
+to select the hammer-speed and sustain mappings. Defaults remain channel 1,
 velocity 127 -> 4.5 m/s and switched CC64. The velocity maximum must be in
 (0,8] m/s; it is an explicit uncalibrated hammer-speed mapping, not output gain.
 Continuous CC64 uses travel `value/127`; CC66/67 retain sostenuto/una-corda.

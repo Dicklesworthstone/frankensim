@@ -8,11 +8,43 @@ pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EVENTS: usize = 1_000_000;
 const MAX_TRACKS: u16 = 256;
 
+/// A nonempty selection of MIDI channels, numbered from 1 in the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Channels(u16);
+
+impl Channels {
+    fn contains(self, channel: u8) -> bool { self.0 & (1 << channel) != 0 }
+}
+
+impl std::str::FromStr for Channels {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut selection = Self(0);
+        for item in value.split(',') {
+            let channel = item.parse::<u8>().ok().filter(|n| (1..=16).contains(n))
+                .ok_or("expected --midi-channel as a comma-separated list of channels 1..16")? - 1;
+            if selection.contains(channel) { return Err(format!("duplicate MIDI channel {}", channel + 1)); }
+            selection.0 |= 1 << channel;
+        }
+        Ok(selection)
+    }
+}
+
+impl std::fmt::Display for Channels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut separator = "";
+        for channel in (0..16).filter(|&ch| self.contains(ch)) {
+            write!(f, "{separator}{}", channel + 1)?;
+            separator = ",";
+        }
+        Ok(())
+    }
+}
+
 /// This is an explicit controller-to-mechanics assumption, not a calibration.
 #[derive(Debug, Clone, Copy)]
 pub struct Mapping {
-    /// Zero-based MIDI channel, chosen by the caller (CLI uses 1..=16).
-    pub channel: u8,
+    pub channels: Channels,
     /// Velocity byte 127 maps to this POST-ESCAPEMENT hammer speed.
     pub maximum_velocity_m_s: f64,
     /// Opt into CC64/127 as physical pedal travel instead of its on/off switch.
@@ -20,7 +52,7 @@ pub struct Mapping {
 }
 impl Default for Mapping {
     fn default() -> Self {
-        Self { channel: 0, maximum_velocity_m_s: 4.5, continuous_sustain: false }
+        Self { channels: Channels(1), maximum_velocity_m_s: 4.5, continuous_sustain: false }
     }
 }
 #[derive(Debug, Default)]
@@ -73,7 +105,7 @@ impl<'a> Reader<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum Message { Tempo(u32), On(u8, u8), Off(u8), Cc(u8, u8), End }
+enum Message { Tempo(u32), On(u8, u8, u8), Off(u8, u8), Cc(u8, u8, u8), End }
 struct Timed { tick: u64, message: Message }
 
 fn track(bytes: &[u8], index: u16, format: u16, mapping: Mapping,
@@ -96,15 +128,16 @@ fn track(bytes: &[u8], index: u16, format: u16, mapping: Mapping,
             let a = input.data()?;
             let family = status & 0xf0;
             let b = if family == 0xc0 || family == 0xd0 { 0 } else { input.data()? };
-            if status & 15 != mapping.channel {
+            let channel = status & 15;
+            if !mapping.channels.contains(channel) {
                 report.other_channel_messages += 1;
                 continue;
             }
             let message = match family {
-                0x80 => Message::Off(a),
-                0x90 if b == 0 => Message::Off(a),
-                0x90 => Message::On(a, b),
-                0xb0 => Message::Cc(a, b),
+                0x80 => Message::Off(channel, a),
+                0x90 if b == 0 => Message::Off(channel, a),
+                0x90 => Message::On(channel, a, b),
+                0xb0 => Message::Cc(channel, a, b),
                 0xe0 if a != 0 || b != 64 => {
                     return Err("selected MIDI channel contains pitch bend; string tension is not a MIDI pitch wheel".into());
                 }
@@ -169,7 +202,7 @@ pub fn load(path: &str, keys: &[u8], rate: u32, frames: u64, mapping: Mapping) -
 
 pub fn read(bytes: &[u8], keys: &[u8], rate: u32, frames: u64, mapping: Mapping) -> Result<Parsed, String> {
     if bytes.len() > MAX_BYTES || rate == 0 || frames == 0 || keys.is_empty()
-        || mapping.channel > 15 || !mapping.maximum_velocity_m_s.is_finite()
+        || !mapping.maximum_velocity_m_s.is_finite()
         || mapping.maximum_velocity_m_s <= 0.0 || mapping.maximum_velocity_m_s > 8.0
         || mapping.maximum_velocity_m_s / 127.0 == 0.0
     { return Err("MIDI requires bounded bytes, nonempty scale/clock, channel 1..16 and finite hammer speed in (0,8] m/s".into()); }
@@ -221,10 +254,11 @@ pub fn read(bytes: &[u8], keys: &[u8], rate: u32, frames: u64, mapping: Mapping)
     // In particular, never sort a same-track sostenuto edge ahead of a note.
     raw.sort_by_key(|e| e.tick);
     let mut events = Vec::new();
-    let mut held = [false; 128];
-    let mut sustain = 0.0;
-    let mut sostenuto = false;
-    let mut una_corda = false;
+    // Keys belong to their striking channel. All hands share the same pedals.
+    let mut held = [None; 128];
+    let mut sustain = [0_u8; 16];
+    let mut sostenuto = 0_u16;
+    let mut una_corda = 0_u16;
     let mut tempo = 500_000_u32;
     let mut previous = 0;
     let mut elapsed = 0_u128;
@@ -242,37 +276,45 @@ pub fn read(bytes: &[u8], keys: &[u8], rate: u32, frames: u64, mapping: Mapping)
         match event.message {
             Message::Tempo(value) => tempo = value,
             Message::End => {},
-            Message::On(key, velocity) => {
+            Message::On(channel, key, velocity) => {
                 if !keys.contains(&key) { return Err(format!("MIDI key {key} is absent from the supplied physical scale")); }
-                if held[usize::from(key)] { return Err(format!("overlapping MIDI note-ons for key {key}; one physical key cannot spawn independent voices")); }
-                held[usize::from(key)] = true;
+                if held[usize::from(key)].is_some() { return Err(format!("overlapping MIDI note-ons for key {key}; one physical key cannot spawn independent voices")); }
+                held[usize::from(key)] = Some(channel);
                 report.selected_note_ons += 1;
                 push(&mut events, sample, Control::NoteOn { key,
                     velocity_m_s: mapping.maximum_velocity_m_s * (f64::from(velocity) / 127.0) }, frames)?;
             }
-            Message::Off(key) => {
-                if held[usize::from(key)] {
-                    held[usize::from(key)] = false;
+            Message::Off(channel, key) => {
+                if held[usize::from(key)] == Some(channel) {
+                    held[usize::from(key)] = None;
                     push(&mut events, sample, Control::NoteOff { key }, frames)?;
                 }
             }
-            Message::Cc(controller, value) => match controller {
-                64 => {
-                    sustain = if mapping.continuous_sustain { f64::from(value) / 127.0 }
-                        else if value >= 64 { 1.0 } else { 0.0 };
-                    push(&mut events, sample, Control::Sustain(sustain), frames)?;
-                }
-                66 => { sostenuto = value >= 64; push(&mut events, sample, Control::Sostenuto(sostenuto), frames)?; }
-                67 => { una_corda = value >= 64; push(&mut events, sample, Control::UnaCorda(una_corda), frames)?; }
-                121 => {
-                    sustain = 0.0; sostenuto = false; una_corda = false;
-                    for control in [Control::Sustain(0.0), Control::Sostenuto(false), Control::UnaCorda(false)] {
+            Message::Cc(channel, controller, value) => match controller {
+                64 | 66 | 67 | 121 => {
+                    let reset = controller == 121;
+                    if reset || controller == 64 {
+                        sustain[usize::from(channel)] = if reset { 0 } else if mapping.continuous_sustain {
+                            value
+                        } else if value >= 64 { 127 } else { 0 };
+                        let travel = sustain.iter().copied().max().unwrap_or(0);
+                        push(&mut events, sample, Control::Sustain(f64::from(travel) / 127.0), frames)?;
+                    }
+                    for (number, claims) in [(66, &mut sostenuto), (67, &mut una_corda)] {
+                        if !reset && controller != number { continue; }
+                        if reset || value < 64 { *claims &= !(1 << channel); }
+                        else { *claims |= 1 << channel; }
+                        let control = if number == 66 { Control::Sostenuto(*claims != 0) }
+                            else { Control::UnaCorda(*claims != 0) };
                         push(&mut events, sample, control, frames)?;
                     }
                 }
                 123 => {
-                    for (key, down) in held.iter_mut().enumerate() {
-                        if *down { *down = false; push(&mut events, sample, Control::NoteOff { key: key as u8 }, frames)?; }
+                    for (key, owner) in held.iter_mut().enumerate() {
+                        if *owner == Some(channel) {
+                            *owner = None;
+                            push(&mut events, sample, Control::NoteOff { key: key as u8 }, frames)?;
+                        }
                     }
                 }
                 120 => return Err("MIDI All Sound Off is not a physical state reset; use key/pedal releases and allow ringdown".into()),
@@ -281,7 +323,7 @@ pub fn read(bytes: &[u8], keys: &[u8], rate: u32, frames: u64, mapping: Mapping)
         }
     }
     if report.selected_note_ons == 0 {
-        return Err(format!("no notes on selected MIDI channel {}; select --midi-channel explicitly", mapping.channel + 1));
+        return Err(format!("no notes on selected MIDI channel {}; select --midi-channel explicitly", mapping.channels));
     }
     if report.end_sample >= frames {
         return Err(format!("MIDI ends at sample {}; increase --duration to include that sample and the desired acoustic tail", report.end_sample));
@@ -290,10 +332,10 @@ pub fn read(bytes: &[u8], keys: &[u8], rate: u32, frames: u64, mapping: Mapping)
     // not clearing resonators, muting PCM or overwriting contact histories.
     let end = report.end_sample;
     for (key, down) in held.into_iter().enumerate() {
-        if down { push(&mut events, end, Control::NoteOff { key: key as u8 }, frames)?; report.end_releases += 1; }
+        if down.is_some() { push(&mut events, end, Control::NoteOff { key: key as u8 }, frames)?; report.end_releases += 1; }
     }
-    for (active, control) in [(sustain != 0.0, Control::Sustain(0.0)),
-        (sostenuto, Control::Sostenuto(false)), (una_corda, Control::UnaCorda(false))]
+    for (active, control) in [(sustain.iter().any(|&value| value != 0), Control::Sustain(0.0)),
+        (sostenuto != 0, Control::Sostenuto(false)), (una_corda != 0, Control::UnaCorda(false))]
     {
         if active { push(&mut events, end, control, frames)?; report.end_releases += 1; }
     }
@@ -392,8 +434,45 @@ mod tests {
             (0,&[0x90,69,127]),(480,&[69,0]),(0,&[0xff,0x2f,0])])]);
         let p=parse(&bytes).unwrap();
         assert_eq!(p.events.len(),2); assert_eq!(p.report.other_channel_messages,2);
-        assert!(read(&simple(),&[69],48_000,100_000,Mapping{channel:1,..Mapping::default()}).is_err());
+        assert!(read(&simple(),&[69],48_000,100_000,Mapping{channels:"2".parse().unwrap(),..Mapping::default()}).is_err());
     }
+    #[test]
+    fn split_hands_share_pedals_and_release_only_their_own_keys() {
+        // Channel 1 plays bass, channel 16 plays treble. The percussion
+        // track sends a bend as well as a note; neither belongs to this piano.
+        let left = events(&[(0, &[0x90, 60, 127]), (0, &[0xb0, 64, 80]),
+            (1, &[0xb0, 66, 127]), (0, &[0xb0, 67, 127]), (2, &[0xb0, 121, 0]),
+            (1, &[0x80, 69, 0]), (0, &[0xb0, 123, 0]), (1, &[0xff, 0x2f, 0])]);
+        let right = events(&[(0, &[0x9f, 69, 127]), (2, &[0xbf, 64, 63]),
+            (0, &[0xbf, 66, 127]), (0, &[0xbf, 67, 127]), (3, &[0xff, 0x2f, 0])]);
+        let drums = events(&[(0, &[0x99, 42, 90]), (0, &[0xe9, 1, 64]), (0, &[0xff, 0x2f, 0])]);
+        let score = read(&smf(1, 480, &[left, right, drums]), &[60, 69], 48_000, 500,
+            Mapping { channels: "16,1".parse().unwrap(), continuous_sustain: true, ..Mapping::default() }).unwrap();
+        assert_eq!(score.report.selected_note_ons, 2);
+        assert_eq!(score.report.other_channel_messages, 2);
+        assert_eq!(score.report.end_releases, 4);
+        let at = |sample| score.events.iter().filter(|e| e.sample == sample)
+            .map(|e| e.control).collect::<Vec<_>>();
+        assert_eq!(at(0), [Control::NoteOn { key: 60, velocity_m_s: 4.5 }, Control::Sustain(80.0/127.0),
+            Control::NoteOn { key: 69, velocity_m_s: 4.5 }]);
+        assert_eq!(at(150), [Control::Sustain(63.0/127.0), Control::Sostenuto(true), Control::UnaCorda(true)]);
+        assert_eq!(at(200), [Control::NoteOff { key: 60 }]);
+        assert_eq!(at(250), [Control::NoteOff { key: 69 }, Control::Sustain(0.0),
+            Control::Sostenuto(false), Control::UnaCorda(false)]);
+    }
+
+    #[test]
+    fn channel_selection_rejects_ambiguous_keys_and_invalid_channel_lists() {
+        for text in ["", "0", "17", "1,", "1,,2", "1,1", "1,17"] {
+            assert!(text.parse::<Channels>().is_err(), "accepted {text:?}");
+        }
+        assert_eq!("16,2".parse::<Channels>().unwrap().to_string(), "2,16");
+        let overlap = events(&[(0, &[0x90, 60, 80]), (1, &[0x91, 60, 100]), (1, &[0xff, 0x2f, 0])]);
+        let mapping = Mapping { channels: "1,2".parse().unwrap(), ..Mapping::default() };
+        assert!(read(&smf(0, 480, &[overlap]), &[60], 48_000, 500, mapping)
+            .err().unwrap().contains("overlapping MIDI note-ons"));
+    }
+
     #[test]
     fn smpte_drop_frame_is_exact_and_tempo_does_not_retime_timecode() {
         let bytes=smf(0,0xe364,&[events(&[(0,&[0xff,0x51,3,15,0x42,0x40]),

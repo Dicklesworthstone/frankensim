@@ -57,7 +57,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--board-reduction SPEC]
     [--performance events.csv] [--observer-gain Pa/(m^3/s)]
-    [--midi performance.mid] [--midi-channel 1..16]
+    [--midi performance.mid] [--midi-channel CHANNEL[,CHANNEL...]]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
     [--acoustic-refinement-levels 0..3]
@@ -437,8 +437,7 @@ impl Options {
                 "--performance" => options.performance = Some(value.clone()),
                 "--midi" => options.midi = Some(value.clone()),
                 "--midi-channel" => {
-                    options.midi_mapping.channel = value.parse::<u8>().map_err(|_| invalid())?
-                        .checked_sub(1).ok_or_else(invalid)?;
+                    options.midi_mapping.channels = value.parse()?;
                 }
                 "--midi-velocity-max-m-s" => options.midi_mapping.maximum_velocity_m_s =
                     value.parse().map_err(|_| invalid())?,
@@ -560,7 +559,7 @@ impl Options {
             return Err("--midi requires --render and excludes --performance/--note/--velocity".into());
         }
         let mapping = options.midi_mapping;
-        if mapping.channel > 15 || !mapping.maximum_velocity_m_s.is_finite()
+        if !mapping.maximum_velocity_m_s.is_finite()
             || mapping.maximum_velocity_m_s <= 0.0 || mapping.maximum_velocity_m_s > 8.0
             || mapping.maximum_velocity_m_s / 127.0 == 0.0
             || (options.midi.is_none() && ["--midi-channel", "--midi-velocity-max-m-s", "--midi-half-pedal"]
@@ -1078,7 +1077,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         let parsed = midi::load(path, &keys, rate, u64::from(count), options.midi_mapping)?;
         let report = &parsed.report;
         println!("MIDI: {} tracks, channel {}, {} hammer launches, end sample {}, {} end releases; {} other-channel messages, {} unsupported channel messages and {} SysEx events ignored.",
-            report.tracks, options.midi_mapping.channel + 1, report.selected_note_ons,
+            report.tracks, options.midi_mapping.channels, report.selected_note_ons,
             report.end_sample, report.end_releases, report.other_channel_messages,
             report.ignored_channel_messages, report.ignored_sysex_events);
         println!("Uncalibrated MIDI mapping: velocity 127 -> {} m/s, linear hammer launch; sustain mapping {}. No output gain, sample bank or pitch-wheel substitution.",
@@ -2018,10 +2017,10 @@ mod render_tests {
     #[test]
     fn midi_options_compose_with_physical_inputs_without_overwriting_the_score() {
         let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
-            "--midi-channel", "16", "--midi-velocity-max-m-s", "2", "--midi-half-pedal",
+            "--midi-channel", "2,16", "--midi-velocity-max-m-s", "2", "--midi-half-pedal",
             "--hammers", "felt.fsh"]).unwrap();
         assert_eq!(o.midi.as_deref(), Some("score.mid"));
-        assert_eq!(o.midi_mapping.channel, 15);
+        assert_eq!(o.midi_mapping.channels.to_string(), "2,16");
         assert_eq!(o.midi_mapping.maximum_velocity_m_s, 2.0);
         assert!(o.midi_mapping.continuous_sustain);
         for args in [vec!["--midi", "score.mid"], vec!["--midi-channel", "1"],
