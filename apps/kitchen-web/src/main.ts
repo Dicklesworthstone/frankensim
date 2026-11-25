@@ -11,6 +11,7 @@ import { mountOvenLab } from "./three/ovenLab";
 import { mountStoveLab } from "./three/stoveLab";
 import { mountWeekLab } from "./three/weekLab";
 import { mountFloorLab } from "./three/floorLab";
+import { mountRushLab } from "./three/rushLab";
 
 declare global {
   interface Window {
@@ -203,6 +204,7 @@ function bootstrap(): void {
     { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false },
     { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false },
     { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false },
+    { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false },
   ].filter((entry) => entry.el !== null);
 
   const mountOne = (entry: (typeof pendingMounts)[number]) => {

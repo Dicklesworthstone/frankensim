@@ -73,7 +73,7 @@ const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satu
 /* ------------------------------------------------------------------------------------------------------------ */
 
 /** Place a fixture with its front face at z = `z`, its left end (as seen from the front) at x0, facing +z or -z. */
-function place(m: Model, x0: number, z: number, facePlusZ = true): THREE.Group {
+export function place(m: Model, x0: number, z: number, facePlusZ = true): THREE.Group {
   const g = m.group;
   if (facePlusZ) g.position.set(x0, 0, z);
   else {
@@ -83,7 +83,7 @@ function place(m: Model, x0: number, z: number, facePlusZ = true): THREE.Group {
   return g;
 }
 
-function tilePlane(w: number, h: number): THREE.Mesh {
+export function tilePlane(w: number, h: number): THREE.Mesh {
   const g = new THREE.PlaneGeometry(w, h);
   const uv = g.attributes.uv as THREE.BufferAttribute;
   for (let i = 0; i < uv.count; i++) uv.setXY(i, (uv.getX(i) * w) / 0.608, (uv.getY(i) * h) / 0.608);
@@ -92,7 +92,7 @@ function tilePlane(w: number, h: number): THREE.Mesh {
   return m;
 }
 
-function backdrop(): THREE.CanvasTexture {
+export function backdrop(): THREE.CanvasTexture {
   const c = document.createElement("canvas");
   c.width = 4;
   c.height = 256;
@@ -178,7 +178,7 @@ function trayTemplate(): THREE.Group {
 }
 
 /** Many copies of a template drawn as one instanced mesh per part. */
-class Instances {
+export class Instances {
   readonly meshes: THREE.InstancedMesh[] = [];
   private rel: THREE.Matrix4[] = [];
   private n = 0;

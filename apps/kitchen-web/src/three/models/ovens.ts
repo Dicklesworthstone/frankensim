@@ -3038,8 +3038,8 @@ const holdingCabinet: Builder = (s, e) => {
         if (fine2) slab(s, p.ss, xu - 0.0008 + sg * 0.008, xu + 0.0008 + sg * 0.008, y - 0.018, y, cav.z0 + 0.05, cav.z1 - 0.025);
       }
     }
-  // Its load: rolls proofing on two sheet pans, an empty pan above.
-  if (fine1) {
+  // Its load: rolls proofing on two sheet pans, an empty pan above (none in the "-EMPTY" variant, which a view fills).
+  if (fine1 && s.name !== "NSF-HOLDING-CABINET-EMPTY") {
     const pz = (cav.z0 + 0.05 + cav.z1 - 0.025) / 2;
     const loads = fine2 ? [5, 9, 12] : [5, 9];
     for (const [k, li] of loads.entries()) {
@@ -4536,6 +4536,7 @@ register({
   "NSF-COMBI-10PAN": combi(10),
   "NSF-COMBI-20PAN-ROLLIN": combi(20),
   "NSF-HOLDING-CABINET": holdingCabinet,
+  "NSF-HOLDING-CABINET-EMPTY": holdingCabinet,
   "NSF-MICROWAVE-COMM": microwave,
   "NSF-TOASTER-CONVEYOR": conveyorToaster,
   "NSF-AIRFRYER-COMM": airFryer,

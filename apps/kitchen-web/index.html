@@ -852,7 +852,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>The week</p>
               <h2 class="d3" id="week-title">Dead on Tuesday, slammed on Wednesday, <em class="g">one crew</em>.</h2>
               <p class="kicker">
-                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste. Then find where the blast chiller should stand.
+                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste. Then find where the blast chiller should stand, and run one lunch hour the same way.
               </p>
             </div>
             <a class="more" href="#week-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -957,6 +957,72 @@
               <div>
                 <code class="formula">walk = Σ_source 2 · pans_source · d(source, chiller) + 2 · loads · d(chiller, walk-in)</code>
                 <p class="model">Model: <code>placeChiller</code>. Distance fields over the free floor rank every spot; the routes and totals are A* paths with the chiller in place.</p>
+              </div>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal rs-fig" id="rush">
+            <header class="fig-head">
+              <p class="todo">Pick a day, then pick what to cook before the doors open</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage rs-stage" data-rush-stage>
+                <canvas data-rush-canvas tabindex="0" aria-label="A fast-casual hot line from the guests' side of the pass: a holding cabinet, a fryer, a griddle and a combi oven, three cooks, and a rail of order tickets over the pass that fills and empties through a lunch service. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud" aria-hidden="true"><b data-rs-hud-clock>10:00</b><span data-rs-hud-tickets>Rail clear</span><em data-rs-hud-note>Doors at 11:00</em></div>
+                <p class="wk-legend rs-legend" aria-hidden="true"><span class="new">New ticket</span><span class="amber">Waiting 8 min</span><span class="ot">Waiting 15 min</span><span class="unit">1 pan = 12 portions</span></p>
+              </div>
+              <div class="lab rs-lab">
+                <div class="lab-view">
+                  <div class="rs-chart" data-rush-chart role="img" aria-label="Orders coming in, tickets waiting and portions held through the lunch service, with each cook's busy time underneath"></div>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>Typical wait</span><b><i data-rs-wait>…</i><em data-rs-wait-d hidden></em></b><small>1 day in 10: <i data-rs-wait-p90>…</i></small></div>
+                    <div class="wk-tile"><span>1 guest in 10 waits</span><b><i data-rs-long>…</i><em data-rs-long-d hidden></em></b><small>1 day in 10: <i data-rs-long-p90>…</i></small></div>
+                    <div class="wk-tile"><span>Crew busy before 11</span><b><i data-rs-rush>…</i><em data-rs-rush-d hidden></em></b><small>Busiest hour: <i data-rs-rush-p90>…</i></small></div>
+                    <div class="wk-tile"><span>Portions thrown out</span><b><i data-rs-waste>…</i><em data-rs-waste-d hidden></em></b><small>1 day in 10: <i data-rs-waste-p90>…</i></small></div>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <div class="seg fill" role="group" aria-label="Day">
+                    <button type="button" data-rs-day="quiet" aria-pressed="false">Tuesday · 220</button>
+                    <button type="button" data-rs-day="busy" aria-pressed="true">Wednesday · 420</button>
+                  </div>
+                  <div class="seg fill" role="group" aria-label="Plan">
+                    <button type="button" data-rs-plan="order" aria-pressed="true">Cook to order</button>
+                    <button type="button" data-rs-plan="keepers" aria-pressed="false">Hold what keeps</button>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish holds</p>
+                    <ul class="wk-menu" data-rs-dishes></ul>
+                  </div>
+                  <div class="field">
+                    <p class="micro">Plating</p>
+                    <div class="seg fill" role="group" aria-label="Who plates">
+                      <button type="button" data-rs-pool="no" aria-pressed="true">Each cook their own</button>
+                      <button type="button" data-rs-pool="yes" aria-pressed="false">Whoever is free</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The chicken thighs</p>
+                    <div class="seg fill" role="group" aria-label="Where the chicken thighs cook">
+                      <button type="button" data-rs-menu="written" aria-pressed="true">On the griddle</button>
+                      <button type="button" data-rs-menu="balanced" aria-pressed="false">Roast in the combi</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Forecast error</b><output data-rs-err-val>±10%</output></span><input type="range" min="0" max="40" step="5" value="10" data-rs-err aria-label="Forecast error" /></label>
+                  <div class="status" data-rs-status data-state="warn">Running the lunch service…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="rush-how">
+              <div>
+                <p class="how-title">How it's computed</p>
+                <p>The service is stepped every 15 seconds from 10:00. Orders come in at random from 11:00 to 14:00 around a peak at 12:20, and the forecast error moves both the day's size and the peak's time. Each cook runs one station. A free cook starts a batch for the guests waiting, then plates the oldest order whose food is ready, then tops up the held dishes. A held dish is cooked to cover most of its holding time's forecast orders while the cabinet has room; it is boxed with its batch and only bagged at the order. Held food past its time, and whatever is left at close, is thrown out.</p>
+                <p>The tiles are the middle of 120 simulated days. The line plays one of them: the tickets are the orders waiting, the pans are the portions held, and the cooks act out each ten minutes of computed work.</p>
+              </div>
+              <div>
+                <code class="formula">wait = plated − ordered<br />short_dish(t) = forecast orders in [t, done + 0.7 · hold] − held − cooking</code>
+                <p class="model">Model: <code>runRush</code>. Batch sizes, cook and hands-on minutes and holding times are set for a fast-casual lunch line.</p>
               </div>
             </figcaption>
           </figure>

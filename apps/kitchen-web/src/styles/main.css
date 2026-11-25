@@ -2751,3 +2751,119 @@ button.wk-dish[aria-pressed="true"] {
     display: none;
   }
 }
+
+/* ============================ The lunch rush ============================ */
+.rs-fig {
+  margin-top: 2.4rem;
+}
+.rs-stage {
+  aspect-ratio: 16 / 9;
+  margin-bottom: 1.6rem;
+}
+.rs-hud b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.rs-hud span {
+  min-width: 6.5em;
+}
+.rs-hud span[data-kind="late"] {
+  color: #fecdd3;
+}
+.rs-hud em[data-kind="held"] {
+  color: #d3f0fc;
+  background: rgb(94 200 242 / 0.2);
+}
+.rs-legend .new {
+  --k: #f1ece2;
+}
+.rs-legend .amber {
+  --k: var(--gold);
+}
+.rs-lab .lab-view {
+  gap: 1rem;
+}
+.rs-chart {
+  padding: 0.7rem 0.75rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: rgb(0 0 0 / 0.2);
+  overflow: hidden;
+}
+.rs-svg {
+  display: block;
+}
+.rs-svg text {
+  font: 500 10.5px var(--mono);
+  fill: var(--faint);
+}
+.rs-svg .ya {
+  text-anchor: end;
+}
+.rs-svg .xa,
+.rs-svg .pk {
+  text-anchor: middle;
+}
+.rs-svg .pk {
+  fill: var(--muted);
+}
+.rs-svg .g {
+  stroke: rgb(255 255 255 / 0.07);
+  stroke-width: 1;
+}
+.rs-svg .open {
+  fill: rgb(255 255 255 / 0.025);
+}
+.rs-svg .in {
+  fill: rgb(255 255 255 / 0.2);
+}
+.rs-svg .held {
+  fill: rgb(94 200 242 / 0.14);
+  stroke: var(--ice);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+.rs-svg .wait {
+  fill: none;
+  stroke: var(--bad);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.rs-svg .cell {
+  fill: var(--chapter);
+}
+.rs-svg .cur {
+  stroke: rgb(255 255 255 / 0.75);
+  stroke-width: 1.2;
+}
+.rs-keys {
+  margin: 0.45rem 0 0;
+}
+.rs-keys .in {
+  --k: rgb(255 255 255 / 0.3);
+}
+.rs-keys .wait {
+  --k: var(--bad);
+}
+.rs-keys .held {
+  --k: var(--ice);
+}
+.rs-keys .busy {
+  --k: var(--chapter);
+}
+.rs-dish em {
+  min-width: 4.6em;
+  text-align: center;
+}
+.rs-dish[aria-pressed="false"] em {
+  color: var(--muted);
+  background: rgb(255 255 255 / 0.06);
+}
+@media (max-width: 599px) {
+  .rs-stage {
+    aspect-ratio: 4 / 3;
+  }
+  .rs-legend .unit {
+    display: none;
+  }
+}

@@ -381,7 +381,7 @@ export interface Spread {
   mean: number;
 }
 
-function spread(xs: number[]): Spread {
+export function spread(xs: number[]): Spread {
   const s = [...xs].sort((a, b) => a - b);
   const q = (p: number) => {
     const x = p * (s.length - 1);
