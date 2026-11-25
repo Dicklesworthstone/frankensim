@@ -1,10 +1,10 @@
 /**
- * The pixel layers of the procedural textures that cost most to paint: the pan foods' (smallwares' panFoods) and the
- * wine label's paper (smallwares' labelMat). They are arithmetic on seeded noise and nothing else, so a worker
- * (foodTexels.worker.ts) makes them while the page loads, and the builders only copy them into canvases. Made here or
- * in the worker, the arrays are the same.
+ * The pixel layers of the procedural textures that cost most to paint: the pan foods' (smallwares' panFoods), the
+ * chef's knife's steels (knifeMats) and the wine label's paper (labelMat). They are arithmetic on seeded noise and
+ * nothing else, so a worker (foodTexels.worker.ts) makes them while the page loads, and the builders only copy them
+ * into canvases. Made here or in the worker, the arrays are the same.
  */
-import { apnoise, clamp01, fbm, greyTexels, lerp, noise2, normalTexels, paintTexels, smooth, tfbm, TAU } from "./texels";
+import { apnoise, clamp01, fbm, greyTexels, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, TAU } from "./texels";
 
 /** The braised meat's tile, in texels a side. */
 export const MEAT_TW = 512;
@@ -83,6 +83,55 @@ export function panFoodTexels(): PanFoodTexels {
   return { sauce, meat: mC, meatNormal: normalTexels(mH, MT, MT, 3, true), meatRough: greyTexels(mR, MT, MT), veg, soup };
 }
 
+/** The knife's blade texture, KNIFE_BW along the blade by KNIFE_BH across it. */
+export const KNIFE_BW = 1024;
+export const KNIFE_BH = 512;
+/** The knife's edge bevel texture, KNIFE_EW along the edge by KNIFE_EH across it. */
+export const KNIFE_EW = 2048;
+export const KNIFE_EH = 8;
+
+/** RGBA pixels of a chef's knife's steels: the blade's ground flats (colour and roughness) and the honed edge bevel. */
+export interface KnifeTexels {
+  blade: Uint8ClampedArray;
+  bladeRough: Uint8ClampedArray;
+  bevel: Uint8ClampedArray;
+}
+
+export function knifeTexels(): KnifeTexels {
+  const r = rng(3134);
+  const nA = noise2(3135);
+  const BW = KNIFE_BW;
+  const BH = KNIFE_BH;
+  // Each grind line: a brightness across, fading in and out along its run.
+  const row = new Float32Array(BH);
+  const ph = new Float32Array(BH);
+  for (let j = 0; j < BH; j++) {
+    row[j] = (r() - 0.5) * (r() < 0.08 ? 2.4 : 1);
+    ph[j] = r() * 200;
+  }
+  const bR = new Float32Array(BW * BH);
+  const blade = paintTexels(BW, BH, (i, j, o) => {
+    const fade = smooth(0.3, 0.7, fbm(nA, i / 90 + ph[j], j * 0.37, 2));
+    const l = row[j] * fade + 0.25 * (fbm(nA, i / 200, j / 30 + 40, 2) - 0.5);
+    bR[j * BW + i] = 0.2 + 0.08 * Math.abs(l) + 0.04 * (fbm(nA, i / 60 + 9, j / 60, 2) - 0.5);
+    const v = 214 + 26 * l;
+    o[0] = v;
+    o[1] = v + 2;
+    o[2] = v + 5;
+  });
+  // The bevel: honing scratches across it, a touch off square.
+  const EW = KNIFE_EW;
+  const er: number[] = [];
+  for (let i = 0; i < EW; i++) er.push((r() - 0.5) * (r() < 0.1 ? 2 : 1));
+  const bevel = paintTexels(EW, KNIFE_EH, (i, j, o) => {
+    const v = 226 + 22 * er[(i + j) % EW];
+    o[0] = v;
+    o[1] = v + 1;
+    o[2] = v + 3;
+  });
+  return { blade, bladeRough: greyTexels(bR, BW, BH), bevel };
+}
+
 /** The label's paper before any ink: its RGBA pixels and its relief, LABEL_TW a side. */
 export interface LabelPaper {
   paper: Uint8ClampedArray;
@@ -115,15 +164,28 @@ export function labelPaper(): LabelPaper {
 /** The layers' buffers, to hand from a worker without a copy. */
 export const panFoodBuffers = (t: PanFoodTexels): ArrayBuffer[] => [t.sauce, t.meat, t.meatNormal, t.meatRough, t.veg, t.soup].map((a) => a.buffer as ArrayBuffer);
 export const labelPaperBuffers = (t: LabelPaper): ArrayBuffer[] => [t.paper.buffer as ArrayBuffer, t.height.buffer as ArrayBuffer];
+export const knifeBuffers = (t: KnifeTexels): ArrayBuffer[] => [t.blade, t.bladeRough, t.bevel].map((a) => a.buffer as ArrayBuffer);
 
 // Layers made ahead by the worker, each for the one builder that paints from it (its material is made once a page).
 let pan: PanFoodTexels | null = null;
 let panTaken = false;
+let knife: KnifeTexels | null = null;
+let knifeTaken = false;
 let label: LabelPaper | null = null;
 let labelTaken = false;
 
 export function providePanFoodTexels(t: PanFoodTexels): void {
   if (!panTaken) pan = t;
+}
+export function provideKnifeTexels(t: KnifeTexels): void {
+  if (!knifeTaken) knife = t;
+}
+/** The knife's layers: the worker's if they have arrived, else made now. */
+export function knifeTexelsFor(): KnifeTexels {
+  const t = knife ?? knifeTexels();
+  knife = null;
+  knifeTaken = true;
+  return t;
 }
 export function provideLabelPaper(t: LabelPaper): void {
   if (!labelTaken) label = t;

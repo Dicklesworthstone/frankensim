@@ -35,7 +35,7 @@ import { register, type Builder, type Hooks } from "./index";
 import { palette } from "./materials";
 import { bar, cyl, lathe, plate, rbox, torus, ball, turnJoint, Shop, type V3, type Built } from "./shop";
 import { PI, TAU, adiff, clamp, clamp01, fbm, greyTexels, lattice, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, type P2 } from "./texels";
-import { LABEL_TW, MEAT_TW, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
+import { KNIFE_BH, KNIFE_BW, KNIFE_EH, KNIFE_EW, LABEL_TW, MEAT_TW, knifeTexelsFor, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
 import { Ribeye, STEAK_SIDE_Q, steakOutline, steakTissueFor } from "./steakTissue";
 import * as bt from "./bouleTexels";
 
@@ -3499,42 +3499,22 @@ function gridMesh(nu: number, nv: number, at: (i: number, k: number) => V3, upY:
 let knifeCache: { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStandardMaterial } | null = null;
 function knifeMats(): { blade: THREE.MeshPhysicalMaterial; bevel: THREE.MeshStandardMaterial } {
   if (knifeCache) return knifeCache;
-  const r = rng(3134);
-  const nA = noise2(3135);
-  const BW = 1024;
-  const BH = 512;
-  // Each grind line: a brightness across, fading in and out along its run.
-  const row = new Float32Array(BH);
-  const ph = new Float32Array(BH);
-  for (let j = 0; j < BH; j++) {
-    row[j] = (r() - 0.5) * (r() < 0.08 ? 2.4 : 1);
-    ph[j] = r() * 200;
-  }
-  const bR = new Float32Array(BW * BH);
-  const bc = paint(BW, BH, (i, j, o) => {
-    const fade = smooth(0.3, 0.7, fbm(nA, i / 90 + ph[j], j * 0.37, 2));
-    const l = row[j] * fade + 0.25 * (fbm(nA, i / 200, j / 30 + 40, 2) - 0.5);
-    bR[j * BW + i] = 0.2 + 0.08 * Math.abs(l) + 0.04 * (fbm(nA, i / 60 + 9, j / 60, 2) - 0.5);
-    const v = 214 + 26 * l;
-    o[0] = v;
-    o[1] = v + 2;
-    o[2] = v + 5;
-  });
+  // The flats ground lengthwise and the bevel's honing scratches (foodTexels.ts: made in a worker as the page loads).
+  const t = knifeTexelsFor();
   const blade = phys(
-    { color: 0xd8dce0, metalness: 1, roughness: 1, map: canvasTex(bc, true), roughnessMap: greyTex(bR, BW, BH, false), anisotropy: 0.6, anisotropyRotation: 0 },
+    {
+      color: 0xd8dce0,
+      metalness: 1,
+      roughness: 1,
+      map: canvasTex(pixelCanvas(KNIFE_BW, KNIFE_BH, t.blade), true),
+      roughnessMap: canvasTex(pixelCanvas(KNIFE_BW, KNIFE_BH, t.bladeRough), false, false),
+      anisotropy: 0.6,
+      anisotropyRotation: 0,
+    },
     "own",
   );
-  // The bevel: honing scratches across it, a touch off square, satin.
-  const EW = 2048;
-  const er: number[] = [];
-  for (let i = 0; i < EW; i++) er.push((r() - 0.5) * (r() < 0.1 ? 2 : 1));
-  const ec = paint(EW, 8, (i, j, o) => {
-    const v = 226 + 22 * er[(i + j) % EW];
-    o[0] = v;
-    o[1] = v + 1;
-    o[2] = v + 3;
-  });
-  const bevel = std({ color: 0xeceef0, metalness: 1, roughness: 0.3, map: canvasTex(ec, true) }, "own");
+  // The bevel: satin.
+  const bevel = std({ color: 0xeceef0, metalness: 1, roughness: 0.3, map: canvasTex(pixelCanvas(KNIFE_EW, KNIFE_EH, t.bevel), true) }, "own");
   knifeCache = { blade, bevel };
   return knifeCache;
 }
