@@ -59,6 +59,17 @@ function starOutline(r: number, lobes: number, depth: number, n: number): { p: [
 }
 
 /**
+ * A part made once per key, a copy handed out each time after: every burner or knob of a size is the same solid, and
+ * the shop moves and merges what it is given. The copy's arrays are the made part's, value for value.
+ */
+const made = new Map<string, THREE.BufferGeometry>();
+function once(key: string, make: () => THREE.BufferGeometry): THREE.BufferGeometry {
+  let g = made.get(key);
+  if (!g) made.set(key, (g = make()));
+  return new THREE.BufferGeometry().copy(g);
+}
+
+/**
  * A slab cut from `shape` (its own xy), `len` long along +z from 0, its edges eased by `bevel` without growing past the
  * outline (unlike `plate`, whose bevel bulges outward).
  */
@@ -91,15 +102,17 @@ export function starBurner(s: Shop, x: number, y: number, z: number, burner: num
   const { p: outline, nrm } = starOutline(r, lobes, depth, n);
   const v2 = (pts: [number, number][]) => pts.map(([a, b]) => new THREE.Vector2(a, b));
   const ease = s.fine(2) ? 0.0012 : 0;
-  // The wall (shape y maps to -z after the turn).
-  const shape = new THREE.Shape(v2(outline));
-  shape.holes.push(new THREE.Path(v2(starOutline(r - 0.0065, lobes, depth * 0.9, n).p.reverse())));
-  const wall = slab(s, shape, 0.014, ease, 12);
-  wall.rotateX(-Math.PI / 2);
+  // The wall (shape y maps to -z after the turn). Wall and lid are the same on every burner of a size.
+  const wall = once(`burner-wall|${s.detail}|${r}`, () => {
+    const shape = new THREE.Shape(v2(outline));
+    shape.holes.push(new THREE.Path(v2(starOutline(r - 0.0065, lobes, depth * 0.9, n).p.reverse())));
+    return slab(s, shape, 0.014, ease, 12).rotateX(-Math.PI / 2);
+  });
   s.add(p.castIron, wall, [x, y - 0.008, z]);
   // The lid: a star a little inside the wall's outline, its edge eased, a raised boss at its centre.
-  const lid = slab(s, new THREE.Shape(v2(starOutline(r - 0.0012, lobes, depth * 0.97, n).p)), 0.0034, s.fine(2) ? 0.0011 : 0);
-  lid.rotateX(-Math.PI / 2);
+  const lid = once(`burner-lid|${s.detail}|${r}`, () =>
+    slab(s, new THREE.Shape(v2(starOutline(r - 0.0012, lobes, depth * 0.97, n).p)), 0.0034, s.fine(2) ? 0.0011 : 0).rotateX(-Math.PI / 2),
+  );
   s.add(p.castIron, lid, [x, y + 0.0055, z]);
   s.add(p.castIron, lathe(s, [
     [0.019, 0.0085],
@@ -234,24 +247,28 @@ function rangeKnob(j: Shop, r: number): void {
     [r * 0.52, 0.0296],
     [0, 0.03],
   ];
-  let g = lathe(j, prof, j.fine(2) ? 144 : 48);
-  g.rotateX(Math.PI / 2);
-  if (j.fine(1)) {
-    g.deleteAttribute("uv");
-    g.deleteAttribute("normal");
-    g = mergeVertices(g, 1e-7);
-    const P = g.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < P.count; i++) {
-      const [vx, vy, vz] = [P.getX(i), P.getY(i), P.getZ(i)];
-      const rr = Math.hypot(vx, vy);
-      const band = smooth(0.0118, 0.0136, vz) * (1 - smooth(0.0246, 0.0268, vz));
-      if (band <= 0 || rr < 1e-6) continue;
-      const f = Math.pow(0.5 + 0.5 * Math.cos(18 * Math.atan2(vy, vx)), 2.2);
-      const k = 1 - (0.0017 * band * f) / rr;
-      P.setXY(i, vx * k, vy * k);
+  // The moulding is the same on every knob of a size.
+  const g = once(`knob|${j.detail}|${r}`, () => {
+    let g = lathe(j, prof, j.fine(2) ? 144 : 48);
+    g.rotateX(Math.PI / 2);
+    if (j.fine(1)) {
+      g.deleteAttribute("uv");
+      g.deleteAttribute("normal");
+      g = mergeVertices(g, 1e-7);
+      const P = g.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < P.count; i++) {
+        const [vx, vy, vz] = [P.getX(i), P.getY(i), P.getZ(i)];
+        const rr = Math.hypot(vx, vy);
+        const band = smooth(0.0118, 0.0136, vz) * (1 - smooth(0.0246, 0.0268, vz));
+        if (band <= 0 || rr < 1e-6) continue;
+        const f = Math.pow(0.5 + 0.5 * Math.cos(18 * Math.atan2(vy, vx)), 2.2);
+        const k = 1 - (0.0017 * band * f) / rr;
+        P.setXY(i, vx * k, vy * k);
+      }
+      g.computeVertexNormals();
     }
-    g.computeVertexNormals();
-  }
+    return g;
+  });
   j.add(p.bakelite, g);
   // The pointer: a raised rib from the centre to the rim, pointing up at rest.
   j.add(p.bakelite, rbox(j, 0.0044, r * 0.68, 0.0032, 0.0012), [0, r * 0.36, 0.0302]);

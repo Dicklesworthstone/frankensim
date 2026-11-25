@@ -249,6 +249,7 @@ export function slideJoint(j: THREE.Object3D | undefined, axis: Axis, dist: numb
 /* Solids. Each is built about its own origin; boxes and cylinders are centred, unless the name says otherwise.   */
 /* ------------------------------------------------------------------------------------------------------------ */
 
+const rboxMade = new Map<string, THREE.BufferGeometry>();
 /**
  * A box, its edges rounded by `r` when there is detail to show it. One segment (108 triangles) rounds a small part
  * convincingly with smooth normals; only big panels seen close up get two (300).
@@ -257,7 +258,13 @@ export function rbox(shop: Shop, w: number, h: number, d: number, r = 0.0015): T
   const rr = Math.min(r, w / 2 - 1e-5, h / 2 - 1e-5, d / 2 - 1e-5);
   if (shop.detail === 0 || rr <= 1e-4) return new THREE.BoxGeometry(w, h, d);
   const big = rr >= 0.004 && Math.max(w, h, d) > 0.2;
-  return new RoundedBoxGeometry(w, h, d, shop.detail === 2 && big ? 2 : 1, rr);
+  const segs = shop.detail === 2 && big ? 2 : 1;
+  // Most rounded boxes on the page repeat one already made (1,190 made of 332 sizes): each size is made once, and a
+  // copy handed out, as the shop moves and merges what it is given.
+  const key = `${w}|${h}|${d}|${segs}|${rr}`;
+  let g = rboxMade.get(key);
+  if (!g) rboxMade.set(key, (g = new RoundedBoxGeometry(w, h, d, segs, rr)));
+  return new THREE.BufferGeometry().copy(g);
 }
 
 /**
