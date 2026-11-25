@@ -2965,6 +2965,20 @@ residual and its own convergence target. A step with mechanical work, or with
 magnetic parameter work outside the magnetic lane's law triangles, refuses
 (`UnaccountedWork`): the receipt has no term for either.
 
+A proposed state also keeps the owner's step that produced it, shared
+through an `Rc`, so a clone does not copy it. `PlanarWindingState::step`
+gives it, typed by owner: `NonlinearWindingStep` for the saturating owner
+and, with `magnetic-hysteresis`, `HystereticWindingStep` for the play-memory
+owner. It is the owner's own step: its cells, graph resistors, field record,
+energies and solve report are those `step_to_candidate` gives from the same
+state with the same conductors, equal in their `Debug` text, which prints
+each `f64` so that it parses back to the same bits (tests/winding_component.rs
+and its `hysteretic` and `magnetic` modules). A constructed state (`new`,
+`at_temperatures`) keeps none. Equality and the identity words do not read
+the kept step, so a proposed state equals the constructed one with the same
+coordinates. The step is held as `dyn Any`, not through the owner's
+associated type, so the state stays covariant in `'m`.
+
 The Component borrows the owner's problem for `'m` and leaks nothing. A
 kernel `System` holds `'static` members, so a caller that adds this Component
 to a system gives it a problem that lives for `'static`. The state has no

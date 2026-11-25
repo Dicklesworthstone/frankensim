@@ -787,6 +787,7 @@ fn laws_give_each_element_at_its_ports_temperature_as_the_owner_would() {
     let winding = following(&circuit, &card);
     let layout = PortLayout::new(winding.ports()).unwrap();
     let mut state = PlanarWindingState::new(circuit.clone());
+    assert!(state.step().is_none());
     let mut owner = circuit;
     let steps = [
         [300.0, 350.0, 400.0],
@@ -806,6 +807,9 @@ fn laws_give_each_element_at_its_ports_temperature_as_the_owner_would() {
         let (expected, ohms) = owner_at(&owner, &card, kelvin);
         let step = expected.step();
         assert_eq!(next, PlanarWindingState::new(expected.circuit().clone()));
+        // The step the state keeps is the owner's own: `Debug` prints each
+        // f64 so that it parses back to the same bits.
+        assert_eq!(format!("{:?}", next.step()), format!("{:?}", Some(step)));
         assert_eq!(
             next.circuit().graph().branches[2].2,
             Branch::Resistor { ohms }

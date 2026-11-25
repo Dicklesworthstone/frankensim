@@ -53,11 +53,13 @@
 //! to a system gives it a problem that lives for `'static`. The state has no
 //! codec: a system holding it cannot be written to a durable snapshot.
 
+use core::any::Any;
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use core::ops::Range;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fs_exec::Cx;
@@ -80,7 +82,7 @@ use fs_ports::component::{
 use fs_ports::{CoupleError, PortKind, StableId};
 
 #[cfg(feature = "magnetic-hysteresis")]
-use super::hysteretic::HystereticWindingCircuit;
+use super::hysteretic::{HystereticWindingCircuit, HystereticWindingStep};
 use super::nonlinear::{
     NonlinearWindingCircuit, NonlinearWindingControls, NonlinearWindingError, NonlinearWindingStep,
     resistors::GraphResistorMaterial,
@@ -304,8 +306,9 @@ mod owner {
     pub trait Sealed<'m>: Clone + Sized {
         /// The field's controls inside [`NonlinearWindingControls`].
         type FieldControls: Copy + fmt::Debug;
-        /// The field's record inside [`NonlinearWindingStep`].
-        type FieldStep;
+        /// The field's record inside [`NonlinearWindingStep`]. A proposed
+        /// state keeps the step as `dyn Any`, so it borrows nothing.
+        type FieldStep: 'static;
         /// Words that tell this owner's Component apart; none for the
         /// saturating owner, whose words came first.
         const LANE_WORDS: &'static [u64];
@@ -734,21 +737,25 @@ mod owner {
     }
 }
 
-/// The accepted state: the owner's circuit, which carries the field history,
-/// and, in the magnetic lane, the temperatures \[K\] its materials were
-/// evaluated at, one per heat receiver.
+/// The accepted state: the owner's circuit, which carries the field history;
+/// in the magnetic lane, the temperatures \[K\] its materials were evaluated
+/// at, one per heat receiver; and, for a state a step proposed, the owner's
+/// step that produced it. The step is held as `dyn Any`, not through the
+/// owner's associated type, so the state stays covariant in `'m`; a clone
+/// shares it.
 #[derive(Clone)]
 pub struct PlanarWindingState<'m, C = NonlinearWindingCircuit<'m>>(
     C,
     Option<Vec<f64>>,
     PhantomData<&'m ()>,
+    Option<Rc<dyn Any>>,
 );
 
 impl<'m, C: WindingOwner<'m>> PlanarWindingState<'m, C> {
     /// The state of an accepted circuit.
     #[must_use]
     pub const fn new(circuit: C) -> Self {
-        Self(circuit, None, PhantomData)
+        Self(circuit, None, PhantomData, None)
     }
 
     /// The magnetic lane's state of an accepted circuit whose field
@@ -758,7 +765,7 @@ impl<'m, C: WindingOwner<'m>> PlanarWindingState<'m, C> {
     /// the field's.
     #[must_use]
     pub const fn at_temperatures(circuit: C, temperatures: Vec<f64>) -> Self {
-        Self(circuit, Some(temperatures), PhantomData)
+        Self(circuit, Some(temperatures), PhantomData, None)
     }
 
     /// The temperatures \[K\] the field materials were evaluated at, in the
@@ -781,6 +788,26 @@ impl<'m, C: WindingOwner<'m>> PlanarWindingState<'m, C> {
     }
 }
 
+impl PlanarWindingState<'_> {
+    /// The saturating owner's step that produced this state: its cells, graph
+    /// resistors, field record, energies and solve report, as the owner's own
+    /// `step_to_candidate` gave them. None for a constructed state.
+    #[must_use]
+    pub fn step(&self) -> Option<&NonlinearWindingStep> {
+        self.3.as_deref()?.downcast_ref()
+    }
+}
+
+#[cfg(feature = "magnetic-hysteresis")]
+impl<'m> PlanarWindingState<'m, HystereticWindingCircuit<'m>> {
+    /// The play-memory owner's step that produced this state, as the owner's
+    /// own `step_to_candidate` gave it. None for a constructed state.
+    #[must_use]
+    pub fn step(&self) -> Option<&HystereticWindingStep> {
+        self.3.as_deref()?.downcast_ref()
+    }
+}
+
 fn same_bits(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
@@ -793,7 +820,8 @@ fn same_bits(a: &[f64], b: &[f64]) -> bool {
 /// step with resistor laws builds a new one. In the magnetic lane, each step
 /// builds its own problem too, so there the problems are compared by mesh,
 /// thickness and materials, and the temperatures by their bits; a state
-/// with temperatures never equals one without.
+/// with temperatures never equals one without. The owner's step a state
+/// keeps is not compared: a proposed state equals the constructed one.
 impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
@@ -1768,7 +1796,8 @@ where
             self.controls,
             &mut || cx.checkpoint().is_err(),
         )?;
-        let step = &step;
+        let kept = Rc::new(step);
+        let step = &*kept;
         if (step.parameter_work_j != 0.0 && !lane) || step.mechanical_work_j != 0.0 {
             return Err(PlanarWindingError::UnaccountedWork {
                 parameter_j: step.parameter_work_j,
@@ -1860,11 +1889,13 @@ where
             residual: report.residual_norm,
             tolerance,
         };
-        *new = if lane {
+        let mut state = if lane {
             PlanarWindingState::at_temperatures(circuit, kelvin.to_vec())
         } else {
             PlanarWindingState::new(circuit)
         };
+        state.3 = Some(kept);
+        *new = state;
         Ok(Proposal::Step(receipt))
     }
 }

@@ -254,6 +254,7 @@ fn a_play_memory_step_is_the_owners_own_and_each_triangle_heats_its_own_receiver
     let winding = component(&circuit, TOLERANCE_J);
     let layout = PortLayout::new(winding.ports()).unwrap();
     let mut state = PlanarWindingState::new(circuit.clone());
+    assert!(state.step().is_none());
     let mut native = circuit;
     let (mut insulating, mut viscous) = (0.0, 0.0);
     for (n, volts) in VOLTAGES.into_iter().enumerate() {
@@ -278,6 +279,7 @@ fn a_play_memory_step_is_the_owners_own_and_each_triangle_heats_its_own_receiver
             .unwrap();
         let step = expected.step();
         assert_eq!(next, PlanarWindingState::new(expected.circuit().clone()));
+        assert_eq!(format!("{:?}", next.step()), format!("{:?}", Some(step)));
         assert_eq!(outputs[0].to_bits(), step.native.y[0].to_bits());
         let heat = booked(step);
         for (k, q) in heat.iter().enumerate() {

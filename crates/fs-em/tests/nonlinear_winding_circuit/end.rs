@@ -5,8 +5,8 @@ use common::{b_from_current, conductors, controls, density_energy, linkage, near
 use fs_em::winding::{
     end::EndWindingMode,
     nonlinear::{
-        NonlinearWindingCircuit, NonlinearWindingInitial, NonlinearWindingPort, NonlinearWindings,
-        resistors::GraphResistorMaterial,
+        NonlinearWindingCircuit, NonlinearWindingError, NonlinearWindingInitial,
+        NonlinearWindingPort, NonlinearWindings, resistors::GraphResistorMaterial,
     },
 };
 use fs_material::conductor::ElectricalPropertyBasis;
@@ -202,14 +202,12 @@ fn reversed_end_coupling_retains_live_history_through_hot_resistor_and_winding_r
             common::material::conductor(&card, temperature, ElectricalPropertyBasis::Resistivity)
                 .into_uniform_conductor(0.7 * 18.0, 1.0)
                 .unwrap();
+        let sources = vec![GraphResistorMaterial {
+            branch: 4,
+            conductor: resistor,
+        }];
         let refreshed = accepted
-            .with_graph_resistors(
-                vec![GraphResistorMaterial {
-                    branch: 4,
-                    conductor: resistor,
-                }],
-                &mut || false,
-            )
+            .with_graph_resistors(sources.clone(), &mut || false)
             .unwrap();
         assert_eq!(refreshed.end_inductance(), original.end_inductance());
         assert_eq!(refreshed.state(), accepted.state());
@@ -218,6 +216,8 @@ fn reversed_end_coupling_retains_live_history_through_hot_resistor_and_winding_r
             accepted.field().potential_wb_m()
         );
         assert_eq!(refreshed.currents_a(), accepted.currents_a());
+        assert_eq!(refreshed.flux_linkages_wb(), accepted.flux_linkages_wb());
+        refuses_empty_and_cancelled(&accepted, sources);
         // The source's resistivity is affine between 300 K and 500 K.
         let ratio = 1.0 + (temperature - 300.0) / 200.0;
         let (rw, rs) = (2.4 * ratio, 0.7 * ratio);
@@ -280,4 +280,20 @@ fn reversed_end_coupling_retains_live_history_through_hot_resistor_and_winding_r
     }
     assert_eq!(original.time_s(), 0.0);
     assert_eq!(original.currents_a(), [0.0, 0.0]);
+}
+
+/// The graph's one resistor needs its one source, and a cancelled call
+/// rebinds nothing.
+fn refuses_empty_and_cancelled(
+    accepted: &NonlinearWindingCircuit<'_>,
+    sources: Vec<GraphResistorMaterial>,
+) {
+    assert!(matches!(
+        accepted.with_graph_resistors(vec![], &mut || false),
+        Err(NonlinearWindingError::Invalid(_))
+    ));
+    assert!(matches!(
+        accepted.with_graph_resistors(sources, &mut || true),
+        Err(NonlinearWindingError::Cancelled)
+    ));
 }

@@ -310,10 +310,12 @@ fn at_held_temperatures_a_step_is_the_owners_own_and_its_heat_is_joule_less_t_ds
     let winding = lane(&circuit, &card);
     let kelvin = [START_K; 3];
     let state = PlanarWindingState::at_temperatures(circuit.clone(), kelvin.to_vec());
+    assert!(state.step().is_none());
     let inputs = HELD;
     let (new, outputs, receipt) = audited(&winding, &state, &inputs);
     let owner = owner_at(&circuit, &card, kelvin);
     let step = owner.step();
+    assert_eq!(format!("{:?}", new.step()), format!("{:?}", Some(step)));
     assert_eq!(
         bits(new.circuit().currents_a()),
         bits(owner.circuit().currents_a())
