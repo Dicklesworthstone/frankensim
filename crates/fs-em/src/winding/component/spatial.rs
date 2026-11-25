@@ -19,8 +19,9 @@
 //! The mesh stands still: each step gives the owner a zero velocity at every
 //! vertex, and the Component has no mechanical port. The receipt takes the
 //! owner's stored change, its numerical (backward Euler) dissipation and the
-//! heat that leaves through the heat ports. A step with mechanical work or
-//! magnetic parameter work refuses: the receipt has no term for either. The
+//! heat that leaves through the heat ports. A step with mechanical work
+//! refuses, and so does one with magnetic parameter work outside the
+//! magnetic lane below: the receipt has no term for either. The
 //! temperatures the heat ports receive enter the generated entropy and, with
 //! laws, the conductors and graph resistors of the step: a
 //! [`SpatialConductorLaw`] per receiver for its core cells and strands, and a
@@ -35,6 +36,20 @@
 //! ([`SpatialWindingState::new`]), and the owner's `stored_after_j` for a
 //! state a step proposed. The owner sums a step's stored change separately,
 //! so the kernel's endpoint check compares two sums of the same terms.
+//!
+//! In the magnetic lane ([`SpatialWinding::magnetic_at_port_temperatures`]),
+//! each cell with a [`SpatialMagneticLaw`] also takes its law's linear
+//! material at the temperature its receiver's port gives, at the end of the
+//! step as the conductors do, and the state carries those temperatures
+//! ([`SpatialWindingState::at_temperatures`]). These are `PlanarWinding`'s
+//! lane terms, from the core the two share, with a cell's flux density the
+//! length of its vector. A port's heat is its Joule heat less `T dS` of its
+//! law cells, and may be negative. The stored energy adds `T s`, measured
+//! from the state's own field and temperatures. The numerical loss adds each
+//! law cell's `-(P + (T1 - T0) s0)`, second order in the step's change of
+//! temperature, with `P` the owner's parameter work. The Component declares
+//! its stored entropy: the sum of `s = -dpsi/dT` over the law cells,
+//! measured from the state.
 //!
 //! The Component borrows the owner's problem for `'m` and leaks nothing. A
 //! system of the kernel holds `'static` members, so a caller that adds one
@@ -51,16 +66,23 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::conductor::ResolvedConductorState;
 use fs_material::conductor::spatial::{SpatialConductivity, SpatialConductorMaterial};
+use fs_material::field_storage::admit_magnetic_temperature_refresh;
+use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
 use fs_phs::circuit::CircuitGraph;
 use fs_ports::CoupleError;
 use fs_ports::component::{Class, Component, ContractViolation, EndOfStep, PortSpec, Proposal};
 
 use super::ResistorLaw;
-use super::shared::{self, Account, Element, ElementRefusal, Refusal, same_bits};
-use crate::spatial::vector_potential::induction::nonlinear::SpatialNonlinearInductionControls;
+use super::shared::{
+    self, Account, Element, ElementRefusal, LawCell, Refusal, Reversible, same_bits,
+};
+use crate::spatial::nonlinear::SpatialNonlinearMaterial;
 use crate::spatial::vector_potential::induction::nonlinear::winding::{
     SpatialNonlinearWindingCircuit, SpatialNonlinearWindingError, SpatialNonlinearWindingStep,
     SpatialWindingConductor,
+};
+use crate::spatial::vector_potential::induction::nonlinear::{
+    SpatialNonlinearInductionControls, SpatialNonlinearInductionMagneticCell,
 };
 use crate::winding::nonlinear::{NonlinearWindingControls, resistors::GraphResistorMaterial};
 
@@ -105,6 +127,17 @@ pub trait SpatialConductorLaw<C: SpatialConductorMaterial>: fmt::Debug + Send + 
     fn identity_words(&self, words: &mut Vec<u64>);
 }
 
+/// One mesh cell whose permeability follows the temperature its receiver's
+/// heat port gives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpatialMagneticLaw {
+    /// The tetrahedron.
+    pub cell: usize,
+    /// fs-material's linear magnetic law, affine in temperature. Its source
+    /// is the field's own linear material in the cell.
+    pub law: ThermalMagneticMaterial,
+}
+
 /// The element whose law had no answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpatialLawElement {
@@ -119,6 +152,9 @@ pub enum SpatialLawElement {
     },
     /// A native graph resistor's branch.
     Resistor(usize),
+    /// A [`SpatialMagneticLaw`]'s tetrahedron: the law has no answer at the
+    /// temperature, or its free energy there is not the field's.
+    Permeability(usize),
 }
 
 /// Refusal of the 3D winding owner or of its Component boundary.
@@ -135,8 +171,9 @@ pub enum SpatialWindingError {
         /// What was refused.
         what: &'static str,
     },
-    /// The step did mechanical work or magnetic parameter work, which the
-    /// receipt has no term for.
+    /// The step did mechanical work, or magnetic parameter work outside the
+    /// magnetic lane or in a cell without a law, which the receipt has no
+    /// term for.
     UnaccountedWork {
         /// Signed magnetic parameter work \[J\].
         parameter_j: f64,
@@ -153,7 +190,8 @@ pub enum SpatialWindingError {
         /// The allowance \[J\].
         tolerance_j: f64,
     },
-    /// A law had no answer at the temperature its port received.
+    /// A law had no answer at the temperature its port received, or a
+    /// magnetic law's free energy is not the field's.
     Law {
         /// The heat receiver whose port gave the temperature.
         receiver: usize,
@@ -249,21 +287,18 @@ fn refused(refusal: Refusal) -> SpatialWindingError {
         },
         Refusal::Law {
             receiver,
-            element: Element::Resistor(branch),
+            element,
             kelvin,
             message,
         } => SpatialWindingError::Law {
             receiver,
-            element: SpatialLawElement::Resistor(branch),
+            element: match element {
+                Element::Resistor(branch) => SpatialLawElement::Resistor(branch),
+                Element::Permeability(cell) => SpatialLawElement::Permeability(cell),
+            },
             kelvin,
             message,
         },
-        // Only the magnetic lane asks a permeability law, and this Component
-        // has none.
-        Refusal::Law {
-            element: Element::Permeability(_),
-            ..
-        } => invalid("a permeability law was asked outside the magnetic lane"),
     }
 }
 
@@ -283,6 +318,11 @@ fn elements(core: impl Iterator<Item = usize>, strands: impl Iterator<Item = usi
         .collect()
 }
 
+/// The length of a flux density vector \[T\].
+fn magnitude([x, y, z]: [f64; 3]) -> f64 {
+    x.hypot(y).hypot(z)
+}
+
 /// The winding owner whose accepted circuit a [`SpatialWinding`] steps:
 /// [`SpatialNonlinearWindingCircuit`], the saturating field. Sealed: the
 /// owners are fs-em's.
@@ -296,15 +336,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialWindingOwner<'m, C>
 mod owner {
     use super::{
         CircuitGraph, GraphResistorMaterial, NonlinearWindingControls, SpatialConductorMaterial,
-        SpatialNonlinearInductionControls, SpatialNonlinearWindingCircuit,
-        SpatialNonlinearWindingError, SpatialNonlinearWindingStep, SpatialWindingConductor, fmt,
+        SpatialNonlinearInductionControls, SpatialNonlinearInductionMagneticCell,
+        SpatialNonlinearMaterial, SpatialNonlinearWindingCircuit, SpatialNonlinearWindingError,
+        SpatialNonlinearWindingStep, SpatialWindingConductor, fmt, magnitude, shared,
     };
     use crate::spatial::vector_potential::induction::nonlinear::SpatialNonlinearInductionStep;
 
     /// What the Component asks of its owner: one step from an accepted
     /// circuit at standstill, the rebinding of its graph resistors, the
-    /// stored energy of an accepted circuit, and the accepted coordinates
-    /// that state equality reads.
+    /// stored energy of an accepted circuit, the magnetic lane's materials
+    /// and records, and the accepted coordinates that state equality reads.
     pub trait Sealed<'m, C: SpatialConductorMaterial>: Clone + Sized {
         /// The field's controls inside [`NonlinearWindingControls`].
         type FieldControls: Copy + fmt::Debug;
@@ -313,11 +354,13 @@ mod owner {
         type FieldStep: 'static;
 
         /// The owner's `step_with_conductors_candidate` to `target_s` with
-        /// these conductors and every vertex at rest, in parts.
+        /// these conductors and every vertex at rest, in parts; with
+        /// `materials`, its `step_with_materials_candidate`.
         #[allow(clippy::too_many_arguments)]
         fn step(
             &self,
             target_s: f64,
+            materials: Option<Vec<SpatialNonlinearMaterial>>,
             core: Vec<Option<C>>,
             windings: Vec<SpatialWindingConductor>,
             inputs: &[f64],
@@ -344,6 +387,21 @@ mod owner {
         /// from its potential.
         fn stored_energy_j(&self) -> Result<f64, SpatialNonlinearWindingError>;
 
+        /// The field's materials, one per mesh cell.
+        fn magnetic_materials(&self) -> &[SpatialNonlinearMaterial];
+
+        /// Each mesh cell's flux density magnitude \[T\] and volume \[m³\],
+        /// recovered from the accepted field's potential.
+        fn flux_densities(&self) -> Result<Vec<(f64, f64)>, SpatialNonlinearWindingError>;
+
+        /// A step's magnetic cell records, in mesh order.
+        fn magnetic_cells(step: &Self::FieldStep) -> &[SpatialNonlinearInductionMagneticCell];
+
+        /// Whether two states' problems hold the same mesh (positions and
+        /// tetrahedra) and materials. A step that refreshes the materials
+        /// builds its own problem.
+        fn same_problem(&self, other: &Self) -> bool;
+
         fn graph(&self) -> &CircuitGraph;
         fn time_s(&self) -> f64;
         fn state(&self) -> &[f64];
@@ -366,6 +424,7 @@ mod owner {
         fn step(
             &self,
             target_s: f64,
+            materials: Option<Vec<SpatialNonlinearMaterial>>,
             core: Vec<Option<C>>,
             windings: Vec<SpatialWindingConductor>,
             inputs: &[f64],
@@ -373,11 +432,15 @@ mod owner {
             cancelled: &mut impl FnMut() -> bool,
         ) -> Result<(Self, SpatialNonlinearWindingStep), SpatialNonlinearWindingError> {
             let velocity = vec![[0.0; 3]; self.field().problem().mesh().vertex_count];
-            Ok(self
-                .step_with_conductors_candidate(
+            let candidate = match materials {
+                Some(materials) => self.step_with_materials_candidate(
+                    target_s, &velocity, materials, core, windings, inputs, controls, cancelled,
+                )?,
+                None => self.step_with_conductors_candidate(
                     target_s, &velocity, core, windings, inputs, controls, cancelled,
-                )?
-                .into_parts())
+                )?,
+            };
+            Ok(candidate.into_parts())
         }
 
         fn rebind_graph_resistors(
@@ -399,6 +462,42 @@ mod owner {
             let field = self.field().field(&mut || false)?.stored_energy_j();
             let end = self.end_inductance().stored_energy_j(self.currents_a())?;
             Ok(field + self.dae().system.hamiltonian(self.state()) + end)
+        }
+
+        fn magnetic_materials(&self) -> &[SpatialNonlinearMaterial] {
+            self.field().problem().materials()
+        }
+
+        fn flux_densities(&self) -> Result<Vec<(f64, f64)>, SpatialNonlinearWindingError> {
+            let field = self.field().field(&mut || false)?;
+            let problem = self.field().problem();
+            field
+                .flux_density_t()
+                .iter()
+                .enumerate()
+                .map(|(cell, &b)| {
+                    problem
+                        .cell_volume_m3(cell)
+                        .map(|volume| (magnitude(b), volume))
+                        .ok_or(SpatialNonlinearWindingError::Invalid(
+                            "missing magnetic volume",
+                        ))
+                })
+                .collect()
+        }
+
+        fn magnetic_cells(
+            step: &SpatialNonlinearInductionStep,
+        ) -> &[SpatialNonlinearInductionMagneticCell] {
+            &step.magnetic_cells
+        }
+
+        fn same_problem(&self, other: &Self) -> bool {
+            let (a, b) = (self.field().problem(), other.field().problem());
+            core::ptr::eq(a, b)
+                || (a.materials() == b.materials()
+                    && a.mesh().tets == b.mesh().tets
+                    && shared::same_vectors(a.positions_m(), b.positions_m()))
         }
 
         fn graph(&self) -> &CircuitGraph {
@@ -448,9 +547,11 @@ mod owner {
 }
 
 /// The accepted state: the owner's circuit, which carries the field history;
-/// its stored energy \[J\]; and, for a state a step proposed, the owner's step
-/// that produced it. The step is held as `dyn Any`, not through the owner's
-/// associated type, so the state stays covariant in `'m`; a clone shares it.
+/// its stored energy \[J\]; in the magnetic lane, the temperatures its field
+/// materials were evaluated at; and, for a state a step proposed, the owner's
+/// step that produced it. The step is held as `dyn Any`, not through the
+/// owner's associated type, so the state stays covariant in `'m`; a clone
+/// shares it.
 #[derive(Clone)]
 pub struct SpatialWindingState<
     'm,
@@ -459,6 +560,7 @@ pub struct SpatialWindingState<
 > {
     circuit: O,
     stored_energy_j: f64,
+    temperatures: Option<Vec<f64>>,
     step: Option<Rc<dyn Any>>,
     problem: PhantomData<&'m ()>,
     conductor: PhantomData<fn() -> C>,
@@ -479,10 +581,35 @@ impl<'m, C: SpatialConductorMaterial, O: SpatialWindingOwner<'m, C>> SpatialWind
         Ok(Self {
             circuit,
             stored_energy_j,
+            temperatures: None,
             step: None,
             problem: PhantomData,
             conductor: PhantomData,
         })
+    }
+
+    /// The magnetic lane's state of an accepted circuit whose field
+    /// materials were evaluated at `temperatures` \[K\], one per heat
+    /// receiver, its storage summed as [`Self::new`] sums it. A step refuses
+    /// a state whose temperatures do not fit its Component, and one whose
+    /// law cells' free energy at them is not the field's.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn at_temperatures(
+        circuit: O,
+        temperatures: Vec<f64>,
+    ) -> Result<Self, SpatialWindingError> {
+        let mut state = Self::new(circuit)?;
+        state.temperatures = Some(temperatures);
+        Ok(state)
+    }
+
+    /// The temperatures \[K\] the field materials were evaluated at, in the
+    /// magnetic lane.
+    #[must_use]
+    pub fn temperatures(&self) -> Option<&[f64]> {
+        self.temperatures.as_deref()
     }
 
     /// The accepted circuit.
@@ -520,16 +647,24 @@ impl<C: SpatialConductorMaterial> SpatialWindingState<'_, C> {
 /// and hold the same bits in every accepted coordinate: clock, circuit
 /// state, currents, linkages, resistances, strands, core conductors and
 /// field potential and clock. The graph is compared by value: a step with
-/// resistor laws builds a new one. Neither the stored energy a state carries
-/// nor the owner's step it keeps is compared: a proposed state equals the
+/// resistor laws builds a new one. In the magnetic lane, each step builds
+/// its own problem too, so there the problems are compared by mesh and
+/// materials, and the temperatures by their bits; a state with temperatures
+/// never equals one without. Neither the stored energy a state carries nor
+/// the owner's step it keeps is compared: a proposed state equals the
 /// constructed one.
 impl<'m, C: SpatialConductorMaterial, O: SpatialWindingOwner<'m, C>> PartialEq
     for SpatialWindingState<'m, C, O>
 {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.circuit, &other.circuit);
+        let problem = match (&self.temperatures, &other.temperatures) {
+            (None, None) => core::ptr::eq(a.problem(), b.problem()),
+            (Some(x), Some(y)) => same_bits(x, y) && a.same_problem(b),
+            _ => false,
+        };
         shared::same_graph(a.graph(), b.graph(), false)
-            && core::ptr::eq(a.problem(), b.problem())
+            && problem
             && a.time_s().to_bits() == b.time_s().to_bits()
             && same_bits(a.state(), b.state())
             && same_bits(a.currents_a(), b.currents_a())
@@ -551,6 +686,7 @@ impl<'m, C: SpatialConductorMaterial, O: SpatialWindingOwner<'m, C>> fmt::Debug
             .field("currents_a", &self.circuit.currents_a())
             .field("state", &self.circuit.state())
             .field("stored_energy_j", &self.stored_energy_j)
+            .field("temperatures_k", &self.temperatures)
             .finish_non_exhaustive()
     }
 }
@@ -609,6 +745,8 @@ pub struct SpatialWinding<
     controls: NonlinearWindingControls<F>,
     energy_tolerance_j: f64,
     ports: Vec<PortSpec>,
+    /// The magnetic lane's laws, by cell.
+    magnetic: Option<BTreeMap<usize, ThermalMagneticMaterial>>,
     problem: PhantomData<&'m ()>,
     owner: PhantomData<fn() -> O>,
 }
@@ -687,7 +825,83 @@ where
         controls: NonlinearWindingControls<F>,
         energy_tolerance_j: f64,
     ) -> Result<Self, SpatialWindingError> {
-        if conductor_laws.len() != receivers.len() {
+        let (supply, elements) =
+            Self::laws(circuit, conductor_laws, resistor_laws, receivers.len())?;
+        Self::build(
+            circuit,
+            &elements,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )
+    }
+
+    /// [`Self::at_port_temperatures`] in the magnetic lane (module
+    /// documentation): the permeability of each cell with a
+    /// [`SpatialMagneticLaw`] also follows the temperature its receiver's
+    /// port gives. Each law cell maps to a receiver, conducting or not. The
+    /// Component steps states made by [`SpatialWindingState::at_temperatures`].
+    ///
+    /// # Errors
+    /// As [`Self::at_port_temperatures`]; there is no law; two laws name one
+    /// cell; a law names a cell whose field material is not linear, or whose
+    /// material is not the law's source (its card, claims and other
+    /// coordinates); a law cell maps to no receiver.
+    #[allow(clippy::too_many_arguments)]
+    pub fn magnetic_at_port_temperatures(
+        circuit: &O,
+        conductor_laws: Vec<Arc<dyn SpatialConductorLaw<C>>>,
+        resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+        magnetic: Vec<SpatialMagneticLaw>,
+        receivers: Vec<SpatialHeatReceiver>,
+        controls: NonlinearWindingControls<F>,
+        energy_tolerance_j: f64,
+    ) -> Result<Self, SpatialWindingError> {
+        let materials = circuit.magnetic_materials();
+        let mut laws = BTreeMap::new();
+        for SpatialMagneticLaw { cell, law } in magnetic {
+            let Some(SpatialNonlinearMaterial::Linear(material)) = materials.get(cell) else {
+                return Err(invalid(
+                    "a magnetic law names a cell whose field material is not linear",
+                ));
+            };
+            if admit_magnetic_temperature_refresh(material, law.material()).is_err() {
+                return Err(invalid(
+                    "a magnetic law's source is not its cell's field material",
+                ));
+            }
+            if laws.insert(cell, law).is_some() {
+                return Err(invalid("two magnetic laws name one cell"));
+            }
+        }
+        if laws.is_empty() {
+            return Err(invalid("the magnetic lane has no law"));
+        }
+        let (supply, mut elements) =
+            Self::laws(circuit, conductor_laws, resistor_laws, receivers.len())?;
+        elements.extend(laws.keys().copied());
+        let mut component = Self::build(
+            circuit,
+            &elements,
+            supply,
+            receivers,
+            controls,
+            energy_tolerance_j,
+        )?;
+        component.magnetic = Some(laws);
+        Ok(component)
+    }
+
+    /// The supply of [`Self::at_port_temperatures`], and the cells its
+    /// receivers must map.
+    fn laws(
+        circuit: &O,
+        conductor_laws: Vec<Arc<dyn SpatialConductorLaw<C>>>,
+        resistor_laws: BTreeMap<usize, Arc<dyn ResistorLaw>>,
+        receivers: usize,
+    ) -> Result<(Supply<C>, Vec<usize>), SpatialWindingError> {
+        if conductor_laws.len() != receivers {
             return Err(invalid("one conductor law per heat receiver required"));
         }
         let core: Vec<usize> = circuit
@@ -716,14 +930,7 @@ where
             conductors: conductor_laws,
             resistors: resistor_laws,
         };
-        Self::build(
-            circuit,
-            &elements,
-            supply,
-            receivers,
-            controls,
-            energy_tolerance_j,
-        )
+        Ok((supply, elements))
     }
 
     fn build(
@@ -756,6 +963,7 @@ where
             controls,
             energy_tolerance_j,
             ports: layout.ports,
+            magnetic: None,
             problem: PhantomData,
             owner: PhantomData,
         })
@@ -784,6 +992,8 @@ where
                 "the state's circuit is not this Component's topology",
             ));
         }
+        let lane = self.magnetic.as_ref().map(|_| self.receivers.len());
+        shared::admit_temperatures(old.temperatures.as_deref(), lane).map_err(refused)?;
         shared::target_time(old.circuit.time_s(), dt_s).map_err(refused)
     }
 
@@ -851,6 +1061,99 @@ where
         let driven = old.rebind_graph_resistors(sources, cancelled)?;
         Ok((Some(driven), core, windings))
     }
+
+    /// In the magnetic lane, the field materials of a step whose heat ports
+    /// received `kelvin`: each law cell's law there, and every other cell's
+    /// material as `old` holds it.
+    fn materials_at(
+        &self,
+        old: &O,
+        kelvin: &[f64],
+    ) -> Result<Option<Vec<SpatialNonlinearMaterial>>, SpatialWindingError> {
+        let Some(laws) = &self.magnetic else {
+            return Ok(None);
+        };
+        let mut materials = old.magnetic_materials().to_vec();
+        for (&cell, law) in laws {
+            let receiver = self.cell_port[&cell];
+            let kelvin = kelvin[receiver];
+            let at = law
+                .at_temperature(kelvin)
+                .map_err(|error| SpatialWindingError::Law {
+                    receiver,
+                    element: SpatialLawElement::Permeability(cell),
+                    kelvin,
+                    message: error.to_string(),
+                })?;
+            *materials
+                .get_mut(cell)
+                .ok_or_else(|| invalid("the state's field has no such law cell"))? =
+                SpatialNonlinearMaterial::Linear(at.material().clone());
+        }
+        Ok(Some(materials))
+    }
+
+    /// The magnetic lane's terms of a step from `old`'s temperatures to the
+    /// ports' (`kelvin`), read from the owner's magnetic cell records. Each
+    /// law's free energy must be the field's at both ends of the step, within
+    /// the energy tolerance; a cell without a law must do no parameter work.
+    fn reversible(
+        &self,
+        old: &SpatialWindingState<'m, C, O>,
+        cells: &[SpatialNonlinearInductionMagneticCell],
+        kelvin: &[f64],
+    ) -> Result<Option<Reversible>, SpatialWindingError> {
+        let Some(laws) = &self.magnetic else {
+            return Ok(None);
+        };
+        let before = old
+            .temperatures
+            .as_deref()
+            .ok_or_else(|| invalid("a state of the magnetic lane carries its temperatures"))?;
+        let cells: Vec<LawCell> = cells
+            .iter()
+            .map(|cell| LawCell {
+                element: cell.cell,
+                flux_density_t: cell.flux_density_t.map(magnitude),
+                free_energy_j: cell.free_energy_j,
+                volume_m3: cell.volume_m3,
+                parameter_work_j: cell.parameter_work_j,
+            })
+            .collect();
+        shared::reversible(
+            laws,
+            &self.cell_port,
+            self.receivers.len(),
+            before,
+            kelvin,
+            &cells,
+            self.energy_tolerance_j,
+        )
+        .map(Some)
+        .map_err(refused)
+    }
+
+    /// In the magnetic lane, a state's `(sum of T s [J], sum of s [J/K])`
+    /// over the law cells, measured from the state alone: each law at its
+    /// receiver's temperature, at the flux density the field's potential
+    /// gives. Both sums are compensated (`two_sum`).
+    fn stored_reversible(
+        &self,
+        state: &SpatialWindingState<'m, C, O>,
+    ) -> Result<Option<(f64, f64)>, SpatialWindingError> {
+        let Some(laws) = &self.magnetic else {
+            return Ok(None);
+        };
+        let temperatures = state
+            .temperatures
+            .as_deref()
+            .filter(|t| t.len() == self.receivers.len())
+            .ok_or_else(|| invalid("a state of the magnetic lane carries its temperatures"))?;
+        let cells = state.circuit.flux_densities()?;
+        shared::stored_reversible(laws, &self.cell_port, temperatures, &cells)
+            .map(Some)
+            .map_err(refused)
+    }
 }
 
 /// A core conductor's conductivity (scalar or tensor), principal axes,
@@ -894,8 +1197,10 @@ where
     /// identity) and strands (winding, cell, fill bits, resistivity bits and
     /// card identity), or the laws' core cells, strands and words; the
     /// receiver map; the controls by their `Debug` text (which prints each
-    /// `f64` so that it parses back to the same bits); then the energy
-    /// tolerance. Each list is preceded by its length.
+    /// `f64` so that it parses back to the same bits); the energy tolerance;
+    /// then, in the magnetic lane only, `b"magtemp1"` and each law's cell and
+    /// words (its card identity, temperature axis, range and slope, and its
+    /// source's permeability). Each list is preceded by its length.
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.push(u64::from_le_bytes(*b"spatial1"));
         shared::graph_words(&self.graph, words);
@@ -946,6 +1251,9 @@ where
         shared::receiver_words(&maps(&self.receivers), words);
         shared::debug_words(&self.controls, words);
         words.push(self.energy_tolerance_j.to_bits());
+        if let Some(laws) = &self.magnetic {
+            shared::lane_words(laws, words);
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -963,12 +1271,25 @@ where
     }
 
     /// The energy the state carries: summed at construction, or the owner's
-    /// `stored_after_j` of the step that proposed it.
+    /// `stored_after_j` of the step that proposed it; in the magnetic lane,
+    /// with `T s` of each law cell, measured from the state.
     fn stored_energy_j(
         &self,
         state: &SpatialWindingState<'m, C, O>,
     ) -> Result<f64, SpatialWindingError> {
-        Ok(state.stored_energy_j)
+        match self.stored_reversible(state)? {
+            None => Ok(state.stored_energy_j),
+            Some((reversible, _)) => Ok(state.stored_energy_j + reversible),
+        }
+    }
+
+    /// In the magnetic lane, the sum of `s = -dpsi/dT` over the law cells,
+    /// measured from the state's own field and temperatures; otherwise none.
+    fn stored_entropy_j_per_k(
+        &self,
+        state: &SpatialWindingState<'m, C, O>,
+    ) -> Result<Option<f64>, SpatialWindingError> {
+        Ok(self.stored_reversible(state)?.map(|(_, entropy)| entropy))
     }
 
     fn propose(
@@ -987,8 +1308,11 @@ where
         let kelvin = &inputs[sources..];
         let (driven, core, windings) =
             self.supply_at(&old.circuit, kelvin, &mut || cx.checkpoint().is_err())?;
+        let materials = self.materials_at(&old.circuit, kelvin)?;
+        let lane = materials.is_some();
         let (circuit, step) = driven.as_ref().unwrap_or(&old.circuit).step(
             target_s,
+            materials,
             core,
             windings,
             &inputs[..sources],
@@ -997,8 +1321,8 @@ where
         )?;
         let kept = Rc::new(step);
         let step = &*kept;
-        shared::admit_work(step.parameter_work_j, step.mechanical_work_j, false)
-            .map_err(refused)?;
+        shared::admit_work(step.parameter_work_j, step.mechanical_work_j, lane).map_err(refused)?;
+        let reversible = self.reversible(old, O::magnetic_cells(&step.field), kelvin)?;
         let field = O::field_heat(&step.field);
         let heat = shared::heat_by_receiver(
             self.receivers.len(),
@@ -1022,11 +1346,12 @@ where
             elements: step.cells.len() + field.len() + step.graph_resistors.len(),
             coordinates: [old.circuit.state().len(), old.circuit.potential_wb().len()],
         };
+        let laws = self.magnetic.as_ref().map_or(0, BTreeMap::len);
         let closed = shared::close(
             &account,
             &heat,
             kelvin,
-            None,
+            reversible.as_ref().map(|terms| (terms, laws)),
             sources,
             self.energy_tolerance_j,
         )
@@ -1049,6 +1374,7 @@ where
         *new = SpatialWindingState {
             circuit,
             stored_energy_j,
+            temperatures: lane.then(|| kelvin.to_vec()),
             step: Some(kept),
             problem: PhantomData,
             conductor: PhantomData,

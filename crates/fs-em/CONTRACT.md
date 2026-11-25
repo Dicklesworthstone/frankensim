@@ -3301,8 +3301,9 @@ in these:
   carries neither.
 - The field steps at standstill: `step_with_conductors_candidate` with every
   vertex at zero velocity. There is no mechanical port. A step with
-  mechanical or parameter work refuses (`UnaccountedWork`), and the owner
-  itself refuses stranded geometry that moves.
+  mechanical work, or parameter work outside the magnetic lane's law cells,
+  refuses (`UnaccountedWork`), and the owner itself refuses stranded
+  geometry that moves.
 - The state, `SpatialWindingState`, carries its stored energy, so the
   kernel's reading needs no field reconstruction. A constructed state sums
   three terms in the owner's order for `stored_before_j`: the field's energy
@@ -3313,6 +3314,7 @@ in these:
   currents, linkages, resistances, strands, core conductors, potential and
   field clock. The stored energy is not compared, and neither is the kept
   step (`SpatialWindingState::step`, the owner's `SpatialNonlinearWindingStep`).
+  In the magnetic lane the problems are compared by content instead (below).
 - `SpatialWinding::at_port_temperatures` takes one `SpatialConductorLaw` per
   receiver and `ResistorLaw`s by branch, as `PlanarWinding` does. Each
   conductor law is asked, at the temperature its port received, for each
@@ -3401,9 +3403,110 @@ Three in the shared core each failed tests of both Components:
 The grouping (field + end) + circuit gave the owner's bits at every step,
 so no test tells it from the owner's order.
 
+#### The 3D magnetic lane
+
+`SpatialWinding::magnetic_at_port_temperatures` is `PlanarWinding`'s
+magnetic lane on the 3D owner, built from the lane terms the two share in
+`winding::component::shared`. It takes one `SpatialMagneticLaw` per law
+cell: fs-material's linear `ThermalMagneticMaterial`, affine in absolute
+temperature, whose source is the cell's linear field material. Each step:
+- sets each law cell to its law at its port's temperature;
+- steps the owner at standstill with `step_with_materials_candidate`;
+- reads each cell's flux density as the length of its vector.
+
+The 3D materials step takes no assembly bounds, so the lane has none. The
+state carries the temperatures (`SpatialWindingState::at_temperatures`).
+These are `PlanarWinding`'s lane terms: the heat less `T dS`, the stored
+`T s`, the second-order numerical loss `-(P + (T1 - T0) s0)` and the
+declared stored entropy. A state's `T s` and `s` are recomputed from its
+own field. Two lane states compare their temperatures bit for bit and their
+problems by positions, tetrahedra and materials. A state with temperatures
+never equals one without. The identity words end with `b"magtemp1"` and
+each law's cell and words.
+
+The refusals are `PlanarWinding`'s lane refusals, by cell.
+- Construction refuses:
+  - no law, or two laws on one cell;
+  - a law on a cell whose material is not linear (a reversible cell, or one
+    beyond the mesh);
+  - a law whose source is not its cell's material;
+  - a law cell mapped to no receiver.
+- A step refuses:
+  - a lane state without temperatures or with another count;
+  - temperatures outside the lane;
+  - a law with no answer at its port's temperature (`Law`,
+    `SpatialLawElement::Permeability`; never clamped);
+  - a law whose free energy at either end is not the field's.
+
+`tests/spatial_winding_component/magnetic.rs` (9 tests) gives every cell of
+the cube a linear material and a law, from the affine card of
+`tests/winding_ohmic/common.rs`: 1/18 ohm m at 300 K, with a permeability
+of `1 + 0.002 (T - 300)` H/m. The strands cross 24 cells, core conductors
+fill the other 12 of the lower half, and the other 12 cells are magnetic
+only. Receiver 0 takes the conducting cells, receiver 1 the magnetic-only
+cells, and receiver 2 the graph resistor. Two held steps from rest charge
+the field first. The tests:
+- held at 300 K, a step is the owner's own `step_with_materials_candidate`,
+  bit for bit in state and source output, and does no parameter work. Each
+  port's heat is its Joule heat less `T dS`, within 1e-12 W. The numerical
+  loss exceeds the owner's dissipation by 1.7e-13 J, inside the rounding
+  floor of 5.5e-13 J;
+- five steps rising 2 K per step pass `audit_step`. One step raised by 16,
+  8, 4 and 2 K books -1.95e-5, -4.95e-6, -1.25e-6 and -3.13e-7 J beyond the
+  owner's dissipation, each `-(P + dT s0)` by hand within 1e-12 J. Halving
+  the rise divides the term by 3.94, 3.97 and 3.98;
+- from rest, the magnetic-only cells draw 0.0244 W, while the conducting
+  cells and the graph resistor give heat out;
+- the refusals above, each by its message or element;
+- the stored entropy of a state is the hand sum within 1e-15 J/K, and the
+  stored energy adds `T s`. A state without temperatures or with another
+  count refuses, and the fixed and conductor-law Components declare none;
+- two proposals build two problems and are equal. States at rest on another
+  allocation of the same problem are equal. These make states at rest
+  unequal, each alone: a magnetic-only cell's material at 310 K, two
+  magnetic-only cells swapped, and the corner vertex (0, 0, 1), which only
+  magnetic-only cells touch, moved in its plane;
+- identity words that tell apart a narrower law, a conducting cell without
+  a law, a magnetic-only cell moved to receiver 0, and the Component outside
+  the lane;
+- `check_component`, its entropy audit included, for three steps each:
+  charged and held, charged and rising 2 K per step, and from rest.
+
+Twenty-eight defects in the lane, planted one at a time, each failed at
+least one of these tests:
+- a permeability refusal named as a resistor's;
+- the source, one-law, no-law and linear checks off;
+- law cells not among the cells receivers may map;
+- the state's temperatures not admitted;
+- every law at the first receiver's temperature;
+- the materials not refreshed;
+- flux density magnitudes without z, in the step's records or in the
+  state's;
+- the step's start temperatures taken as the ports';
+- the temperature count unchecked for the stored entropy;
+- `T s` dropped from the stored energy;
+- the stored entropy undeclared;
+- parameter work refused in the lane;
+- the lane's terms dropped from the account;
+- the next state without temperatures;
+- the lane's words dropped;
+- temperatures ignored in equality;
+- problems compared by address;
+- a state with temperatures equal to one without;
+- the problems' materials, tetrahedra or positions not compared;
+- the conductors' step taken with the lane's materials;
+- the lane never set;
+- `at_temperatures` keeping no temperatures.
+
+In the shared core, `same_vectors` comparing lengths alone fails the
+problem test here. The planar targets do not catch it: no planar test
+builds two states that differ in vector memory alone.
+
 Not claimed:
 - the 3D play-memory owner;
-- a 3D magnetic lane;
+- a law in a reversible or recoil cell;
+- convergence of the fixed point between a port's temperature and the heat
+  it returns;
 - motion, a tangent or a codec;
 - any comparison with `fs_couple`'s winding modules.
 

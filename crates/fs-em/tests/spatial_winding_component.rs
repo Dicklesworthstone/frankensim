@@ -6,6 +6,8 @@
 //! the temperatures the heat ports receive.
 #![cfg(feature = "component")]
 
+#[path = "spatial_winding_component/magnetic.rs"]
+mod magnetic;
 #[path = "nonlinear_eddy/common.rs"]
 mod material;
 
@@ -63,6 +65,12 @@ const VOLTS: f64 = 2.0;
 const GRAPH_OHM: f64 = 0.3;
 const FILL: f64 = 0.6;
 const TOLERANCE_J: f64 = 1e-9;
+/// The cube's assembly bounds.
+const LIMITS: WeightedAssemblyLimits = WeightedAssemblyLimits {
+    max_cells: 1000,
+    max_dofs: 4000,
+    max_triplets: 100_000,
+};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -107,6 +115,11 @@ fn card(sigma: f64) -> MaterialCard {
 /// The unit cube in 48 tetrahedra of 1/48 m³, each with the card's
 /// reversible law.
 fn cube(card: &MaterialCard) -> SpatialNonlinearVectorMagnetostatics {
+    cube_of(SpatialNonlinearMaterial::Reversible(material::law(card)))
+}
+
+/// The unit cube in 48 tetrahedra of 1/48 m³, each with `material`.
+fn cube_of(material: SpatialNonlinearMaterial) -> SpatialNonlinearVectorMagnetostatics {
     let mut positions = vec![];
     for k in 0..=2 {
         for j in 0..=2 {
@@ -147,12 +160,8 @@ fn cube(card: &MaterialCard) -> SpatialNonlinearVectorMagnetostatics {
     SpatialNonlinearVectorMagnetostatics::new(
         positions,
         tets,
-        vec![SpatialNonlinearMaterial::Reversible(material::law(card)); count],
-        WeightedAssemblyLimits {
-            max_cells: 1000,
-            max_dofs: 4000,
-            max_triplets: 100_000,
-        },
+        vec![material; count],
+        LIMITS,
         &mut || false,
     )
     .unwrap()
@@ -369,8 +378,23 @@ fn series_on<'m>(
     across: Branch,
     fill: f64,
 ) -> SpatialNonlinearWindingCircuit<'m> {
+    series_of(
+        p,
+        core_at(p, card, core_k),
+        strands_at(p, card, 300.0, fill),
+        across,
+    )
+}
+
+/// [`series_on`] with these core conductors and strands.
+fn series_of(
+    p: &SpatialNonlinearVectorMagnetostatics,
+    core: Vec<Option<ResolvedConductorState>>,
+    strands: Vec<SpatialWindingConductor>,
+    across: Branch,
+) -> SpatialNonlinearWindingCircuit<'_> {
     SpatialNonlinearWindingCircuit::new(
-        history(p, core_at(p, card, core_k)),
+        history(p, core),
         CircuitGraph {
             node_count: 3,
             branches: vec![
@@ -386,7 +410,7 @@ fn series_on<'m>(
             profiles_per_m2: vec![profile(p)],
             end_inductance_h: vec![0.03],
         },
-        strands_at(p, card, 300.0, fill),
+        strands,
         NonlinearWindingInitial {
             currents_a: vec![0.0],
             remaining_fluxes_wb: vec![],

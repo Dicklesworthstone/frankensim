@@ -695,7 +695,6 @@ pub(crate) fn same_bits(a: &[f64], b: &[f64]) -> bool {
 }
 
 /// Equal lists of vectors, bit for bit.
-#[cfg(feature = "magnetic-hysteresis")]
 pub(crate) fn same_vectors<const N: usize>(a: &[[f64; N]], b: &[[f64; N]]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_bits(x, y))
 }
