@@ -526,26 +526,6 @@ interface FamilyMats {
   wool: THREE.MeshStandardMaterial;
   /** A halogen lamp seen through frosted glass. */
   lamp: THREE.MeshBasicMaterial;
-  /** Food: what the pans hold. Baked mac and cheese, its elbows in the sauce and browned where the top caught. */
-  mac: THREE.MeshStandardMaterial;
-  /** Loose elbows standing out of the mac: cheese-coated, and browned. */
-  elbow: THREE.MeshStandardMaterial;
-  elbowBrown: THREE.MeshStandardMaterial;
-  /** Chili con carne: a glossy red-brown sauce full of mince, onion and tomato. */
-  chili: THREE.MeshStandardMaterial;
-  /** Kidney beans in the chili. */
-  bean: THREE.MeshStandardMaterial;
-  /** Whole cooked green beans: the heap seen from above, and loose pods in two greens. */
-  greensHeap: THREE.MeshStandardMaterial;
-  greens: THREE.MeshStandardMaterial;
-  greensDark: THREE.MeshStandardMaterial;
-  /** Steamed long-grain rice, grain by grain. */
-  rice: THREE.MeshStandardMaterial;
-  mash: THREE.MeshStandardMaterial;
-  /** Corn kernels. */
-  corn: THREE.MeshStandardMaterial;
-  /** A cutting board's HDPE: off-white, satin, crossed by fine knife scores. UVs in metres (a tile is 0.3 m). */
-  board: THREE.MeshStandardMaterial;
   /** A basket's heap of fries seen from above (the fill under the loose ones). */
   fries: THREE.MeshStandardMaterial;
   /** Single fries, pale to well browned; each is painted darker at its tips. */
@@ -556,9 +536,6 @@ interface FamilyMats {
   /** A salmon portion: coral flesh with its white myosepta in chevrons. */
   salmon: THREE.MeshStandardMaterial;
   gravy: THREE.MeshStandardMaterial;
-  /** A slice of sandwich bread, its face and crust as one picture: raw, and toasted golden-brown. */
-  breadRaw: THREE.MeshStandardMaterial;
-  breadToast: THREE.MeshStandardMaterial;
   /** Door glass: the outer pane's grey-bronze tint, clear inner panes, and edges seen edge on. */
   paneSmoke: THREE.MeshPhysicalMaterial;
   paneClear: THREE.MeshPhysicalMaterial;
@@ -1518,10 +1495,62 @@ function boardArt(): [HTMLCanvasElement, HTMLCanvasElement, HTMLCanvasElement] {
   return [c, rc, bc];
 }
 
-type StdFn = (p: THREE.MeshStandardMaterialParameters, uv?: "box" | "own", uvScale?: number) => THREE.MeshStandardMaterial;
+function std(p: THREE.MeshStandardMaterialParameters, uv: "box" | "own" = "box", uvScale?: number): THREE.MeshStandardMaterial {
+  const m = new THREE.MeshStandardMaterial(p);
+  m.userData.uv = uv;
+  if (uvScale) m.userData.uvScale = uvScale;
+  return m;
+}
 
-/** The hot table's food and its board. Food tops carry their own UVs in metres; each map repeats every `tile` m. */
-function foodMats(std: StdFn, speck: (base: string, dots: string[], n: number, seed: number) => THREE.CanvasTexture) {
+/** A 256 px tile of `base` scattered with `n` small dots of the `dots` colours. */
+function speck(base: string, dots: string[], n: number, seed: number): THREE.CanvasTexture {
+  const [c, x] = canvas2d(256, 256);
+  const r = rng(seed);
+  x.fillStyle = base;
+  x.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < n; i++) {
+    x.fillStyle = dots[Math.floor(r() * dots.length)]!;
+    x.beginPath();
+    x.ellipse(r() * 256, r() * 256, 1 + r() * 3.5, 1 + r() * 2.5, r() * 3, 0, Math.PI * 2);
+    x.fill();
+  }
+  const t = ctex(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+interface FoodMats {
+  /** Food: what the pans hold. Baked mac and cheese, its elbows in the sauce and browned where the top caught. */
+  mac: THREE.MeshStandardMaterial;
+  /** Loose elbows standing out of the mac: cheese-coated, and browned. */
+  elbow: THREE.MeshStandardMaterial;
+  elbowBrown: THREE.MeshStandardMaterial;
+  /** Chili con carne: a glossy red-brown sauce full of mince, onion and tomato. */
+  chili: THREE.MeshStandardMaterial;
+  /** Kidney beans in the chili. */
+  bean: THREE.MeshStandardMaterial;
+  /** Whole cooked green beans: the heap seen from above, and loose pods in two greens. */
+  greensHeap: THREE.MeshStandardMaterial;
+  greens: THREE.MeshStandardMaterial;
+  greensDark: THREE.MeshStandardMaterial;
+  /** Steamed long-grain rice, grain by grain. */
+  rice: THREE.MeshStandardMaterial;
+  mash: THREE.MeshStandardMaterial;
+  /** Corn kernels. */
+  corn: THREE.MeshStandardMaterial;
+  /** A cutting board's HDPE: off-white, satin, crossed by fine knife scores. UVs in metres (a tile is 0.3 m). */
+  board: THREE.MeshStandardMaterial;
+}
+
+let food: FoodMats | null = null;
+
+/**
+ * The hot table's food and its board, painted the first time a hot table is built rather than with the rest of the
+ * family's materials: a kitchen without one never paints them. Food tops carry their own UVs in metres; each map
+ * repeats every `tile` m.
+ */
+function foodMats(): FoodMats {
+  if (food) return food;
   const tiled = (cv: HTMLCanvasElement, srgb: boolean, tile: number) => {
     const t = ctex(cv, srgb);
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -1534,7 +1563,7 @@ function foodMats(std: StdFn, speck: (base: string, dots: string[], n: number, s
   const mashBump = tiled(mashMap.image as HTMLCanvasElement, false, 0.06);
   const chili = std({ ...art(chiliArt(), 0.12), bumpScale: 4, roughness: 0.32, metalness: 0 }, "own");
   const [bm, br, bb] = boardArt();
-  return {
+  return (food = {
     mac: std({ ...art(macArt(), 0.1), bumpScale: 1.6, roughness: 0.5, metalness: 0 }, "own"),
     // Open tubes: both faces drawn, so an end that stands clear of the sauce shows the pasta's inside.
     elbow: std({ color: 0xe9b04c, roughness: 0.42, metalness: 0, side: THREE.DoubleSide }),
@@ -1548,19 +1577,33 @@ function foodMats(std: StdFn, speck: (base: string, dots: string[], n: number, s
     mash: std({ map: mashMap, bumpMap: mashBump, bumpScale: 0.8, roughness: 0.62, metalness: 0 }, "own"),
     corn: std({ ...art(cornArt(), 0.08), bumpScale: 2.2, roughness: 0.34, metalness: 0 }, "own"),
     board: std({ map: tiled(bm, true, 0.3), roughnessMap: tiled(br, false, 0.3), bumpMap: tiled(bb, false, 0.3), bumpScale: 0.5, roughness: 0.85, metalness: 0 }, "own"),
+  });
+}
+
+/** A slice of sandwich bread, its face and crust as one picture: raw, and toasted golden-brown. */
+interface BreadMats {
+  breadRaw: THREE.MeshStandardMaterial;
+  breadToast: THREE.MeshStandardMaterial;
+}
+
+let breads: BreadMats | null = null;
+
+/** The toaster's bread, painted the first time a toaster is built. */
+function breadMats(): BreadMats {
+  if (breads) return breads;
+  const bread = (toasted: boolean) => {
+    const a = breadArt(toasted);
+    const m = new THREE.MeshStandardMaterial({ map: a.map, bumpMap: a.bump, bumpScale: 2.2, roughness: 0.92, metalness: 0 });
+    m.userData.uv = "own";
+    return m;
   };
+  return (breads = { breadRaw: bread(false), breadToast: bread(true) });
 }
 
 let fam: FamilyMats | null = null;
 
 function mats(): FamilyMats {
   if (fam) return fam;
-  const std = (p: THREE.MeshStandardMaterialParameters, uv: "box" | "own" = "box", uvScale?: number) => {
-    const m = new THREE.MeshStandardMaterial(p);
-    m.userData.uv = uv;
-    if (uvScale) m.userData.uvScale = uvScale;
-    return m;
-  };
   const basic = (c: HTMLCanvasElement) => {
     const m = new THREE.MeshBasicMaterial({ map: ctex(c) });
     m.userData.uv = "own";
@@ -1569,21 +1612,6 @@ function mats(): FamilyMats {
   const perfTex = perforation(16, 0.62);
   perfTex.repeat.set(1, 1);
   const meshTex = perforation(32, 0.6);
-  const speck = (base: string, dots: string[], n: number, seed: number) => {
-    const [c, x] = canvas2d(256, 256);
-    const r = rng(seed);
-    x.fillStyle = base;
-    x.fillRect(0, 0, 256, 256);
-    for (let i = 0; i < n; i++) {
-      x.fillStyle = dots[Math.floor(r() * dots.length)]!;
-      x.beginPath();
-      x.ellipse(r() * 256, r() * 256, 1 + r() * 3.5, 1 + r() * 2.5, r() * 3, 0, Math.PI * 2);
-      x.fill();
-    }
-    const t = ctex(c);
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    return t;
-  };
   // Clear polycarbonate. Everything made of it is a closed solid, so its front faces alone draw both of its surfaces.
   const poly = new THREE.MeshPhysicalMaterial({ color: 0xe6eef2, metalness: 0, roughness: 0.08, transparent: true, opacity: 0.13, clearcoat: 1, envMapIntensity: 1.4, depthWrite: false });
   poly.userData.uv = "own";
@@ -1607,10 +1635,6 @@ function mats(): FamilyMats {
   const own = <T extends THREE.Material>(m: T): T => {
     m.userData.uv = "own";
     return m;
-  };
-  const bread = (toasted: boolean) => {
-    const a = breadArt(toasted);
-    return own(new THREE.MeshStandardMaterial({ map: a.map, bumpMap: a.bump, bumpScale: 2.2, roughness: 0.92, metalness: 0 }));
   };
   const fryTex = ctex(fryArt());
   const grilleTex = perforation(15, 0.62);
@@ -1638,15 +1662,12 @@ function mats(): FamilyMats {
       m.userData.uv = "own";
       return m;
     })(),
-    ...foodMats(std, speck),
     fries: own(new THREE.MeshStandardMaterial({ map: ctex(friesHeapArt()), roughness: 0.62 })),
     fry: [0xfff8ec, 0xf8dcae, 0xe8b07a].map((col) => own(new THREE.MeshStandardMaterial({ map: fryTex, color: col, roughness: 0.62 }))),
     dough: std({ color: 0xead8b4, roughness: 0.88 }),
     beef: own(new THREE.MeshStandardMaterial({ map: ctex(steakArt()), roughness: 0.42 })),
     salmon: own(new THREE.MeshStandardMaterial({ map: ctex(salmonArt()), roughness: 0.4 })),
     gravy: std({ color: 0x6a4224, roughness: 0.22 }),
-    breadRaw: bread(false),
-    breadToast: bread(true),
     paneSmoke: own(new THREE.MeshPhysicalMaterial({ color: 0x2a2b2a, metalness: 0, roughness: 0.02, transparent: true, opacity: 0.4, envMapIntensity: 1.7, clearcoat: 1, clearcoatRoughness: 0.02, depthWrite: false })),
     paneClear: own(new THREE.MeshPhysicalMaterial({ color: 0xd8e6e2, metalness: 0, roughness: 0.02, transparent: true, opacity: 0.1, envMapIntensity: 1.5, depthWrite: false })),
     paneEdge: own(new THREE.MeshStandardMaterial({ color: 0x4f7c6c, metalness: 0, roughness: 0.08, transparent: true, opacity: 0.72, depthWrite: false })),
@@ -3412,7 +3433,7 @@ function mergeGeoms(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
  */
 const conveyorToaster: Builder = (s, e) => {
   const p = palette();
-  const fm = mats();
+  const fm = breadMats();
   const { w, d, h } = e;
   const fine1 = s.fine(1);
   const fine2 = s.fine(2);
@@ -4179,6 +4200,7 @@ function kidneyBean(): THREE.BufferGeometry {
 const steamTable: Builder = (s, e) => {
   const p = palette();
   const fm = mats();
+  const food = foodMats();
   const { w, d, h } = e;
   const fine1 = s.fine(1);
   const fine2 = s.fine(2);
@@ -4235,14 +4257,14 @@ const steamTable: Builder = (s, e) => {
   };
   // Baked mac: a low dome, lumpy where the elbows pile. Green beans: a loose heap. Rice: heaped up to the middle and
   // packed against the steel. Chili: a thick sauce, nearly level, its meniscus climbing the wall.
-  const mac = fill(wells[0]!, zc, 0.325, 0.53, fm.mac, { edge: -0.033, climb: 0.0015, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.005, 0.045], [0.002, 0.022]], seed: 1 });
-  const greens = fill(wells[1]!, zc - 0.133, 0.325, 0.265, fm.greensHeap, { edge: -0.045, climb: 0, climbIn: 0.003, heap: 0.016, rise: 0.04, lumps: [[0.007, 0.05], [0.003, 0.025]], seed: 2 });
-  fill(wells[1]!, zc + 0.133, 0.325, 0.265, fm.rice, { edge: -0.036, climb: 0.002, climbIn: 0.004, heap: 0.022, rise: 0.045, lumps: [[0.004, 0.04], [0.0018, 0.02]], seed: 3 });
-  const chili = fill(wells[2]!, zc, 0.325, 0.53, fm.chili, { edge: -0.031, climb: 0.003, climbIn: 0.0025, heap: 0.006, rise: 0.02, lumps: [[0.0035, 0.05], [0.0015, 0.028]], seed: 4 });
+  const mac = fill(wells[0]!, zc, 0.325, 0.53, food.mac, { edge: -0.033, climb: 0.0015, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.005, 0.045], [0.002, 0.022]], seed: 1 });
+  const greens = fill(wells[1]!, zc - 0.133, 0.325, 0.265, food.greensHeap, { edge: -0.045, climb: 0, climbIn: 0.003, heap: 0.016, rise: 0.04, lumps: [[0.007, 0.05], [0.003, 0.025]], seed: 2 });
+  fill(wells[1]!, zc + 0.133, 0.325, 0.265, food.rice, { edge: -0.036, climb: 0.002, climbIn: 0.004, heap: 0.022, rise: 0.045, lumps: [[0.004, 0.04], [0.0018, 0.02]], seed: 3 });
+  const chili = fill(wells[2]!, zc, 0.325, 0.53, food.chili, { edge: -0.031, climb: 0.003, climbIn: 0.0025, heap: 0.006, rise: 0.02, lumps: [[0.0035, 0.05], [0.0015, 0.028]], seed: 4 });
   // Mash swirled by the spoon; corn; gravy, level but for its meniscus.
   const thirds: [Mat, Lie][] = [
-    [fm.mash, { edge: -0.032, climb: 0.001, climbIn: 0.003, heap: 0.016, rise: 0.035, lumps: [[0.004, 0.04]], swirl: 0.008, step: 0.7, seed: 5 }],
-    [fm.corn, { edge: -0.033, climb: 0.0012, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.003, 0.03], [0.0015, 0.016]], seed: 6 }],
+    [food.mash, { edge: -0.032, climb: 0.001, climbIn: 0.003, heap: 0.016, rise: 0.035, lumps: [[0.004, 0.04]], swirl: 0.008, step: 0.7, seed: 5 }],
+    [food.corn, { edge: -0.033, climb: 0.0012, climbIn: 0.003, heap: 0.01, rise: 0.03, lumps: [[0.003, 0.03], [0.0015, 0.016]], seed: 6 }],
     [fm.gravy, { edge: -0.036, climb: 0.002, climbIn: 0.002, heap: 0, rise: 0.01, lumps: [[0.0004, 0.06]], seed: 7 }],
   ];
   for (const [k, [m, L]] of thirds.entries()) fill(wells[3]!, zc + (k - 1) * 0.177, 0.325, 0.176, m, L);
@@ -4271,13 +4293,13 @@ const steamTable: Builder = (s, e) => {
       if (cy + v.y + tr < mac.h(ex + v.x, ez + v.z) + 0.003) continue;
       const g = new THREE.TorusGeometry(R, tr, 5, 8, arc);
       g.rotateZ(t0);
-      s.add(r() < 0.4 ? fm.elbowBrown : fm.elbow, g, [mac.x + ex, py + cy, mac.z + ez], rot);
+      s.add(r() < 0.4 ? food.elbowBrown : food.elbow, g, [mac.x + ex, py + cy, mac.z + ez], rot);
       placed++;
     }
     // Kidney beans in the chili, mostly under the sauce, their backs showing.
     for (let i = 0; i < 80; i++) {
       const [bx, bz] = [(r() - 0.5) * (chili.fw - 0.03), (r() - 0.5) * (chili.fd - 0.03)];
-      s.add(fm.bean, kidneyBean(), [chili.x + bx, py + chili.h(bx, bz) - 0.0012 - r() * 0.0012, chili.z + bz], [(r() - 0.5) * 0.3, r() * Math.PI * 2, (r() - 0.5) * 0.3]);
+      s.add(food.bean, kidneyBean(), [chili.x + bx, py + chili.h(bx, bz) - 0.0012 - r() * 0.0012, chili.z + bz], [(r() - 0.5) * 0.3, r() * Math.PI * 2, (r() - 0.5) * 0.3]);
     }
     // Green beans dropped one by one onto the heap, each coming to rest on it or on the beans already there: a height
     // map in 1 cm cells, starting from the heap's own surface.
@@ -4304,7 +4326,7 @@ const steamTable: Builder = (s, e) => {
         for (const [k, t] of ts.entries()) yc = Math.max(yc, hs[k]! - slope * t + rad * 0.55);
         // Nothing heaped up over the rim.
         if (yc > -0.012) continue;
-        const tone = r() < 0.45 ? fm.greensDark : fm.greens;
+        const tone = r() < 0.45 ? food.greensDark : food.greens;
         s.add(tone, podGeom(L, rad, (r() - 0.35) * 0.008), [greens.x + bx, py + yc, greens.z + bz], [0, yaw, Math.atan(slope)]);
         for (const t of ts) hm[along(t)] = Math.max(hm[along(t)]!, yc + slope * t + rad * 0.8);
       }
@@ -4353,7 +4375,7 @@ const steamTable: Builder = (s, e) => {
       g = box(bw, bt, bd).translate(0, bt / 2, 0);
       boxUVs(g, 1);
     }
-    s.add(fm.board, g, [w / 2, 0.8, (zf + 0.002 - 0.004) / 2]);
+    s.add(food.board, g, [w / 2, 0.8, (zf + 0.002 - 0.004) / 2]);
   }
   if (fine1) for (const x of [0.15, w / 2, w - 0.15]) {
     const tri = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(0.16, 0), new THREE.Vector2(0, -0.08)]);
