@@ -4710,3 +4710,45 @@ reverse recovery and avalanche; storage, OCV or bearing drag that change
 with temperature. The
 retired lanes' refusals of a source that changed or was bound another way
 retired with them; the graphs do not cover them.
+
+## Multirate stepping (bead `frankensim-rc-1109-root-3gc12.5.9`)
+
+`System::plan_multirate` assigns components to rate groups from each component's
+`limit_dt_s` and optional per-node `node_max_dt_s` / `node_substeps` bounds
+(refusing overrides coarser than a component's own `limit_dt_s` or exceeding
+`max_substeps`). Any load-line loop stays intact in one rate group (promoted to
+its fastest member when `promote_load_line_blocks` is `true`, otherwise refused
+with `MultirateError::SplitLoadLineBlock`).
+
+`System::step_multirate` advances each rate group on its own local clock
+`dt_g = H / substeps_g` over one macro window `[t_0, t_0 + H]`:
+
+- **Bitwise single-rate identity**: when every rate group has `substeps == 1`,
+  `step_multirate` and `step_multirate_to_events` delegate directly to
+  `System::step` and `System::step_to_events`, reproducing state, clock,
+  outputs, and ledger accounts bit for bit.
+- **Conserved cross-rate accumulators**: fast-to-slow port outputs, port
+  energies, entropies, stream masses, and carried inventories are summed across
+  substeps in double-double (`fs_math::dd::Dd`). Cyclic cross-rate stages solve
+  the macro window-average interface equations with dense safeguarded Newton
+  (generalizing `fs_phs::multirate::MultiratePair` to arbitrary `Component`
+  graphs and connection types).
+- **Declared slow-to-fast interpolation**: `SlowInterpolation::ZeroOrderHold`
+  holds slower outputs constant across fast substeps so cross-rate work, heat,
+  impulse, mass, and carried quantities cancel to double-double roundoff
+  (`interpolation_numerical_loss_j == 0.0`, certifying `Color::Verified`).
+  `SlowInterpolation::Linear` ramps slower outputs linearly across fast
+  substeps (after step 0) and computes the exact quadrature energy discrepancy
+  in double-double, booking it explicitly into `interpolation_numerical_loss_j`
+  and the receiving node's `numerical_loss_j` account (leaving
+  `Ledger::energy_residual_j` closed while coloring the window
+  `Color::Estimated`).
+- **Synchronized clocks and atomic rollback**: component `next_event_s`,
+  mid-substep shortening requests, scheduled boundary events, and
+  `System::step_multirate_to_events` guards synchronize all rate groups to one
+  shared `Sum` clock. Every refusal or cancellation restores the exact entry
+  checkpoint, clock, and ledger without partial publication.
+- **Limits**: held/interpolated cross-rate interfaces do not eliminate macro-
+  window phase error on strongly coupled oscillators; refine the macro window
+  alongside local clocks.
+

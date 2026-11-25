@@ -595,3 +595,135 @@ fn malformed_source_energy_bounds_at_either_endpoint_preserve_caller_outputs() {
         });
     }
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn multirate_system_matches_fs_phs_multirate_pair() {
+    use fs_phs::multirate::{
+        Clock as PhsClock, IntegrationMethod as PhsMethod, MultiratePair, PortPair as PhsPortPair,
+        SolveConfig as PhsSolveConfig,
+    };
+    use fs_system::{MultirateConfig, SlowInterpolation};
+
+    // Two linear dissipative port-Hamiltonian oscillators (fast left, slow right)
+    // coupled via a single skew work-conjugate power port.
+    let left_owner = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.25],
+        vec![0.0, 1.0],
+        Box::new(QuadraticStorage::new(vec![200.0, 0.0, 0.0, 20.0], 2).unwrap()),
+    )
+    .unwrap();
+    let right_owner = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.05],
+        vec![0.0, 1.0],
+        Box::new(QuadraticStorage::new(vec![4.0, 0.0, 0.0, 1.0], 2).unwrap()),
+    )
+    .unwrap();
+
+    let macro_dt = 0.01;
+    let fast_substeps = 8_usize;
+    let slow_substeps = 1_usize;
+    let windows = 15_usize;
+
+    // Reference: `fs_phs::multirate::MultiratePair` with Gonzalez discrete gradient.
+    let mut pair = MultiratePair::new(
+        &left_owner,
+        &right_owner,
+        &[PhsPortPair {
+            left: 0,
+            right: 0,
+            input_scale: 1.0,
+        }],
+        macro_dt,
+        PhsClock {
+            substeps: fast_substeps,
+            method: PhsMethod::DiscreteGradient {
+                maximum_rate_rad_s: 120.0,
+                maximum_rate_dt: 1.0,
+            },
+            maximum_contact_step_s: None,
+        },
+        PhsClock {
+            substeps: slow_substeps,
+            method: PhsMethod::DiscreteGradient {
+                maximum_rate_rad_s: 20.0,
+                maximum_rate_dt: 1.0,
+            },
+            maximum_contact_step_s: None,
+        },
+        PhsSolveConfig::default(),
+    )
+    .unwrap();
+
+    let mut xl = vec![0.02, 0.05];
+    let mut xr = vec![0.01, -0.02];
+    let mut pair_diss = 0.0_f64;
+    for _ in 0..windows {
+        let step = pair.step(&xl, &xr, &[0.0], &[0.0]).unwrap();
+        xl = step.left.state;
+        xr = step.right.state;
+        pair_diss += step.left.dissipated_j + step.right.dissipated_j;
+    }
+
+    // Generalized `fs_system::System::step_multirate` with the EXACT same two
+    // `PortHamiltonianComponent` owners joined by `bond`: FlowIn setter `left`
+    // receives `-y_right`, EffortIn member `right` receives `+y_left` (matching
+    // `MultiratePair`'s canonical skew pairing `u_left = -y_right, u_right = y_left`).
+    let left_comp =
+        PortHamiltonianComponent::new(left_owner, vec![power("p", PortRole::FlowIn)]).unwrap();
+    let right_comp =
+        PortHamiltonianComponent::new(right_owner, vec![power("p", PortRole::EffortIn)]).unwrap();
+    let mut b = SystemBuilder::new();
+    let n_left = b.add("left", left_comp, vec![0.02, 0.05]).unwrap();
+    let n_right = b.add("right", right_comp, vec![0.01, -0.02]).unwrap();
+    b.bond(b.port(n_left, "p").unwrap(), b.port(n_right, "p").unwrap())
+        .unwrap();
+    b.boundary(
+        b.port(n_left, "heat").unwrap(),
+        Box::new(|_, _, out| out[0] = 300.0),
+    )
+    .unwrap();
+    b.boundary(
+        b.port(n_right, "heat").unwrap(),
+        Box::new(|_, _, out| out[0] = 300.0),
+    )
+    .unwrap();
+    let mut sys = b.seal().unwrap();
+    let plan = sys
+        .plan_multirate(
+            macro_dt,
+            MultirateConfig {
+                node_substeps: vec![(n_left, fast_substeps), (n_right, slow_substeps)],
+                interpolation: SlowInterpolation::ZeroOrderHold,
+                ..MultirateConfig::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(plan.cyclic_stage_count(), 1);
+
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        for _ in 0..windows {
+            let rep = sys.step_multirate(macro_dt, &plan, cx).unwrap();
+            assert_eq!(rep.interpolation_numerical_loss_j, 0.0);
+        }
+    });
+
+    let sys_xl = sys.state::<Vec<f64>>(n_left).unwrap();
+    let sys_xr = sys.state::<Vec<f64>>(n_right).unwrap();
+    for (a, b) in sys_xl.iter().zip(&xl) {
+        close(*a, *b, 1.0e-11);
+    }
+    for (a, b) in sys_xr.iter().zip(&xr) {
+        close(*a, *b, 1.0e-11);
+    }
+    close(sys.ledger().total_dissipated_j(), pair_diss, 1.0e-11);
+    close(sys.ledger().energy_residual_j(), 0.0, 1.0e-12);
+    close(sys.ledger().connection_defect_j(), 0.0, 1.0e-12);
+}

@@ -36,6 +36,7 @@ mod analysis;
 mod events;
 mod line;
 mod modes;
+mod multirate;
 mod plan;
 mod scalar;
 mod snapshot;
@@ -51,6 +52,11 @@ pub use analysis::{
 pub use events::{
     EventBracket, EventConfig, EventDirection, EventError, EventReport, EventSetConfig,
     EventSetError, EventSetReport, EventSetStatus, EventStatus, LocatedEvent,
+};
+pub use multirate::{
+    CrossRateChannel, MAX_CROSS_RATE_ITERATIONS, MAX_MULTIRATE_SUBSTEPS, MultirateConfig,
+    MultirateError, MultirateEventReport, MultiratePlan, MultirateStepReport, RateGroup,
+    SlowInterpolation,
 };
 pub use plan::{
     AlgebraicLoopAudit, BlockClass, BlockCostEstimate, BlockPlan, CAUSALIZATION_AUDIT_SCHEMA,
@@ -355,8 +361,15 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InterfaceCarried { connection, carried, defect, tolerance } => write!(f,
-                "connection {connection} left carried coordinate {carried} uncancelled by {defect} (tolerance {tolerance})"),
+            Self::InterfaceCarried {
+                connection,
+                carried,
+                defect,
+                tolerance,
+            } => write!(
+                f,
+                "connection {connection} left carried coordinate {carried} uncancelled by {defect} (tolerance {tolerance})"
+            ),
             Self::Component { node, phase, error } => {
                 write!(f, "component `{node}` refused in {phase:?}: {error:?}")
             }
@@ -386,7 +399,10 @@ impl fmt::Display for SystemError {
                 write!(f, "component `{node}` is inside a loop and needs {needs}")
             }
             Self::LoadLine { node, reason } => {
-                write!(f, "component `{node}` cannot be put on its load line: {reason}")
+                write!(
+                    f,
+                    "component `{node}` cannot be put on its load line: {reason}"
+                )
             }
             Self::GuessRequired { port } => write!(
                 f,
@@ -739,7 +755,12 @@ impl SystemBuilder {
             });
         }
         let candidate = Box::new(state.clone());
-        self.insert(name, Box::new(OnLine(component)), Box::new(state), candidate)
+        self.insert(
+            name,
+            Box::new(OnLine(component)),
+            Box::new(state),
+            candidate,
+        )
     }
 
     /// Add a component that offers the [`StageResidual`] monolithic tier.
@@ -2074,8 +2095,15 @@ impl SystemBuilder {
                 .enumerate()
                 .map(|(index, name)| NodeAccount {
                     name: name.clone(),
-                    carried: vec![None; self.nodes[index].ports().iter()
-                        .map(PortSpec::carried_quantities).max().unwrap_or(0)],
+                    carried: vec![
+                        None;
+                        self.nodes[index]
+                            .ports()
+                            .iter()
+                            .map(PortSpec::carried_quantities)
+                            .max()
+                            .unwrap_or(0)
+                    ],
                     has_streams: self.nodes[index]
                         .ports()
                         .iter()
@@ -2083,16 +2111,23 @@ impl SystemBuilder {
                     ..NodeAccount::default()
                 })
                 .collect(),
-            connections: self.connections.iter().map(|connection| {
-                let mut members = Vec::new();
-                connection.energy_members(&mut members);
-                let carried = members.iter().map(|port| self.spec(*port).carried_quantities())
-                    .max().unwrap_or(0);
-                ConnectionAccount {
-                    carried_defect: vec![Account::default(); carried],
-                    ..ConnectionAccount::default()
-                }
-            }).collect(),
+            connections: self
+                .connections
+                .iter()
+                .map(|connection| {
+                    let mut members = Vec::new();
+                    connection.energy_members(&mut members);
+                    let carried = members
+                        .iter()
+                        .map(|port| self.spec(*port).carried_quantities())
+                        .max()
+                        .unwrap_or(0);
+                    ConnectionAccount {
+                        carried_defect: vec![Account::default(); carried],
+                        ..ConnectionAccount::default()
+                    }
+                })
+                .collect(),
             boundaries: self
                 .boundaries
                 .iter()
@@ -2503,73 +2538,72 @@ impl BlockWork {
             );
         }
         let entries = slots.len();
-        let (line_condensed, line_slots, line_slot_start, line_tear) =
-            if let Some(ln) = line_node {
-                let line_pattern: Vec<Vec<usize>> = pattern
-                    .iter()
-                    .enumerate()
-                    .map(|(column, rows)| {
-                        if input_owner[block.unknowns[column]] == ln {
-                            Vec::new()
-                        } else {
-                            rows.clone()
-                        }
-                    })
-                    .collect();
-                let line_condensed = Condensed::plan(&line_pattern);
-                let mut line_slots = Vec::new();
-                let mut line_slot_start = Vec::with_capacity(m);
-                for (column, range) in column_readers.iter().enumerate() {
-                    line_slot_start.push(line_slots.len());
-                    if input_owner[block.unknowns[column]] != ln {
-                        line_slots.extend(
-                            readers[range.clone()]
-                                .iter()
-                                .map(|&(row, _, _)| line_condensed.slot(row, column)),
-                        );
+        let (line_condensed, line_slots, line_slot_start, line_tear) = if let Some(ln) = line_node {
+            let line_pattern: Vec<Vec<usize>> = pattern
+                .iter()
+                .enumerate()
+                .map(|(column, rows)| {
+                    if input_owner[block.unknowns[column]] == ln {
+                        Vec::new()
+                    } else {
+                        rows.clone()
                     }
+                })
+                .collect();
+            let line_condensed = Condensed::plan(&line_pattern);
+            let mut line_slots = Vec::new();
+            let mut line_slot_start = Vec::with_capacity(m);
+            for (column, range) in column_readers.iter().enumerate() {
+                line_slot_start.push(line_slots.len());
+                if input_owner[block.unknowns[column]] != ln {
+                    line_slots.extend(
+                        readers[range.clone()]
+                            .iter()
+                            .map(|&(row, _, _)| line_condensed.slot(row, column)),
+                    );
                 }
-                let ln_pos = block
-                    .nodes
-                    .binary_search(&ln)
-                    .expect("a block's load-line component belongs to its block");
-                let ln_outputs = output_start[ln]..output_start[ln + 1];
-                let mut active_outputs = Vec::new();
-                for &target in &block.unknowns {
-                    match &drivers[target] {
-                        Driver::OnLine { terms, own } => {
-                            for &(source, _) in &terms[..terms.len() - own] {
-                                if ln_outputs.contains(&source) {
-                                    active_outputs.push(source - ln_outputs.start);
-                                }
-                            }
-                        }
-                        other => {
-                            sources.clear();
-                            other.sources(&mut sources);
-                            for &source in &sources {
-                                if ln_outputs.contains(&source) {
-                                    active_outputs.push(source - ln_outputs.start);
-                                }
+            }
+            let ln_pos = block
+                .nodes
+                .binary_search(&ln)
+                .expect("a block's load-line component belongs to its block");
+            let ln_outputs = output_start[ln]..output_start[ln + 1];
+            let mut active_outputs = Vec::new();
+            for &target in &block.unknowns {
+                match &drivers[target] {
+                    Driver::OnLine { terms, own } => {
+                        for &(source, _) in &terms[..terms.len() - own] {
+                            if ln_outputs.contains(&source) {
+                                active_outputs.push(source - ln_outputs.start);
                             }
                         }
                     }
+                    other => {
+                        sources.clear();
+                        other.sources(&mut sources);
+                        for &source in &sources {
+                            if ln_outputs.contains(&source) {
+                                active_outputs.push(source - ln_outputs.start);
+                            }
+                        }
+                    }
                 }
-                active_outputs.sort_unstable();
-                active_outputs.dedup();
-                let line_tear = LineTear::plan(
-                    m,
-                    ln,
-                    &block.unknowns,
-                    input_owner,
-                    active_outputs,
-                    of_node[ln_pos].clone(),
-                )
-                .filter(|tear| line_condensed.kept() + tear.width() < condensed.kept());
-                (line_condensed, line_slots, line_slot_start, line_tear)
-            } else {
-                (Condensed::default(), Vec::new(), Vec::new(), None)
-            };
+            }
+            active_outputs.sort_unstable();
+            active_outputs.dedup();
+            let line_tear = LineTear::plan(
+                m,
+                ln,
+                &block.unknowns,
+                input_owner,
+                active_outputs,
+                of_node[ln_pos].clone(),
+            )
+            .filter(|tear| line_condensed.kept() + tear.width() < condensed.kept());
+            (line_condensed, line_slots, line_slot_start, line_tear)
+        } else {
+            (Condensed::default(), Vec::new(), Vec::new(), None)
+        };
         let affine_line = line_node.is_some()
             && affine_line_nodes
             && varying
@@ -2779,8 +2813,9 @@ impl StepTracker {
     }
 
     fn elapsed_wall_ns(&self) -> u64 {
-        self.wall_start
-            .map_or(0, |start| u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
+        self.wall_start.map_or(0, |start| {
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        })
     }
 }
 
@@ -2932,7 +2967,8 @@ impl System {
         self.ledger = ledger;
         self.config = checkpoint.config;
         self.accepted_controller = controller;
-        self.candidate_controller.copy_from(&self.accepted_controller);
+        self.candidate_controller
+            .copy_from(&self.accepted_controller);
         self.accepted_generation = self.accepted_generation.wrapping_add(1);
         self.invalidate_caches();
         Ok(())
@@ -3959,7 +3995,10 @@ impl System {
         self.blocks[block].nodes = nodes;
         self.block_work[block] = work;
         if matches!(result, Ok(Ok(_)))
-            && matches!(mode, BlockSolveMode::LoadLineNewton | BlockSolveMode::InterfaceNewton)
+            && matches!(
+                mode,
+                BlockSolveMode::LoadLineNewton | BlockSolveMode::InterfaceNewton
+            )
         {
             // The flow inputs of a load line held released flows during
             // the solve; what is published is what crossed.
@@ -4817,18 +4856,30 @@ impl System {
             }
             entropy_audits[node] = self.audit_entropy(node, dt_s)?;
             for carried in 0..self.carried_audits[node].len() {
-                let measure = |state: &dyn Any| self.nodes[node]
-                    .stored_carried_quantity(state, carried)
-                    .map_err(|error| SystemError::Component {
-                        node: self.names[node].clone(), phase: Phase::Measure, error,
-                    });
+                let measure = |state: &dyn Any| {
+                    self.nodes[node]
+                        .stored_carried_quantity(state, carried)
+                        .map_err(|error| SystemError::Component {
+                            node: self.names[node].clone(),
+                            phase: Phase::Measure,
+                            error,
+                        })
+                };
                 let old = measure(self.accepted[node].as_ref())?;
                 let new = measure(self.candidate[node].as_ref())?;
                 self.carried_audits[node][carried] = audit_carried_step(
-                    ports, &self.layouts[node], dt_s,
-                    &self.inputs[inputs.clone()], &self.outputs[outputs.clone()], carried, old, new,
-                ).map_err(|violation| SystemError::Contract {
-                    node: self.names[node].clone(), violation,
+                    ports,
+                    &self.layouts[node],
+                    dt_s,
+                    &self.inputs[inputs.clone()],
+                    &self.outputs[outputs.clone()],
+                    carried,
+                    old,
+                    new,
+                )
+                .map_err(|violation| SystemError::Contract {
+                    node: self.names[node].clone(),
+                    violation,
                 })?;
             }
         }
@@ -5091,9 +5142,16 @@ impl System {
             }
             connection_rows.push((energy, entropy, mass_defect_kg));
             for carried in 0..self.connection_carried[index].len() {
-                let amount = |port: &PortRef| self.port_carried[self.port_start[port.node] + port.port]
-                    .get(carried).copied().unwrap_or(0.0);
-                let scale = members.iter().map(|port| amount(port).abs()).fold(0.0_f64, f64::max);
+                let amount = |port: &PortRef| {
+                    self.port_carried[self.port_start[port.node] + port.port]
+                        .get(carried)
+                        .copied()
+                        .unwrap_or(0.0)
+                };
+                let scale = members
+                    .iter()
+                    .map(|port| amount(port).abs())
+                    .fold(0.0_f64, f64::max);
                 let mut sum = Sum::default();
                 let mut magnitude = 0.0;
                 let mut slack = 0.0;
@@ -5105,17 +5163,21 @@ impl System {
                     }
                     let spec = &self.nodes[port.node].ports()[port.port];
                     if spec.role() == PortRole::FlowIn && carried < spec.carried_quantities() {
-                        slack += dt_s * self.input_allowance[
-                            self.input_range(*port).start + STREAM_CARRIED + carried
-                        ];
+                        slack += dt_s
+                            * self.input_allowance
+                                [self.input_range(*port).start + STREAM_CARRIED + carried];
                     }
                 }
                 let defect = sum.value() * scale;
-                let tolerance = (128.0 * f64::EPSILON + self.config.relative_tolerance)
-                    * magnitude * scale + slack;
+                let tolerance =
+                    (128.0 * f64::EPSILON + self.config.relative_tolerance) * magnitude * scale
+                        + slack;
                 if !(defect.is_finite() && tolerance.is_finite() && defect.abs() <= tolerance) {
                     return Err(SystemError::InterfaceCarried {
-                        connection: index, carried, defect, tolerance,
+                        connection: index,
+                        carried,
+                        defect,
+                        tolerance,
                     });
                 }
                 self.connection_carried[index][carried] = defect;
@@ -5146,10 +5208,14 @@ impl System {
         for (accepted, candidate) in self.accepted.iter_mut().zip(&mut self.candidate) {
             core::mem::swap(accepted, candidate);
         }
-        core::mem::swap(&mut self.accepted_controller, &mut self.candidate_controller);
+        core::mem::swap(
+            &mut self.accepted_controller,
+            &mut self.candidate_controller,
+        );
         self.accepted_inputs.copy_from_slice(&self.inputs);
         self.accepted_outputs.copy_from_slice(&self.outputs);
-        self.accepted_allowance.copy_from_slice(&self.input_allowance);
+        self.accepted_allowance
+            .copy_from_slice(&self.input_allowance);
         self.accepted_receipts.copy_from_slice(&self.receipts);
         self.accepted_generation = self.accepted_generation.wrapping_add(1);
         self.time.add(dt_s);
@@ -5244,7 +5310,11 @@ impl System {
             account.energy_in_j.add(self.port_energy[global]);
             account.entropy_in_j_per_k.add(self.port_entropy[global]);
             account.mass_in_kg.add(self.port_mass[global]);
-            for (total, &value) in account.carried_in.iter_mut().zip(&self.port_carried[global]) {
+            for (total, &value) in account
+                .carried_in
+                .iter_mut()
+                .zip(&self.port_carried[global])
+            {
                 total.add(value);
             }
         }
