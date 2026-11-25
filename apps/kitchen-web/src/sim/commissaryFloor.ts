@@ -6,11 +6,11 @@
  * site metadata (the corridors that must stay clear). Floor frame: three.js x and z, metres; the manifest's Blender y
  * becomes -z.
  *
- * The trips are the week's cooked-ahead batches (commissaryWeek), every one of which goes through the blast chiller: each
- * pan is carried from its kettle, skillet, combi or prep table to the chiller one at a time, and the cook walks back; a
- * chilled load goes to the walk-in on a rack, and the rack comes back. Every walk is measured on the floor round the fixtures for a cook with a pan (NavGrid paths in
- * crowd.ts): distance fields over the free floor rank every spot at once, and the routes drawn and quoted are the
- * string-pulled A* paths with the chiller in place.
+ * The trips are the week's cooked-ahead batches (commissaryWeek), every one of which goes through the blast chiller:
+ * each pan is carried from its kettle, skillet, combi or prep table to the chiller one at a time, and the cook walks
+ * back; a chilled load goes to the walk-in on a rack, and the rack comes back. Every walk is measured on the floor
+ * round the fixtures for a cook with a pan (NavGrid paths in crowd.ts): distance fields over the free floor rank every
+ * spot at once, and the routes drawn and quoted are the string-pulled A* paths with the chiller in place.
  *
  * A spot is a place on a wall where the chiller's footprint fits flush, facing the room, clear of every fixture, every
  * corridor in the site metadata and the floor under a hood, with room for a cook in front of its door.

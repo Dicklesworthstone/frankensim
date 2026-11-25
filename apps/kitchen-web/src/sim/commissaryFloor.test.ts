@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { NavGrid } from "../three/models/crowd";
 import { CARRY_R, CHILL_LOAD, WALKIN, buildFloor, distanceField, fieldAt, fieldsOf, placeChiller, routesFor, trafficOf, wallSpots, weekMetres, type FloorManifest, type FloorMeta } from "./commissaryFloor";
 import { menuFor, runCommissary } from "./commissaryWeek";
 
@@ -41,18 +42,21 @@ describe("commissary floor", () => {
   });
 
   test("the routes drawn keep a cook with a pan clear of every fixture and of the chiller where it stands", () => {
-    const t = traffic([]);
-    const a = placeChiller(floor, fields, t, spots);
-    for (const plan of [a.drawn, a.atBest]) {
-      for (const r of plan.routes) {
-        expect(r.path.length).toBeGreaterThanOrEqual(2);
-        for (let i = 1; i < r.path.length; i++) {
-          const [p, q] = [r.path[i - 1]!, r.path[i]!];
-          for (let k = 0; k <= 20; k++) {
-            const x = p[0] + ((q[0] - p[0]) * k) / 20;
-            const z = p[1] + ((q[1] - p[1]) * k) / 20;
-            // Clearance from the room's fixtures, allowing the grid's own resolution at the ends (stances).
-            expect(floor.grid.clearance(x, z)).toBeGreaterThan(CARRY_R - 2 * floor.grid.cell);
+    for (const swaps of [[], SWAPS]) {
+      const a = placeChiller(floor, fields, traffic(swaps), spots);
+      for (const [plan, chiller] of [[a.drawn, floor.chiller.rect], [a.atBest, a.spots[a.best]!.rect]] as const) {
+        // The floor with this chiller standing on it.
+        const grid = new NavGrid(floor.bounds, [...floor.rects, chiller], floor.grid.cell);
+        for (const r of plan.routes) {
+          expect(r.path.length).toBeGreaterThanOrEqual(2);
+          for (let i = 1; i < r.path.length; i++) {
+            const [p, q] = [r.path[i - 1]!, r.path[i]!];
+            for (let k = 0; k <= 20; k++) {
+              const x = p[0] + ((q[0] - p[0]) * k) / 20;
+              const z = p[1] + ((q[1] - p[1]) * k) / 20;
+              // Clearance from the room's fixtures and the chiller, allowing the grid's own resolution at the ends.
+              expect(grid.clearance(x, z)).toBeGreaterThan(CARRY_R - 2 * floor.grid.cell);
+            }
           }
         }
       }
