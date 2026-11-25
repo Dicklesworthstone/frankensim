@@ -81,3 +81,27 @@ fn invalid_second_receiver_is_rejected_during_cold_preparation() {
             [POSITIONS[0],position],Medium::air()).is_err());
     }
 }
+
+#[test]
+fn opposing_cardioids_reconstruct_omni_on_a_played_note() {
+    use fs_bem::near_field::FirstOrder;
+    let (instrument, surface) = parts();
+    let position_m = POSITIONS[0];
+    let cardioid = |front| Placement { position_m, pattern: FirstOrder::new(0.5, front).unwrap() };
+    let mut pair = AudioStream::with_receivers(instrument, score(SCORE), Some(&surface),
+        cardioid([0.0,0.0,-1.0]), Some(cardioid([0.0,0.0,1.0])), Medium::air(), 1.0).unwrap();
+    let mut reference = mono(position_m);
+    let mut stereo = vec![0.0; 2800];
+    let mut pressure = vec![0.0; 1400];
+    pair.render_interleaved_block(&mut stereo).unwrap();
+    reference.render_block(&mut pressure).unwrap();
+
+    let peak = pressure.iter().map(|p| p.abs()).fold(0.0_f64, f64::max);
+    assert!(peak > 1e-10);
+    assert!(stereo.chunks_exact(2).any(|p| (p[0] - p[1]).abs() > peak * 0.01));
+    for (channels, omni) in stereo.chunks_exact(2).zip(pressure) {
+        assert!((channels[0] + channels[1] - omni).abs() < peak * 1e-9);
+    }
+    assert_eq!(pair.instrument.bank.q, reference.instrument.bank.q);
+    assert_eq!(pair.instrument.bank.v, reference.instrument.bank.v);
+}

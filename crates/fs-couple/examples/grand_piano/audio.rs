@@ -2,7 +2,7 @@
 //! allocation happen before construction, never in the successful block loop.
 //! The same sample path serves offline WAV rendering and a host audio callback.
 //! No audio-device backend or measured real-time deadline is implied here.
-use super::{board_geometry::SurfaceSample, engine::Instrument, microphone::Microphone,
+use super::{board_geometry::SurfaceSample, engine::Instrument, microphone::{Microphone, Placement},
     performance::Performance};
 use fs_bem::helmholtz::Medium;
 
@@ -50,15 +50,26 @@ impl AudioStream {
     /// explicitly diagnostic volume observer. Gain affects ONLY the latter.
     pub fn new(instrument:Instrument, score:Performance, surface:Option<&[SurfaceSample]>,
         position_m:[f64;3], medium:Medium, diagnostic_gain:f64)->Result<Self,String> {
+        Self::with_receivers(instrument, score, surface, Placement::omni(position_m), None, medium, diagnostic_gain)
+    }
+
+    /// Each microphone observes the same accepted mechanics trace.
+    pub fn with_receivers(instrument: Instrument, score: Performance, surface: Option<&[SurfaceSample]>,
+        left: Placement, right: Option<Placement>, medium: Medium, diagnostic_gain: f64) -> Result<Self,String> {
+        if surface.is_none() && (right.is_some() || left.pattern.pressure_fraction() < 1.0) {
+            return Err("spatial microphones require a geometric soundboard surface".into());
+        }
         if !diagnostic_gain.is_finite() || diagnostic_gain<=0.0 {
             return Err("diagnostic observer gain must be finite and positive".into());
         }
-        let microphone=surface.map(|surface|Microphone::new_multirate(surface,&instrument.bank,
-            instrument.sample_rate(),position_m,medium)).transpose()?;
+        let prepare = |surface: &[SurfaceSample], placement| Microphone::placed(surface, &instrument.bank,
+            instrument.sample_rate(), placement, medium);
+        let microphone = surface.map(|s| prepare(s, left)).transpose()?;
+        let right_microphone = surface.zip(right).map(|(s, mic)| prepare(s, mic)).transpose()?;
         let board_trace=vec![0.0;instrument.board_trace_len()];
         let mut instrument=instrument;
         let accelerator=ACCELERATOR.get().and_then(|f|f(&mut instrument));
-        Ok(Self{instrument,microphone,right_microphone:None,score,board_trace,diagnostic_gain,sample:0,failed:false,
+        Ok(Self{instrument,microphone,right_microphone,score,board_trace,diagnostic_gain,sample:0,failed:false,
             accelerator,traces:Vec::new(),pending:std::collections::VecDeque::new(),horizon:None})
     }
     /// Two physical Rayleigh receivers of ONE instrument and ONE control clock.
@@ -66,10 +77,8 @@ impl AudioStream {
     /// at each position. Construction is cold; no synthetic stereo gain is used.
     pub fn new_stereo(instrument:Instrument, score:Performance, surface:&[SurfaceSample],
         positions_m:[[f64;3];2], medium:Medium)->Result<Self,String> {
-        let mut stream=Self::new(instrument,score,Some(surface),positions_m[0],medium,1.0)?;
-        stream.right_microphone=Some(Microphone::new_multirate(surface,&stream.instrument.bank,
-            stream.instrument.sample_rate(),positions_m[1],medium)?);
-        Ok(stream)
+        let [left,right] = positions_m.map(Placement::omni);
+        Self::with_receivers(instrument, score, Some(surface), left, Some(right), medium, 1.0)
     }
     pub fn channels(&self)->usize {if self.right_microphone.is_some() {2}else{1}}
     pub fn stereo_microphones(&self)->Option<[&Microphone;2]> {

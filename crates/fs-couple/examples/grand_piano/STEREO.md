@@ -18,8 +18,8 @@ travel times, causal filter and pressure history. Both receive the SAME loaded
 soundboard velocity trace from every mechanical substep. The engine and score
 advance once per audio frame, not once per receiver. No second instrument,
 voice stealing, panning law, copied mono signal or decorrelation effect is used.
-Coincident positions deliberately produce identical channels; swapping the
-positions swaps the observations without changing the physical performance.
+Coincident positions and matching patterns produce identical channels; swapping the
+complete microphone placements swaps the observations without changing the physical performance.
 
 Both channels use the same PCM full-scale pressure, defaulting to 2 Pa. Set
 `--pcm-full-scale-pa` above the reported pressure peak when the default range
@@ -98,3 +98,27 @@ Existing files, directories and dangling symlinks refuse. Each publication
 also uses exclusive creation: an entry appearing after admission is preserved
 rather than overwritten. Successful earlier fresh outputs can remain if a
 later write fails; this is not a filesystem transaction.
+
+## Directional microphones on the Rayleigh render
+
+Use `--microphone-pattern` and `--microphone-right-pattern` to specify the
+pressure fraction followed by a unit front axis in board coordinates.
+The axis points from the capsule toward a source in front of it. Both
+channels default to omni. The right pattern requires a right receiver position.
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --note 69 --velocity 2 --duration 2 \
+  --microphone 0.2,0.8,0.2 --microphone-pattern 0.5,0,0,-1 \
+  --microphone-right 1.2,0.8,0.2 --microphone-right-pattern 0.5,0,0,-1 \
+  --wav-format float32 --render cardioid-pair.wav
+```
+
+These example placements face the board. A fraction of 1 selects omni,
+0.5 selects cardioid and 0 selects figure eight. Each directional capsule
+combines retarded pressure and particle velocity from the vibrating surface,
+including the reactive velocity term that grows at close range. Directional
+trace columns carry the suffix `_pa_equivalent`. Omni trace columns retain
+`_pa`. Both use the same on-axis plane-wave pressure reference for encoding.
+Opposed, coincident cardioids sum to the omni waveform at that position.
+The half-space model still assumes an infinite baffle and an ideal capsule.

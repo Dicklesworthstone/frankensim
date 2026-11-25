@@ -8,7 +8,31 @@
 use super::board_geometry::SurfaceSample;
 use super::linear::Bank;
 use fs_bem::helmholtz::Medium;
+pub use fs_bem::near_field::FirstOrder;
 use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium, SurfaceSample as AcousticSample};
+
+#[derive(Clone, Copy)]
+pub struct Placement {
+    pub position_m: [f64; 3],
+    pub pattern: FirstOrder,
+}
+
+impl Placement {
+    pub fn omni(position_m: [f64; 3]) -> Self { Self { position_m, pattern: FirstOrder::default() } }
+}
+
+pub fn parse_pattern(value: &str) -> Result<FirstOrder, String> {
+    let invalid = "expected microphone pressure fraction and unit front axis: alpha,x,y,z";
+    let mut values = value.split(',');
+    let mut number = || values.next().and_then(|v| v.parse::<f64>().ok()).ok_or(invalid);
+    let pattern = FirstOrder::new(number()?, [number()?, number()?, number()?]).map_err(|e| e.to_string())?;
+    if values.next().is_some() { return Err(invalid.into()); }
+    Ok(pattern)
+}
+
+pub fn pressure_unit(pattern: FirstOrder) -> &'static str {
+    if pattern.pressure_fraction() == 1.0 { "pa" } else { "pa_equivalent" }
+}
 
 pub struct Microphone { receiver: BaffledPressure }
 impl std::ops::Deref for Microphone {
@@ -31,9 +55,14 @@ impl Microphone {
     }
     pub fn new_multirate(surface:&[SurfaceSample], bank:&Bank, rate:u32,
         position_m:[f64;3], medium:Medium) -> Result<Self,String> {
-        let loaded=Self::surface(surface,bank)?;
-        Ok(Self { receiver:BaffledPressure::new_multirate_differentiating(&loaded,bank.board_count,bank.rate,rate,position_m,
-            RayleighMedium {density:medium.density,sound_speed:medium.sound_speed})? })
+        Self::placed(surface, bank, rate, Placement::omni(position_m), medium)
+    }
+    pub fn placed(surface: &[SurfaceSample], bank: &Bank, rate: u32, placement: Placement,
+        medium: Medium) -> Result<Self,String> {
+        let loaded = Self::surface(surface,bank)?;
+        Ok(Self { receiver: BaffledPressure::new_multirate_first_order(&loaded, bank.board_count,
+            bank.rate, rate, placement.position_m,
+            RayleighMedium {density:medium.density, sound_speed:medium.sound_speed}, placement.pattern)? })
     }
 }
 

@@ -60,6 +60,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--midi performance.mid] [--midi-channel CHANNEL[,CHANNEL...]]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
+    [--microphone-pattern alpha,x,y,z] [--microphone-right-pattern alpha,x,y,z]
     [--acoustic-refinement-levels 0..3]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--bridge-trace-csv paired.csv]
@@ -274,6 +275,10 @@ The complete score must fit --duration, leaving room for acoustic ringdown.
 Unsupported physical controls refuse or are reported as ignored; see MIDI.md.
 Geometric boards default to a spatial Rayleigh half-space pressure microphone
 at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
+--microphone-pattern alpha,x,y,z sets the pressure fraction and unit front axis
+pointing toward the source. 1 is omni (default), 0.5 cardioid, 0 figure eight.
+Directional output is Pa-equivalent and includes reactive near-field velocity.
+--microphone-right-pattern sets the pattern of an explicit right receiver.
 --microphone-right adds a second spatial receiver and writes left/right stereo
 from one mechanical performance. The original/default microphone is left;
 no panning, duplicated mono, peak normalization or second physics run. See STEREO.md.
@@ -349,7 +354,8 @@ struct Options {
     board_reduction: Option<board_geometry::ritz::RitzOptions>,
     rayleigh_loading: Option<rayleigh_loading::Options>,
     radiation_ports: Option<usize>,
-    microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
+    microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>,
+    microphone_patterns: [microphone::FirstOrder; 2], diagnostic_volume: bool,
     acoustic_refinement_levels: usize,
     dump_scale: Option<String>, dump_board: Option<String>,
     bridge_trace_csv: Option<String>, modal_pressure_csv: Option<String>, receiver_pressure_csv: Option<String>,
@@ -373,7 +379,7 @@ impl Default for Options {
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             board_reduction: None, rayleigh_loading: None, radiation_ports: None,
-            microphone: None, microphone_right: None, diagnostic_volume: false,
+            microphone: None, microphone_right: None, microphone_patterns: Default::default(), diagnostic_volume: false,
             acoustic_refinement_levels: 0,
             dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
             pressure_basis_json: None,
@@ -447,6 +453,10 @@ impl Options {
                     if values.len() != 3 { return Err(invalid()); }
                     let position=Some([values[0], values[1], values[2]]);
                     if flag=="--microphone" {options.microphone=position;} else {options.microphone_right=position;}
+                }
+                "--microphone-pattern" | "--microphone-right-pattern" => {
+                    let channel = usize::from(flag == "--microphone-right-pattern");
+                    options.microphone_patterns[channel] = microphone::parse_pattern(value)?;
                 }
                 "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
                 "--board-reduction" => options.board_reduction = Some(board_geometry::ritz::RitzOptions::parse(value)?),
@@ -613,9 +623,12 @@ impl Options {
             || (options.render.is_none() && options.dump_board.is_none())) {
             return Err("--edge-cubic-board-mass requires a flat geometric board solve for --render or --dump-board and excludes --consistent-board-mass".into());
         }
+        if seen.contains("--microphone-right-pattern") && options.microphone_right.is_none() {
+            return Err("--microphone-right-pattern requires --microphone-right".into());
+        }
         if [options.microphone,options.microphone_right].iter().flatten()
             .any(|p| p.iter().any(|x|!x.is_finite()) || p[2]<0.05)
-            || ((options.microphone.is_some() || options.microphone_right.is_some())
+            || ((options.microphone.is_some() || options.microphone_right.is_some() || seen.contains("--microphone-pattern"))
                 && (!geometric || options.render.is_none() || options.diagnostic_volume)) {
             return Err("microphones need a geometric render, finite x,y,z with z>=0.05, and no --diagnostic-volume".into());
         }
@@ -973,11 +986,11 @@ fn bridge_acceleration(velocity: &[f64], sample: usize, rate: u32) -> f64 {
     (velocity[right] - velocity[left]) * f64::from(rate) / (right - left) as f64
 }
 fn write_bridge_trace(path: &str, velocity: &[f64], pressure: &[f64],
-    rate: u32, channels: usize) -> Result<(), String> {
+    rate: u32, channels: usize, left_unit: &str) -> Result<(), String> {
     use std::io::Write;
     let file = fresh_output(path)?;
     let mut out = std::io::BufWriter::new(file);
-    writeln!(out, "sample,time_s,bridge_velocity_m_s,bridge_acceleration_m_s2,pressure_left_pa")
+    writeln!(out, "sample,time_s,bridge_velocity_m_s,bridge_acceleration_m_s2,pressure_left_{left_unit}")
         .map_err(|e| format!("{path}: {e}"))?;
     for (i, &v) in velocity.iter().enumerate() {
         writeln!(out, "{i},{:.17e},{:.17e},{:.17e},{:.17e}",
@@ -987,16 +1000,17 @@ fn write_bridge_trace(path: &str, velocity: &[f64], pressure: &[f64],
     out.flush().map_err(|e| format!("{path}: {e}"))
 }
 fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
-    rate: u32, channels: usize, modes: usize) -> Result<(), String> {
+    rate: u32, channels: usize, modes: usize, units: [&str; 2]) -> Result<(), String> {
     use std::io::Write;
     let file = fresh_output(path)?;
     let mut out = std::io::BufWriter::new(file);
     write!(out, "sample,time_s").map_err(|e| format!("{path}: {e}"))?;
     for channel in 0..channels {
         let side = if channel == 0 {"left"} else {"right"};
-        write!(out, ",pressure_{side}_pa").map_err(|e| format!("{path}: {e}"))?;
+        let unit = units[channel];
+        write!(out, ",pressure_{side}_{unit}").map_err(|e| format!("{path}: {e}"))?;
         for mode in 0..modes {
-            write!(out, ",{side}_mode_{mode}_pa").map_err(|e| format!("{path}: {e}"))?;
+            write!(out, ",{side}_mode_{mode}_{unit}").map_err(|e| format!("{path}: {e}"))?;
         }
     }
     writeln!(out).map_err(|e| format!("{path}: {e}"))?;
@@ -1020,13 +1034,13 @@ fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
     out.flush().map_err(|e| format!("{path}: {e}"))
 }
 fn write_receiver_pressure(out: &mut impl std::io::Write, pressure: &[f64],
-    rate: u32, channels: usize) -> Result<(), String> {
+    rate: u32, channels: usize, units: [&str; 2]) -> Result<(), String> {
     if !(1..=2).contains(&channels) || rate == 0 || !pressure.len().is_multiple_of(channels)
         || pressure.iter().any(|p|!p.is_finite()) {
         return Err("receiver pressure needs complete finite mono/stereo frames and a positive clock".into());
     }
-    write!(out,"sample,time_s,pressure_left_pa").map_err(|e|e.to_string())?;
-    if channels==2 {write!(out,",pressure_right_pa").map_err(|e|e.to_string())?;}
+    write!(out,"sample,time_s,pressure_left_{}",units[0]).map_err(|e|e.to_string())?;
+    if channels==2 {write!(out,",pressure_right_{}",units[1]).map_err(|e|e.to_string())?;}
     writeln!(out).map_err(|e|e.to_string())?;
     for (sample,frame) in pressure.chunks_exact(channels).enumerate() {
         write!(out,"{sample},{:.17e}",sample as f64/f64::from(rate)).map_err(|e|e.to_string())?;
@@ -1146,14 +1160,13 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
             options.dampers.as_deref().unwrap_or("supplied"));
     }
     let surface = if options.diagnostic_volume { None } else { surface };
-    let left=options.microphone.unwrap_or([0.675,1.0,1.0]);
-    let mut stream = match options.microphone_right {
-        Some(right)=>audio::AudioStream::new_stereo(piano,score,
-            surface.ok_or("stereo pressure requires a geometric soundboard surface")?,
-            [left,right],ambient.medium())?,
-        None=>audio::AudioStream::new(piano,score,surface,left,
-            ambient.medium(),options.observer_gain)?,
+    let [left_pattern,right_pattern] = options.microphone_patterns;
+    let left = microphone::Placement {
+        position_m: options.microphone.unwrap_or([0.675,1.0,1.0]), pattern: left_pattern,
     };
+    let right = options.microphone_right.map(|position_m| microphone::Placement {position_m, pattern: right_pattern});
+    let mut stream = audio::AudioStream::with_receivers(piano,score,surface,left,right,
+        ambient.medium(),options.observer_gain)?;
     // A supplied record must reach the sound: the microphone's medium,
     // Rayleigh loading, a gas,ambient cavity or the preset board's wood.
     if options.gas_record.is_some() && stream.microphone().is_none() && options.rayleigh_loading.is_none()
@@ -1171,6 +1184,13 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
             right.position_m,right.delay_samples,right.filter_delay_samples());
     }
     let channels=stream.channels();
+    let units = options.microphone_patterns.map(microphone::pressure_unit);
+    for (channel, pattern) in options.microphone_patterns[..channels].iter().enumerate() {
+        if pattern.pressure_fraction() < 1.0 {
+            println!("Channel {} is Pa-equivalent, pressure fraction {}, front axis {:?} (board frame).",
+                channel + 1, pattern.pressure_fraction(), pattern.front_axis());
+        }
+    }
     let mut pressure = vec![0.0; count as usize*channels];
     let mut bridge_velocity = bridge_row.as_ref().map(|_| Vec::with_capacity(count as usize));
     let modal_modes = stream.instrument().bank.board_count;
@@ -1218,18 +1238,18 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     let wav = options.wav_format.encode(&pressure, rate, channels as u16, options.pcm_full_scale_pa)?;
     write_fresh_output(path, &wav)?;
     if let (Some(csv), Some(velocity)) = (&options.bridge_trace_csv, &bridge_velocity) {
-        write_bridge_trace(csv, velocity, &pressure, rate, channels)?;
+        write_bridge_trace(csv, velocity, &pressure, rate, channels, units[0])?;
         println!("Modeled vertical bridge motion at key {key}: {csv}; centered output-rate acceleration, left pressure, same sample indices. Pressure includes propagation and anti-alias delay.");
     }
     if let (Some(csv), Some(modal)) = (&options.modal_pressure_csv, &modal_pressure) {
-        write_modal_pressure(csv, modal, &pressure, rate, channels, modal_modes)?;
+        write_modal_pressure(csv, modal, &pressure, rate, channels, modal_modes, units)?;
         println!("Loaded-board modal pressure at key {key}: {csv}; signed contributions at each physical receiver on the WAV clock. Basis indices are not bare-board eigenfrequencies.");
     }
     if let Some(csv)=&options.receiver_pressure_csv {
         let file=fresh_output(csv)?;
-        write_receiver_pressure(&mut std::io::BufWriter::new(file),&pressure,rate,channels)
+        write_receiver_pressure(&mut std::io::BufWriter::new(file),&pressure,rate,channels,units)
             .map_err(|e|format!("{csv}: {e}"))?;
-        println!("Total receiver pressure: {csv}; unquantized Pa, same frames and channels as WAV, no modal trace allocation.");
+        println!("Total receiver pressure: {csv}; unquantized receiver output, units in column headers, same frames and channels as WAV, no modal trace allocation.");
     }
     if let Some(json) = &options.pressure_basis_json {
         let file = fresh_output(json)?;
@@ -1238,7 +1258,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("Loaded pressure basis: {json}; exact projection map and diagonal reference frequencies, not full instrument poles.");
     }
     if stream.microphone().is_some() {
-        println!("Computed half-space pressure in Pa; {} full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering or measured-SPL calibration. Air backreaction: {}.", options.wav_format.label(), options.pcm_full_scale_pa,
+        println!("Computed half-space microphone output; {} full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering or measured-SPL calibration. Air backreaction: {}.", options.wav_format.label(), options.pcm_full_scale_pa,
             if options.rayleigh_loading.is_some() { "explicit passive Rayleigh load" } else { "absent" });
     } else {
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
@@ -1981,10 +2001,28 @@ mod render_tests {
         }
     }
     #[test]
+    fn directional_microphones_require_valid_physical_channels() {
+        let base = ["--preset","steinway-d","--render","p.wav"];
+        let parse = |extra: &[&str]| options(&[&base[..],extra].concat());
+        let selected = parse(&["--microphone-pattern","0.5,0,0,-1"]).unwrap();
+        assert_eq!(selected.microphone_patterns[0].pressure_fraction(),0.5);
+        assert_eq!(selected.microphone_patterns[1].pressure_fraction(),1.0);
+        for pattern in ["NaN,0,0,1","1.1,0,0,1","0,0,0,2","0,1,0","0,1,0,0,1"] {
+            assert!(parse(&["--microphone-pattern",pattern]).is_err());
+        }
+        assert!(parse(&["--microphone-right-pattern","0.5,0,0,-1"]).is_err());
+        assert!(parse(&["--microphone-pattern","0.5,0,0,-1","--diagnostic-volume"]).is_err());
+        let mixed = parse(&["--microphone-right","0.2,0.5,1","--microphone-right-pattern","0,0,0,-1"]).unwrap();
+        let mut csv = Vec::new();
+        write_receiver_pressure(&mut csv,&[0.,0.],48_000,2,mixed.microphone_patterns.map(microphone::pressure_unit)).unwrap();
+        assert!(csv.starts_with(b"sample,time_s,pressure_left_pa,pressure_right_pa_equivalent\n"));
+    }
+
+    #[test]
     fn compact_receiver_csv_retains_frame_channel_order_and_physical_units() {
         for channels in [1,2] {
             let values=[0.125,-0.25,0.5,-1.0]; let mut output=Vec::new();
-            write_receiver_pressure(&mut output,&values,48_000,channels).unwrap();
+            write_receiver_pressure(&mut output,&values,48_000,channels,["pa";2]).unwrap();
             let text=String::from_utf8(output).unwrap(); let mut lines=text.lines();
             assert_eq!(lines.next().unwrap(),if channels==1 {
                 "sample,time_s,pressure_left_pa"
@@ -2001,7 +2039,7 @@ mod render_tests {
         for (values,rate,channels) in [(&[0.0][..],48_000,2),(&[f64::NAN][..],48_000,1),
             (&[0.0][..],0,1),(&[0.0][..],48_000,0)] {
             let mut output=Vec::new();
-            assert!(write_receiver_pressure(&mut output,values,rate,channels).is_err());
+            assert!(write_receiver_pressure(&mut output,values,rate,channels,["pa";2]).is_err());
             assert!(output.is_empty());
         }
         assert!(options(&["--preset","steinway-d","--midi","score.mid","--render","p.wav",
