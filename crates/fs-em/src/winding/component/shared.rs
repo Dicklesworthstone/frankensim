@@ -11,6 +11,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fs_material::conductor::ResolvedConductorState;
+#[cfg(feature = "magnetic-hysteresis")]
+use fs_material::field_storage::hysteresis::{
+    source::ResolvedVectorHysteresis, vector::VectorHysteresisState,
+};
 use fs_material::field_storage::linear_magnetic_permeability;
 use fs_material::field_storage::thermal::FieldThermalState;
 use fs_material::field_storage::thermal::magnetic::{
@@ -699,6 +703,21 @@ pub(crate) fn same_vectors<const N: usize>(a: &[[f64; N]], b: &[[f64; N]]) -> bo
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_bits(x, y))
 }
 
+/// Equal play memories: every cell's field, flux density, branch
+/// polarizations and stored energy density, bit for bit.
+#[cfg(feature = "magnetic-hysteresis")]
+pub(crate) fn same_play_states(a: &[VectorHysteresisState], b: &[VectorHysteresisState]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.stored_energy_j_m3().to_bits() == y.stored_energy_j_m3().to_bits()
+                && same_vectors(
+                    &[x.field_a_m(), x.flux_density_t()],
+                    &[y.field_a_m(), y.flux_density_t()],
+                )
+                && same_vectors(x.polarizations_t(), y.polarizations_t())
+        })
+}
+
 /// The fit's one query coordinate that is a static absolute temperature:
 /// typed so, or the untyped `T` (as fs-em's silica optics reads it).
 #[cfg(feature = "magnetic-hysteresis")]
@@ -718,6 +737,25 @@ pub(crate) fn fitted_temperature(material: &ResolvedMaterialStatePoint) -> Optio
         }
     }
     found
+}
+
+/// Whether a play-memory fit holds at `kelvin`. Its coefficients are
+/// constant, so they must hold over the whole interval between the
+/// temperature the fit was resolved at and `kelvin`. At the fit's own
+/// temperature they are the fit's.
+#[cfg(feature = "magnetic-hysteresis")]
+pub(crate) fn admit_fit_temperature(
+    law: &ResolvedVectorHysteresis,
+    kelvin: f64,
+) -> Result<(), String> {
+    let (axis, fitted) = fitted_temperature(law.material()).ok_or_else(|| {
+        "the magnetic fit was resolved at no single absolute temperature".to_owned()
+    })?;
+    if kelvin.to_bits() == fitted.to_bits() {
+        return Ok(());
+    }
+    law.admit_temperature_interval(axis, [kelvin.min(fitted), kelvin.max(fitted)])
+        .map_err(|error| error.to_string())
 }
 
 /// The graph's nodes, branches (ends and element) and transformers, each

@@ -333,7 +333,7 @@ mod owner {
     #[cfg(feature = "magnetic-hysteresis")]
     use super::HystereticWindingCircuit;
     #[cfg(feature = "magnetic-hysteresis")]
-    use super::shared::{fitted_temperature, same_vectors};
+    use super::shared::{admit_fit_temperature, same_play_states, same_vectors};
     use super::{
         CircuitGraph, EddyConductor, GraphResistorMaterial, IsotropicMagneticMaterial,
         NonlinearEddyMagneticCell, NonlinearWindingCircuit, NonlinearWindingControls,
@@ -635,9 +635,6 @@ mod owner {
             0..self.field().problem().mesh().faces().len()
         }
 
-        /// The fit's coefficients are constant, so they must hold over the
-        /// whole interval between the temperature the fit was resolved at
-        /// and `kelvin`. At the fit's own temperature they are the fit's.
         fn admit_field_temperature(&self, triangle: usize, kelvin: f64) -> Result<(), String> {
             let law = self
                 .field()
@@ -645,14 +642,7 @@ mod owner {
                 .materials()
                 .get(triangle)
                 .ok_or_else(|| "the field has no magnetic fit in this triangle".to_owned())?;
-            let (axis, fitted) = fitted_temperature(law.material()).ok_or_else(|| {
-                "the magnetic fit was resolved at no single absolute temperature".to_owned()
-            })?;
-            if kelvin.to_bits() == fitted.to_bits() {
-                return Ok(());
-            }
-            law.admit_temperature_interval(axis, [kelvin.min(fitted), kelvin.max(fitted)])
-                .map_err(|error| error.to_string())
+            admit_fit_temperature(law, kelvin)
         }
 
         /// Every cell's field, flux density, branch polarizations and
@@ -665,15 +655,7 @@ mod owner {
             );
             a.stored_energy_j().to_bits() == b.stored_energy_j().to_bits()
                 && same_vectors(a.magnetic_flux_density_t(), b.magnetic_flux_density_t())
-                && a.cell_states().len() == b.cell_states().len()
-                && a.cell_states().iter().zip(b.cell_states()).all(|(x, y)| {
-                    x.stored_energy_j_m3().to_bits() == y.stored_energy_j_m3().to_bits()
-                        && same_vectors(
-                            &[x.field_a_m(), x.flux_density_t()],
-                            &[y.field_a_m(), y.flux_density_t()],
-                        )
-                        && same_vectors(x.polarizations_t(), y.polarizations_t())
-                })
+                && same_play_states(a.cell_states(), b.cell_states())
         }
 
         fn stored_energy_j(&self) -> Result<f64, NonlinearWindingError> {

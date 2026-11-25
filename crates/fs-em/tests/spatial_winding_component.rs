@@ -3,9 +3,14 @@
 //! through the ports as the owner books it, the stored energy the state
 //! carries against the owner's sums, the kernel's audit, conformance,
 //! refusals and identity; then the same with conductor and resistor laws at
-//! the temperatures the heat ports receive.
+//! the temperatures the heat ports receive. The magnetic lane is in
+//! `magnetic.rs`, and, with `magnetic-hysteresis`, the play-memory owner in
+//! `hysteretic.rs`.
 #![cfg(feature = "component")]
 
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "spatial_winding_component/hysteretic.rs"]
+mod hysteretic;
 #[path = "spatial_winding_component/magnetic.rs"]
 mod magnetic;
 #[path = "nonlinear_eddy/common.rs"]

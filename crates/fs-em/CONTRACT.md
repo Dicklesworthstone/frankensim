@@ -3502,8 +3502,118 @@ In the shared core, `same_vectors` comparing lengths alone fails the
 problem test here. The planar targets do not catch it: no planar test
 builds two states that differ in vector memory alone.
 
+#### The 3D play-memory owner
+
+With `magnetic-hysteresis`, `SpatialWinding` also takes the play-memory
+owner, `SpatialHystereticWindingCircuit`. The Component is the same one;
+the sealed owner trait carries what differs:
+- The field steps with the owner's `step_with_conductors_candidate`, which
+  takes no velocity. The owner has no temperature refresh, so
+  `magnetic_at_port_temperatures` refuses it ("this owner refreshes no
+  field materials with temperature").
+- Every field cell is an element, conducting or not. Its pinning and
+  viscous heat (`irreversible_heat_j`) goes to the receiver that maps it,
+  beside any eddy heat there. A magnetic cell mapped to no receiver or to
+  two refuses construction.
+- Before the field steps, each field cell's fit is asked, in mesh order, at
+  its receiver's port temperature. The fit must hold over the whole
+  interval from the temperature it was resolved at to the port's, or the
+  step refuses (`Law`, `SpatialLawElement::Field`, with the receiver and
+  the temperature). A fit resolved at no single absolute temperature
+  refuses too. This is `PlanarWinding`'s check for its play-memory owner,
+  now in `winding::component::shared`, and the planar play-memory test
+  covers that last refusal through it.
+- A state whose field has another cell count is another topology.
+- Two states also compare their play memory bit for bit: each cell's
+  stored energy density, field, flux density and polarizations.
+- The identity words carry `b"vecplay1"` after the tolerance.
+- `SpatialWindingState::step` gives the owner's
+  `SpatialHystereticWindingStep`. A state's stored energy sums the same
+  three terms in the same order.
+
+`tests/spatial_winding_component/hysteretic.rs` (6 tests) uses the
+one-mode cube of `tests/spatial_induction_winding/hysteretic_common.rs`:
+2 x 2 x 2 sub-cubes in 48 tetrahedra, every edge prescribed but the body
+diagonal [9, 22], so only the six cells around it carry flux. On the grid
+those six are congruent and heat alike, so vertices 12, 18 and 19 of the
+star leave it, by 0.04, 0.07 and -0.03 m along z, z and y. Every cell
+has the fixture's play fit with a branch viscosity of 0.6, resolved at
+300 K and valid from 200 to 400 K. The fixture's winding loops around the
+centre vertex, into the 0.7 ohm graph resistor. Of the six cells around
+the diagonal, the strands cross 24 and 25, the core conducts in 26 and 27,
+and 28 and 29 are magnetic only. Receivers take the strands' cells, the
+eddy cells, every other cell and the graph resistor. Seven source voltages
+switch the play through two minor loops: the fixture's one-mode reference
+driven to 12, 0, 6, 1, 6, -12 and 0 A/m. The owner closes its account only
+to its controls' `energy_tolerance_j`, 4e-7 J, so that is the tests'
+allowance. The tests:
+- seven steps, ports at 300, 310, 320 and 330 K. Each is the owner's own,
+  bit for bit, in state (play memory included), step record (every heat
+  record) and source output. Each heat port returns minus its receiver's
+  heat as booked by hand, bit for bit, and the entropy is the ports' sum,
+  bit for bit. No two cells of the star heat alike in any step, so a heat
+  booked at another cell's receiver would show at a port. A state built
+  from the owner's circuit equals the proposed one, and its stored energy
+  is the owner's `stored_after_j`, bit for bit. Each step passes
+  `audit_step` with balance defects of at most 1.8e-12 J and endpoint
+  defects of at most 2.3e-13 J. In the first step cells 28 and 29, which
+  carry no conductor, heat by 0.3068 J, and viscous switching gives
+  0.6993 J across the field;
+- `check_component` after two steps, every heat port giving heat out;
+- step refusals:
+  - ports at 400 K and 200 K step (the support is inclusive);
+  - 420 K at the strands' port refuses naming cell 0, 150 K at the eddy
+    port cell 26, and 400.5 K at the magnetic-only port cell 2, each the
+    first cell of its receiver in mesh order;
+  - the graph resistor's port at 600 K steps, since it reaches no fit;
+  - a cancelled step;
+  - from rest, an allowance of `f64::MIN_POSITIVE` refuses the first step
+    (`Balance`): the owner's defect of -4.143e-9 J is beyond the rounding
+    floor of 3.387e-9 J;
+  - a state on a three-layer mesh (72 cells) is another topology.
+  Each refused step leaves the state handed to it, play memory included,
+  as it was;
+- construction refusals: cell 28 mapped to no receiver or to two, and a
+  receiver naming cell 48, beyond the mesh. The identity words end with
+  the tolerance and the owner's word, and the saturating Component's end
+  with its tolerance. Swapping an eddy cell and a magnetic-only cell
+  between their receivers changes the words;
+- laws that answer the owner's own conductors step as fixed conductors do
+  for three steps, bit for bit;
+- the magnetic lane refuses the owner.
+
+Seventeen defects in the owner's paths were planted one at a time.
+Fifteen failed at least one of these tests:
+- magnetic cells heating by pinning alone;
+- each magnetic cell's heat booked at the cell before it. On the grid this
+  one passed every test, which is why the star leaves the grid;
+- the eddy heat dropped;
+- the owner declaring no field cells, or field cells left out of the
+  elements, with fixed conductors or with laws;
+- the fits asked at their own temperature, all at the first receiver's
+  temperature, or not at all;
+- the field-cell topology check dropped (the owner then refuses the
+  taller mesh itself, with another error);
+- the owner's word dropped;
+- the end-mode term dropped from the stored energy;
+- the owner offering an empty material list to the lane;
+- the state keeping no step;
+- a field refusal named as a core conductor's.
+
+Two passed every test. States that compare no play memory pass because
+no test can build two states that differ in it alone (not claimed,
+below). The owner stepping with refreshed materials passes because the
+lane refuses the owner at construction, so no step reaches it.
+
+In the shared check, two defects each failed one test here and one in
+`tests/winding_component/hysteretic.rs`: every temperature admitted, and
+the interval taken from the fit's temperature upward only (its 200 K step
+then refuses).
+
 Not claimed:
-- the 3D play-memory owner;
+- two states that differ in play memory alone: no public route builds
+  them, so no test shows that the memory comparison matters;
+- a temperature refresh of the play fits;
 - a law in a reversible or recoil cell;
 - convergence of the fixed point between a port's temperature and the heat
   it returns;
