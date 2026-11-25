@@ -107,18 +107,26 @@ export function footprintReach(f: Footprint): number {
 /* The free floor                                                                                                 */
 /* ------------------------------------------------------------------------------------------------------------ */
 
+/** A binary min-heap of (key, cell), in typed arrays that double as they fill. */
 class Heap {
-  private k: number[] = [];
-  private v: number[] = [];
+  private k = new Float64Array(256);
+  private v = new Int32Array(256);
+  private n = 0;
   get size(): number {
-    return this.k.length;
+    return this.n;
   }
   push(key: number, val: number): void {
+    if (this.n === this.k.length) {
+      const k2 = new Float64Array(this.n * 2);
+      const v2 = new Int32Array(this.n * 2);
+      k2.set(this.k);
+      v2.set(this.v);
+      this.k = k2;
+      this.v = v2;
+    }
     const k = this.k;
     const v = this.v;
-    let i = k.length;
-    k.push(key);
-    v.push(val);
+    let i = this.n++;
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (k[p]! <= key) break;
@@ -133,9 +141,9 @@ class Heap {
     const k = this.k;
     const v = this.v;
     const top = v[0]!;
-    const lk = k.pop()!;
-    const lv = v.pop()!;
-    const n = k.length;
+    const n = --this.n;
+    const lk = k[n]!;
+    const lv = v[n]!;
     if (n > 0) {
       let i = 0;
       for (;;) {
@@ -165,6 +173,9 @@ export interface PathOptions {
   keepRight?: number;
 }
 
+/** NavGrid's clearance cap, metres: no body or rule here looks further from a wall than this. */
+const CLR_CAP = 4;
+
 export class NavGrid {
   readonly cell: number;
   readonly x0: number;
@@ -185,9 +196,40 @@ export class NavGrid {
     this.z0 = bounds.minZ;
     this.nx = Math.max(2, Math.ceil((bounds.maxX - bounds.minX) / cell));
     this.nz = Math.max(2, Math.ceil((bounds.maxZ - bounds.minZ) / cell));
-    this.clr = new Float32Array(this.nx * this.nz);
-    for (let j = 0; j < this.nz; j++)
-      for (let i = 0; i < this.nx; i++) this.clr[j * this.nx + i] = Math.min(4, this.clearance(this.x0 + (i + 0.5) * cell, this.z0 + (j + 0.5) * cell));
+    const { nx, nz, x0, z0 } = this;
+    // clearance() at every cell centre, capped at 4 m. A rectangle 4 m or more from a cell cannot lower the capped
+    // value, so each is measured only from the cells within 4 m of it (and a cell's margin); the walls from every cell.
+    // A minimum is exact in any order, so every cell gets the same number as clearance() gives it.
+    const d = new Float64Array(nx * nz);
+    for (let j = 0; j < nz; j++) {
+      const z = z0 + (j + 0.5) * cell;
+      for (let i = 0; i < nx; i++) {
+        const x = x0 + (i + 0.5) * cell;
+        d[j * nx + i] = Math.min(x - bounds.minX, bounds.maxX - x, z - bounds.minZ, bounds.maxZ - z);
+      }
+    }
+    for (const r of rects) {
+      const i0 = Math.max(0, Math.floor((r.minX - CLR_CAP - x0) / cell) - 1);
+      const i1 = Math.min(nx - 1, Math.ceil((r.maxX + CLR_CAP - x0) / cell) + 1);
+      const j0 = Math.max(0, Math.floor((r.minZ - CLR_CAP - z0) / cell) - 1);
+      const j1 = Math.min(nz - 1, Math.ceil((r.maxZ + CLR_CAP - z0) / cell) + 1);
+      for (let j = j0; j <= j1; j++) {
+        const z = z0 + (j + 0.5) * cell;
+        for (let i = i0; i <= i1; i++) {
+          const x = x0 + (i + 0.5) * cell;
+          const k = j * nx + i;
+          // Outside the rectangle its distance is hypot(dx, dz), never under the larger of dx and dz: when either is
+          // already no nearer than the cell's clearance so far, it cannot lower it.
+          const dx = Math.max(r.minX - x, 0, x - r.maxX);
+          const dz = Math.max(r.minZ - z, 0, z - r.maxZ);
+          if ((dx > 0 || dz > 0) && (dx >= d[k]! || dz >= d[k]!)) continue;
+          const q = rectDistance(r, x, z);
+          if (q < d[k]!) d[k] = q;
+        }
+      }
+    }
+    this.clr = new Float32Array(nx * nz);
+    for (let k = 0; k < d.length; k++) this.clr[k] = Math.min(CLR_CAP, d[k]!);
   }
 
   /** Exact clearance at a point: the distance to the nearest wall or obstacle, negative inside one. */
@@ -330,16 +372,10 @@ export class NavGrid {
     const heap = new Heap();
     cost[start] = 0;
     heap.push(h(s[0], s[1]), start);
-    const dirs = [
-      [1, 0, 1],
-      [-1, 0, 1],
-      [0, 1, 1],
-      [0, -1, 1],
-      [1, 1, Math.SQRT2],
-      [1, -1, Math.SQRT2],
-      [-1, 1, Math.SQRT2],
-      [-1, -1, Math.SQRT2],
-    ] as const;
+    // The 8 neighbours: steps across and along, then the diagonals, with their lengths in cells.
+    const DI = [1, -1, 0, 0, 1, 1, -1, -1];
+    const DJ = [0, 0, 1, -1, 1, -1, 1, -1];
+    const DW = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
     // Each cell's room (static, and from the dynamic obstacles), worked out once.
     const room = new Float32Array(N);
     const free = (c: number): boolean => {
@@ -369,7 +405,10 @@ export class NavGrid {
       if (chunk > 0 && pops % chunk === 0) yield;
       const i = c % nx;
       const j = (c / nx) | 0;
-      for (const [di, dj, w] of dirs) {
+      for (let q = 0; q < 8; q++) {
+        const di = DI[q]!;
+        const dj = DJ[q]!;
+        const w = DW[q]!;
         const ii = i + di;
         const jj = j + dj;
         if (ii < 0 || jj < 0 || ii >= nx || jj >= nz) continue;

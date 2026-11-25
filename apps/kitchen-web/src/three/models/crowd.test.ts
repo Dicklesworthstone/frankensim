@@ -165,6 +165,32 @@ describe("NavGrid", () => {
     }
   });
 
+  test("every cell holds clearance() at its centre, capped at 4 m, whatever the obstacles", () => {
+    // Random rooms with overlapping, touching and wall-hugging rectangles, some far apart (past the 4 m cap).
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    for (let room = 0; room < 12; room++) {
+      const W = 3 + rnd() * 14;
+      const D = 3 + rnd() * 12;
+      const bounds: Rect = { minX: -rnd() * 2, maxX: W, minZ: -D, maxZ: rnd() * 2 };
+      const rects: Rect[] = [];
+      for (let n = 0; n < 4 + Math.floor(rnd() * 20); n++) {
+        const x = bounds.minX + rnd() * (bounds.maxX - bounds.minX);
+        const z = bounds.minZ + rnd() * (bounds.maxZ - bounds.minZ);
+        const w = rnd() < 0.2 ? 0 : rnd() * 2.5;
+        const d = rnd() * 1.5;
+        rects.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 });
+      }
+      const cell = [0.04, 0.08, 0.13][room % 3]!;
+      const grid = new NavGrid(bounds, rects, cell);
+      for (let j = 0; j < grid.nz; j++)
+        for (let i = 0; i < grid.nx; i++) {
+          const want = Math.fround(Math.min(4, grid.clearance(grid.x0 + (i + 0.5) * cell, grid.z0 + (j + 0.5) * cell)));
+          if (grid.clr[j * grid.nx + i] !== want) expect([room, i, j, grid.clr[j * grid.nx + i]]).toEqual([room, i, j, want]);
+        }
+    }
+  });
+
   test("paths keep the walker's radius from every wall and counter, and reach their ends", () => {
     const { grid } = kitchen();
     for (const a of STATIONS)

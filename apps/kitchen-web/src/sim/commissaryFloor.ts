@@ -113,6 +113,11 @@ export function distanceField(g: NavGrid, from: XZ, r: number): Float64Array {
   const { nx, nz, cell, clr } = g;
   const dist = new Float64Array(nx * nz).fill(Infinity);
   const free = (i: number, j: number) => i >= 0 && j >= 0 && i < nx && j < nz && clr[j * nx + i]! >= r;
+  // The same test as a mask with a border two cells wide that is never free, so that each of the 16 steps (and the
+  // cells beside it) is a fixed offset from a cell's index, with no bounds to check.
+  const px = nx + 4;
+  const okp = new Uint8Array(px * (nz + 4));
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) okp[(j + 2) * px + i + 2] = clr[j * nx + i]! >= r ? 1 : 0;
   // Start from the free cells nearest the point (a stance can sit just inside the inflated edge of its fixture).
   const si = Math.floor((from[0] - g.x0) / cell);
   const sj = Math.floor((from[1] - g.z0) / cell);
@@ -135,22 +140,40 @@ export function distanceField(g: NavGrid, from: XZ, r: number): Float64Array {
     [2, 1], [2, -1], [-2, 1], [-2, -1], [1, 2], [1, -2], [-1, 2], [-1, -2],
   ];
   const LEN = STEPS.map(([a, b]) => Math.hypot(a, b) * cell);
+  // The cells a step passes beside, both of which must be free: for a long step the two it cuts between, for a
+  // diagonal the two it cuts the corner of; a straight step passes none (side 0 is the step itself).
+  const NOFF = new Int32Array(16);
+  const OFF = new Int32Array(16);
+  const S1 = new Int32Array(16);
+  const S2 = new Int32Array(16);
+  const SIDES = new Uint8Array(16);
+  const at = (a: number, b: number) => b * px + a;
+  STEPS.forEach(([a, b], s) => {
+    NOFF[s] = b * nx + a;
+    OFF[s] = at(a, b);
+    if (Math.abs(a) === 2 || Math.abs(b) === 2) {
+      SIDES[s] = 1;
+      S1[s] = at(Math.sign(a), Math.sign(b));
+      S2[s] = at(Math.abs(a) === 2 ? Math.sign(a) : 0, Math.abs(b) === 2 ? Math.sign(b) : 0);
+    } else if (Math.abs(a) === 1 && Math.abs(b) === 1) {
+      SIDES[s] = 1;
+      S1[s] = at(a, 0);
+      S2[s] = at(0, b);
+    }
+  });
   while (heap.size) {
     const k = heap.pop();
     const d = heap.lastKey;
     if (d > dist[k]!) continue;
     const i = k % nx;
     const j = (k - i) / nx;
+    const kp = (j + 2) * px + i + 2;
     for (let s = 0; s < 16; s++) {
-      const [a, b] = STEPS[s]!;
-      const ni = i + a;
-      const nj = j + b;
-      if (!free(ni, nj)) continue;
-      // A long step passes the cells beside it: both must be free.
-      if ((Math.abs(a) === 2 || Math.abs(b) === 2) && !(free(i + Math.sign(a), j + Math.sign(b)) && free(i + (Math.abs(a) === 2 ? Math.sign(a) : 0), j + (Math.abs(b) === 2 ? Math.sign(b) : 0)))) continue;
-      if (Math.abs(a) === 1 && Math.abs(b) === 1 && !(free(i + a, j) && free(i, j + b))) continue;
+      if (okp[kp + OFF[s]!] !== 1) continue;
+      // A long or diagonal step passes the cells beside it: both must be free.
+      if (SIDES[s] === 1 && !(okp[kp + S1[s]!] === 1 && okp[kp + S2[s]!] === 1)) continue;
       const nd = d + LEN[s]!;
-      const nk = nj * nx + ni;
+      const nk = k + NOFF[s]!;
       if (nd < dist[nk]!) {
         dist[nk] = nd;
         heap.push(nk, nd);
@@ -178,19 +201,27 @@ export function fieldAt(g: NavGrid, field: Float64Array, p: XZ): number {
   return best;
 }
 
+/** A binary min-heap of (cell, key), in typed arrays that double as they fill. */
 class MinHeap {
-  private k: number[] = [];
-  private v: number[] = [];
+  private k = new Float64Array(1024);
+  private v = new Int32Array(1024);
+  private n = 0;
   lastKey = 0;
   get size(): number {
-    return this.k.length;
+    return this.n;
   }
   push(item: number, key: number): void {
+    if (this.n === this.k.length) {
+      const k2 = new Float64Array(this.n * 2);
+      const v2 = new Int32Array(this.n * 2);
+      k2.set(this.k);
+      v2.set(this.v);
+      this.k = k2;
+      this.v = v2;
+    }
     const k = this.k;
     const v = this.v;
-    let i = k.length;
-    k.push(key);
-    v.push(item);
+    let i = this.n++;
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (k[p]! <= key) break;
@@ -206,9 +237,9 @@ class MinHeap {
     const v = this.v;
     const top = v[0]!;
     this.lastKey = k[0]!;
-    const lk = k.pop()!;
-    const lv = v.pop()!;
-    const n = k.length;
+    const n = --this.n;
+    const lk = k[n]!;
+    const lv = v[n]!;
     if (n) {
       let i = 0;
       for (;;) {
