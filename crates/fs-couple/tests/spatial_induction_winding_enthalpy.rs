@@ -1,8 +1,14 @@
 //! G1/G3/G4: original three-dimensional terminal currents respond to finite heat.
 //! Manufactured cards check equations and conservation, not measured devices.
+#[path = "spatial_induction_winding_enthalpy/graph.rs"]
+mod graph;
 #[cfg(feature = "magnetic-hysteresis")]
 #[path = "spatial_induction_winding_enthalpy/hysteretic.rs"]
 mod hysteretic;
+// Its planar conductor law has no use here.
+#[path = "winding_graph/kernel.rs"]
+#[allow(dead_code)]
+mod kernel;
 #[path = "../../fs-em/tests/winding_ohmic/common.rs"]
 mod source;
 
@@ -55,6 +61,7 @@ use fs_solver::{CheckedCgConfig, NewtonKrylovConfig};
 use fs_thermal::enthalpy::*;
 
 const BASIS: ElectricalPropertyBasis = ElectricalPropertyBasis::Resistivity;
+const DT: f64 = 0.2;
 const CELL: CellId = CellId(7);
 const MAT: MaterialId = MaterialId(9);
 const END_L: f64 = 0.03;

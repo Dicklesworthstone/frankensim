@@ -5525,6 +5525,61 @@ retry. Pinned Rustfmt parsing, whitespace checks and source/physical-accounting
 review passed. These newly authored native tests, compilation and the required
 `dsr quality --tool frankensim` gate have not run in this environment.
 
+The first and third of those cases fail on 128e8869d7, and so does the
+separate-body regression above, at their first step (bead frankensim-cj38p).
+Their card's permeability is a curve over T, flat at 2, and
+`admit_fixed_magnetic_refresh` refuses any temperature refresh of such a
+permeability on the fixed-field path: "heated magnetic region changes
+prepared storage". The heat-assembly case binds `mu(T)` laws and passes.
+
+On the composition kernel, `tests/spatial_induction_winding_enthalpy/graph.rs`
+declares the first and third cases as graphs: fs-em's `SpatialWinding`
+(feature `component`) on the fixture's saturating circuit, built with
+`magnetic_at_port_temperatures`, beside the backward-Euler `ThermalTimeline`
+of `tests/winding_graph/kernel.rs`:
+- one heat port receives the heat of all 48 tetrahedra, strands and core
+  alike, and of the authored graph resistor;
+- every conductor follows the cell's card at the temperature the port
+  receives, rebound as the module rebinds it;
+- every tetrahedron's permeability follows the card's linear `mu(T)` law
+  over 280-350 K, built as the heat-assembly case builds it.
+The lane is required: outside it, the Component refuses the fixture with
+the module's message, because the rebound core conductors move T in a
+permeability whose source axes include T.
+
+Held over two steps of 0.2 s at 10 V, on the fixed card and at 0.5 % per
+kelvin, in this order:
+- the ledger closes within 1e-8 J;
+- the first case's equations on the kernel's rows: strand heat
+  `0.2 i² rho(T) R`, with `R` the profile's geometric resistance, graph heat
+  `0.2 i² R_graph`, their sum with the eddy heat, the cell's `4 dT`, and
+  `rho(T)` of every strand and core conductor, at that case's tolerances;
+- each interval against the module's law path (`step_candidate` with the
+  same laws), once the law has given the module's own conductors at each of
+  its end temperatures, bit for bit: within 1.308e-10 K, 1.553e-12 A,
+  3.553e-15 in the circuit state, 6.539e-14 Wb and 3.105e-12 J, the fixed
+  card's currents, state, potential and energies to the bit. The bounds sit
+  about fifty times above;
+- the responsive cell warms, and its currents stay below the fixed card's.
+
+The second graph holds the third case's refusals on the responsive card:
+- a law over the 0.3 ohm m card has no answer at the first core cell,
+  because fs-material rebinds a material only to its own card; the step
+  publishes nothing;
+- a cancellation requested at the law's last answer in a step, in the last
+  of its five proposals, is the kernel's `Cancelled`; the step publishes
+  nothing, and the retry equals the good step bit for bit.
+The module's partial-fill refusal and its circuit budget have no kernel
+counterpart: its caloric owner maps mesh volumes to cells and budgets its
+own thermal Newton, while the graph's cell is the timeline's.
+
+Six planted defects each failed at least one of the two graphs:
+- one in the law: the port's temperature ignored;
+- four in the shared kernel: start-of-step cell temperatures, the heat
+  routes at a fixed 300 K, a fresh gate in place of the one given, and the
+  source port at half the drive;
+- one in the Component: the graph resistor's heat left out of its receiver.
+
 ## Tetrahedral material current closes finite enthalpy
 
 `circuit_enthalpy::conduction::spatial::SpatialConductionThermalNetwork` closes

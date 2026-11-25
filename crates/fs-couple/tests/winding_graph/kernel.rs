@@ -1,21 +1,21 @@
 //! The composition-kernel plumbing of the winding graphs: the law that
 //! rebinds each triangle's conductor to its cell's card at its port's
 //! temperature, the cells as one backward-Euler timeline whose cell ports
-//! return end-of-step temperatures, a `PlanarWinding` beside them with one
+//! return end-of-step temperatures, a winding Component beside them with one
 //! heat route per heat port, and the closure of the kernel's ledger. Each
 //! includer's root supplies `DT`.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_em::planar::eddy::EddyConductor;
-use fs_em::winding::component::{ConductorLaw, PlanarWinding, PlanarWindingState, WindingOwner};
+use fs_em::winding::component::ConductorLaw;
 use fs_em::winding::ohmic::WindingConductor;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::conductor::ResolvedConductorState;
 use fs_material::phase::ResolvedHeatCapacityCurve;
+use fs_ports::component::Component;
 use fs_system::{NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 use fs_thermal::enthalpy::conduction::implicit::{
@@ -92,10 +92,14 @@ impl ConductorLaw for CellConductors {
 }
 
 pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
-    let gate = CancelGate::new_clock_free();
+    with_gate(&CancelGate::new_clock_free(), f)
+}
+
+/// [`with_cx`] on `gate`.
+pub(super) fn with_gate<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
         f(&Cx::new(
-            &gate,
+            gate,
             arena,
             StreamKey {
                 seed: 11,
@@ -217,16 +221,16 @@ pub(super) fn timeline(
 /// `winding` from `state` beside the cells' `timeline` from `cells_start`,
 /// heat port `k` routed into `ports[k]`, its source port (if any) held at `drive(t0)` volts
 /// over the step that starts at `t0`.
-pub(super) fn graph<C, F>(
-    winding: PlanarWinding<'static, C, F>,
-    state: PlanarWindingState<'static, C>,
+pub(super) fn graph<W>(
+    winding: W,
+    state: W::State,
     (timeline, cells_start): (ThermalTimeline<'static>, TimelineState<'static>),
     ports: &[CellId],
     drive: Option<fn(f64) -> f64>,
 ) -> (System, NodeId, NodeId)
 where
-    C: WindingOwner<'static, FieldControls = F> + 'static,
-    F: Copy + fmt::Debug + 'static,
+    W: Component + 'static,
+    W::State: 'static,
 {
     let mut builder = SystemBuilder::new();
     let electrical = builder.add("winding", winding, state).unwrap();
