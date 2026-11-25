@@ -38,11 +38,17 @@ const TABLE_Z = 0.3;
 const TABLE_X0 = -2.8;
 const COOK_Z = 0.05;
 const BACK_Z = -0.12;
-const COOKS: { cohort: Cohort; x: number; seed: number; apron: number; share: number; tempo: number }[] = [
-  { cohort: "p50", x: -2.32, seed: 41, apron: 0x26344d, share: 1.08, tempo: 0.95 },
-  { cohort: "p95", x: -1.58, seed: 57, apron: 0x3b3d43, share: 1.0, tempo: 1.05 },
-  { cohort: "p05", x: -0.84, seed: 63, apron: 0x45563f, share: 0.92, tempo: 1.0 },
+const COOKS: { cohort: Cohort; seed: number; apron: number; share: number; tempo: number }[] = [
+  { cohort: "p50", seed: 41, apron: 0x26344d, share: 1.08, tempo: 0.95 },
+  { cohort: "p95", seed: 57, apron: 0x3b3d43, share: 1.0, tempo: 1.05 },
+  { cohort: "p05", seed: 63, apron: 0x45563f, share: 0.92, tempo: 1.0 },
+  { cohort: "p50", seed: 71, apron: 0x4a3a2e, share: 1.0, tempo: 1.02 },
 ];
+export type Crew = 2 | 3 | 4;
+/** Where each cook stands along the table: three as drawn, 0.74 m apart; four 0.6 m apart; two, the first two places. */
+const CREW_X: Record<Crew, readonly number[]> = { 2: [-2.32, -1.58], 3: [-2.32, -1.58, -0.84], 4: [-2.53, -1.93, -1.33, -0.73] };
+/** The kitchen with this many cooks: shift, overtime cap and setup are per cook (commissaryWeek's Kitchen). */
+const kitchenFor = (crew: Crew) => (crew === KITCHEN.cooks ? KITCHEN : { ...KITCHEN, cooks: crew });
 
 /** The cooking line along the back, fronts facing +z. */
 const LINE_Z = -1.45;
@@ -269,16 +275,18 @@ interface DaySpan {
   r: DayResult;
 }
 
-function timeline(run: CommissaryRun): { days: DaySpan[]; total: number } {
+function timeline(run: CommissaryRun, crew: Crew): { days: DaySpan[]; total: number } {
   const days: DaySpan[] = [];
   let t = 0;
+  const crewOf = COOKS.slice(0, crew);
+  const shareSum = crewOf.reduce((a, c) => a + c.share, 0);
   for (const r of run.plan.days) {
     const worked = r.dayOfMin + r.aheadMin;
-    const hours = SHIFT_H + r.otMin / KITCHEN.cooks / 60;
-    const each = worked / KITCHEN.cooks / 60;
+    const hours = SHIFT_H + r.otMin / crew / 60;
+    const each = worked / crew / 60;
     // Shared a little unevenly (nobody stops at the same minute), never past the day's hours: what one cook cannot
     // take, the others do.
-    const busyH = COOKS.map((c) => each * (r.otMin > 0 ? 1 : c.share));
+    const busyH = crewOf.map((c) => each * (r.otMin > 0 ? 1 : (c.share * crew) / shareSum));
     for (let pass = 0; pass < 2; pass++) {
       const spill = busyH.reduce((a, b) => a + Math.max(0, b - hours), 0);
       const room = busyH.filter((b) => b < hours).length;
@@ -294,11 +302,11 @@ function timeline(run: CommissaryRun): { days: DaySpan[]; total: number } {
 }
 
 /** The cooks' week: plating while the day's work lasts, a step back from the table and standing after. */
-function cookSteps(spans: DaySpan[], i: number, at: THREE.Vector3, shuffle?: { back: number; fwd: number }): RoutineStep[] {
+function cookSteps(spans: DaySpan[], i: number, x: number, at: THREE.Vector3, shuffle?: { back: number; fwd: number }): RoutineStep[] {
   const c = COOKS[i]!;
   const steps: RoutineStep[] = [];
-  const back: [number, number] = [c.x, BACK_Z];
-  const front: [number, number] = [c.x, COOK_Z];
+  const back: [number, number] = [x, BACK_Z];
+  const front: [number, number] = [x, COOK_Z];
   const sb = shuffle?.back ?? 1;
   const sf = shuffle?.fwd ?? 1;
   spans.forEach((s) => {
@@ -429,24 +437,56 @@ export function mountWeekLab(root: HTMLElement): void {
 
   /* The cooks, each with a tray and a pan of food on the table in front, and a spoon. */
   const foodMat = new THREE.MeshStandardMaterial({ color: 0x8a5230, roughness: 0.7 });
-  const cooks = COOKS.map((c, i) => {
-    const st: Staff = makeStaff(c.cohort, 2, { seed: c.seed, apron: c.apron, sleeves: i === 1 ? "rolled" : "cuffed" });
-    st.place(c.x, COOK_Z, 0);
+  type Cook = { c: (typeof COOKS)[number]; st: Staff; x: number; at: THREE.Vector3; tray: THREE.Object3D; src: THREE.Object3D; spoon: THREE.Object3D; routine: Routine | null };
+  const makeCook = (i: number): Cook => {
+    const c = COOKS[i]!;
+    const x = CREW_X[4][i]!;
+    const st: Staff = makeStaff(c.cohort, 2, { seed: c.seed, apron: c.apron, sleeves: i === 1 || i === 3 ? "rolled" : "cuffed" });
+    st.place(x, COOK_Z, 0);
     scene.add(st.group);
-    const at = new THREE.Vector3(c.x, TABLE.h + 0.004, TABLE_Z + 0.15);
+    const at = new THREE.Vector3(x, TABLE.h + 0.004, TABLE_Z + 0.15);
     const tray = makeTray(foodMat);
-    tray.position.copy(at);
     scene.add(tray);
     const src = buildFixture(HALF.id, HALF, 1);
-    src.hooks.set?.("food", [0, 1, 2][i]!);
+    src.hooks.set?.("food", [0, 1, 2, 0][i]!);
     src.hooks.set?.("fill", 0.5);
-    src.group.position.set(c.x + 0.26 - HALF.w / 2, TABLE.h, TABLE_Z + 0.5 + HALF.d / 2);
     scene.add(src.group);
     const spoon = makeSpoon();
     st.hand("R").add(spoon);
     spoon.visible = false;
-    return { c, st, at, spoon, routine: null as Routine | null };
-  });
+    return { c, st, x, at, tray, src: src.group, spoon, routine: null };
+  };
+  const cooks: Cook[] = [0, 1, 2].map(makeCook);
+  /** The crew on the plan; a cook past it steps out of the picture with their tray and pan. */
+  let crew: Crew = 3;
+  const seatCrew = (): void => {
+    let added = false;
+    while (cooks.length < crew) {
+      const k = makeCook(cooks.length);
+      cooks.push(k);
+      added = true;
+      void k.st.ready.then(() => {
+        k.st.hand("R").add(k.spoon);
+        void gate.refresh(scene);
+      });
+    }
+    cooks.forEach((k, i) => {
+      const on = i < crew;
+      k.st.group.visible = on;
+      k.tray.visible = on;
+      k.src.visible = on;
+      if (!on) {
+        k.routine = null;
+        return;
+      }
+      k.x = CREW_X[crew][i]!;
+      k.st.place(k.x, COOK_Z, 0);
+      k.at.set(k.x, TABLE.h + 0.004, TABLE_Z + 0.15);
+      k.tray.position.copy(k.at);
+      k.src.position.set(k.x + 0.26 - HALF.w / 2, TABLE.h, TABLE_Z + 0.5 + HALF.d / 2);
+    });
+    if (added) void gate.refresh(scene);
+  };
 
   /* Camera: from the front, raised, holding the line, the table and all six racks. */
   const camera = new THREE.PerspectiveCamera(32, 16 / 10, 0.05, 60);
@@ -506,6 +546,7 @@ export function mountWeekLab(root: HTMLElement): void {
   /* ---------------------------------------------------------------------------------------------------------- */
 
   const planBtns = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-wk-plan]"));
+  const crewBtns = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-wk-crew]"));
   const menuEl = root.querySelector<HTMLElement>("[data-wk-menu]");
   const racksIn = root.querySelector<HTMLInputElement>("[data-wk-racks]");
   const racksVal = root.querySelector<HTMLElement>("[data-wk-racks-val]");
@@ -572,8 +613,11 @@ export function mountWeekLab(root: HTMLElement): void {
   }
 
   /* The chart: a column per day, the crew's 24 hours as a line across. */
-  const CAP = KITCHEN.cooks * KITCHEN.shiftMin;
-  const TOP = CAP * 1.45;
+  /** The scale is the drawn crew's, whatever the crew on the plan, so the days' bars compare across crews. */
+  const TOP = KITCHEN.cooks * KITCHEN.shiftMin * 1.45;
+  const capOf = () => crew * KITCHEN.shiftMin;
+  let capEl: HTMLElement | null = null;
+  let capKey: HTMLElement | null = null;
   type Col = { el: HTMLButtonElement; dayOf: HTMLElement; ahead: HTMLElement; ot: HTMLElement; idle: HTMLElement; tag: HTMLElement };
   const cols: Col[] = [];
   let arcs: SVGSVGElement | null = null;
@@ -583,8 +627,8 @@ export function mountWeekLab(root: HTMLElement): void {
     plot.className = "wk-plot";
     const cap = document.createElement("div");
     cap.className = "wk-cap";
-    cap.style.bottom = `${(CAP / TOP) * 100}%`;
     plot.appendChild(cap);
+    capEl = cap;
     arcs = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     arcs.setAttribute("class", "wk-arcs");
     arcs.setAttribute("viewBox", "0 0 600 100");
@@ -603,11 +647,15 @@ export function mountWeekLab(root: HTMLElement): void {
     chartEl.appendChild(plot);
     const keys = document.createElement("p");
     keys.className = "wk-keys";
-    keys.innerHTML = `<span class="dayof">For the day</span><span class="ahead">Cooked ahead</span><span class="ot">Overtime</span><span class="idle">Idle</span><span class="cap">Shift: ${KITCHEN.cooks} cooks × ${SHIFT_H} h</span><span class="note">Crew-hours, the forecast week</span>`;
+    keys.innerHTML = `<span class="dayof">For the day</span><span class="ahead">Cooked ahead</span><span class="ot">Overtime</span><span class="idle">Idle</span><span class="cap">Shift</span><span class="note">Crew-hours, the forecast week</span>`;
+    capKey = keys.querySelector<HTMLElement>(".cap");
     chartEl.appendChild(keys);
   }
   const pct = (min: number) => `${((Math.max(0, min) / TOP) * 100).toFixed(2)}%`;
   function renderChart(run: CommissaryRun): void {
+    const CAP = capOf();
+    if (capEl) capEl.style.bottom = `${(CAP / TOP) * 100}%`;
+    if (capKey) capKey.textContent = `Shift: ${crew} cooks × ${SHIFT_H} h`;
     run.plan.days.forEach((r, d) => {
       const c = cols[d];
       if (!c) return;
@@ -696,6 +744,17 @@ export function mountWeekLab(root: HTMLElement): void {
       text += w.otMin > 1 ? `${DAY_NAMES[worst]} still needs ${fmtH(w.otMin)} of overtime.` : `No day runs over; the crew works ${util}% of its paid hours.`;
       state = w.lateMeals > 0.5 ? "danger" : w.otMin > 1 ? "warn" : "ok";
     }
+    // A fourth cook against cooking ahead with three: the meals out late, and the paid crew-hours.
+    const paid = (r: CommissaryRun, n: number) => n * SHIFT_H * DAYS.length + r.ot.p50;
+    if (crew === 4) {
+      const three = runCommissary({ ...settings, strategy: "ahead" });
+      const more = paid(run, 4) - paid(three, 3);
+      if (three.late.p50 <= run.late.p50 + 0.5 && more >= 1) text += ` Three cooks cooking ahead get as many meals out on time for ${Math.round(more)} crew-hours a week less.`;
+    } else if (crew === 3 && settings.strategy === "ahead") {
+      const four = runCommissary({ ...settings, strategy: "day" }, kitchenFor(4));
+      const more = paid(four, 4) - paid(run, 3);
+      if (run.late.p50 <= four.late.p50 + 0.5 && more >= 1) text += ` A fourth cook on the day would get as many meals out on time for ${Math.round(more)} crew-hours a week more.`;
+    }
     statusEl.textContent = text;
     statusEl.dataset.state = state;
   }
@@ -705,14 +764,14 @@ export function mountWeekLab(root: HTMLElement): void {
   /* ---------------------------------------------------------------------------------------------------------- */
 
   let run: CommissaryRun = runCommissary(settings);
-  let spans = timeline(run);
+  let spans = timeline(run, crew);
   let weekT = 0;
   function buildRoutines(): void {
-    for (let i = 0; i < cooks.length; i++) {
+    for (let i = 0; i < crew; i++) {
       const k = cooks[i]!;
       // Plan once to learn how long the step back and forward take, then again with the standing filled to fit.
-      const trial = new Routine(k.st, { x: k.c.x, z: COOK_Z, yaw: 0 }, cookSteps(spans.days, i, k.at), true);
-      const steps0 = cookSteps(spans.days, i, k.at);
+      const trial = new Routine(k.st, { x: k.x, z: COOK_Z, yaw: 0 }, cookSteps(spans.days, i, k.x, k.at), true);
+      const steps0 = cookSteps(spans.days, i, k.x, k.at);
       let back = 1;
       let fwd = 1;
       steps0.forEach((s, j) => {
@@ -721,17 +780,21 @@ export function mountWeekLab(root: HTMLElement): void {
         if (s.to[1] === BACK_Z) back = dur;
         else fwd = dur;
       });
-      k.routine = new Routine(k.st, { x: k.c.x, z: COOK_Z, yaw: 0 }, cookSteps(spans.days, i, k.at, { back, fwd }), true);
+      k.routine = new Routine(k.st, { x: k.x, z: COOK_Z, yaw: 0 }, cookSteps(spans.days, i, k.x, k.at, { back, fwd }), true);
     }
   }
 
   function update(): void {
     settings.strategy = (planBtns.find((b) => b.getAttribute("aria-pressed") === "true")?.dataset.wkPlan as Strategy) ?? settings.strategy;
-    run = runCommissary(settings);
-    const base = settings.strategy === "ahead" ? runCommissary({ ...settings, strategy: "day" }) : null;
+    run = runCommissary(settings, kitchenFor(crew));
+    // The tiles' changes are against the page's start: three cooks, cooking on the day, this menu.
+    const atStart = settings.strategy === "day" && crew === KITCHEN.cooks;
+    const base = atStart ? null : runCommissary({ ...settings, strategy: "day" });
     const frac = spans.total > 0 ? weekT / spans.total : 0;
-    spans = timeline(run);
+    spans = timeline(run, crew);
+    seatCrew();
     buildRoutines();
+    for (const b of crewBtns) b.setAttribute("aria-pressed", String(Number(b.dataset.wkCrew) === crew));
     weekT = frac * spans.total;
     renderMenu();
     renderChart(run);
@@ -745,6 +808,11 @@ export function mountWeekLab(root: HTMLElement): void {
   for (const b of planBtns)
     b.addEventListener("click", () => {
       for (const o of planBtns) o.setAttribute("aria-pressed", String(o === b));
+      update();
+    });
+  for (const b of crewBtns)
+    b.addEventListener("click", () => {
+      crew = Number(b.dataset.wkCrew) as Crew;
       update();
     });
   racksIn?.addEventListener("input", () => {
@@ -841,7 +909,7 @@ export function mountWeekLab(root: HTMLElement): void {
 
     // The cooks, and their spoons while they plate.
     cooks.forEach((k, i) => {
-      if (!k.routine) return;
+      if (!k.routine || i >= crew) return;
       const state = k.routine.apply(t);
       const work = span.busyH[i]! * SEC_PER_H;
       k.spoon.visible = state.activity === "work" && local > 0.45 && local < work - 0.45;
@@ -877,7 +945,7 @@ export function mountWeekLab(root: HTMLElement): void {
       if (hudClock) hudClock.textContent = clock(h);
       if (hudNote) {
         const idle = span.busyH.filter((b) => h >= b - 1e-6).length;
-        const note = local > span.len ? "Shift over" : h > SHIFT_H ? "Overtime" : idle === KITCHEN.cooks ? "Crew idle" : idle > 0 ? `${idle} of ${KITCHEN.cooks} cooks idle` : "Crew working";
+        const note = local > span.len ? "Shift over" : h > SHIFT_H ? "Overtime" : idle === crew ? "Crew idle" : idle > 0 ? `${idle} of ${crew} cooks idle` : "Crew working";
         hudNote.textContent = note;
         hudNote.dataset.kind = h > SHIFT_H && local <= span.len ? "ot" : idle > 0 && local <= span.len ? "idle" : "on";
       }

@@ -852,7 +852,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>The week</p>
               <h2 class="d3" id="week-title">Dead on Tuesday, slammed on Wednesday, <em class="g">one crew</em>.</h2>
               <p class="kicker">
-                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste. Then find where the blast chiller should stand, and run one lunch hour the same way.
+                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste, or hire a fourth cook and see what that buys. Then find where the blast chiller should stand, and run one lunch hour the same way.
               </p>
             </div>
             <a class="more" href="#week-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -886,6 +886,14 @@
                     <button type="button" data-wk-plan="ahead" aria-pressed="false">Cook ahead</button>
                   </div>
                   <div class="field">
+                    <p class="micro">The crew</p>
+                    <div class="seg fill" role="group" aria-label="Cooks">
+                      <button type="button" data-wk-crew="2" aria-pressed="false">2 cooks</button>
+                      <button type="button" data-wk-crew="3" aria-pressed="true">3 cooks</button>
+                      <button type="button" data-wk-crew="4" aria-pressed="false">4 cooks</button>
+                    </div>
+                  </div>
+                  <div class="field">
                     <p class="micro">The menu · how long each dish keeps chilled</p>
                     <ul class="wk-menu" data-wk-menu></ul>
                   </div>
@@ -902,7 +910,7 @@
                 <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes.</p>
               </div>
               <div>
-                <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − 3 cooks × 8 h)</code>
+                <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − cooks × 8 h)</code>
                 <p class="model">Model: <code>runCommissary</code>. Minutes per meal, keeping times and pan yields are set for a catering commissary.</p>
               </div>
             </figcaption>

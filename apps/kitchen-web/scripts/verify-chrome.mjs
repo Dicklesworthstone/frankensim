@@ -319,6 +319,24 @@ async function main() {
         if (!(otAhead < otDay)) {
           throw new Error(`Cooking ahead did not cut overtime: ${otDay} -> ${otAhead}`);
         }
+        // A fourth cook on the day must get the late meals to none, at the cost of idle hours, and the status must weigh
+        // it against cooking ahead with three. Then back to the page's start.
+        const lateOf = () => page.$eval("[data-wk-late]", (el) => parseFloat(el.textContent || "NaN"));
+        const idleOf = () => page.$eval("[data-wk-idle]", (el) => parseFloat(el.textContent || "NaN"));
+        await page.click('[data-wk-plan="day"]');
+        await sleep(300);
+        const [late3, idle3] = [await lateOf(), await idleOf()];
+        await page.click('[data-wk-crew="4"]');
+        await sleep(600);
+        const [late4, idle4] = [await lateOf(), await idleOf()];
+        const status4 = await page.$eval("[data-wk-status]", (el) => el.textContent || "");
+        const cooks4 = await page.$eval("[data-wk-hud-note]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Week crew: 3 cooks ${late3} late, ${idle3} h idle -> 4 cooks ${late4} late, ${idle4} h idle | ${status4.slice(-90)}`);
+        if (!(late4 < late3 && idle4 > idle3 && /Three cooks cooking ahead/.test(status4))) {
+          throw new Error(`A fourth cook did not read right: ${late3}/${idle3} -> ${late4}/${idle4}, "${status4}" (HUD ${cooks4})`);
+        }
+        await page.click('[data-wk-crew="3"]');
+        await sleep(300);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-week.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-week.png");
       }

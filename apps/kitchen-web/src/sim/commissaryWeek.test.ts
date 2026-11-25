@@ -137,3 +137,16 @@ describe("commissary week", () => {
     }
   });
 });
+
+test("a fourth cook on the day and three cooking ahead both get the week's meals out, the fourth cook mostly idle", () => {
+  const plan = (strategy: Strategy, cooks: number, swaps: readonly string[] = [], racks = 3) => runCommissary({ strategy, swaps, sigma: 0.1, racks }, { ...KITCHEN, cooks });
+  const threeDay = plan("day", 3);
+  const fourDay = plan("day", 4);
+  const threeAhead = plan("ahead", 3);
+  expect(threeDay.late.p50).toBeGreaterThan(20);
+  expect(fourDay.late.p50).toBeLessThan(1);
+  expect(threeAhead.late.p50).toBeLessThan(1);
+  expect(fourDay.idle.p50).toBeGreaterThan(threeAhead.idle.p50 + 30);
+  // Two cooks cannot carry the week, whatever is cooked ahead or swapped.
+  expect(plan("ahead", 2, ALL_SWAPS, 5).late.p50).toBeGreaterThan(100);
+});
