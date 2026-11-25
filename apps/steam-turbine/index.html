@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f14" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23162636'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%237dd3fc' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%23eab663'/%3E%3Cpath d='M16 6v6M16 20v6M6 16h6M20 16h6M9 9l4.2 4.2M18.8 18.8L23 23M23 9l-4.2 4.2M13.2 18.8L9 23' stroke='%237dd3fc' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <title>SST-600 Industrial Steam Turbine · FrankenSim Multiphysics Digital Twin &amp; Design Studio</title>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top Telemetry Header -->
+      <header class="topbar" id="topbar">
+        <div class="brand">
+          <div class="brand-badge">FS</div>
+          <div class="brand-copy">
+            <h1>SST-600 Industrial Steam Turbine</h1>
+            <span class="subtitle">FrankenSim Digital Twin · 17-Stage IF97 · 2D PDE · 4-DOF Rotor · fs-plate FEM · fs-dfo L4 Optimizer</span>
+          </div>
+        </div>
+
+        <div class="telemetry-strip" aria-label="Live turbine telemetry">
+          <div class="kpi">
+            <span class="kpi-label">SPEED</span>
+            <span class="kpi-value" id="kpi-rpm">3,000<small>rpm</small></span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">OUTPUT</span>
+            <span class="kpi-value" id="kpi-mw">50.0<small>MW</small></span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">CHP / ELEC</span>
+            <span class="kpi-value" id="kpi-eff">54 / 32<small>%</small></span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">CONDENSER</span>
+            <span class="kpi-value" id="kpi-cond">7.5<small>kPa</small></span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">SHAFT VIB</span>
+            <span class="kpi-value" id="kpi-vib">14<small>µm pp</small></span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">HP ROTOR</span>
+            <span class="kpi-value" id="kpi-temp">447<small>°C</small></span>
+          </div>
+          <div class="status-pill status-nominal" id="status-pill">SYNC NOMINAL</div>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="btn-play" class="icon-btn primary" title="Pause / Resume simulation (Space)">Pause</button>
+          <button id="btn-audio" class="icon-btn" title="Toggle 48 kHz live turbine audio (M)">Audio Off</button>
+          <button id="btn-reset" class="icon-btn" title="Reset to nominal 50 MW state (R)">Reset</button>
+          <button id="btn-drawer-left" class="icon-btn mobile-only" aria-label="Toggle controls">Controls</button>
+          <button id="btn-drawer-right" class="icon-btn mobile-only" aria-label="Toggle metrology">Metrology</button>
+        </div>
+      </header>
+
+      <!-- Compact Mobile Telemetry Strip (visible on smartphones/tablets <= 1020px) -->
+      <div class="mobile-kpi-bar" id="mobile-kpi-bar" aria-label="Live turbine status">
+        <span id="mkpi-text">3,000 rpm · 48.9 MW · 28% η · 10 µm</span>
+        <span class="status-pill status-nominal" id="mkpi-status">SYNC NOMINAL</span>
+      </div>
+
+      <!-- Full-bleed HDR 3D WebGL Viewport -->
+      <main class="stage-wrap">
+        <div id="viewport" class="viewport" aria-label="Interactive 3D Siemens SST-600 steam turbine"></div>
+
+        <!-- Intuitive CAD Camera Navigation Pill (Desktop Mouse + Smartphone Touch) -->
+        <div class="nav-toolbar" id="nav-toolbar" aria-label="3D viewport navigation">
+          <div class="nav-pill">
+            <button id="btn-nav-orbit" class="nav-btn active" title="Rotate / Orbit mode (1-finger / Left-drag)">Orbit</button>
+            <button id="btn-nav-pan" class="nav-btn" title="Pan mode (1-finger / Left-drag pans smoothly)">Pan</button>
+            <span class="nav-sep"></span>
+            <button id="btn-nav-zoomout" class="nav-btn nav-sq" title="Zoom out (-)" aria-label="Zoom out">−</button>
+            <button id="btn-nav-zoomin" class="nav-btn nav-sq" title="Zoom in (+)" aria-label="Zoom in">+</button>
+            <button id="btn-nav-fit" class="nav-btn" title="Reset camera framing (F)">Fit</button>
+            <span class="nav-sep desktop-only-sep"></span>
+            <button id="btn-zen" class="nav-btn desktop-only-btn" title="Hide / Show side panels (H)">Full 3D</button>
+          </div>
+          <div class="nav-hint" id="nav-hint">
+            Drag: Orbit · Right/Shift+Drag: Pan · Scroll: Zoom to cursor · Dbl-click: Focus
+          </div>
+        </div>
+
+        <!-- Floating Experiment Guidance Banner -->
+        <div class="exp-toast hidden" id="exp-toast" role="status" aria-live="polite">
+          <div class="exp-toast-head">
+            <span class="exp-toast-tag" id="exp-toast-tag">EXPERIMENT</span>
+            <strong id="exp-toast-title">Nominal 50 MW CHP Design Point</strong>
+            <button id="btn-exp-dismiss" class="close-x" aria-label="Dismiss banner">×</button>
+          </div>
+          <p id="exp-toast-desc"></p>
+        </div>
+
+        <!-- Floating Interactive 3D CAD Surface Probe Readout (hover over turbine!) -->
+        <div class="probe-card hidden" id="probe-card" aria-live="off">
+          <div class="probe-head">
+            <strong id="pr-part">LP Stage 16 Ti-6Al-4V Blade</strong>
+            <span id="pr-zr">z=4.14m · r=0.64m</span>
+          </div>
+          <div class="probe-grid" id="pr-grid"></div>
+        </div>
+
+        <!-- Floating Scientific Calibrated Colorbar Legend (active in GPU false-color modes) -->
+        <div class="colorbar-card hidden" id="colorbar-card" aria-label="False-color field scale">
+          <div class="cb-head">
+            <span id="cb-title">Temperature T(r, z)</span>
+            <span class="cb-unit" id="cb-unit">°C</span>
+          </div>
+          <div class="cb-bar" id="cb-bar"></div>
+          <div class="cb-ticks">
+            <span id="cb-min">30 °C</span>
+            <span id="cb-mid">290 °C</span>
+            <span id="cb-max">550 °C</span>
+          </div>
+        </div>
+
+        <!-- Left Engineering Control Room & L4 Design Studio -->
+        <aside class="panel panel-left" id="panel-left">
+          <div class="panel-tabs" role="tablist">
+            <button class="tab active" data-left-tab="controls" role="tab" aria-selected="true">Control</button>
+            <button class="tab" data-left-tab="design" role="tab" aria-selected="false">Design L4</button>
+            <button class="tab" data-left-tab="experiments" role="tab" aria-selected="false">Cases (9)</button>
+            <button class="tab" data-left-tab="visuals" role="tab" aria-selected="false">Fields</button>
+          </div>
+
+          <div class="panel-body">
+            <!-- TAB 1: Plant Control Room -->
+            <section class="tab-pane active" id="left-controls">
+              <div class="control-group">
+                <div class="group-title">Steam Admission &amp; CHP Extraction</div>
+                <label class="slider-row">
+                  <span>Load / Admission <em id="val-load">78%</em></span>
+                  <input id="sl-load" type="range" min="0" max="110" step="1" value="78" />
+                </label>
+                <label class="slider-row">
+                  <span>12-Bar CHP Extraction <em id="val-ext">40%</em></span>
+                  <input id="sl-ext" type="range" min="0" max="100" step="1" value="40" />
+                </label>
+                <label class="slider-row">
+                  <span>Boiler Live Pressure <em id="val-pboiler">110 bar</em></span>
+                  <input id="sl-pboiler" type="range" min="40" max="165" step="1" value="110" />
+                </label>
+                <label class="slider-row">
+                  <span>Boiler Live Temp <em id="val-tboiler">525 °C</em></span>
+                  <input id="sl-tboiler" type="range" min="340" max="565" step="1" value="525" />
+                </label>
+                <label class="slider-row">
+                  <span>Governor Speed Ref <em id="val-rpmref">3000 rpm</em></span>
+                  <input id="sl-rpmref" type="range" min="500" max="3200" step="10" value="3000" />
+                </label>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">Grid Tie &amp; Emergency Protection</div>
+                <div class="btn-grid-2">
+                  <button id="btn-breaker" class="action-btn state-on">11 kV Breaker: CLOSED</button>
+                  <button id="btn-trip" class="action-btn danger">Emergency ESV Trip</button>
+                </div>
+                <div class="btn-grid-2" style="margin-top:6px;">
+                  <button id="btn-reset-trip" class="action-btn">Reset Trip Latch</button>
+                  <button id="btn-cold-start" class="action-btn">Cold Start (143 rpm)</button>
+                </div>
+                <label class="slider-row" style="margin-top:8px;">
+                  <span>Generator Excitation <em id="val-exc">1.05 pu</em></span>
+                  <input id="sl-exc" type="range" min="60" max="135" step="1" value="105" />
+                </label>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">Condenser &amp; Cooling Water (fs-multiphase)</div>
+                <label class="slider-row">
+                  <span>Air In-Leakage (Colburn-Hougen) <em id="val-air">0.05%</em></span>
+                  <input id="sl-air" type="range" min="0" max="35" step="0.05" value="0.05" />
+                </label>
+                <label class="slider-row">
+                  <span>Cooling Water Flow <em id="val-cwflow">100%</em></span>
+                  <input id="sl-cwflow" type="range" min="20" max="140" step="1" value="100" />
+                </label>
+                <label class="slider-row">
+                  <span>Cooling Water Inlet Temp <em id="val-cwtemp">20 °C</em></span>
+                  <input id="sl-cwtemp" type="range" min="8" max="38" step="0.5" value="20" />
+                </label>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">Bearings &amp; 4-DOF Rotordynamics Faults</div>
+                <label class="slider-row">
+                  <span>Rotor Mass Unbalance <em id="val-unbal">14,000 g·mm</em></span>
+                  <input id="sl-unbal" type="range" min="1000" max="350000" step="1000" value="14000" />
+                </label>
+                <label class="slider-row">
+                  <span>Oil-Whip Pad Destabilization <em id="val-whip">0.00</em></span>
+                  <input id="sl-whip" type="range" min="0" max="2.4" step="0.05" value="0" />
+                </label>
+                <label class="slider-row">
+                  <span>Lube Oil Pressure / Cooler <em id="val-oilp">100%</em></span>
+                  <input id="sl-oilp" type="range" min="22" max="120" step="1" value="100" />
+                </label>
+              </div>
+            </section>
+
+            <!-- TAB 2: L4 ASCENT Machine Design & fs-dfo Optimizer -->
+            <section class="tab-pane" id="left-design">
+              <p class="hint-text">
+                Tune 6 physical SST-600 hardware dimensions directly in the 17-stage meanline,
+                2D continuum PDE, &amp; 4-DOF rotordynamics graph, or let FrankenSim L4
+                <code>fs-dfo</code> (CMA-ES + Nelder-Mead) optimize the machine live in WASM.
+              </p>
+
+              <div class="control-group">
+                <div class="group-title">Parametric Hardware Geometry</div>
+                <label class="slider-row">
+                  <span>Blade Tip Clearance <em id="val-des-tip">0.75 mm</em></span>
+                  <input id="sl-des-tip" type="range" min="0.35" max="1.80" step="0.01" value="0.75" />
+                </label>
+                <label class="slider-row">
+                  <span>HP Drum Degree of Reaction <em id="val-des-react">0.48</em></span>
+                  <input id="sl-des-react" type="range" min="0.15" max="0.65" step="0.01" value="0.48" />
+                </label>
+                <label class="slider-row">
+                  <span>LP Stage 16 Blade Height <em id="val-des-lpbl">0.527 m</em></span>
+                  <input id="sl-des-lpbl" type="range" min="0.40" max="0.66" step="0.001" value="0.527" />
+                </label>
+                <label class="slider-row">
+                  <span>Journal Bearing Clearance <em id="val-des-brgc">220 µm</em></span>
+                  <input id="sl-des-brgc" type="range" min="150" max="300" step="1" value="220" />
+                </label>
+                <label class="slider-row">
+                  <span>Tilting-Pad Preload Factor <em id="val-des-prel">0.32</em></span>
+                  <input id="sl-des-prel" type="range" min="0.00" max="0.60" step="0.01" value="0.32" />
+                </label>
+                <label class="slider-row">
+                  <span>HP Casing Wall Thickness <em id="val-des-wall">95 mm</em></span>
+                  <input id="sl-des-wall" type="range" min="65" max="145" step="1" value="95" />
+                </label>
+                <div class="btn-grid-2" style="margin-top:6px;">
+                  <button id="btn-des-apply" class="action-btn state-on">Apply Geometry</button>
+                  <button id="btn-des-reset" class="action-btn">Siemens Spec</button>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">L4 ASCENT Multi-Variable Optimizer (fs-dfo)</div>
+                <div class="segmented" id="seg-opt-obj">
+                  <button data-obj="0" class="active">Max Elec η</button>
+                  <button data-obj="1">Max CHP</button>
+                  <button data-obj="2">Max Life</button>
+                </div>
+                <button id="btn-run-opt" class="action-btn opt-run-btn" style="margin-top:8px; width:100%;">
+                  Run fs-dfo CMA-ES + Nelder-Mead
+                </button>
+                <div class="chart-card" style="margin-top:8px; padding:6px;">
+                  <canvas id="canvas-opt" width="286" height="86"></canvas>
+                </div>
+                <div id="opt-summary" class="opt-summary">
+                  Click above to search 6D design space under blade Goodman SF, casing Lamé stress,
+                  LP wetness &amp; 4-DOF stability constraints.
+                </div>
+                <button id="btn-apply-opt" class="action-btn state-on" style="margin-top:6px; width:100%;" disabled>
+                  Apply Optimized Machine Design
+                </button>
+              </div>
+            </section>
+
+            <!-- TAB 3: 9 Guided Multiphysics Experiments -->
+            <section class="tab-pane" id="left-experiments">
+              <p class="hint-text">
+                Every experiment injects real boundary conditions or faults into the 12-component
+                <code>fs-system</code> graph — zero scripted outcomes.
+              </p>
+              <div id="experiment-list" class="experiment-list"></div>
+              <div class="ff-bar">
+                <span>Fast-Forward Sim</span>
+                <div class="btn-grid-3">
+                  <button class="action-btn" data-ff="2">+2 s</button>
+                  <button class="action-btn" data-ff="10">+10 s</button>
+                  <button class="action-btn" data-ff="30">+30 s</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- TAB 4: GPU Continuum False-Color Fields, Cutaways & 6 Vector Fields -->
+            <section class="tab-pane" id="left-visuals">
+              <div class="control-group">
+                <div class="group-title">GPU Per-Pixel Continuum Field Map</div>
+                <div class="field-grid-6" id="seg-shader">
+                  <button data-shader="pbr" class="active">CAD PBR</button>
+                  <button data-shader="temp">Temp °C</button>
+                  <button data-shader="stress">Stress MPa</button>
+                  <button data-shader="pressure">Press bar</button>
+                  <button data-shader="mach">Mach Ma</button>
+                  <button data-shader="wetcreep">Wet / Creep</button>
+                </div>
+                <div class="check-list" style="margin-top:8px;">
+                  <label><input type="checkbox" id="chk-iso" checked /> 10-Level Scientific Iso-Contour Bands</label>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">6 Engineering 3D Vector Fields (GPU Instanced)</div>
+                <div class="check-list">
+                  <label><input type="checkbox" id="vf-velocity" /> 17-Stage Euler Velocity Triangles (c_a, c_u)</label>
+                  <label><input type="checkbox" id="vf-heat" /> 2D Fourier Heat Flux q = -k(T) ∇T</label>
+                  <label><input type="checkbox" id="vf-forces" /> Blade Lift / Torque &amp; Balance-Piston Thrust</label>
+                  <label><input type="checkbox" id="vf-stress" /> Blade Centrifugal &amp; Casing Lamé Hoop σ</label>
+                  <label><input type="checkbox" id="vf-whirl" /> Bearing Ocvirk Oil Wedge &amp; 3D Whirl Trail</label>
+                  <label><input type="checkbox" id="vf-acoustic" /> Farassat/Curle Acoustic Poynting Intensity</label>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">Casing Section &amp; CAD Inspection</div>
+                <div class="segmented" id="seg-cutaway">
+                  <button data-cutaway="half" class="active">Half Cutaway</button>
+                  <button data-cutaway="open">Open Top</button>
+                  <button data-cutaway="closed">Closed</button>
+                </div>
+                <label class="slider-row" style="margin-top:9px;">
+                  <span>Exploded Assembly <em id="val-explode">0%</em></span>
+                  <input id="sl-explode" type="range" min="0" max="100" step="1" value="0" />
+                </label>
+                <label class="slider-row">
+                  <span>Rotor Visual Slow-Mo <em id="val-slowmo">1/28×</em></span>
+                  <input id="sl-slowmo" type="range" min="1" max="100" step="1" value="4" />
+                </label>
+                <div class="check-list" style="margin-top:6px;">
+                  <label><input type="checkbox" id="chk-generator" checked /> Show Cutaway 60 MVA Generator</label>
+                  <label><input type="checkbox" id="chk-steam" checked /> LP Wet-Steam Condensation Mist (x &lt; 0.96)</label>
+                  <label><input type="checkbox" id="chk-orbit-exag" checked /> Exaggerate Lateral Shaft Whirl (×250)</label>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <div class="group-title">Simulation Time Rate</div>
+                <div class="segmented" id="seg-timescale">
+                  <button data-rate="0.25">0.25×</button>
+                  <button data-rate="1" class="active">1×</button>
+                  <button data-rate="3">3×</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </aside>
+
+        <!-- Right Metrology & Conservation Drawer -->
+        <aside class="panel panel-right" id="panel-right">
+          <div class="panel-tabs" role="tablist">
+            <button class="tab active" data-right-tab="thermo" role="tab" aria-selected="true">Mollier &amp; 17-Stg</button>
+            <button class="tab" data-right-tab="rotor" role="tab" aria-selected="false">Campbell &amp; Orbit</button>
+            <button class="tab" data-right-tab="audio" role="tab" aria-selected="false">Acoustics</button>
+            <button class="tab" data-right-tab="ledger" role="tab" aria-selected="false">Ledger &amp; FEM</button>
+          </div>
+
+          <div class="panel-body">
+            <!-- RIGHT TAB 1: Mollier h-s & 17-Stage Axial Profile -->
+            <section class="tab-pane active" id="right-thermo">
+              <div class="chart-card">
+                <div class="chart-head">
+                  <span>IAPWS-IF97 Mollier h–s Expansion</span>
+                  <span class="badge-mono" id="badge-moisture">x = 0.91</span>
+                </div>
+                <canvas id="canvas-mollier" width="320" height="196"></canvas>
+              </div>
+              <div class="chart-card" style="margin-top:8px;">
+                <div class="chart-head">
+                  <span>17-Stage Row-by-Row Meanline</span>
+                  <div class="mini-seg" id="seg-stage-mode">
+                    <button data-stmode="pt" class="active">P/T</button>
+                    <button data-stmode="mach_wet">Ma/x</button>
+                    <button data-stmode="stress_mw">σ/MW</button>
+                  </div>
+                </div>
+                <canvas id="canvas-stages" width="320" height="148"></canvas>
+              </div>
+              <div class="metric-grid" id="grid-thermo"></div>
+            </section>
+
+            <!-- RIGHT TAB 2: Campbell Diagram & Whirl Orbit -->
+            <section class="tab-pane" id="right-rotor">
+              <div class="chart-card">
+                <div class="chart-head">
+                  <span>4-DOF Gyroscopic Campbell Diagram</span>
+                  <span class="badge-mono" id="badge-abscissa">Re(λ) = -12/s</span>
+                </div>
+                <canvas id="canvas-campbell" width="320" height="175"></canvas>
+              </div>
+              <div class="chart-card" style="margin-top:8px;">
+                <div class="chart-head">
+                  <span>Front Bearing Whirl Orbit (ISO 7919)</span>
+                  <span class="badge-mono" id="badge-eproc">log E = 0.0</span>
+                </div>
+                <canvas id="canvas-orbit" width="320" height="160"></canvas>
+              </div>
+              <div class="metric-grid" id="grid-rotor"></div>
+            </section>
+
+            <!-- RIGHT TAB 3: 48 kHz Acoustics, fs-plate Shell Modes & Virtual Mic -->
+            <section class="tab-pane" id="right-audio">
+              <div class="chart-card">
+                <div class="chart-head">
+                  <span>48 kHz Virtual Mic Waveform &amp; Spectrum</span>
+                  <span class="badge-mono" id="badge-spl">92.0 dB</span>
+                </div>
+                <canvas id="canvas-scope" width="320" height="122"></canvas>
+                <canvas id="canvas-fft" width="320" height="122" style="margin-top:6px;"></canvas>
+              </div>
+              <div class="control-group" style="margin-top:8px;">
+                <div class="group-title">3D Virtual Microphone Position (fs-aeroac)</div>
+                <label class="slider-row">
+                  <span>Axial Station z (HP → Exhaust) <em id="val-micz">2.4 m</em></span>
+                  <input id="sl-micz" type="range" min="-0.5" max="6.0" step="0.1" value="2.4" />
+                </label>
+                <label class="slider-row">
+                  <span>Stand-Off Distance <em id="val-micx">2.2 m</em></span>
+                  <input id="sl-micx" type="range" min="0.8" max="6.0" step="0.1" value="2.2" />
+                </label>
+                <label class="slider-row">
+                  <span>Monitoring Gain <em id="val-gain">1.0×</em></span>
+                  <input id="sl-gain" type="range" min="0.1" max="3.0" step="0.1" value="1.0" />
+                </label>
+              </div>
+              <div class="metric-grid" id="grid-audio"></div>
+              <div class="control-group" style="margin-top:10px;">
+                <div class="group-title">Exhaust Hood FEM &amp; Levine-Schwinger Duct</div>
+                <div class="metric-grid" id="grid-fem-audio"></div>
+              </div>
+            </section>
+
+            <!-- RIGHT TAB 4: fs-system::Ledger, L2 Geometry & fs-plate FEM Certificates -->
+            <section class="tab-pane" id="right-ledger">
+              <div class="control-group">
+                <div class="group-title">fs-system::Ledger Conservation Audit</div>
+                <div class="metric-grid" id="grid-ledger"></div>
+                <div class="digest-box">
+                  <span>BLAKE3 State Digest</span>
+                  <code id="val-digest">loading…</code>
+                </div>
+              </div>
+              <div class="control-group">
+                <div class="group-title">fs-plate::shell Exhaust Hood FEM Certificate</div>
+                <div class="metric-grid" id="grid-fem"></div>
+              </div>
+              <div class="control-group">
+                <div class="group-title">L2 MORPH Geometry Certificate (F-Rep + NURBS)</div>
+                <div class="metric-grid" id="grid-geom"></div>
+              </div>
+              <div class="control-group">
+                <div class="group-title">8-Node Thermal Network &amp; Norton Creep</div>
+                <div class="metric-grid" id="grid-thermal"></div>
+              </div>
+            </section>
+          </div>
+        </aside>
+
+        <!-- Bottom Camera & Quick Field Dock -->
+        <nav class="camera-dock" aria-label="Camera presets">
+          <button class="cam-btn active" data-cam="overview">1 Overview</button>
+          <button class="cam-btn" data-cam="lp_stage">2 LP Giant Stage</button>
+          <button class="cam-btn" data-cam="hp_valves">3 HP &amp; Valves</button>
+          <button class="cam-btn" data-cam="seals">4 Balance Seals</button>
+          <button class="cam-btn" data-cam="exhaust">5 Exhaust &amp; Brg</button>
+          <button class="cam-btn" data-cam="top_open">6 Open Rotor</button>
+          <span class="dock-sep"></span>
+          <button class="cam-btn" id="btn-quick-cutaway" title="Cycle cutaway mode (C)">Cutaway: Half</button>
+          <button class="cam-btn" id="btn-quick-field" title="Cycle GPU Continuum Field Map (T)">Field: PBR</button>
+        </nav>
+
+        <!-- Boot Splash Overlay -->
+        <div class="boot-overlay" id="boot-overlay">
+          <div class="boot-card">
+            <div class="boot-spinner"></div>
+            <h2>Booting FrankenSim SST-600 Digital Twin</h2>
+            <p id="boot-status">Tessellating AxisymmetricChart, NurbsSurface &amp; fs-plate FEM shell in WebAssembly…</p>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

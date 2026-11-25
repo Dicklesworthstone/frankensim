@@ -1,0 +1,72 @@
+[package]
+name = "fs-steam-turbine"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "FrankenSim Siemens SST-600 industrial steam turbine digital twin: geometry generated from fs-rep-frep AxisymmetricChart and fs-rep-nurbs NurbsSurface, coupled multiphysics composed on fs-ports and fs-system with IAPWS-IF97 steam, fs-multiphase condensation, fs-mbd rotordynamics, fs-tribo bearings, fs-phs synchronous generator, and 48 kHz modal/aeroacoustic synthesis."
+
+[workspace]
+
+[lib]
+name = "fs_steam_turbine"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+# Core substrate, math, units, hashing, execution
+fs-alloc = { path = "../../../crates/fs-alloc" }
+fs-blake3 = { path = "../../../crates/fs-blake3" }
+fs-exec = { path = "../../../crates/fs-exec" }
+fs-math = { path = "../../../crates/fs-math" }
+fs-qty = { path = "../../../crates/fs-qty" }
+
+# Convergence composition kernel
+fs-ports = { path = "../../../crates/fs-ports" }
+fs-system = { path = "../../../crates/fs-system", features = ["phs"] }
+fs-phs = { path = "../../../crates/fs-phs" }
+
+# Geometry primitives (L2 MORPH)
+fs-geom = { path = "../../../crates/fs-geom" }
+fs-rep-frep = { path = "../../../crates/fs-rep-frep" }
+fs-rep-nurbs = { path = "../../../crates/fs-rep-nurbs" }
+fs-rep-mesh = { path = "../../../crates/fs-rep-mesh" }
+fs-topo = { path = "../../../crates/fs-topo" }
+
+# Thermodynamics, multiphase condensation, convection, materials
+fs-thermochem = { path = "../../../crates/fs-thermochem" }
+fs-material = { path = "../../../crates/fs-material" }
+fs-multiphase = { path = "../../../crates/fs-multiphase" }
+fs-convection = { path = "../../../crates/fs-convection" }
+
+# Rotordynamics, tribology, control
+fs-mbd = { path = "../../../crates/fs-mbd" }
+fs-ga = { path = "../../../crates/fs-ga" }
+fs-tribo = { path = "../../../crates/fs-tribo" }
+fs-control = { path = "../../../crates/fs-control" }
+
+# Acoustics, FEM structural shells, psychoacoustics, spectral thermal color, anytime inference, L4 DFO optimization
+fs-modal = { path = "../../../crates/fs-modal" }
+fs-plate = { path = "../../../crates/fs-plate" }
+fs-duct = { path = "../../../crates/fs-duct" }
+fs-aeroac = { path = "../../../crates/fs-aeroac" }
+fs-psycho = { path = "../../../crates/fs-psycho" }
+fs-eproc = { path = "../../../crates/fs-eproc" }
+fs-dfo = { path = "../../../crates/fs-dfo" }
+fs-render = { path = "../../../crates/fs-render", features = ["tracer", "photometry"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+asupersync = { path = "../../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[lints.rust]
+unsafe_code = "forbid"

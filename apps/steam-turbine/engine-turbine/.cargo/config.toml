@@ -1,0 +1,5 @@
+[env]
+FRANKENSIM_DEPGRAPH_SALT = "frankensim-workspace-dev-v1"
+
+[build]
+rustflags = ["--cap-lints=warn", "-A", "missing_docs"]

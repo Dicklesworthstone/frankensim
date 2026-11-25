@@ -1,0 +1,27 @@
+{
+  "name": "steam-turbine",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Siemens SST-600 Industrial Steam Turbine Digital Twin — FrankenSim convergence-kernel multiphysics (IAPWS-IF97 steam, Colburn-Hougen condensation, 4-DOF gyroscopic rotordynamics, PHS synchronous generator, AxisymmetricChart & NurbsSurface geometry, 48 kHz acoustics).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:cf": "tsc --noEmit && vite build --base /turbine/ --outDir dist-cf/turbine --emptyOutDir && cp cloudflare/_headers dist-cf/_headers && cp cloudflare/.assetsignore dist-cf/.assetsignore",
+    "deploy:cf": "npm run build:cf && npx wrangler deploy --config cloudflare/wrangler.jsonc",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "test": "node --test test/turbineEngine.test.mjs",
+    "wasm": "CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_turbine /Users/jemanuel/.cargo/bin/cargo lbuild --offline --manifest-path engine-turbine/Cargo.toml --target wasm32-unknown-unknown --release -j 4 && wasm-bindgen --target web --out-dir src/wasm-pkg ${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_turbine/wasm32-unknown-unknown/release/fs_steam_turbine.wasm"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "three": "^0.186.0"
+  }
+}
