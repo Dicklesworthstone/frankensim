@@ -3026,7 +3026,10 @@ element and the temperature; the temperature is never clamped. A law whose
 answer changes card, basis or claims meets the owner's continuity refusal.
 With resistor laws, the topology check ignores resistor values, which the
 laws set at every step. Without them, and with fixed conductors, it compares
-them too. State equality compares the graph by value.
+them too. The check and state equality read each element's value bit for
+bit, so a winding's NaN inductor placeholder, which the owner replaces by
+the field, equals itself. Compared by value, every state of such a graph
+was another topology and every step was refused.
 
 A port's temperature is the one the kernel gives it, held over the step.
 Under a timeline built `returning_end_temperatures` it is the cell's end
@@ -3119,9 +3122,10 @@ measured `sum dS_r`.
   driving a resistor of its own (`FlowIn`; 1.5 A into 2 ohm returns 3 V and
   4.5 W);
 - three steps of a voltage source driving the winding into a graph resistor
-  with a capacitor across it, with core conductors and an end inductance. Each
-  step is the owner's own `step_to_candidate`, bit for bit, in state, source
-  output, per-receiver heat rate, stored change and entropy. What the heat ports
+  with a capacitor across it, with core conductors, an end inductance and a
+  NaN placeholder for the winding's graph inductor. Each step is the owner's
+  own `step_to_candidate`, bit for bit, in state, source output,
+  per-receiver heat rate, stored change and entropy. What the heat ports
   return equals the owner's `heat_j` within the receipt's floor. Each step
   passes the kernel's `audit_step` with balance defects of at most 2.4e-15 J
   and endpoint defects of at most 1.1e-16 J;
@@ -3131,7 +3135,9 @@ measured `sum dS_r`.
   without a conductor, a zero tolerance, a cold port, a short or non-finite
   input, and a state of another topology;
 - identity words that tell apart a core conductor at another temperature,
-  swapped receivers, other controls and another tolerance.
+  swapped receivers, other controls and another tolerance; two graphs that
+  differ in one resistor's value alone; and two receiver maps that differ
+  only in which receiver heats each of two graph resistors.
 
 With laws, all reading the fixture's card. Its resistivity is affine in
 temperature, and at 400 K its conductivity is 2/3 of its 300 K value:
@@ -3277,6 +3283,128 @@ Not claimed:
 - the play-memory owner with conductor laws that follow temperature, or with
   resistor laws;
 - magnetic temperature refresh, motion, a tangent, a codec;
+- any comparison with `fs_couple`'s winding modules.
+
+### The 3D saturating winding as one Component
+
+Behind the same `component` feature,
+`winding::component::spatial::SpatialWinding` is the 3D saturating winding
+circuit `SpatialNonlinearWindingCircuit` as one Component. It shares
+`PlanarWinding`'s owner-independent core, the crate-private
+`winding::component::shared`: port layout and admission, heat by receiver,
+the balance closure, the receipt and the identity words. Its ports, receipt,
+balance check, refusals and resistor laws are `PlanarWinding`'s. It differs
+in these:
+- A `SpatialHeatReceiver` maps tetrahedra (`cells`) and graph resistors
+  (`resistors`). A cell is a strand's (`SpatialWindingCellHeat`) or a core
+  conductor's (`SpatialInductionCell`). A receiver may not name a cell that
+  carries neither.
+- The field steps at standstill: `step_with_conductors_candidate` with every
+  vertex at zero velocity. There is no mechanical port. A step with
+  mechanical or parameter work refuses (`UnaccountedWork`), and the owner
+  itself refuses stranded geometry that moves.
+- The state, `SpatialWindingState`, carries its stored energy, so the
+  kernel's reading needs no field reconstruction. A constructed state sums
+  three terms in the owner's order for `stored_before_j`: the field's energy
+  recomputed from the accepted potential, then the native Hamiltonian, then
+  the end-mode energy. A proposed state takes the step's `stored_after_j`.
+- Two states are equal when they share the graph, bit for bit, and the
+  problem, by address, and hold the same bits in clock, circuit state,
+  currents, linkages, resistances, strands, core conductors, potential and
+  field clock. The stored energy is not compared, and neither is the kept
+  step (`SpatialWindingState::step`, the owner's `SpatialNonlinearWindingStep`).
+- `SpatialWinding::at_port_temperatures` takes one `SpatialConductorLaw` per
+  receiver and `ResistorLaw`s by branch, as `PlanarWinding` does. Each
+  conductor law is asked, at the temperature its port received, for each
+  core cell's conductor (`core`) and each strand's (`strand`, by winding and
+  cell). A law with no answer refuses the step (`Law`), naming
+  `SpatialLawElement::Core`, `Strand` or `Resistor`, the receiver and the
+  temperature.
+- The identity words begin with `b"spatial1"` read little-endian. A fixed
+  core conductor gives its cell, conductivity, axes, source basis and keys
+  and card identity; a strand gives its winding, cell, fill fraction and
+  conductor.
+
+`tests/spatial_winding_component.rs` (10 tests) works on the unit cube in 48
+tetrahedra, with the reversible card of `tests/nonlinear_eddy/common.rs`
+(at 400 K its conductivity is 2/3 of its 300 K value). One winding loops
+around the centre vertex through the 24 cells that touch it, its strands
+filling 0.6 of each. The other 24 cells carry core conductors. A 2 V source
+drives the winding into a 0.3 ohm graph resistor with 0.05 F across it. The
+winding has an end inductance of 0.03 H, and its graph inductor is a NaN
+placeholder. The tests:
+- ports;
+- three steps. Each is the owner's own standstill step, bit for bit, in
+  state, source output, per-receiver heat rate, stored change and entropy,
+  and every receiver heats. Each state's stored energy equals, bit for bit,
+  the owner's `stored_before_j` of the next step and the sum recomputed from
+  its own field. Each step passes `audit_step` with balance defects of at
+  most 1.1e-16 J and endpoint defects of at most 6.9e-18 J;
+- `check_component` conformance, with fixed conductors and with laws;
+- refusals:
+  - an element mapped to no receiver or to two, an empty receiver, and a
+    receiver naming a non-resistor branch or a cell without a conductor
+    (one beyond the mesh, since every cell of the cube carries one);
+  - a zero tolerance, a cold port, and a short or non-finite input;
+  - a state with another element across the resistor and, with fixed
+    conductors, a state whose resistor value is not the Component's.
+  A state whose core conductors alone differ is another state;
+- with laws, three steps with ports at different temperatures. Each is the
+  owner's own, with every element resolved by hand at its receiver's
+  temperature. The graph resistor goes 0.45, 0.315 and 0.39 ohm, and the
+  balance defects stay at most 8.3e-17 J;
+- a law that ignores temperature steps as fixed conductors do, bit for bit;
+- law refusals:
+  - a law count, a resistor law on an inductor, and laws for one of two
+    graph resistors;
+  - a strand, core and resistor law asked at 520 K, each named;
+  - another card's law, refused by the owner ("magnetic refresh must retain
+    the complete original card, requirements, coordinate schema and selected
+    claims");
+- identity words that tell apart:
+  - a core or strands at another temperature, thinner strands, swapped
+    receivers, other controls and another tolerance;
+  - two graphs that differ in one resistor's value alone, and two receiver
+    maps that differ only in which receiver heats each of two graph
+    resistors;
+  - fixed conductors and laws, a frozen law, another card's conductor or
+    resistor law, and thinner strands under laws.
+
+Nineteen defects in the 3D paths, planted one at a time, each failed at
+least one of these tests:
+1. the new state keeping the owner's `stored_before_j`;
+2. the end-mode term dropped from a state's stored energy;
+3. the stored energy grouped as field + (circuit + end);
+4. the field stepped moving (the owner refuses);
+5. the core cells' heat dropped (`Balance`);
+6. the strands' heat dropped (`Balance`);
+7. core laws asked 10 K above their port;
+8. strand laws asked 10 K above their port;
+9. a core law's refusal named as a resistor's;
+10. the fixed strands' fill fractions dropped from the words;
+11. the laws' strands' fill fractions dropped from the words;
+12. the fixed core conductors dropped from the words;
+13. the fixed strands' conductors dropped from the words;
+14. the conductor laws' words dropped;
+15. states not comparing core conductors;
+16. the topology check dropped;
+17. resistor laws comparing the whole graph;
+18. the law count check dropped;
+19. fixed conductors comparing the graph without resistor values.
+
+Three in the shared core each failed tests of both Components:
+1. elements compared by value, so the NaN placeholder never equals itself;
+2. a resistor's value dropped from the graph's words (the topology check
+   reads the same words);
+3. the receivers' graph resistor branches dropped from their words.
+
+The grouping (field + end) + circuit gave the owner's bits at every step,
+so no test tells it from the owner's order.
+
+Not claimed:
+- the 3D play-memory owner;
+- a 3D magnetic lane;
+- motion, a tangent or a codec;
 - any comparison with `fs_couple`'s winding modules.
 
 ## Accepted induction and nonlinear circuit fields drive mechanical loads

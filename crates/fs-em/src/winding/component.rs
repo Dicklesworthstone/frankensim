@@ -71,6 +71,7 @@ use fs_ports::CoupleError;
 use fs_ports::component::{Class, Component, ContractViolation, EndOfStep, PortSpec, Proposal};
 
 pub(crate) mod shared;
+pub mod spatial;
 
 use shared::{Account, Element, ElementRefusal, LawCell, Refusal, Reversible, same_bits};
 
@@ -842,7 +843,7 @@ impl<'m, C: WindingOwner<'m>> PartialEq for PlanarWindingState<'m, C> {
             (Some(x), Some(y)) => same_bits(x, y) && a.same_problem(b),
             _ => false,
         };
-        a.graph() == b.graph()
+        shared::same_graph(a.graph(), b.graph(), false)
             && problem
             && a.time_s().to_bits() == b.time_s().to_bits()
             && same_bits(a.state(), b.state())

@@ -252,14 +252,42 @@ pub(crate) fn admit_ports(
     Ok(())
 }
 
-/// Whether a state's graph is the Component's: equal, or, when resistor laws
-/// set the resistors at every step, equal but for the resistors' values.
+/// Whether a state's graph is the Component's: the same nodes, branch ends
+/// and transformer terminals, and every value bit for bit (a winding's
+/// inductor placeholder may be NaN, which equals nothing by value); when
+/// resistor laws set the resistors at every step, all but the resistors'
+/// values.
 pub(crate) fn same_graph(old: &CircuitGraph, own: &CircuitGraph, resistor_laws: bool) -> bool {
-    if resistor_laws {
-        same_topology(old, own)
-    } else {
-        old == own
-    }
+    old.node_count == own.node_count
+        && old.transformers.len() == own.transformers.len()
+        && old
+            .transformers
+            .iter()
+            .zip(&own.transformers)
+            .all(|(x, y)| {
+                x.primary == y.primary
+                    && x.secondary == y.secondary
+                    && x.ratio.to_bits() == y.ratio.to_bits()
+            })
+        && old.branches.len() == own.branches.len()
+        && old.branches.iter().zip(&own.branches).all(|(x, y)| {
+            x.0 == y.0
+                && x.1 == y.1
+                && ((resistor_laws
+                    && matches!(
+                        (x.2, y.2),
+                        (Branch::Resistor { .. }, Branch::Resistor { .. })
+                    ))
+                    || same_branch(x.2, y.2))
+        })
+}
+
+/// The same element with the same value, bit for bit.
+fn same_branch(a: Branch, b: Branch) -> bool {
+    let (mut x, mut y) = (Vec::with_capacity(2), Vec::with_capacity(2));
+    branch_words(a, &mut x);
+    branch_words(b, &mut y);
+    x == y
 }
 
 /// A state's temperatures: in the magnetic lane (`lane`, the number of
@@ -691,22 +719,6 @@ pub(crate) fn fitted_temperature(material: &ResolvedMaterialStatePoint) -> Optio
         }
     }
     found
-}
-
-/// Equal graphs but for the values of their resistors, which resistor laws
-/// set at every step.
-fn same_topology(a: &CircuitGraph, b: &CircuitGraph) -> bool {
-    a.node_count == b.node_count
-        && a.transformers == b.transformers
-        && a.branches.len() == b.branches.len()
-        && a.branches.iter().zip(&b.branches).all(|(x, y)| {
-            x.0 == y.0
-                && x.1 == y.1
-                && (matches!(
-                    (x.2, y.2),
-                    (Branch::Resistor { .. }, Branch::Resistor { .. })
-                ) || x.2 == y.2)
-        })
 }
 
 /// The graph's nodes, branches (ends and element) and transformers, each

@@ -144,7 +144,7 @@ fn series_on<'m>(
             node_count: 3,
             branches: vec![
                 (1, 0, Branch::VoltageSource { port: 0 }),
-                (1, 2, Branch::Inductor { henries: 123.0 }),
+                (1, 2, Branch::Inductor { henries: f64::NAN }),
                 (2, 0, Branch::Resistor { ohms: GRAPH_OHM }),
                 (2, 0, across),
             ],
@@ -582,6 +582,32 @@ fn identity_words_tell_conductors_receivers_and_tolerances_apart() {
     for other in [&hot, &moved, &loose, &wider] {
         assert_ne!(base, words(other));
     }
+    // Two graphs that differ in one resistor's value only, and two receiver
+    // maps that differ only in which receiver heats each graph resistor.
+    let split = |ohms: f64, branches: [usize; 2]| {
+        let parallel = series_on(
+            &problem,
+            &card,
+            core(&card, 300.0),
+            Branch::Resistor { ohms },
+        );
+        let mut receivers = receivers();
+        receivers[1].resistors = vec![branches[0]];
+        receivers[2].resistors = vec![branches[1]];
+        words(
+            &PlanarWinding::new(
+                &parallel,
+                core(&card, 300.0),
+                stranded(&card),
+                receivers,
+                controls(),
+                TOLERANCE_J,
+            )
+            .unwrap(),
+        )
+    };
+    assert_ne!(split(1.0, [2, 3]), split(2.0, [2, 3]));
+    assert_ne!(split(1.0, [2, 3]), split(1.0, [3, 2]));
 }
 
 /// The fixture's conductor at `kelvin`, as `common::material::conductor`
@@ -948,7 +974,10 @@ fn with_no_resistor_law_the_graph_resistor_keeps_its_authored_value() {
         .step_to_candidate(DT, core, windings, &[VOLTS], controls(), &mut || false)
         .unwrap();
     assert_eq!(next, PlanarWindingState::new(expected.circuit().clone()));
-    assert_eq!(next.circuit().graph(), circuit.graph());
+    assert_eq!(
+        next.circuit().graph().branches[2],
+        circuit.graph().branches[2]
+    );
     // The authored value is then the Component's own.
     let hot = circuit
         .with_graph_resistors(
