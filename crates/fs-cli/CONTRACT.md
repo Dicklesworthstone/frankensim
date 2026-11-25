@@ -1,5 +1,47 @@
 # CONTRACT: fs-cli
 
+## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
+
+`crates/fs-cli/src/assembly_run.rs` (with `assembly_run/codec.rs` and
+`assembly_run/report.rs`) implements the six-stage generic assembly pipeline
+(`AssemblyStage::{Admit, Lower, Plan, Run, Probe, Report}`) on top of the shared
+`stage_driver` runner (`DurableStageSession`, `discover_and_attest_resume`),
+with a distinct checkpoint envelope type id (`b"fscliasm"`), distinct run
+identity domain (`org.frankensim.fs-cli.assembly-run-identity.v1`), and
+`explain_assembly_run` read-only ledger projection:
+
+- `admit` parses canonical s-expression `(assembly ...)` or isomorphic `fs-ir`
+  JSON, enforces the Five Explicits (`units`, `seed`, `versions`, `budget`,
+  `capability`), resolves admitted `CardPackSet` packs into `fs_system::CardStore`,
+  and validates structurally through `fs_scenario::assembly::draft::DraftAssembly::admit`.
+- `lower` runs `LoweringRegistry::with_kernel_defaults().lower(...)`, verifies
+  `LoweringReceipt::verify_completeness()`, and retains the canonical lowering
+  receipt artifact and `lowering.*` ledger metrics.
+- `plan` seals and retains the static `ExecutionPlan` (`plan_hash`),
+  `CausalizationAudit`, and `plan.*` ledger metrics.
+- `run` executes the unchanged lowered `System` through `System::step`
+  (`Transient`, retaining `fs_system::ledger::LedgerExport` + energy metrics +
+  real entity trace) or `System::run_analysis` (`Modal`, `Harmonic`,
+  `Stationary`). Under S2-A, `Stationary` delegates directly to
+  `System::run_analysis` and durably records `AnalysisError::MissingTier`
+  (`cli-assembly-analysis-capability`) when a lowered component lacks
+  `StageResidual`.
+- `probe` evaluates declared probes (`Thermocouple`, `Timing`, `FieldQuantity`)
+  and analysis outputs strictly from retained kernel outputs; any probe whose
+  observable was not lowered refuses explicitly (`cli-assembly-probe-unsupported`)
+  without fabricating values.
+- `report` projects the retained receipts into `EngineeringReport` (HTML + JSON)
+  and a format-9 `EvidencePackage` verified by `fs_checker::check`.
+- `explain_assembly_run` projects the retained lowering receipt, execution plan,
+  causalization audit, and window energy ledger without replaying physics.
+
+No-claim boundary: Stage 2 exposes library entry points (`run_assembly`,
+`resume_assembly`, `explain_assembly_run`) with Estimate-only probe authority;
+`StageResidual` on default `fs-system::elements` (S2-B), CLI verb dispatch
+(`frankensim run <assembly.fsim>`, `frankensim explain`), FrankenScript
+`assembly.run` (Stage 3), and generalized 8-term QoI budgets (`.11.8`) remain
+subsequent packages.
+
 ## Reusable durable stage driver (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 1)
 
 `crates/fs-cli/src/stage_driver.rs` factors the durable multi-stage orchestration

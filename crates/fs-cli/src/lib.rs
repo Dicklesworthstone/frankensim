@@ -7,6 +7,7 @@
 //! (`report`, `package`, `compare`) project retained receipts and never replay
 //! physics; a CLI-shaped mock is not substituted for an integrated workflow.
 
+mod assembly_run;
 mod cards;
 mod cht_command;
 mod cinematic;
@@ -31,6 +32,11 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+pub use assembly_run::{
+    ASSEMBLY_DRIVER_VERSION, ASSEMBLY_RUN_IDENTITY_DOMAIN, AssemblyAnalysisMode,
+    AssemblyCancelPlan, AssemblyExplanation, AssemblyStage, explain_assembly_run, resume_assembly,
+    run_assembly,
+};
 pub use cards::{
     AdmittedCardPack, CARD_PACK_SET_DOMAIN, CardPackKind, CardPackRefusal, CardPackSet,
     CardPackSetBuilder, MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES, MAX_CARD_PACKS,
