@@ -34,7 +34,8 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { register, type Builder, type Hooks } from "./index";
 import { palette } from "./materials";
 import { bar, cyl, lathe, plate, rbox, torus, ball, turnJoint, Shop, type V3, type Built } from "./shop";
-import { PI, TAU, adiff, clamp, clamp01, fbm, lattice, lerp, noise2, rng, smooth, type P2 } from "./texels";
+import { PI, TAU, adiff, clamp, clamp01, fbm, greyTexels, lattice, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, type P2 } from "./texels";
+import { LABEL_TW, MEAT_TW, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
 import { Ribeye, STEAK_SIDE_Q, steakOutline, steakTissueFor } from "./steakTissue";
 import * as bt from "./bouleTexels";
 
@@ -58,23 +59,17 @@ function canvasTex(c: HTMLCanvasElement, srgb: boolean, wrap = false): THREE.Can
   return t;
 }
 
-/** A canvas filled pixel by pixel: `f(x, y, o)` writes [r, g, b] 0..255 into `o` (no texel allocates). */
-function paint(w: number, h: number, f: (x: number, y: number, o: Float64Array) => void): HTMLCanvasElement {
+/** A canvas showing RGBA pixels made elsewhere (texels.ts, foodTexels.ts). */
+function pixelCanvas(w: number, h: number, px: Uint8ClampedArray): HTMLCanvasElement {
   const [c, x] = canvas(w, h);
   const img = x.createImageData(w, h);
-  const d = img.data;
-  const o = new Float64Array(3);
-  for (let j = 0; j < h; j++)
-    for (let i = 0; i < w; i++) {
-      f(i, j, o);
-      const k = (j * w + i) * 4;
-      d[k] = o[0];
-      d[k + 1] = o[1];
-      d[k + 2] = o[2];
-      d[k + 3] = 255;
-    }
+  img.data.set(px);
   x.putImageData(img, 0, 0);
   return c;
+}
+/** A canvas filled pixel by pixel: `f(x, y, o)` writes [r, g, b] 0..255 into `o` (no texel allocates). */
+function paint(w: number, h: number, f: (x: number, y: number, o: Float64Array) => void): HTMLCanvasElement {
+  return pixelCanvas(w, h, paintTexels(w, h, f));
 }
 
 /** Value noise that tiles every P lattice cells in x and in y, 0..1. */
@@ -98,79 +93,13 @@ function pnoise(seed: number, P: number): (x: number, y: number) => number {
     return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
   };
 }
-/** Value noise that tiles every Px lattice cells in x and Py in y (for grain finer across than along), 0..1. */
-function apnoise(seed: number, Px: number, Py: number): (x: number, y: number) => number {
-  const v = lattice(seed, Px * Py);
-  return (x, y) => {
-    const xi = Math.floor(x);
-    const yi = Math.floor(y);
-    const fx = x - xi;
-    const fy = y - yi;
-    const ux = fx * fx * (3 - 2 * fx);
-    const uy = fy * fy * (3 - 2 * fy);
-    const x0 = ((xi % Px) + Px) % Px;
-    const y0 = ((yi % Py) + Py) % Py;
-    const x1 = (x0 + 1) % Px;
-    const y1 = (y0 + 1) % Py;
-    const a = v[y0 * Px + x0];
-    const b = v[y0 * Px + x1];
-    const c = v[y1 * Px + x0];
-    const d = v[y1 * Px + x1];
-    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
-  };
-}
-/** Fractal sum that keeps a periodic noise's tiling: each octave exactly twice the last. */
-function tfbm(n: (x: number, y: number) => number, x: number, y: number, oct = 4): number {
-  let s = 0;
-  let a = 0.5;
-  let f = 1;
-  let norm = 0;
-  for (let i = 0; i < oct; i++) {
-    s += a * n(x * f + i * 31, y * f + i * 57);
-    norm += a;
-    a *= 0.5;
-    f *= 2;
-  }
-  return s / norm;
-}
-
-/**
- * A tangent-space normal map from a height field (metres of relief per texel is `k`): +u right, +v up the image, as
- * three reads a canvas (flipped, so that row 0 is v = 1).
- */
+/** A tangent-space normal map from a height field (metres of relief per texel is `k`; see normalTexels). */
 function normalTex(h: Float32Array, w: number, hh: number, k: number, wrap: boolean): THREE.CanvasTexture {
-  const [c, x] = canvas(w, hh);
-  const img = x.createImageData(w, hh);
-  const d = img.data;
-  const at = (i: number, j: number) => {
-    if (wrap) return h[((j + hh) % hh) * w + ((i + w) % w)];
-    return h[clamp(j, 0, hh - 1) * w + clamp(i, 0, w - 1)];
-  };
-  for (let j = 0; j < hh; j++)
-    for (let i = 0; i < w; i++) {
-      const dx = (at(i + 1, j) - at(i - 1, j)) * k;
-      const dy = (at(i, j - 1) - at(i, j + 1)) * k;
-      const l = Math.hypot(dx, dy, 1);
-      const o = (j * w + i) * 4;
-      d[o] = (0.5 - (0.5 * dx) / l) * 255;
-      d[o + 1] = (0.5 - (0.5 * dy) / l) * 255;
-      d[o + 2] = (0.5 + 0.5 / l) * 255;
-      d[o + 3] = 255;
-    }
-  x.putImageData(img, 0, 0);
-  return canvasTex(c, false, wrap);
+  return canvasTex(pixelCanvas(w, hh, normalTexels(h, w, hh, k, wrap)), false, wrap);
 }
 /** A grey canvas texture (roughness, clearcoat) from values 0..1. */
 function greyTex(v: ArrayLike<number>, w: number, hh: number, wrap: boolean): THREE.CanvasTexture {
-  const [c, x] = canvas(w, hh);
-  const img = x.createImageData(w, hh);
-  for (let k = 0; k < w * hh; k++) {
-    const g = clamp(v[k] * 255, 0, 255);
-    img.data[k * 4] = img.data[k * 4 + 1] = img.data[k * 4 + 2] = g;
-    img.data[k * 4 + 3] = 255;
-  }
-  x.putImageData(img, 0, 0);
-  return canvasTex(c, false, wrap);
+  return canvasTex(pixelCanvas(w, hh, greyTexels(v, w, hh)), false, wrap);
 }
 
 function std(p: THREE.MeshStandardMaterialParameters, uv: "box" | "own" = "box", uvScale?: number): THREE.MeshStandardMaterial {
@@ -1678,50 +1607,9 @@ let foodCache: Record<string, THREE.Material> | null = null;
 /** The hotel-pan foods' finishes: braising sauce and meat, rice, a vegetable medley, soup. Static, shared. */
 function panFoods(): Record<string, THREE.Material> {
   if (foodCache) return foodCache;
-  const n = noise2(808);
-  // Sauce: a reduced braising liquid, glossy and nearly opaque, fat beads catching the light.
-  const sauceC = paint(256, 256, (x, y, o) => {
-    const v = fbm(n, x / 50, y / 50, 3);
-    // Beads of rendered fat, amber, on the reduced liquor.
-    const fat = smooth(0.8, 0.86, fbm(n, x / 4 + 50, y / 4, 2)) * 0.45;
-    o[0] = lerp(48, 66, v) + fat * 50;
-    o[1] = lerp(21, 28, v) + fat * 30;
-    o[2] = lerp(9, 12, v) + fat * 8;
-  });
-  // Braised meat, a 5 cm tile with u along the grain: bundles of fibre a millimetre or two across, wandering, split
-  // apart into dark crevices; a mahogany glaze over most of it, torn patches showing the redder, matt strands.
-  const MT = 512;
-  const nWv = apnoise(8101, 4, 4);
-  const nBd = apnoise(8102, 5, 36);
-  const nSt = apnoise(8103, 8, 140);
-  const nTr = apnoise(8104, 6, 6);
-  // (Its colour goes straight into the canvas's pixels.)
-  const [meatC, meatX] = canvas(MT, MT);
-  const meatImg = meatX.createImageData(MT, MT);
-  const mC = meatImg.data;
-  const mH = new Float32Array(MT * MT);
-  const mR = new Float32Array(MT * MT);
-  for (let j = 0; j < MT; j++)
-    for (let i = 0; i < MT; i++) {
-      const u = i / MT;
-      const v = j / MT;
-      const vw = v + 0.035 * (tfbm(nWv, u * 4, v * 4, 2) - 0.5);
-      const bd = tfbm(nBd, u * 5, vw * 36, 2);
-      const st = tfbm(nSt, u * 8, vw * 140, 2);
-      const crev = smooth(0.3, 0.2, bd);
-      const torn = 0.75 * smooth(0.64, 0.76, tfbm(nTr, u * 6, v * 6, 2));
-      const k = j * MT + i;
-      mH[k] = 0.55 * bd + 0.3 * st * (0.4 + 0.6 * torn) - 0.45 * crev;
-      const glaze = 1 - torn;
-      const lv = 0.92 + 0.16 * st;
-      const dk = 1 - 0.5 * crev;
-      mC[k * 4] = lerp(lerp(90, 108, st), lerp(56, 74, bd), glaze) * lv * dk;
-      mC[k * 4 + 1] = lerp(lerp(46, 56, st), lerp(26, 34, bd), glaze) * lv * dk;
-      mC[k * 4 + 2] = lerp(lerp(28, 34, st), lerp(13, 17, bd), glaze) * lv * dk;
-      mC[k * 4 + 3] = 255;
-      mR[k] = clamp01(lerp(0.42, 0.7, torn) + 0.2 * crev + 0.08 * (st - 0.5));
-    }
-  meatX.putImageData(meatImg, 0, 0);
+  // Sauce, braised meat, vegetables and soup, painted from noise (foodTexels.ts), most likely by a worker already.
+  const t = panFoodTexelsFor();
+  const MT = MEAT_TW;
   // Steamed long-grain rice: grains drawn one by one, slightly translucent at their ends.
   const r = rng(616);
   const [rc, rx] = canvas(512, 512);
@@ -1749,33 +1637,18 @@ function panFoods(): Record<string, THREE.Material> {
       ctx.restore();
     }
   }
-  // Vegetables seen in the gaps: a green and orange medley under its butter gloss.
-  const vegC = paint(256, 256, (x, y, o) => {
-    const v = fbm(n, x / 6, y / 6, 3);
-    const or = fbm(n, x / 9 + 30, y / 9, 3) > 0.6;
-    o[0] = or ? 212 : lerp(40, 96, v);
-    o[1] = or ? 112 : lerp(80, 140, v);
-    o[2] = or ? 32 : lerp(20, 40, v);
-  });
-  // Soup: a vegetable broth, golden and a little cloudy, small eyes of fat on it, each paler with a dark rim.
-  const soupC = paint(256, 256, (x, y, o) => {
-    const v = fbm(n, x / 24, y / 24, 3);
-    const f = fbm(n, x / 2.6 + 70, y / 2.6, 2) * smooth(0.45, 0.65, fbm(n, x / 40 + 9, y / 40, 2));
-    const eye = smooth(0.66, 0.69, f);
-    const rim = smooth(0.62, 0.66, f) - eye;
-    o[0] = lerp(160, 184, v) + eye * 34 - rim * 50;
-    o[1] = lerp(96, 116, v) + eye * 30 - rim * 36;
-    o[2] = lerp(30, 40, v) + eye * 8 - rim * 12;
-  });
+  const sauceC = pixelCanvas(256, 256, t.sauce);
+  const vegC = pixelCanvas(256, 256, t.veg);
+  const soupC = pixelCanvas(256, 256, t.soup);
   foodCache = {
     sauce: phys({ color: 0xffffff, map: canvasTex(sauceC, true, true), roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.3 }, "box", 1 / 0.16),
     meat: phys(
       {
         color: 0xffffff,
-        map: canvasTex(meatC, true, true),
-        normalMap: normalTex(mH, MT, MT, 3, true),
+        map: canvasTex(pixelCanvas(MT, MT, t.meat), true, true),
+        normalMap: canvasTex(pixelCanvas(MT, MT, t.meatNormal), false, true),
         normalScale: new THREE.Vector2(1.1, 1.1),
-        roughnessMap: greyTex(mR, MT, MT, true),
+        roughnessMap: canvasTex(pixelCanvas(MT, MT, t.meatRough), false, true),
         roughness: 1,
         clearcoat: 0.22,
         clearcoatRoughness: 0.35,
@@ -4168,27 +4041,11 @@ const ladleBuilder: Builder = (s, e) => {
 let labelCache: THREE.MeshStandardMaterial | null = null;
 function labelMat(): THREE.MeshStandardMaterial {
   if (labelCache) return labelCache;
-  const W = 1024;
-  const [c, x] = canvas(W, W);
-  const nP = noise2(5551);
-  const img = x.createImageData(W, W);
-  const hP = new Float32Array(W * W);
-  for (let j = 0; j < W; j++)
-    for (let i = 0; i < W; i++) {
-      const k = j * W + i;
-      // Laid lines about a millimetre apart, chain lines every 25 mm, the fibre's cloud over both.
-      const laid = 0.5 + 0.5 * Math.cos((j / W) * 93 * TAU);
-      const cd = (((i / W) * 93) % 25) - 12.5;
-      const chain = Math.exp(-(cd * cd) / 0.5);
-      const fib = fbm(nP, i / 6, j / 6, 3);
-      hP[k] = 0.25 * laid + 0.3 * chain + 0.6 * fib;
-      const v = (fib - 0.5) * 16 - 4 * laid - 6 * chain;
-      img.data[k * 4] = 238 + v;
-      img.data[k * 4 + 1] = 229 + v;
-      img.data[k * 4 + 2] = 204 + v * 1.1;
-      img.data[k * 4 + 3] = 255;
-    }
-  x.putImageData(img, 0, 0);
+  const W = LABEL_TW;
+  // The laid paper and its relief (foodTexels.ts), most likely made by a worker already; the ink goes over both.
+  const { paper, height: hP } = labelPaperFor();
+  const c = pixelCanvas(W, W, paper);
+  const x = c.getContext("2d", { willReadFrequently: true })!;
   const claret = "rgb(96, 22, 34)";
   const ink = "rgb(34, 26, 24)";
   // The border: a heavy rule and a hairline inside it.

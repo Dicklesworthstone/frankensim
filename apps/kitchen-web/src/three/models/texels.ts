@@ -70,6 +70,93 @@ export function fbm(n: (x: number, y: number) => number, x: number, y: number, o
   return s / norm;
 }
 
+/** Value noise that tiles every Px lattice cells in x and Py in y (for grain finer across than along), 0..1. */
+export function apnoise(seed: number, Px: number, Py: number): (x: number, y: number) => number {
+  const v = lattice(seed, Px * Py);
+  return (x, y) => {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    const fx = x - xi;
+    const fy = y - yi;
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    const x0 = ((xi % Px) + Px) % Px;
+    const y0 = ((yi % Py) + Py) % Py;
+    const x1 = (x0 + 1) % Px;
+    const y1 = (y0 + 1) % Py;
+    const a = v[y0 * Px + x0];
+    const b = v[y0 * Px + x1];
+    const c = v[y1 * Px + x0];
+    const d = v[y1 * Px + x1];
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  };
+}
+/** Fractal sum that keeps a periodic noise's tiling: each octave exactly twice the last. */
+export function tfbm(n: (x: number, y: number) => number, x: number, y: number, oct = 4): number {
+  let s = 0;
+  let a = 0.5;
+  let f = 1;
+  let norm = 0;
+  for (let i = 0; i < oct; i++) {
+    s += a * n(x * f + i * 31, y * f + i * 57);
+    norm += a;
+    a *= 0.5;
+    f *= 2;
+  }
+  return s / norm;
+}
+
+/** RGBA pixels filled one by one: `f(x, y, o)` writes [r, g, b] 0..255 into `o` (no texel allocates); alpha 255. */
+export function paintTexels(w: number, h: number, f: (x: number, y: number, o: Float64Array) => void): Uint8ClampedArray {
+  const d = new Uint8ClampedArray(w * h * 4);
+  const o = new Float64Array(3);
+  for (let j = 0; j < h; j++)
+    for (let i = 0; i < w; i++) {
+      f(i, j, o);
+      const k = (j * w + i) * 4;
+      d[k] = o[0];
+      d[k + 1] = o[1];
+      d[k + 2] = o[2];
+      d[k + 3] = 255;
+    }
+  return d;
+}
+
+/**
+ * A tangent-space normal map's RGBA pixels from a height field (metres of relief per texel is `k`): +u right, +v up
+ * the image, as three reads a canvas (flipped, so that row 0 is v = 1).
+ */
+export function normalTexels(h: Float32Array, w: number, hh: number, k: number, wrap: boolean): Uint8ClampedArray {
+  const d = new Uint8ClampedArray(w * hh * 4);
+  const at = (i: number, j: number) => {
+    if (wrap) return h[((j + hh) % hh) * w + ((i + w) % w)];
+    return h[clamp(j, 0, hh - 1) * w + clamp(i, 0, w - 1)];
+  };
+  for (let j = 0; j < hh; j++)
+    for (let i = 0; i < w; i++) {
+      const dx = (at(i + 1, j) - at(i - 1, j)) * k;
+      const dy = (at(i, j - 1) - at(i, j + 1)) * k;
+      const l = Math.hypot(dx, dy, 1);
+      const o = (j * w + i) * 4;
+      d[o] = (0.5 - (0.5 * dx) / l) * 255;
+      d[o + 1] = (0.5 - (0.5 * dy) / l) * 255;
+      d[o + 2] = (0.5 + 0.5 / l) * 255;
+      d[o + 3] = 255;
+    }
+  return d;
+}
+
+/** Grey RGBA pixels (roughness, clearcoat) from values 0..1. */
+export function greyTexels(v: ArrayLike<number>, w: number, hh: number): Uint8ClampedArray {
+  const d = new Uint8ClampedArray(w * hh * 4);
+  for (let k = 0; k < w * hh; k++) {
+    const g = clamp(v[k] * 255, 0, 255);
+    d[k * 4] = d[k * 4 + 1] = d[k * 4 + 2] = g;
+    d[k * 4 + 3] = 255;
+  }
+  return d;
+}
+
 export const adiff = (a: number, b: number) => {
   let d = (a - b) % TAU;
   if (d > PI) d -= TAU;

@@ -11,6 +11,7 @@ import { OVEN_BOULE_DETAIL, OVEN_PIECES, mountOvenLab } from "./three/ovenLab";
 import { STOVE_PIECES, STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { prefetchBouleLayers } from "./three/models/boulePrefetch";
+import { prefetchFoodTexels } from "./three/models/foodPrefetch";
 import { buildAhead, type Piece } from "./three/models/all";
 import { WEEK_PIECES, mountWeekLab } from "./three/weekLab";
 import { floorPieces, mountFloorLab } from "./three/floorLab";
@@ -224,6 +225,9 @@ function bootstrap(): void {
   // heaviest; the oven waits for it only to build the loaf, after its own mount.
   const steakReady = prefetchSteakTissue(STOVE_STEAK);
   void prefetchBouleLayers(OVEN_BOULE_DETAIL);
+  // The pan foods' textures are the heaviest paint in the hero kitchen's build (its first hotel pan), the wine label's
+  // paper in the stove's: both start on another thread now too.
+  prefetchFoodTexels();
 
   const heroRoot = document.getElementById("hero");
   const hero = heroRoot ? tryMount("hero", () => mountHeroKitchen(heroRoot)) : null;
