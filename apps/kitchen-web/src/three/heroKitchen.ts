@@ -505,6 +505,7 @@ async function buildKitchen(spec: ExemplarSpec, manifest: Manifest, meta: SiteMe
   let tris = 0;
   const big = manifest.fixtures.length > 40;
   let k = 0;
+  let slice = performance.now();
   for (const f of manifest.fixtures) {
     if (!alive()) return null;
     const [w, d, h] = f.local_extents_m;
@@ -631,8 +632,12 @@ async function buildKitchen(spec: ExemplarSpec, manifest: Manifest, meta: SiteMe
     }
     k++;
     o.onProgress?.(k, manifest.fixtures.length);
-    // Let the page breathe between fixtures.
-    if (k % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+    // Let the page breathe between fixtures: hand the thread back once a slice has run 40 ms (one fixture can take
+    // that alone the first time its finishes are painted).
+    if (performance.now() - slice > 40) {
+      await new Promise((r) => setTimeout(r, 0));
+      slice = performance.now();
+    }
   }
   const merged: THREE.Mesh[] = [];
   for (const bin of bins.values()) {
@@ -1943,11 +1948,8 @@ class Crew {
   private lastPrune = 0;
   private standCache = new Map<string, XZ | null>();
 
-  constructor(
-    readonly K: Kitchen,
-    detailed: boolean,
-    phone: boolean,
-  ) {
+  /** The room's stations, runs and tools; its people come with `populate`. */
+  constructor(readonly K: Kitchen) {
     this.group.name = "crew";
     this.lines.name = "paths";
     this.rnd = rngSeed(K.fixtures.length * 7919 + Math.round(K.W * 100));
@@ -1984,13 +1986,21 @@ class Crew {
       if (s.kind === "flip") this.setupGrill(s);
       if (s.baskets) s.baskets.forEach((b, k) => s.fx.model.hooks.set?.(k === 0 ? "lift_l" : "lift_r", b.down ? 0 : 1));
     }
-    // Who works here: the spec's head count (3 to 10), its routes' cohorts and areas as hints.
-    const spec = K.spec;
+  }
+
+  /**
+   * Who works here: the spec's head count (3 to 10), its routes' cohorts and areas as hints. Each person is built and
+   * placed in a task of their own; false once `alive` turns false between them (the caller disposes the crew).
+   */
+  async populate(detailed: boolean, phone: boolean, alive: () => boolean): Promise<boolean> {
+    const spec = this.K.spec;
     const n = Math.max(Math.min(3, this.stations.length), Math.min(10, spec.staffCount, Math.floor(this.stations.length * 0.7)));
     const routes = spec.staffRoutes;
     const cohorts: Cohort[] = ["p50", "p05", "p95"];
     const taken = new Set<Station>();
     for (let i = 0; i < n; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      if (!alive()) return false;
       const route = i < routes.length ? routes[i] : undefined;
       const cohort: Cohort = route ? route.cohort : cohorts[i % 3]!;
       const st = makeStaff(cohort, phone ? 1 : 2, { seed: 11 + i * 17, body: detailed ? "detailed" : "procedural", shadows: !phone });
@@ -2069,6 +2079,7 @@ class Crew {
       this.agents.push(a);
       this.group.add(st.group);
     }
+    return true;
   }
 
   /* -------------------------------------------------------------------------------------------------------- */
@@ -4642,6 +4653,19 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
       K?.dispose();
       return;
     }
+    // The crew is built before its room replaces the one on screen: the stations and runs in a task apart from the
+    // room's last fixtures and its merge, then a person to a task.
+    await new Promise((r) => setTimeout(r, 0));
+    if (seq !== loadSeq) {
+      K.dispose();
+      return;
+    }
+    const C = new Crew(K);
+    if (!(await C.populate(!phone, phone, () => seq === loadSeq))) {
+      C.dispose();
+      K.dispose();
+      return;
+    }
     if (kitchen) {
       scene.remove(kitchen.root);
       kitchen.dispose();
@@ -4657,7 +4681,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     }
     kitchen = K;
     scene.add(K.root);
-    crew = new Crew(K, !phone, phone);
+    crew = C;
     crew.inView = panInView;
     scene.add(crew.group, crew.lines);
     presets = framePresets(K, crew, spec);
