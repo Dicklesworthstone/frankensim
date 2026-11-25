@@ -165,6 +165,96 @@ pub fn det_probe_json() -> String {
     )
 }
 
+/// Sea-level density [kg/m³] of the canonical trim in [`modes_json`]
+/// (the E8.2-i battery's density).
+pub const MODES_RHO_KG_M3: f64 = 1.294;
+
+/// The augmented engine's labeled poles at the canonical trim (bead
+/// frankensim-byipt): `wright_openloop_v1` trimmed at
+/// [`MODES_RHO_KG_M3`] from the trim battery's start, then the 7-state
+/// linearization without a pilot (rigid u, w, q, θ; canard angle and
+/// rate; common prop speed) through `fs_flyer::augmented`. `family` is
+/// the engine's structural attribution and `shift` its strength. A
+/// refusal anywhere in the chain (a trim refusal wrapped to name its
+/// subsystem) returns the refusal envelope, as does a non-finite pole.
+#[must_use]
+pub fn modes_json() -> String {
+    use fs_flyer::aircraft::wright_openloop_v1;
+    use fs_flyer::augmented::{
+        ModeFamily, attribute_modes, build_engine, canard_control_column, wrap_trim_refusal,
+    };
+    use fs_flyer::canardmech::CANARD_MECH_V1;
+    use fs_flyer::longitudinal::linearize;
+    let design = wright_openloop_v1();
+    let chain = design
+        .trim(MODES_RHO_KG_M3, [13.0, 0.06, 0.1, 45.0])
+        .map_err(wrap_trim_refusal)
+        .and_then(|trim| {
+            let rigid = linearize(&design, &trim, MODES_RHO_KG_M3)?;
+            let column = canard_control_column(&design, &trim, MODES_RHO_KG_M3)?;
+            let engine = build_engine(
+                &design,
+                &CANARD_MECH_V1,
+                None,
+                &rigid,
+                &column,
+                MODES_RHO_KG_M3,
+            )?;
+            let poles = attribute_modes(&engine)?;
+            Ok((trim, engine, poles))
+        });
+    let (trim, engine, poles) = match chain {
+        Ok(parts) => parts,
+        Err(e) => return refusal_envelope(&Refusal::from(e)),
+    };
+    if poles.iter().any(|p| {
+        !(p.pole.re.is_finite() && p.pole.im.is_finite() && p.attribution_shift.is_finite())
+    }) {
+        return refusal_envelope(&Refusal {
+            code: "modes-nonfinite",
+            message: "the augmented engine returned a non-finite pole or shift".into(),
+            ranked_repairs: vec!["report the trim and engine build that produced it".into()],
+        });
+    }
+    let family = |f: ModeFamily| match f {
+        ModeFamily::Rigid => "rigid",
+        ModeFamily::Actuator => "actuator",
+        ModeFamily::Rotor => "rotor",
+        ModeFamily::Pilot => "pilot",
+    };
+    let quoted = |items: &[&'static str]| {
+        items
+            .iter()
+            .map(|s| format!("\"{}\"", json_escape(s)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let poles = poles
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"re\":{},\"im\":{},\"family\":\"{}\",\"shift\":{}}}",
+                p.pole.re,
+                p.pole.im,
+                family(p.family),
+                p.attribution_shift
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"trim\":{{\"v_mps\":{},\"alpha_rad\":{},\"delta_canard_rad\":{},\"omega_prop_rad_s\":{},\"rho_kg_m3\":{}}},\"states\":[{}],\"declared\":[{}],\"poles\":[{}]}}",
+        trim.v_mps,
+        trim.alpha_rad,
+        trim.delta_canard_rad,
+        trim.omega_prop_rad_s,
+        MODES_RHO_KG_M3,
+        quoted(&engine.labels),
+        quoted(&engine.declared_approximations),
+        poles
+    )
+}
+
 /// Versioned identity domain for hello-kernel trajectory digests.
 pub const HELLO_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer-wasm.hello-trajectory.v1";
 
@@ -679,6 +769,14 @@ mod js {
     #[must_use]
     pub fn flyer_trim_trace() -> String {
         crate::trim_trace_json()
+    }
+
+    /// The augmented engine's labeled poles at the canonical trim
+    /// (bead frankensim-byipt; see `modes_json`).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_modes_json() -> String {
+        crate::modes_json()
     }
 
     /// Pinned-input BEMT bit probe (guzez.7.2.1 lane bisection).

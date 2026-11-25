@@ -12,6 +12,7 @@
 // no receipt source is connected to this page, so they show NO_RECEIPT_SOURCE
 // and build no badge, digest, verdict or receipt link.
 
+import type { ModeFamily, PublishedLabeledPole } from "./eigenView.ts";
 import type { FieldArrays } from "./fieldViz.ts";
 import type { StripLoadsState } from "./forceOverlay.ts";
 import type { YawDecomposition } from "./lateralView.ts";
@@ -77,6 +78,68 @@ export const ILLUSTRATION =
 /** The whole content of an evidence tile while no receipt source is connected. */
 export const NO_RECEIPT_SOURCE =
   "unavailable: no receipt source is connected to this page, so no badge, digest or verdict is shown";
+
+/** The augmented engine's poles at the canonical trim, or why they are missing. */
+type EngineModes =
+  | {
+      readonly ok: true;
+      readonly trimVMps: number;
+      readonly trimAlphaRad: number;
+      readonly poles: readonly PublishedLabeledPole[];
+    }
+  | { readonly ok: false; readonly reason: string };
+
+let engineModes: Promise<EngineModes> | null = null;
+
+/**
+ * fs-flyer's augmented linearization (rigid 4 + canard 2 + prop speed, no
+ * pilot) at the canonical trim, from the wasm export flyer_modes_json (bead
+ * frankensim-byipt). Computed once per page, on the main thread, when the
+ * eigenmode tile is first enabled; the poles belong to the trim, not to the
+ * live state.
+ */
+function loadEngineModes(): Promise<EngineModes> {
+  engineModes ??= (async (): Promise<EngineModes> => {
+    try {
+      const pkg = await import("./wasm-pkg/fs_flyer_wasm.js");
+      await pkg.default();
+      const out = JSON.parse(pkg.flyer_modes_json()) as {
+        refusal?: { code: string };
+        trim?: { v_mps: number; alpha_rad: number };
+        poles?: { re: number; im: number; family: ModeFamily; shift: number }[];
+      };
+      if (out.refusal) return { ok: false, reason: `engine refused: ${out.refusal.code}` };
+      if (!out.trim || !out.poles) return { ok: false, reason: "engine modes envelope malformed" };
+      return {
+        ok: true,
+        trimVMps: out.trim.v_mps,
+        trimAlphaRad: out.trim.alpha_rad,
+        poles: out.poles.map((p) => ({ re: p.re, im: p.im, family: p.family, attributionShift: p.shift })),
+      };
+    } catch (error) {
+      return { ok: false, reason: `engine modes unavailable: ${String(error)}` };
+    }
+  })();
+  return engineModes;
+}
+
+/**
+ * One family's poles, each conjugate pair once as `re ± im i`. A part within
+ * 1e-9 of the largest pole magnitude (`scale`) is rounding and reads as 0, so
+ * a pure integrator shows as neutral; an unstable root names its doubling time.
+ */
+function poleLine(family: string, poles: readonly PublishedLabeledPole[], scale: number): string {
+  const tiny = 1e-9 * scale;
+  const shown = poles
+    .filter((p) => p.im >= -tiny)
+    .map((p) => {
+      const re = Math.abs(p.re) <= tiny ? 0 : p.re;
+      const root = Math.abs(p.im) <= tiny ? num(re) : `${num(re)} ± ${num(Math.abs(p.im))}i`;
+      if (re > 0) return `${root} (unstable, doubles in ${num(Math.LN2 / re)} s)`;
+      return re === 0 ? `${root} (neutral)` : root;
+    });
+  return `${family}: ${shown.join(", ")} /s`;
+}
 
 function noReceiptSource(content: HTMLElement): Promise<LoadedAdapter> {
   setLines(content, [NO_RECEIPT_SOURCE]);
@@ -249,6 +312,23 @@ const ADAPTERS: readonly AdapterDef[] = [
     label: "Eigenmodes",
     async load(content) {
       const ev = await import("./eigenView.ts");
+      const modes = await loadEngineModes();
+      const engineLines: string[] = [];
+      if (modes.ok) {
+        const alphaDeg = (modes.trimAlphaRad * 180) / Math.PI;
+        engineLines.push(
+          `ENGINE: fs-flyer augmented linearization at trim (${num(modes.trimVMps, 1)} m/s, α ${num(alphaDeg, 1)}°), no pilot; poles of the trim, not of the live state`,
+        );
+        const scale = Math.max(...modes.poles.map((p) => Math.hypot(p.re, p.im)));
+        const families = ev.groupModeFamilies(modes.poles);
+        if (families.ok) {
+          for (const g of families.value) engineLines.push(poleLine(g.family, g.poles, scale));
+        } else {
+          engineLines.push(`families refused: ${families.refusal.code}`);
+        }
+      } else {
+        engineLines.push(modes.reason);
+      }
       return {
         update(sample) {
           if (!sample) return;
@@ -262,26 +342,14 @@ const ADAPTERS: readonly AdapterDef[] = [
             Math.max(Math.abs(sample.warpRad), 1e-3),
           ]);
           const proj = ev.teachingProjection(labels, mags);
-          const groups = ev.groupModeFamilies([
-            { re: -0.45, im: 1.1, family: "rigid", attributionShift: 0 },
-            { re: -2.8, im: 0, family: "actuator", attributionShift: 0.3 },
-          ]);
-          const lines: string[] = [
-            ILLUSTRATION,
-            "poles fixed at -0.45 ± 1.1i and -2.8, not engine eigenvalues",
-          ];
+          const lines: string[] = [...engineLines, ILLUSTRATION];
           if (proj.ok) {
-            lines.push(`rigid share ${(proj.value.rigidShare * 100).toFixed(1)}%`);
+            lines.push(`live-state rigid share ${(proj.value.rigidShare * 100).toFixed(1)}%`);
             lines.push(`beyond-4-state ${(proj.value.beyondFourStateContent * 100).toFixed(1)}%`);
             lines.push(proj.value.caption);
           } else {
             lines.push(`projection refused: ${proj.refusal.code}`);
           }
-          lines.push(
-            groups.ok
-              ? groups.value.map((g) => `${g.family}:${g.poles.length}`).join(" · ") || "no poles"
-              : `families refused: ${groups.refusal.code}`,
-          );
           setLines(content, lines);
         },
       };

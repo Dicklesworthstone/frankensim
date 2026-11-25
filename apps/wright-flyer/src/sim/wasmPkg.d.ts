@@ -47,4 +47,5 @@ declare module "*/wasm-pkg/fs_flyer_wasm.js" {
     length_m: number, advection_mps: number, correlation_times_s: Float64Array,
   ): string;
   export function flyer_engine_checkpoint(): string;
+  export function flyer_modes_json(): string;
 }

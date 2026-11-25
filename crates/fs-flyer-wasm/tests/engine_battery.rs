@@ -535,3 +535,61 @@ fn short_lifecycle_is_bit_identical_twice() {
     assert_eq!(a, b, "byte-identical envelope transcripts");
     jlog("determinism", &format!("\"transcript_bytes\":{}", a.len()));
 }
+
+/// Bead frankensim-byipt: the page's eigenmode tile shows `modes_json`, so
+/// the export must carry exactly the augmented engine's attributed poles at
+/// the canonical trim (no pole added, dropped or altered), including the
+/// open-loop pitch instability.
+#[test]
+fn modes_json_reports_the_augmented_engines_attributed_poles() {
+    use fs_flyer::aircraft::wright_openloop_v1;
+    use fs_flyer::augmented::{ModeFamily, attribute_modes, build_engine, canard_control_column};
+    use fs_flyer::canardmech::CANARD_MECH_V1;
+    use fs_flyer::longitudinal::linearize;
+    let rho = fs_flyer_wasm::MODES_RHO_KG_M3;
+    let design = wright_openloop_v1();
+    let trim = design.trim(rho, [13.0, 0.06, 0.1, 45.0]).unwrap();
+    let rigid = linearize(&design, &trim, rho).unwrap();
+    let column = canard_control_column(&design, &trim, rho).unwrap();
+    let engine = build_engine(&design, &CANARD_MECH_V1, None, &rigid, &column, rho).unwrap();
+    let poles = attribute_modes(&engine).unwrap();
+    let json = fs_flyer_wasm::modes_json();
+    assert!(!json.contains("\"refusal\""), "{json}");
+    assert_eq!(poles.len(), 7);
+    assert_eq!(json.matches("\"family\":").count(), poles.len(), "{json}");
+    for p in &poles {
+        let family = match p.family {
+            ModeFamily::Rigid => "rigid",
+            ModeFamily::Actuator => "actuator",
+            ModeFamily::Rotor => "rotor",
+            ModeFamily::Pilot => "pilot",
+        };
+        let cell = format!(
+            "{{\"re\":{},\"im\":{},\"family\":\"{family}\",\"shift\":{}}}",
+            p.pole.re, p.pole.im, p.attribution_shift
+        );
+        assert!(json.contains(&cell), "missing {cell} in {json}");
+    }
+    let max_re = poles
+        .iter()
+        .map(|p| p.pole.re)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        max_re > 0.0,
+        "the open-loop pitch instability must persist: {json}"
+    );
+    assert!(
+        json.contains(&format!("\"v_mps\":{},", trim.v_mps)),
+        "{json}"
+    );
+    assert!(
+        json.contains(
+            "\"states\":[\"u\",\"w\",\"q\",\"theta\",\"delta_c\",\"ddelta_c\",\"omega_prop\"]"
+        ),
+        "{json}"
+    );
+    jlog(
+        "modes",
+        &format!("\"poles\":{},\"max_re\":{max_re}", poles.len()),
+    );
+}

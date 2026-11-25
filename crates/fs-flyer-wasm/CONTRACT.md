@@ -189,6 +189,24 @@ This remains a prescribed homogeneous gas with the existing incompressible,
 Reynolds-independent force laws. It does not add thermodynamic evolution,
 source-backed historical weather, Reynolds corrections or acoustic propagation.
 
+### Augmented-engine poles for the eigenmode tile
+
+`modes_json` and its export `flyer_modes_json` trim `wright_openloop_v1` at
+`MODES_RHO_KG_M3` (1.294 kg/m³) from the trim battery's start. They then build
+fs-flyer's 7-state augmented linearization without a pilot (`linearize`,
+`augmented::canard_control_column`, `augmented::build_engine`). They return
+`augmented::attribute_modes`'s poles, each with its structural family and
+attribution shift, together with the trim, the state labels and the declared
+approximations.
+
+A refusal anywhere in that chain returns the refusal envelope; a trim refusal
+is first wrapped by `wrap_trim_refusal` to name its subsystem. A non-finite pole
+or shift refuses as `modes-nonfinite`. The page's eigenmode tile computes this
+once on the main thread and shows the poles. They belong to the trim, not to
+the live flight state. `engine_battery` compares every pole, family and shift
+in the envelope with a direct fs-flyer computation, and asserts that the
+open-loop pitch instability (a pole with positive real part) persists.
+
 ## No-claim boundaries
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,

@@ -8,8 +8,8 @@
 
 use fs_flyer::aircraft::wright_openloop_v1;
 use fs_flyer::augmented::{
-    AugmentedEngine, ModeFamily, ROTOR_INERTIA_KG_M2, attribute_modes, build_engine, eig_dense,
-    eigenvalues, wrap_trim_refusal,
+    AugmentedEngine, ModeFamily, ROTOR_INERTIA_KG_M2, attribute_modes, build_engine,
+    canard_control_column, eig_dense, eigenvalues, wrap_trim_refusal,
 };
 use fs_flyer::canardmech::CANARD_MECH_V1;
 use fs_flyer::longitudinal::{IYY_KG_M2, eig4, linearize};
@@ -38,34 +38,7 @@ fn rigid_and_column_for(
 ) {
     let trim = d.trim(RHO, [13.0, 0.06, 0.1, 45.0]).unwrap();
     let rep = linearize(&d, &trim, RHO).unwrap();
-    let h = 0.004;
-    let bp = d
-        .force_buildup(
-            trim.v_mps,
-            trim.alpha_rad,
-            trim.delta_canard_rad + h,
-            trim.omega_prop_rad_s,
-            0.0,
-            RHO,
-        )
-        .unwrap();
-    let bm = d
-        .force_buildup(
-            trim.v_mps,
-            trim.alpha_rad,
-            trim.delta_canard_rad - h,
-            trim.omega_prop_rad_s,
-            0.0,
-            RHO,
-        )
-        .unwrap();
-    let m = d.gross_mass_kg;
-    let b = [
-        (bp.force_n[0] - bm.force_n[0]) / (2.0 * h) / m,
-        (bp.force_n[2] - bm.force_n[2]) / (2.0 * h) / m,
-        (bp.moment_y_nm - bm.moment_y_nm) / (2.0 * h) / IYY_KG_M2,
-        0.0,
-    ];
+    let b = canard_control_column(&d, &trim, RHO).unwrap();
     (d, rep, b)
 }
 

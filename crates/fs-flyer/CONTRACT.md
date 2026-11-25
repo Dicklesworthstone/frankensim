@@ -2331,6 +2331,17 @@ As in the preceding velocity checks, this bounded source-selected build
 omits the unused continuation branch and unrelated runtime modules; it is not
 a full workspace Cargo or lifecycle validation.
 
+`augmented::canard_control_column` owns the canard control column. It takes
+the central difference in canard deflection about a trim, with step
+`CANARD_COLUMN_STEP_RAD` (0.004 rad), at the trim's airspeed, incidence and
+prop speed. Its rows are the body X and Z force per unit mass and the pitching
+moment per pitch inertia; the θ row is 0. Gravity depends on incidence only, so
+it cancels in the difference.
+
+This is the column `tests/augmented_battery.rs` always built for itself, moved
+without change: the battery's spectrum digest is the same before and after the
+move. `fs-flyer-wasm`'s `modes_json` uses it for the page's eigenmode tile.
+
 ## Steady angular wake momentum in two-way geared propulsion
 
 `propcoupling::swirl::coupled_step` selects the native two-component

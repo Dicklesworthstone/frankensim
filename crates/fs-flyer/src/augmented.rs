@@ -16,7 +16,7 @@
 //! named-attribution machinery the design-diff cards (E8.2-ii) consume.
 
 use crate::Refusal;
-use crate::aircraft::OpenLoopDesign;
+use crate::aircraft::{OpenLoopDesign, TrimResult};
 use crate::canardmech::CanardMechanism;
 use crate::longitudinal::{IYY_KG_M2, LongitudinalReport, Pole};
 use crate::pilot::PilotWrightModel;
@@ -222,6 +222,45 @@ pub fn wrap_trim_refusal(inner: Refusal) -> Refusal {
         message: format!("limiting subsystem: {subsystem}; inner: {}", inner.message),
         ranked_repairs: inner.ranked_repairs,
     }
+}
+
+/// Canard step [rad] of the central difference in [`canard_control_column`].
+pub const CANARD_COLUMN_STEP_RAD: f64 = 0.004;
+
+/// The canard control column that [`build_engine`] couples the actuator
+/// state through: the central difference, in canard deflection about the
+/// trim, of the body X and Z force per unit mass and the pitching moment
+/// per pitch inertia, at the trim's airspeed, incidence and prop speed
+/// (step [`CANARD_COLUMN_STEP_RAD`]). The θ row is 0. Gravity depends on
+/// incidence only, so it cancels in the difference.
+///
+/// # Errors
+/// A force build-up refusal at either canard setting passes through.
+pub fn canard_control_column(
+    design: &OpenLoopDesign,
+    trim: &TrimResult,
+    rho_kg_m3: f64,
+) -> Result<[f64; 4], Refusal> {
+    let h = CANARD_COLUMN_STEP_RAD;
+    let buildup = |delta_canard_rad: f64| {
+        design.force_buildup(
+            trim.v_mps,
+            trim.alpha_rad,
+            delta_canard_rad,
+            trim.omega_prop_rad_s,
+            0.0,
+            rho_kg_m3,
+        )
+    };
+    let bp = buildup(trim.delta_canard_rad + h)?;
+    let bm = buildup(trim.delta_canard_rad - h)?;
+    let m = design.gross_mass_kg;
+    Ok([
+        (bp.force_n[0] - bm.force_n[0]) / (2.0 * h) / m,
+        (bp.force_n[2] - bm.force_n[2]) / (2.0 * h) / m,
+        (bp.moment_y_nm - bm.moment_y_nm) / (2.0 * h) / IYY_KG_M2,
+        0.0,
+    ])
 }
 
 /// Eigenvalues of the engine (deterministic Hessenberg + Francis QR).
