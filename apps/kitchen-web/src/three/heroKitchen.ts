@@ -4628,7 +4628,8 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     currentSpec = spec;
     for (const b of archetypeBtns) b.setAttribute("aria-pressed", String(b.dataset.archetype === id));
     if (rushInput) {
-      rushInput.min = String(Math.round(spec.nominalOrdersPerHr * 0.35));
+      // On the slider's step of 5, as the nominal and top rates are, so the slider can sit on the nominal rate.
+      rushInput.min = String(Math.round((spec.nominalOrdersPerHr * 0.35) / 5) * 5);
       rushInput.max = String(spec.maxOrdersPerHr);
       ordersPerHr = spec.nominalOrdersPerHr;
       rushInput.value = String(ordersPerHr);

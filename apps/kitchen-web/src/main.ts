@@ -149,6 +149,9 @@ function initFleetMatrix(hero: HeroController | null): void {
 
 function initRangeTrackFills(): void {
   const sliders = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="range"]'));
+  // A browser that keeps form values over a reload (Firefox) or a history step puts a slider where the chapter
+  // behind it does not start: every chapter starts at its HTML default, so the sliders do too.
+  for (const el of sliders) el.value = el.defaultValue;
   const syncSlider = (el: HTMLInputElement) => {
     const min = Number(el.min || 0);
     const max = Number(el.max || 100);
