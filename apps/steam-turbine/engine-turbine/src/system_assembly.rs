@@ -72,6 +72,10 @@ pub struct OperatorControls {
     pub sampled_max_vib_um_pp: f64,
     pub sampled_rub_torque_nm: f64,
     pub sampled_axial_thrust_n: f64,
+    /// Isentropic efficiencies of the HP and IP/LP stage sections, sampled each sub-step from
+    /// the 17-stage meanline at the plant's operating point (set when the plant is built).
+    pub sampled_eta_hp: f64,
+    pub sampled_eta_iplp: f64,
 }
 
 impl Default for OperatorControls {
@@ -102,6 +106,10 @@ impl Default for OperatorControls {
             sampled_max_vib_um_pp: 15.0,
             sampled_rub_torque_nm: 0.0,
             sampled_axial_thrust_n: 38_000.0,
+            // Not a value: every plant build replaces these with the meanline's own, and a stage
+            // section refuses an efficiency outside (0, 1).
+            sampled_eta_hp: 0.0,
+            sampled_eta_iplp: 0.0,
         }
     }
 }
@@ -181,6 +189,32 @@ impl AssembledTurbinePlant {
             eval_ph(1.35e6, 3_010_000.0)
         };
         let p_cond_init = if cold_start { 12_000.0 } else { 7_500.0 };
+
+        // Row-by-row meanline at the starting point: it also supplies the two stage sections'
+        // efficiencies until the first sub-step samples them at the plant's own state.
+        let (m_hp_init, m_lp_init) = if cold_start { (4.0, 4.0) } else { (52.0, 44.0) };
+        let meanline = solve_17_stage_meanline(
+            &geom.blade_rows,
+            &design,
+            chest_st.p_pa,
+            chest_st.h_j_kg,
+            ext_st.p_pa,
+            p_cond_init,
+            m_hp_init,
+            m_lp_init,
+            ctrl.sampled_omega_rad_s,
+        );
+        let eff0 =
+            meanline.section_efficiencies(chest_st.p_pa, chest_st.h_j_kg, m_hp_init, m_lp_init);
+        {
+            let mut c = controls.borrow_mut();
+            c.sampled_eta_hp = eff0
+                .hp
+                .expect("meanline HP section efficiency at the starting point");
+            c.sampled_eta_iplp = eff0
+                .iplp
+                .expect("meanline IP/LP section efficiency at the starting point");
+        }
 
         let omega_init = ctrl.sampled_omega_rad_s;
         // Total shaft polar inertia = exact forged rotor + 17 NURBS blade rows (~515 kg·m²)
@@ -288,6 +322,7 @@ impl AssembledTurbinePlant {
         let hp_st_out = p(&b, hp_stages, "outlet");
         let hp_st_sh = p(&b, hp_stages, "shaft");
         let hp_st_q = p(&b, hp_stages, "casing_heat");
+        let hp_st_eta = p(&b, hp_stages, "eta");
         let ext_st_p = p(&b, ext_header, "steam");
         let ext_q_p = p(&b, ext_header, "wall_heat");
         let ext_v_in = p(&b, ext_valve, "inlet");
@@ -297,6 +332,7 @@ impl AssembledTurbinePlant {
         let iplp_out = p(&b, ip_lp_stages, "outlet");
         let iplp_sh = p(&b, ip_lp_stages, "shaft");
         let iplp_q = p(&b, ip_lp_stages, "casing_heat");
+        let iplp_eta = p(&b, ip_lp_stages, "eta");
         let cond_in = p(&b, condenser, "steam_in");
         let cond_dr = p(&b, condenser, "condensate_out");
         let cond_q = p(&b, condenser, "cooling_heat");
@@ -377,6 +413,26 @@ impl AssembledTurbinePlant {
                 }),
             )
             .expect("hp valve lift boundary");
+        }
+        {
+            let c = Rc::clone(&controls);
+            b.boundary(
+                hp_st_eta,
+                Box::new(move |_t0, _dt, vals| {
+                    vals[0] = c.borrow().sampled_eta_hp;
+                }),
+            )
+            .expect("hp section efficiency boundary");
+        }
+        {
+            let c = Rc::clone(&controls);
+            b.boundary(
+                iplp_eta,
+                Box::new(move |_t0, _dt, vals| {
+                    vals[0] = c.borrow().sampled_eta_iplp;
+                }),
+            )
+            .expect("ip/lp section efficiency boundary");
         }
         {
             let c = Rc::clone(&controls);
@@ -528,17 +584,6 @@ impl AssembledTurbinePlant {
             governor,
         };
 
-        let meanline = solve_17_stage_meanline(
-            &geom.blade_rows,
-            &design,
-            chest_st.p_pa,
-            chest_st.h_j_kg,
-            ext_st.p_pa,
-            p_cond_init,
-            if cold_start { 4.0 } else { 52.0 },
-            if cold_start { 4.0 } else { 44.0 },
-            omega_init,
-        );
         let mut continuum = AxisymmetricContinuum2D::new(cold_start, &design);
         continuum.step(
             0.02,
@@ -635,8 +680,46 @@ impl AssembledTurbinePlant {
                 th.diff_expansion_mm,
             );
 
-            // 4. Push accepted feedback into the sampled sensor/actuator boundary registers
+            // 4. Row-by-row meanline at the accepted state; its section efficiencies drive the
+            //    two stage sections over the next sub-step (29 us natively, < 1% of a sub-step).
+            let chest = *self
+                .system
+                .state::<PlenumState>(self.nodes.hp_chest)
+                .expect("chest");
+            let ext = *self
+                .system
+                .state::<PlenumState>(self.nodes.ext_header)
+                .expect("ext");
+            let cond = *self
+                .system
+                .state::<CondenserState>(self.nodes.condenser)
+                .expect("cond");
+            self.meanline = solve_17_stage_meanline(
+                &geom.blade_rows,
+                &self.design,
+                chest.p_pa,
+                chest.h_j_kg,
+                ext.p_pa,
+                cond.p_cond_pa,
+                hp.m_dot_kg_s,
+                iplp.m_dot_kg_s,
+                shaft.omega_rad_s,
+            );
+            let eff = self.meanline.section_efficiencies(
+                chest.p_pa,
+                chest.h_j_kg,
+                hp.m_dot_kg_s,
+                iplp.m_dot_kg_s,
+            );
+
+            // 5. Push accepted feedback into the sampled sensor/actuator boundary registers
             let mut c = self.controls.borrow_mut();
+            if let Some(eta) = eff.hp {
+                c.sampled_eta_hp = eta;
+            }
+            if let Some(eta) = eff.iplp {
+                c.sampled_eta_iplp = eta;
+            }
             c.sampled_omega_rad_s = shaft.omega_rad_s;
             c.sampled_hp_valve_lift = gov.cv_lift * gov.esv_open;
             c.sampled_ext_valve_lift = gov.ext_lift;
@@ -648,27 +731,12 @@ impl AssembledTurbinePlant {
             c.reset_trip_pulse = false;
         }
 
-        // 5. Solve full 17-stage row-by-row meanline & step 64x24 2D axisymmetric thermal/stress PDE once per frame slice
+        // 6. Step the 64x24 2D axisymmetric thermal/stress PDE once per frame slice
+        // (self.meanline was solved after the last sub-step, at this state.)
         let chest = self.hp_chest_state();
-        let ext = self.ext_header_state();
-        let cond = self.condenser_state();
-        let hp = self.hp_stages_state();
-        let iplp = self.ip_lp_stages_state();
         let shaft = self.rotor_shaft_state();
         let th = self.thermal_state();
         let hp_v = self.hp_valve_state();
-
-        self.meanline = solve_17_stage_meanline(
-            &geom.blade_rows,
-            &self.design,
-            chest.p_pa,
-            chest.h_j_kg,
-            ext.p_pa,
-            cond.p_cond_pa,
-            hp.m_dot_kg_s,
-            iplp.m_dot_kg_s,
-            shaft.omega_rad_s,
-        );
         let rub_power_w = self.lateral.rub_torque_nm * shaft.omega_rad_s.abs();
         self.continuum.step(
             total,

@@ -364,13 +364,17 @@ impl Component for SteamPlenumComponent {
 /// Multi-stage steam turbine expansion section implementing real IAPWS-IF97 expansion,
 /// velocity-triangle efficiency, Baumann Region-4 moisture loss, labyrinth leakage,
 /// low-flow windage heating, twin-balance-piston axial thrust, and Alford steam whirl.
+///
+/// The section's isentropic efficiency is not a parameter: it arrives on the `eta` signal
+/// port, sampled each 20 ms sub-step from the 17-stage row-by-row meanline
+/// ([`crate::stage_meanline::StageMeanlineReport::section_efficiencies`]) at the plant's
+/// own operating point, so speed, wetness, blade geometry and tip clearance reach the
+/// power through one loss model.
 pub struct TurbineStageGroupComponent {
-    ports: [PortSpec; 4],
+    ports: [PortSpec; 5],
     pub n_stages: u32,
     pub k_stodola_m2: f64,
     pub r_crit: f64,
-    pub eta_design: f64,
-    pub nu_opt: f64,
     pub r_mean_m: f64,
     pub mean_blade_h_m: f64,
     pub leakage_fraction: f64,
@@ -426,12 +430,11 @@ impl TurbineStageGroupComponent {
                 )
                 .expect("hp shaft"),
                 PortSpec::heat(sid("casing_heat"), PortRole::EffortIn).expect("hp heat"),
+                PortSpec::signal_in(sid("eta"), nz(1)),
             ],
             n_stages: 6,
             k_stodola_m2: 0.003_45,
             r_crit: 0.14,
-            eta_design: 0.875,
-            nu_opt: 0.56,
             r_mean_m: 0.318,
             mean_blade_h_m: 0.072,
             leakage_fraction: 0.018,
@@ -463,12 +466,11 @@ impl TurbineStageGroupComponent {
                 )
                 .expect("iplp shaft"),
                 PortSpec::heat(sid("casing_heat"), PortRole::EffortIn).expect("iplp heat"),
+                PortSpec::signal_in(sid("eta"), nz(1)),
             ],
             n_stages: 11,
             k_stodola_m2: 0.0180,
             r_crit: 0.06,
-            eta_design: 0.895,
-            nu_opt: 0.62,
             r_mean_m: 0.485,
             mean_blade_h_m: 0.265,
             leakage_fraction: 0.014,
@@ -487,7 +489,6 @@ impl TurbineStageGroupComponent {
         let mut s = Self::hp_section();
         let d = d.clamped();
         s.leakage_fraction = d.hp_leakage_fraction();
-        s.eta_design = (s.eta_design * d.hp_eta_modifier()).clamp(0.70, 0.94);
         s.eff_thrust_area_m2 *= d.thrust_reaction_factor();
         s
     }
@@ -498,7 +499,6 @@ impl TurbineStageGroupComponent {
         let mut s = Self::ip_lp_section();
         let d = d.clamped();
         s.leakage_fraction = d.iplp_leakage_fraction();
-        s.eta_design = (s.eta_design * d.iplp_eta_modifier()).clamp(0.72, 0.95);
         s.eff_thrust_area_m2 *= d.thrust_reaction_factor();
         s
     }
@@ -542,7 +542,8 @@ impl Component for TurbineStageGroupComponent {
         cx: &Cx<'_>,
     ) -> Result<Proposal, Self::Error> {
         check_cx(cx)?;
-        // Inputs: inlet (0..3), outlet (3..6), shaft omega_in = -omega_shaft (6), casing T_wall (7)
+        // Inputs: inlet (0..3), outlet (3..6), shaft omega_in = -omega_shaft (6), casing T_wall (7),
+        // section isentropic efficiency from the meanline (8)
         let p_in = inputs[STREAM_PRESSURE];
         let h_in = inputs[STREAM_SPECIFIC_ENTHALPY];
         let p_out = inputs[3 + STREAM_PRESSURE];
@@ -550,20 +551,19 @@ impl Component for TurbineStageGroupComponent {
         let omega_in = inputs[6];
         let omega_shaft = -omega_in;
         let t_wall = inputs[7].clamp(280.0, 1_100.0);
+        let eta_is = inputs[8];
+        if !(eta_is > 0.0 && eta_is < 1.0) {
+            return Err(TurbineComponentError::InvalidState(
+                "stage section efficiency from the meanline must lie in (0, 1)",
+            ));
+        }
 
         let st_in = eval_ph(p_in, h_in);
         let m_dot = stodola_mass_flow(self.k_stodola_m2, p_in, st_in.v_m3_kg, p_out, self.r_crit);
         let st_is = eval_ps(p_out, st_in.s_j_kg_k);
         let dh_is = (h_in - st_is.h_j_kg).max(0.0);
 
-        let u_blade = omega_shaft.abs() * self.r_mean_m;
         let c0 = (2.0 * dh_is / f64::from(self.n_stages)).sqrt().max(10.0);
-        let nu = u_blade / c0;
-        let eta_vel =
-            self.eta_design * (1.0 - 0.55 * ((nu - self.nu_opt) / self.nu_opt).powi(2)).clamp(0.15, 1.0);
-        // Baumann wetness penalty directly from IAPWS-IF97 Region 4 moisture fraction!
-        let y_mean = 0.5 * (st_in.moisture() + st_is.moisture());
-        let eta_is = eta_vel * (1.0 - 0.85 * y_mean).clamp(0.30, 1.0);
 
         let m_pos = m_dot.max(0.0);
         let leakage = m_pos * self.leakage_fraction;

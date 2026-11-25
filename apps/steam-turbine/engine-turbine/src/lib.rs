@@ -1048,6 +1048,90 @@ mod tests {
         );
     }
 
+    /// The two stage sections take their efficiency from the row-by-row meanline, so their
+    /// shaft power must match the meanline's stage powers less labyrinth leakage (and, for the
+    /// IP/LP section, the unrecovered leaving loss). The sections once used their own typed
+    /// efficiencies, and the HP section ran 9% below its own stages.
+    #[test]
+    fn stage_section_power_agrees_with_the_row_by_row_meanline() {
+        let mut sim = SteamTurbineSim::new();
+        for _ in 0..20 {
+            assert!(sim.step(0.05), "{}", sim.last_error());
+        }
+        let p = &sim.plant;
+        let (d, ml) = (p.design, &p.meanline);
+        let (hp, ip) = (p.hp_stages_state(), p.ip_lp_stages_state());
+        let ml_hp: f64 = ml.stages[0..6].iter().map(|s| s.power_w).sum();
+        let ml_ip: f64 =
+            ml.stages[6..17].iter().map(|s| s.power_w).sum::<f64>() - ml.lp_leaving_loss_kw * 1.0e3;
+        let hp_expect = ml_hp * (1.0 - d.hp_leakage_fraction());
+        let ip_expect = ml_ip * (1.0 - d.iplp_leakage_fraction());
+        eprintln!(
+            "HP {:.3} vs {:.3} MW, IP/LP {:.3} vs {:.3} MW, eta {:.4} {:.4}",
+            hp.shaft_power_w * 1e-6,
+            hp_expect * 1e-6,
+            ip.shaft_power_w * 1e-6,
+            ip_expect * 1e-6,
+            hp.eta_is,
+            ip.eta_is
+        );
+        assert!(
+            (hp.shaft_power_w - hp_expect).abs() < 0.01 * hp_expect,
+            "HP section {} W vs meanline {} W",
+            hp.shaft_power_w,
+            hp_expect
+        );
+        assert!(
+            (ip.shaft_power_w - ip_expect).abs() < 0.015 * ip_expect,
+            "IP/LP section {} W vs meanline {} W",
+            ip.shaft_power_w,
+            ip_expect
+        );
+    }
+
+    /// A longer last-stage blade enlarges the exit annulus, slows the leaving flow and cuts the
+    /// leaving loss; the plant must turn that into IP/LP shaft power at the same valve positions.
+    /// The blade length reaches the plant only through the meanline's section efficiency.
+    #[test]
+    fn longer_last_stage_blades_raise_plant_power_through_the_meanline() {
+        let run = |blade_h_m: f64| {
+            let mut sim = SteamTurbineSim::new();
+            let d = sim.plant.design;
+            sim.apply_design_params(
+                d.tip_clearance_mm,
+                d.hp_reaction,
+                blade_h_m,
+                d.bearing_clearance_um,
+                d.bearing_preload,
+                d.casing_wall_mm,
+            );
+            for _ in 0..40 {
+                assert!(sim.step(0.05), "{}", sim.last_error());
+            }
+            (
+                sim.plant.ip_lp_stages_state().shaft_power_w,
+                sim.plant.meanline.lp_leaving_loss_kw,
+            )
+        };
+        let (p_short, leave_short) = run(0.46);
+        let (p_long, leave_long) = run(0.60);
+        eprintln!(
+            "0.46 m: {:.3} MW, leaving {:.0} kW; 0.60 m: {:.3} MW, leaving {:.0} kW",
+            p_short * 1e-6,
+            leave_short,
+            p_long * 1e-6,
+            leave_long
+        );
+        assert!(
+            leave_long < leave_short,
+            "leaving loss {leave_long} kW vs {leave_short} kW"
+        );
+        assert!(
+            p_long > p_short + 0.5 * (leave_short - leave_long) * 1.0e3,
+            "IP/LP power {p_long} W vs {p_short} W"
+        );
+    }
+
     #[test]
     fn load_rejection_triggers_speed_surge_and_governor_catch() {
         let mut sim = SteamTurbineSim::new();

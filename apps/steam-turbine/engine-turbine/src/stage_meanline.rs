@@ -79,33 +79,6 @@ impl TurbineDesignParams {
         (0.014 * (self.tip_clearance_mm / 0.75)).clamp(0.005, 0.042)
     }
 
-    /// Stage design efficiency modifier arising from reaction-degree matching & tip-clearance leakage.
-    /// Unified with `solve_17_stage_meanline` so L4 `fs-dfo` optimization improvements transfer 1:1
-    /// into the live 12-component `fs-system` plant!
-    #[must_use]
-    pub fn hp_eta_modifier(&self) -> f64 {
-        // Optimal Parsons/reaction profile efficiency peaks near R = 0.48..0.52;
-        // tighter tip clearance strictly improves efficiency (bounded by rub margin in optimizer).
-        let r_pen = 0.12 * (self.hp_reaction - 0.50).powi(2);
-        let tip_pen = 0.038 * (self.tip_clearance_mm - 0.75);
-        (1.0 - r_pen - tip_pen).clamp(0.82, 1.045)
-    }
-
-    /// IP/LP efficiency modifier including LP annulus leaving-velocity kinetic loss `1/A_ann²`.
-    /// Unified with `solve_17_stage_meanline` so longer LP blades visibly raise live electrical MW!
-    #[must_use]
-    pub fn iplp_eta_modifier(&self) -> f64 {
-        let r_nom_tip = 0.408 + 0.527;
-        let r_cur_tip = 0.408 + self.lp_last_blade_h_m;
-        let a_nom = PI * (r_nom_tip * r_nom_tip - 0.408_f64.powi(2));
-        let a_cur = PI * (r_cur_tip * r_cur_tip - 0.408_f64.powi(2));
-        // Leaving kinetic energy loss scales as ~0.048 * (A_nom / A_cur)^2; longer LP blades recover it
-        let leave_gain = 0.048 * (1.0 - (a_nom / a_cur).powi(2));
-        let r_pen = 0.095 * (self.hp_reaction - 0.50).powi(2);
-        let tip_pen = 0.026 * (self.tip_clearance_mm - 0.75);
-        (1.0 + leave_gain - r_pen - tip_pen).clamp(0.82, 1.06)
-    }
-
     /// Thrust-balance factor: higher reaction raises rotor pressure drop and net axial thrust.
     #[must_use]
     pub fn thrust_reaction_factor(&self) -> f64 {
@@ -189,7 +162,58 @@ impl Default for StageMeanlineReport {
     }
 }
 
+/// Isentropic efficiencies of the plant's two stage sections, read off the row-by-row
+/// meanline. `None` where a section carries too little flow or expansion to define one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionEfficiencies {
+    /// HP section (stages 0..=5), chest to extraction pressure: `(h_0 - h_5) / (h_0 - h_5s)`.
+    pub hp: Option<f64>,
+    /// IP/LP section (stages 6..=16), extraction to condenser pressure, total-to-static: the
+    /// last stage's leaving kinetic energy is not recovered, so
+    /// `(m (h_5 - h_16) - P_leave) / (m (h_5 - h_16s))`.
+    pub iplp: Option<f64>,
+}
+
 impl StageMeanlineReport {
+    /// Section isentropic efficiencies of this meanline solution, which started from the
+    /// chest state `(p_chest_pa, h_chest_j_kg)` with mass flows `m_hp_kg_s`, `m_lp_kg_s`.
+    ///
+    /// A section needs at least 0.5 kg/s and 1 kJ/kg of isentropic drop for its efficiency
+    /// to mean anything; below that the plant keeps the last value (its work is then ~0).
+    #[must_use]
+    pub fn section_efficiencies(
+        &self,
+        p_chest_pa: f64,
+        h_chest_j_kg: f64,
+        m_hp_kg_s: f64,
+        m_lp_kg_s: f64,
+    ) -> SectionEfficiencies {
+        const MIN_FLOW_KG_S: f64 = 0.5;
+        const MIN_DROP_J_KG: f64 = 1_000.0;
+        let ok = |eta: f64| (eta > 0.0 && eta < 1.0).then_some(eta);
+
+        let s0 = eval_ph(p_chest_pa, h_chest_j_kg).s_j_kg_k;
+        let last_hp = &self.stages[5];
+        let dh_is_hp = h_chest_j_kg - eval_ps(last_hp.p_out_pa, s0).h_j_kg;
+        let hp = if m_hp_kg_s >= MIN_FLOW_KG_S && dh_is_hp >= MIN_DROP_J_KG {
+            ok((h_chest_j_kg - last_hp.h_out_j_kg) / dh_is_hp)
+        } else {
+            None
+        };
+
+        let s5 = eval_ph(last_hp.p_out_pa, last_hp.h_out_j_kg).s_j_kg_k;
+        let last = &self.stages[NUM_STAGES - 1];
+        let dh_is_lp = last_hp.h_out_j_kg - eval_ps(last.p_out_pa, s5).h_j_kg;
+        let iplp = if m_lp_kg_s >= MIN_FLOW_KG_S && dh_is_lp >= MIN_DROP_J_KG {
+            let work = m_lp_kg_s * (last_hp.h_out_j_kg - last.h_out_j_kg)
+                - self.lp_leaving_loss_kw * 1.0e3;
+            ok(work / (m_lp_kg_s * dh_is_lp))
+        } else {
+            None
+        };
+        SectionEfficiencies { hp, iplp }
+    }
+
     /// Flatten all 17 stages (`17 × 16 = 272` `f64`s) for zero-copy WASM telemetry & 3D vector fields.
     ///
     /// Per-stage layout (stride 16):
@@ -397,8 +421,9 @@ pub fn solve_17_stage_meanline(
         };
 
         // Ainley-Mathieson / Soderberg / reaction-profile / tip-clearance / Baumann loss model:
-        // Reaction stages (i >= 1) suffer extra rotor turning/impulse profile loss far from R = 0.50,
-        // matching `TurbineDesignParams::hp_eta_modifier` and `iplp_eta_modifier` identically!
+        // Reaction stages (i >= 1) suffer extra rotor turning/impulse profile loss far from R = 0.50.
+        // The plant's two stage sections take their efficiencies from this loss model
+        // (`StageMeanlineReport::section_efficiencies`).
         let base_eta = if i == 0 { 0.835 } else if i < 6 { 0.905 } else { 0.920 };
         let vel_factor = (1.0 - 0.48 * ((nu - nu_opt) / nu_opt).powi(2)).clamp(0.22, 1.0);
         let reaction_factor = if i == 0 {

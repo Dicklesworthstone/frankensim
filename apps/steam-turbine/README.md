@@ -8,6 +8,8 @@ Time runs at physical speed. The metal and oil thermal nodes carry the full `m·
 
 The condenser shell is a saturated control volume: vapour of mass `V·ρ_g(p)` over its condensate, with pressure solved each step from the energy balance `d/dt[V·ρ_g·(u_g − h_f)] = H_in − ṁ_in·h_f − q`. Wet exhaust therefore leaves its liquid as condensate, and at steady state the duty equals `ṁ_in·(h_in − h_f)` exactly. Entropy production of the valves, stage sections and condenser is reported as computed, never clamped at zero.
 
+The two lumped stage sections of the plant graph (HP: Curtis wheel + 5 stages; IP/LP: 11 stages) carry no efficiency of their own. After every 20 ms sub-step the 17-stage row-by-row meanline is solved at the plant's state (29 µs natively), and each section's isentropic efficiency is read off it: HP from the chest to the extraction pressure, IP/LP total-to-static to the condenser, so the last stage's leaving loss counts. Blade heights, chords, shrouds, tip clearance, velocity ratio and wetness therefore reach the shaft power through one loss model, and the per-stage chart adds up to the plant's section power (HP exactly, after labyrinth leakage). The loss model itself (`stage_meanline.rs`) still starts from per-family base efficiencies of 0.835, 0.905 and 0.920; those are its fitted inputs.
+
 ## Quick Start
 
 ```bash

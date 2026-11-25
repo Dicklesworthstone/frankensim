@@ -123,7 +123,10 @@ test("Emergent transients: Load Rejection, Condenser Air Ingress, Wet Steam Baum
   const afterAir = simAir.snapshot();
   assert.ok(afterAir[29] < baseHtc * 0.5, `HTC must drop with air ingress: ${baseHtc} -> ${afterAir[29]}`);
   assert.ok(afterAir[19] > baseCond + 4.0, `vacuum pressure must rise: ${baseCond} -> ${afterAir[19]}`);
-  assert.ok(afterAir[5] < baseMw - 1.5, `output MW must drop under backpressure: ${baseMw} -> ${afterAir[5]}`);
+  // Restated 2026-11-25 when the stage sections took their efficiency from the meanline: the
+  // 8.7 -> 14.1 kPa rise cuts the IP/LP isentropic drop 7.2% (2.1 MW at fixed efficiency), but the
+  // denser exhaust halves the last stage's leaving loss (1543 -> 797 kW), so the net is -1.19 MW.
+  assert.ok(afterAir[5] < baseMw - 0.8, `output MW must drop under backpressure: ${baseMw} -> ${afterAir[5]}`);
   simAir.free();
 
   // 3. Wet Steam & Baumann Penalty (dropping live superheat cuts dryness x and IP/LP efficiency)
