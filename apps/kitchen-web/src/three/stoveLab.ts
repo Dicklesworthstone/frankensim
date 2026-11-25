@@ -62,6 +62,9 @@ const MEAT_RHO = 1055;
 const STEAK_W = 0.165;
 const STEAK_D = 0.115;
 const STEAK_YAW = 0.35;
+/** The steak's mass, and the box its ribeye is built in: the slab's thickness, with room to thicken as it cooks. */
+const STEAK_MASS_G = 340;
+export const STOVE_STEAK = { w: STEAK_W, d: STEAK_D, h: (STEAK_MASS_G / 1000 / (MEAT_RHO * SLAB_AREA_M2)) * (1 + 0.35 * 0.3), detail: 2 as const };
 /** The induction zone's rating, and the hotplate element's: what the kernel's coupled power is a fraction of. */
 const ZONE_RATED_W = 3500;
 /** Wine: 120 g per press of the button, from a 750 mL bottle; ~0.99 g/mL. */
@@ -886,12 +889,13 @@ export function mountStoveLab(root: HTMLElement): void {
     pan: "cast_iron",
     fat: "canola",
     powerFrac: 0.72,
-    steakMassG: 340,
+    steakMassG: STEAK_MASS_G,
     ambientC: 23,
   };
   // The raw steak's thickness is the kernel's slab: mass over contact area and density.
   const slabT = cfg.steakMassG / 1000 / (MEAT_RHO * SLAB_AREA_M2);
-  const steak = buildFixture("ARCH-FOOD-STEAK-RIBEYE", { w: STEAK_W, d: STEAK_D, h: slabT * (1 + 0.35 * 0.3) }, 2);
+  // The same box as STOVE_STEAK, whose tissue main.ts starts in a worker as the page loads.
+  const steak = buildFixture("ARCH-FOOD-STEAK-RIBEYE", { w: STOVE_STEAK.w, d: STOVE_STEAK.d, h: STOVE_STEAK.h }, STOVE_STEAK.detail);
   steak.group.position.set(-STEAK_W / 2, 0, STEAK_D / 2);
   steakHolder.add(steak.group);
 

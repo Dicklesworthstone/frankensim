@@ -8,7 +8,8 @@ import { mountColdChainLab } from "./three/coldChainLab";
 import { mountEquipmentTurntable } from "./three/equipmentTurntable";
 import { mountHeroKitchen, type HeroController } from "./three/heroKitchen";
 import { mountOvenLab } from "./three/ovenLab";
-import { mountStoveLab } from "./three/stoveLab";
+import { STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
+import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { mountWeekLab } from "./three/weekLab";
 import { mountFloorLab } from "./three/floorLab";
 import { mountRushLab } from "./three/rushLab";
@@ -190,15 +191,18 @@ function bootstrap(): void {
   initScrollChrome();
   initReveal();
   initRangeTrackFills();
+  // The stove chapter's ribeye texture is the heaviest single build on the page: start it on another thread now,
+  // while the hero kitchen builds, and mount the stove once it has arrived.
+  const steakReady = prefetchSteakTissue(STOVE_STEAK);
 
   const heroRoot = document.getElementById("hero");
   const hero = heroRoot ? tryMount("hero", () => mountHeroKitchen(heroRoot)) : null;
   initFleetMatrix(hero);
 
   const mountedChapters: string[] = hero ? ["hero"] : [];
-  const pendingMounts: Array<{ id: string; el: HTMLElement; mount: (el: HTMLElement) => void; done: boolean }> = [
+  const pendingMounts: Array<{ id: string; el: HTMLElement; mount: (el: HTMLElement) => void; done: boolean; after?: Promise<void> }> = [
     { id: "equipment", el: document.getElementById("equipment")!, mount: mountEquipmentTurntable, done: false },
-    { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false },
+    { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false, after: steakReady },
     { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false },
     { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false },
     { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false },
@@ -210,7 +214,11 @@ function bootstrap(): void {
   const mountOne = (entry: (typeof pendingMounts)[number]) => {
     if (entry.done) return;
     entry.done = true;
-    if (tryMount(entry.id, () => (entry.mount(entry.el), true))) mountedChapters.push(entry.id);
+    const go = () => {
+      if (tryMount(entry.id, () => (entry.mount(entry.el), true))) mountedChapters.push(entry.id);
+    };
+    if (entry.after) void entry.after.then(go);
+    else go();
   };
 
   const lazyObserver = new IntersectionObserver(
