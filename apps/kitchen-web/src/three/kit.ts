@@ -29,11 +29,18 @@ let bufW = 0;
 let bufH = 0;
 const ownGl = new WeakMap<object, THREE.WebGLRenderer>();
 const EACH = typeof location !== "undefined" && new URLSearchParams(location.search).get("gl") === "each";
+/**
+ * three reads each shader program's logs and link status back the first time it draws with it, to report a failed
+ * compile: four calls a program that each wait on the GPU process. The built page skips them (as three advises for
+ * production); development, and `?shaders=check` (scripts/verify-chrome.mjs), keep them.
+ */
+const CHECK_SHADERS = import.meta.env.DEV || (typeof location !== "undefined" && new URLSearchParams(location.search).get("shaders") === "check");
 
 function sharedRenderer(): THREE.WebGLRenderer | null {
   if (shared !== undefined) return shared;
   try {
     shared = new THREE.WebGLRenderer({ canvas: document.createElement("canvas"), antialias: true, alpha: true, powerPreference: "high-performance" });
+    shared.debug.checkShaderErrors = CHECK_SHADERS;
     shared.setPixelRatio(1);
   } catch {
     shared = null;
@@ -181,6 +188,7 @@ export function viewGl(canvas: HTMLCanvasElement, opts: { alpha?: boolean; expos
   else
     try {
       r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha, powerPreference: "high-performance" });
+      r.debug.checkShaderErrors = CHECK_SHADERS;
       r.outputColorSpace = THREE.SRGBColorSpace;
       r.toneMapping = THREE.ACESFilmicToneMapping;
       r.toneMappingExposure = exposure;

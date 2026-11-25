@@ -116,7 +116,8 @@ async function main() {
       }
     });
 
-    await page.goto(url, { waitUntil: "networkidle0", timeout: 45000 });
+    // ?shaders=check: the built page skips three's shader error checks (src/three/kit.ts); this check wants them.
+    await page.goto(`${url}?shaders=check`, { waitUntil: "networkidle0", timeout: 45000 });
     // The hero kitchen is built in the page after load; wait until it reports its draw calls (it is finished).
     await page.waitForFunction(() => (document.querySelector("[data-hero-status]")?.textContent || "").includes("draw calls"), {
       timeout: 60000,
