@@ -214,14 +214,31 @@ function bootstrap(): void {
     { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false },
   ].filter((entry) => entry.el !== null);
 
+  // Each chapter mounts in a task of its own, in the order asked. Two that come into range together, or the stove
+  // (whose steak arrives on its own time) behind another, would otherwise build in one long task with no frame
+  // drawn between them.
+  const queue: Array<() => void> = [];
+  let draining = false;
+  const drain = () => {
+    queue.shift()?.();
+    if (queue.length) setTimeout(drain, 0);
+    else draining = false;
+  };
+  const enqueue = (job: () => void) => {
+    queue.push(job);
+    if (!draining) {
+      draining = true;
+      setTimeout(drain, 0);
+    }
+  };
   const mountOne = (entry: (typeof pendingMounts)[number]) => {
     if (entry.done) return;
     entry.done = true;
     const go = () => {
       if (tryMount(entry.id, () => (entry.mount(entry.el), true))) mountedChapters.push(entry.id);
     };
-    if (entry.after) void entry.after.then(go);
-    else go();
+    if (entry.after) void entry.after.then(() => enqueue(go));
+    else enqueue(go);
   };
 
   const lazyObserver = new IntersectionObserver(
