@@ -7,6 +7,7 @@ import {
   WEEK_PLANS,
   menuFor,
   paidHours,
+  reshapeWeek,
   rng,
   runCommissary,
   simulateWeek,
@@ -178,6 +179,37 @@ test("the plan map's plans: every crew, timing, rack count and set of swaps once
   expect(seen.size).toBe(WEEK_PLANS);
   // The order the swaps are listed in does not change the plan.
   expect(weekPlanIndex({ cooks: 3, strategy: "ahead", racks: 2, swaps: ["salad", "chicken"] })).toBe(weekPlanIndex({ cooks: 3, strategy: "ahead", racks: 2, swaps: ["chicken", "salad"] }));
+});
+
+test("reshapeWeek keeps the week's meals and moves each day toward the average or away from it", () => {
+  const total = (k: Kitchen) => k.forecast.reduce((a, b) => a + b, 0);
+  expect(reshapeWeek(1)).toBe(KITCHEN);
+  for (const swing of [0, 0.25, 0.5, 0.75, 1.25, 1.5]) {
+    const k = reshapeWeek(swing);
+    expect(total(k)).toBe(total(KITCHEN));
+    for (const n of k.forecast) expect(Number.isInteger(n) && n > 0).toBe(true);
+  }
+  const flat = reshapeWeek(0).forecast;
+  expect(Math.max(...flat) - Math.min(...flat)).toBeLessThanOrEqual(1);
+  // The order of the days stays: Wednesday the busiest, Tuesday the quietest.
+  const sharp = reshapeWeek(1.5).forecast;
+  expect(sharp.indexOf(Math.max(...sharp))).toBe(2);
+  expect(sharp.indexOf(Math.min(...sharp))).toBe(1);
+  expect(sharp[1]!).toBeLessThan(KITCHEN.forecast[1]!);
+});
+
+test("the same meals, spread flat or sharp: cooking ahead buys nothing on a flat week, not enough on a sharp one", () => {
+  const plan = (week: Kitchen, strategy: Strategy, cooks: number, swaps: readonly string[] = [], racks = 3) =>
+    runCommissary({ strategy, swaps, sigma: 0.1, racks }, withCooks(cooks, week));
+  const flat = reshapeWeek(0);
+  const sharp = reshapeWeek(1.5);
+  // Flat: three cooks on the day get every meal out with no overtime.
+  const flatDay = plan(flat, "day", 3);
+  expect(flatDay.late.p90).toBeLessThan(0.5);
+  expect(flatDay.ot.p50).toBeLessThan(0.5);
+  // Sharp: three cooks fall behind even cooking ahead; a fourth cook cooking ahead does not.
+  expect(plan(sharp, "ahead", 3, ["chicken"], 2).late.p50).toBeGreaterThan(20);
+  expect(plan(sharp, "ahead", 4, ["chicken"], 2).late.p90).toBeLessThan(0.5);
 });
 
 test("paid crew-hours: every cook's shift on every day, plus a median week's overtime", () => {

@@ -20,12 +20,14 @@ import {
   SWAPS,
   WEEK_PLANS,
   paidHours,
+  reshapeWeek,
   runCommissary,
   weekPlan,
   weekPlanIndex,
   withCooks,
   type CommissaryRun,
   type DayResult,
+  type Kitchen,
   type Settings,
   type Strategy,
 } from "../sim/commissaryWeek";
@@ -42,6 +44,8 @@ import { studioEnvironment, studioLights } from "./models/stage";
 /* ------------------------------------------------------------------------------------------------------------ */
 
 const SHIFT_H = KITCHEN.shiftMin / 60;
+/** Pans the blast chiller takes in a day: its cycles inside the shift (as the planner counts them). */
+const CHILL_MAX_PANS = Math.floor(KITCHEN.shiftMin / KITCHEN.chillCycleMin) * KITCHEN.chillPans;
 /** Animation seconds per hour of the working day, and between one day's end and the next day's start. */
 const SEC_PER_H = 0.8;
 const NIGHT_S = 1.2;
@@ -65,7 +69,7 @@ export type Crew = 2 | 3 | 4;
 /** Where each cook stands along the table: three as drawn, 0.74 m apart; four 0.6 m apart; two, the first two places. */
 const CREW_X: Record<Crew, readonly number[]> = { 2: [-2.32, -1.58], 3: [-2.32, -1.58, -0.84], 4: [-2.53, -1.93, -1.33, -0.73] };
 /** The kitchen with this many cooks: shift, overtime cap and setup are per cook (commissaryWeek's Kitchen). */
-const kitchenFor = (crew: Crew) => withCooks(crew);
+const kitchenFor = (crew: Crew, week: Kitchen = KITCHEN) => withCooks(crew, week);
 
 /** The cooking line along the back, fronts facing +z. */
 const LINE_Z = -1.45;
@@ -395,7 +399,6 @@ export function mountWeekLab(root: HTMLElement): void {
   const [kettle, skillet, combi, chiller] = line as [Model, Model, Model, Model];
 
   /* The racks, their labels, and the light on today's. */
-  const forecast = KITCHEN.forecast;
   const rackX = (d: number) => RACK_X0 + d * RACK_STEP;
   const labelMats: THREE.MeshBasicMaterial[] = [];
   const labelGeo = new THREE.PlaneGeometry(0.5, 0.186);
@@ -403,7 +406,7 @@ export function mountWeekLab(root: HTMLElement): void {
     const m = buildFixture(RACK.id, RACK, 1);
     scene.add(place(m, rackX(d), RACK_Z, true));
     // Hung on the rack's bottom front rail, under the lowest pan.
-    const mat = new THREE.MeshBasicMaterial({ map: dayLabel(DAYS[d]!, forecast[d]!), transparent: true, opacity: 0.62, toneMapped: false });
+    const mat = new THREE.MeshBasicMaterial({ map: dayLabel(DAYS[d]!, KITCHEN.forecast[d]!), transparent: true, opacity: 0.62, toneMapped: false });
     labelMats.push(mat);
     const lab = new THREE.Mesh(labelGeo, mat);
     lab.position.set(rackX(d) + RACK.w / 2, 0.165, RACK_Z + 0.014);
@@ -569,6 +572,8 @@ export function mountWeekLab(root: HTMLElement): void {
   const racksVal = root.querySelector<HTMLElement>("[data-wk-racks-val]");
   const errIn = root.querySelector<HTMLInputElement>("[data-wk-err]");
   const errVal = root.querySelector<HTMLElement>("[data-wk-err-val]");
+  const swingIn = root.querySelector<HTMLInputElement>("[data-wk-swing]");
+  const swingVal = root.querySelector<HTMLElement>("[data-wk-swing-val]");
   const statusEl = root.querySelector<HTMLElement>("[data-wk-status]");
   const chartEl = root.querySelector<HTMLElement>("[data-week-chart]");
   const hudDay = root.querySelector<HTMLElement>("[data-wk-hud-day]");
@@ -582,6 +587,9 @@ export function mountWeekLab(root: HTMLElement): void {
   const tiles = { ot: tile("ot"), idle: tile("idle"), late: tile("late"), waste: tile("waste") };
 
   const settings: Settings & { swaps: string[] } = { strategy: "day", swaps: [], sigma: Number(errIn?.value ?? 10) / 100, racks: Number(racksIn?.value ?? 3) };
+  /** The swing between the quiet and busy days (1: the forecast as it stands), and the three cooks' week it makes. */
+  let swing = Number(swingIn?.value ?? 100) / 100;
+  let week: Kitchen = reshapeWeek(swing);
 
   /* The menu card: every dish and how long it keeps; the three that have a variant that keeps are switches. */
   const dishRows = new Map<string, HTMLElement>();
@@ -631,7 +639,9 @@ export function mountWeekLab(root: HTMLElement): void {
 
   /* The chart: a column per day, the crew's 24 hours as a line across. */
   /** The scale is the drawn crew's, whatever the crew on the plan, so the days' bars compare across crews. */
-  const TOP = KITCHEN.cooks * KITCHEN.shiftMin * 1.45;
+  const TOP0 = KITCHEN.cooks * KITCHEN.shiftMin * 1.45;
+  let TOP = TOP0;
+  const dayMeals: HTMLElement[] = [];
   const capOf = () => crew * KITCHEN.shiftMin;
   let capEl: HTMLElement | null = null;
   let capKey: HTMLElement | null = null;
@@ -656,7 +666,8 @@ export function mountWeekLab(root: HTMLElement): void {
       const el = document.createElement("button");
       el.type = "button";
       el.className = "wk-col";
-      el.innerHTML = `<span class="wk-bar"><i class="wk-idle"></i><i class="wk-dayof"></i><i class="wk-ahead"></i><i class="wk-ot"></i></span><span class="wk-tag"></span><span class="wk-day">${day}<small>${forecast[d]!.toLocaleString("en-US")}</small></span>`;
+      el.innerHTML = `<span class="wk-bar"><i class="wk-idle"></i><i class="wk-dayof"></i><i class="wk-ahead"></i><i class="wk-ot"></i></span><span class="wk-tag"></span><span class="wk-day">${day}<small>${KITCHEN.forecast[d]!.toLocaleString("en-US")}</small></span>`;
+      dayMeals.push(el.querySelector("small")!);
       el.addEventListener("click", () => jumpTo(d));
       plot.appendChild(el);
       cols.push({ el, dayOf: el.querySelector(".wk-dayof")!, ahead: el.querySelector(".wk-ahead")!, ot: el.querySelector(".wk-ot")!, idle: el.querySelector(".wk-idle")!, tag: el.querySelector(".wk-tag")! });
@@ -671,6 +682,9 @@ export function mountWeekLab(root: HTMLElement): void {
   const pct = (min: number) => `${((Math.max(0, min) / TOP) * 100).toFixed(2)}%`;
   function renderChart(run: CommissaryRun): void {
     const CAP = capOf();
+    // The scale is fixed so that the bars compare across plans and crews, unless a day's work would not fit under it.
+    const peak = run.plan.days.reduce((a, r) => Math.max(a, r.dayOfMin + r.aheadMin, CAP + r.otMin), CAP);
+    TOP = Math.max(TOP0, peak + 0.08 * TOP0);
     if (capEl) capEl.style.bottom = `${(CAP / TOP) * 100}%`;
     if (capKey) capKey.textContent = `Shift: ${crew} cooks × ${SHIFT_H} h`;
     run.plan.days.forEach((r, d) => {
@@ -757,18 +771,34 @@ export function mountWeekLab(root: HTMLElement): void {
       const pans = b.batches.reduce((x, y) => x + y.pans, 0);
       const names = [...new Set(b.batches.map((x) => x.forDay))].sort((x, y) => x - y).map((x) => DAY_NAMES[x]!);
       const fors = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : (names[0] ?? "");
-      text = b.aheadMin > 0 ? `${DAY_NAMES[big]} cooks ${pans} pans ahead for ${fors}. ` : "Nothing on this menu keeps long enough to cook ahead. ";
-      text += w.otMin > 1 ? `${DAY_NAMES[worst]} still needs ${fmtH(w.otMin)} of overtime.` : `No day runs over; the crew works ${util}% of its paid hours.`;
+      const keeps = run.menu.some((dish) => dish.keeps > 0);
+      if (b.aheadMin > 0) {
+        // Say when the day's cooking ahead stopped at a limit: the chiller's pans a day, or the walk-in full overnight.
+        const held = days.slice(0, big + 1).reduce((a, r) => a + r.batches.filter((x) => x.forDay > big).reduce((y, x) => y + x.pans, 0), 0);
+        const racks = settings.racks ?? KITCHEN.racks;
+        const limit =
+          pans >= CHILL_MAX_PANS
+            ? ", as many as the blast chiller can take in a day"
+            : held >= racks * KITCHEN.rackPans
+              ? `, as many as the walk-in's ${racks} ${racks === 1 ? "rack holds" : "racks hold"}`
+              : "";
+        text = `${DAY_NAMES[big]} cooks ${pans} pans ahead for ${fors}${limit}. `;
+      }
+      else if (!keeps) text = "Nothing on this menu keeps long enough to cook ahead. ";
+      else if (w.otMin > 1) text = "No day before the busy ones has time to spare for cooking ahead. ";
+      else text = "No day runs past the shift, so nothing needs cooking ahead. ";
+      if (w.otMin > 1) text += `${DAY_NAMES[worst]} still needs ${fmtH(w.otMin)} of overtime${w.lateMeals > 0.5 ? ` and sends ${Math.round(w.lateMeals)} meals out late` : ""}.`;
+      else text += b.aheadMin > 0 || !keeps ? `No day runs over; the crew works ${util}% of its paid hours.` : `The crew works ${util}% of its paid hours.`;
       state = w.lateMeals > 0.5 ? "danger" : w.otMin > 1 ? "warn" : "ok";
     }
     // A fourth cook against cooking ahead with three: the meals out late, and the paid crew-hours.
     const paid = (r: CommissaryRun, n: number) => paidHours(r, n);
     if (crew === 4) {
-      const three = runCommissary({ ...settings, strategy: "ahead" });
+      const three = runCommissary({ ...settings, strategy: "ahead" }, week);
       const more = paid(run, 4) - paid(three, 3);
       if (three.late.p50 <= run.late.p50 + 0.5 && more >= 1) text += ` Three cooks cooking ahead get as many meals out on time for ${Math.round(more)} crew-hours a week less.`;
     } else if (crew === 3 && settings.strategy === "ahead") {
-      const four = runCommissary({ ...settings, strategy: "day" }, kitchenFor(4));
+      const four = runCommissary({ ...settings, strategy: "day" }, kitchenFor(4, week));
       const more = paid(four, 4) - paid(run, 3);
       if (run.late.p50 <= four.late.p50 + 0.5 && more >= 1) text += ` A fourth cook on the day would get as many meals out on time for ${Math.round(more)} crew-hours a week more.`;
     }
@@ -780,7 +810,7 @@ export function mountWeekLab(root: HTMLElement): void {
   /* Running it.                                                                                                 */
   /* ---------------------------------------------------------------------------------------------------------- */
 
-  let run: CommissaryRun = runCommissary(settings);
+  let run: CommissaryRun = runCommissary(settings, week);
   let spans = timeline(run, crew);
   let weekT = 0;
   function buildRoutines(): void {
@@ -803,10 +833,10 @@ export function mountWeekLab(root: HTMLElement): void {
 
   function update(): void {
     settings.strategy = (planBtns.find((b) => b.getAttribute("aria-pressed") === "true")?.dataset.wkPlan as Strategy) ?? settings.strategy;
-    run = runCommissary(settings, kitchenFor(crew));
-    // The tiles' changes are against the page's start: three cooks, cooking on the day, this menu.
+    run = runCommissary(settings, kitchenFor(crew, week));
+    // The tiles' changes are against the page's start: three cooks, cooking on the day, this menu, this week.
     const atStart = settings.strategy === "day" && crew === KITCHEN.cooks;
-    const base = atStart ? null : runCommissary({ ...settings, strategy: "day" });
+    const base = atStart ? null : runCommissary({ ...settings, strategy: "day" }, week);
     const frac = spans.total > 0 ? weekT / spans.total : 0;
     spans = timeline(run, crew);
     seatCrew();
@@ -819,6 +849,12 @@ export function mountWeekLab(root: HTMLElement): void {
     renderStatus(run);
     if (racksVal) racksVal.textContent = `${settings.racks} ${settings.racks === 1 ? "rack" : "racks"} · ${(settings.racks ?? 3) * KITCHEN.rackPans} pans`;
     if (errVal) errVal.textContent = settings.sigma > 0 ? `±${Math.round(settings.sigma * 100)}%` : "Exact";
+    if (swingVal) {
+      const f = week.forecast;
+      const lo = Math.min(...f);
+      const hi = Math.max(...f);
+      swingVal.textContent = hi - lo <= 1 ? `Flat · ${hi.toLocaleString("en-US")} a day` : `${lo.toLocaleString("en-US")} → ${hi.toLocaleString("en-US")} meals`;
+    }
     lastDay = -1;
     askPlans();
     renderMap();
@@ -840,6 +876,22 @@ export function mountWeekLab(root: HTMLElement): void {
   });
   errIn?.addEventListener("input", () => {
     settings.sigma = Number(errIn.value) / 100;
+    update();
+  });
+  swingIn?.addEventListener("input", () => {
+    swing = Number(swingIn.value) / 100;
+    week = reshapeWeek(swing);
+    // The racks' labels and the chart's days carry each day's meals.
+    week.forecast.forEach((n, d) => {
+      const m = labelMats[d];
+      if (m) {
+        const old = m.map;
+        m.map = dayLabel(DAYS[d]!, n);
+        old?.dispose();
+      }
+      const el = dayMeals[d];
+      if (el) el.textContent = n.toLocaleString("en-US");
+    });
     update();
   });
 
@@ -874,14 +926,14 @@ export function mountWeekLab(root: HTMLElement): void {
   };
   const curPlan = () => weekPlanIndex({ cooks: crew, strategy: settings.strategy, racks: settings.racks ?? KITCHEN.racks, swaps: settings.swaps });
   function askPlans(): void {
-    const key = String(settings.sigma);
+    const key = JSON.stringify([settings.sigma, swing]);
     if (!mapEl || key === mapKey) return;
     mapKey = key;
     scores.clear();
     worker?.terminate();
     worker = null;
-    // Dragging the forecast-error slider asks again at every step: start the run once it rests.
-    const ask: WeekPlanAsk = { key, sigma: settings.sigma };
+    // Dragging a slider asks again at every step: start the run once it rests.
+    const ask: WeekPlanAsk = { key, sigma: settings.sigma, swing };
     clearTimeout(mapTimer);
     mapTimer = window.setTimeout(() => startPlans(ask), 250);
   }

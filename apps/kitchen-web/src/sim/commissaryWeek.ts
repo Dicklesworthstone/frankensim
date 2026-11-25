@@ -486,6 +486,28 @@ export function weekPlanIndex(p: WeekPlan): number {
   return ((PLAN_CREWS.indexOf(p.cooks) * 2 + (p.strategy === "ahead" ? 1 : 0)) * PLAN_RACKS + (p.racks - 1)) * nm + m;
 }
 
+/**
+ * The kitchen's week with the swing between its quiet and busy days scaled: 0 puts every day at the week's average,
+ * 1 is the forecast as it stands, 1.5 is half as far again from the average. The week's meals stay the same: each day
+ * is rounded down and the largest remainders take what is left.
+ */
+export function reshapeWeek(swing: number, kitchen: Kitchen = KITCHEN): Kitchen {
+  if (swing === 1) return kitchen;
+  const f = kitchen.forecast;
+  const total = f.reduce((a, b) => a + b, 0);
+  const mean = total / f.length;
+  const raw = f.map((x) => Math.max(0, mean + swing * (x - mean)));
+  const out = raw.map((x) => Math.floor(x));
+  let left = Math.round(total - out.reduce((a, b) => a + b, 0));
+  const order = raw.map((x, i) => [x - Math.floor(x), i] as const).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  for (const [, i] of order) {
+    if (left <= 0) break;
+    out[i]!++;
+    left--;
+  }
+  return { ...kitchen, forecast: out };
+}
+
 /** The kitchen with this many cooks. */
 export const withCooks = (cooks: number, kitchen: Kitchen = KITCHEN): Kitchen => (cooks === kitchen.cooks ? kitchen : { ...kitchen, cooks });
 

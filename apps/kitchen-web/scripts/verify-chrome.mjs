@@ -359,6 +359,31 @@ async function main() {
         if (!/2 cooks/.test(wkCrew)) throw new Error(`A two-cook dot on the week map set "${wkCrew}"`);
         await page.click('[data-wk-crew="3"]');
         await sleep(300);
+        // The same meals, spread flat or sharp: flat, nothing needs cooking ahead; half as sharp again, the cheapest plan
+        // with every meal on time takes a fourth cook.
+        const setSwing = (v) =>
+          page.$eval(
+            "[data-wk-swing]",
+            (el, x) => {
+              el.value = x;
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+            },
+            v,
+          );
+        await page.click('[data-wk-plan="ahead"]');
+        await setSwing("0");
+        await sleep(400);
+        const flatStatus = await page.$eval("[data-wk-status]", (el) => el.textContent || "");
+        const flatLabel = await page.$eval("[data-wk-swing-val]", (el) => el.textContent || "");
+        if (!/nothing needs cooking ahead/.test(flatStatus) || !/^Flat/.test(flatLabel)) throw new Error(`A flat week read "${flatLabel}": "${flatStatus}"`);
+        await setSwing("150");
+        await page.waitForFunction(() => /^Cheapest with no meal late/.test(document.querySelector("[data-wk-map-note]")?.textContent || ""), { timeout: 90000 });
+        const sharpNote = await page.$eval("[data-wk-map-note]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Week swing: flat "${flatStatus.slice(0, 60)}" | 1.5x "${sharpNote.slice(0, 100)}"`);
+        if (!/: 4 cooks/.test(sharpNote)) throw new Error(`At 1.5x the swing the cheapest on-time plan did not take a fourth cook: "${sharpNote}"`);
+        await setSwing("100");
+        await page.click('[data-wk-plan="day"]');
+        await sleep(300);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-week.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-week.png");
       }

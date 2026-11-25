@@ -903,6 +903,7 @@
                     <ul class="wk-menu" data-wk-menu></ul>
                   </div>
                   <label class="range"><span><b>Racks in the walk-in</b><output data-wk-racks-val>3 racks · 60 pans</output></span><input type="range" min="1" max="5" step="1" value="3" data-wk-racks aria-label="Speed racks in the walk-in" /></label>
+                  <label class="range"><span><b>Quiet day to busy day</b><output data-wk-swing-val>360 → 1,250 meals</output></span><input type="range" min="0" max="150" step="25" value="100" data-wk-swing aria-label="How far the quiet and busy days are from the week's average" /></label>
                   <label class="range"><span><b>Forecast error</b><output data-wk-err-val>±10%</output></span><input type="range" min="0" max="40" step="5" value="10" data-wk-err aria-label="Forecast error" /></label>
                   <div class="status" data-wk-status data-state="warn">Planning the week…</div>
                 </div>
@@ -912,7 +913,7 @@
               <div>
                 <p class="how-title">How it's computed</p>
                 <p>Each morning the day's orders are known and the rest of the week is a forecast. Every dish costs the crew minutes per meal. To cook ahead, the planner takes the time left after the day's own work and cooks dishes that keep for the days the forecast says will run over, as close to that day as each dish allows. It works within the blast chiller's 75 pans a day and the racks in the walk-in. Chilled food goes out oldest first and is thrown out once it passes its keeping time.</p>
-                <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes.</p>
+                <p>The tiles show the middle week of 400 simulated weeks, each with orders scattered around the forecast by the forecast error. The racks and cooks act out the computed hours: one pan on a rack is 72 crew-minutes. The quiet-day-to-busy-day slider keeps the week's 4,630 meals and moves every day toward the average or further from it.</p>
                   <p>The plan map runs all 240 plans over the same 400 weeks: two, three or four cooks, cooking on the day or ahead, one to five racks, and any of the three swaps. Crew-hours are every shift plus a middle week's overtime; meals late are the count one week in ten reaches.</p>
               </div>
               <div>
