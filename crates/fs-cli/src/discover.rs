@@ -31,8 +31,10 @@ const MAX_ITEMS: usize = 64;
 const NO_CLAIM: &str = "declared scalar data/model coverage only; no specimen inference, solver initialization, trajectory prediction or physical validation";
 
 /// Discover through canonical pack files and an explicit executable registry.
-/// The command-line binary supplies an empty registry; embedders may supply
-/// their actual factories. The request and packs are read with fixed byte caps,
+/// The command-line binary supplies the native version-1 hyperelastic
+/// factories (`fs_material::hyper::cards::register_hyperelastic_laws`);
+/// embedders may supply their actual factories. Any other law keeps its
+/// `UnknownLaw` gap. The request and packs are read with fixed byte caps,
 /// then ingested transactionally into a temporary in-memory store. No input
 /// file or persistent catalog is modified. A successfully produced gap report
 /// exits zero even when no candidate supplies the complete requested bundle.

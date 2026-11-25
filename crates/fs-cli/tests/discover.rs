@@ -1,5 +1,5 @@
 //! G0/G3 CLI discovery checks with real canonical packs and FrankenSQLite.
-//! Authored density values below are synthetic software fixtures.
+//! Authored density and model values below are synthetic software fixtures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
-    ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+    ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
+    MODEL_PACK_TARGET_BASIS, MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget,
+    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel, ValidityBoundSide,
 };
 use fs_qty::Dims;
 use fs_qty::semantic::{QuantityKind, QuantitySpec, SemanticType, ValueForm};
@@ -335,4 +337,120 @@ fn g0_discover_preserves_model_requirements_and_refuses_malformed_pins() {
             .stderr
             .contains("pin: expected a 64-digit content hash")
     );
+}
+
+/// A version-1 neo-Hookean parameter block under `law`, valid on 200-400 K,
+/// as fs-couple's registered hyperelastic traction fixture authors it.
+fn model(law: &str, mu_pa: f64) -> ConstitutiveModelCard {
+    let source = hash_bytes(law.as_bytes());
+    let pa = Dims([-1, 1, -2, 0, 0, 0]);
+    let parameter = |value, dims| LawParameter { value, dims };
+    ConstitutiveModelCard {
+        law: LawId(law.into()),
+        law_version: 1,
+        parameters: [
+            ("mu".into(), parameter(mu_pa, pa)),
+            ("lambda".into(), parameter(0.0, pa)),
+            ("stretch_limit".into(), parameter(5.0, Dims::NONE)),
+        ]
+        .into(),
+        state_schema_version: 1,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: ValidityDomain::unconstrained().with("temperature", 200.0, 400.0),
+        sources: vec![source],
+        provenance: Provenance {
+            source: "synthetic CLI model".into(),
+            license: "CC0-1.0".into(),
+            artifact: Some(source),
+        },
+    }
+}
+
+/// The models with one SI normalization receipt per parameter and per
+/// temperature bound, as fs-matdb-store's discovery battery records them.
+fn model_pack(id: &str, models: Vec<ConstitutiveModelCard>) -> NormalizedModelPack {
+    let source = hash_bytes(id.as_bytes());
+    let receipt = |target, dims, basis: &str| {
+        ModelNormalizationReceipt::new(
+            target,
+            source,
+            dims,
+            1.0,
+            0.0,
+            basis,
+            MODEL_PACK_TARGET_BASIS,
+            None,
+            None,
+        )
+    };
+    let mut receipts = Vec::new();
+    for card in &models {
+        let model = card.content_hash();
+        for (parameter, value) in &card.parameters {
+            let target = ModelNormalizationTarget::Parameter {
+                model,
+                parameter: parameter.clone(),
+            };
+            receipts.push(receipt(target, value.dims, "synthetic SI"));
+        }
+        for side in [ValidityBoundSide::Lower, ValidityBoundSide::Upper] {
+            let target = ModelNormalizationTarget::ValidityBound {
+                model,
+                axis: "temperature".into(),
+                side,
+            };
+            receipts.push(receipt(target, Dims([0, 0, 0, 1, 0, 0]), "K"));
+        }
+    }
+    NormalizedModelPack::new(
+        id,
+        "synthetic-discovery-v1",
+        source,
+        "CC0-1.0",
+        models,
+        receipts,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g0_discover_binary_supports_registered_hyperelastic_laws_and_keeps_other_gaps() {
+    let dir = scratch();
+    let paths = [dir.join("models.pack")];
+    let density = pack("elastomer", false);
+    let neo_hookean = model("neo-hookean-log", 6e5);
+    let models = model_pack(
+        "elastomer-models",
+        vec![neo_hookean.clone(), model("unregistered-law", 3e5)],
+    );
+    let card = NormalizedMaterialCardPack::new_with_models(
+        density.card().id().clone(),
+        density.claims_pack().clone(),
+        models,
+    )
+    .unwrap();
+    std::fs::write(&paths[0], card.to_bytes()).unwrap();
+    let both = r#""models":[{"law":"neo-hookean-log","version":1},{"law":"unregistered-law","version":1}]"#;
+    let source = request(LOCAL, DENSITY).replace("\"models\":[]", both);
+    let output = run(&dir, &source, &paths, true);
+    assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}", output.stderr);
+    assert!(output.stdout.contains("\"unknown_models\":[]"));
+    assert!(output.stdout.contains("\"status\":\"partial\""));
+    assert!(output.stdout.contains(&format!(
+        r#"{{"law":"neo-hookean-log","version":1,"status":"supported","detail":"model={} initial_state=ZeroInternalState"}}"#,
+        neo_hookean.content_hash()
+    )));
+    assert!(output.stdout.contains(
+        r#"{"law":"unregistered-law","version":1,"status":"gap","detail":"Implementation {"#
+    ));
+    assert!(
+        output
+            .stdout
+            .contains(r#"UnknownLaw { law: \"unregistered-law\", version: 1 }"#)
+    );
+    let only = source.replace(r#",{"law":"unregistered-law","version":1}"#, "");
+    let output = run(&dir, &only, &paths, true);
+    assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"complete\""));
+    assert!(!output.stdout.contains("\"status\":\"gap\""));
 }

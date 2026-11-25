@@ -3452,9 +3452,12 @@ Request schema `frankensim.discovery.v1` requires these fields:
   at least one property or model is required.
 
 `discover_paths` accepts an actual `LawRegistry` for embedders. The binary
-currently has no registered constitutive graph factories, so associated model
-requirements retain `UnknownLaw` implementation gaps; merely loading model
-data never enables a law. Model membership, source selection, card and node
+registers the native version-1 hyperelastic factories of
+`fs_material::hyper::cards::register_hyperelastic_laws`: `neo-hookean-log`,
+`mooney-rivlin-decoupled`, `gent-decoupled`, `ogden-decoupled` and
+`hgo-dispersed`. A model requirement of any other law or version retains its
+`UnknownLaw` implementation gap; merely loading model data never enables a
+law. Model membership, source selection, card and node
 domains, and factory admission use the existing store implementation. A
 successful report does not initialize state or bind a connected solver graph.
 

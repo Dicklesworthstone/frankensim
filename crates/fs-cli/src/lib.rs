@@ -268,12 +268,11 @@ fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> 
         ),
         Command::Cinematic(arguments) => cinematic::run(arguments, mode == OutputMode::Json),
         Command::Validate(path) => validate_path(&path, mode),
-        Command::Discover { request, packs } => discover_paths(
-            &request,
-            &packs,
-            mode == OutputMode::Json,
-            &fs_material::graph::LawRegistry::new(),
-        ),
+        Command::Discover { request, packs } => {
+            let mut registry = fs_material::graph::LawRegistry::new();
+            fs_material::hyper::cards::register_hyperelastic_laws(&mut registry);
+            discover_paths(&request, &packs, mode == OutputMode::Json, &registry)
+        }
         Command::Import(command) => import_path(&command, mode),
         Command::SolveProject {
             project,
