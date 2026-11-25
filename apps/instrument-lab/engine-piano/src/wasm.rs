@@ -91,11 +91,11 @@ impl Playback {
 fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
     full_scale_pa: f64) -> Config {
     let mut cfg = Config::live(sample_rate);
-    // The browser plays the published RT-0425 string losses and the felt pack's hammers:
-    // Stulov's 88 measured Abel hammers, K u^p + R d(u^p)/dt per hammer with its mass
-    // (Config field docs).
+    // The browser plays the published RT-0425 string losses and the estimated felt card
+    // (crush and Prony relaxation). The felt pack's measured Stulov hammers
+    // (Config::felt_pack_hammers) stay a native option: the owner preferred the estimated
+    // card by ear, in the offline Satie and in the plugin (2026-11-25).
     cfg.rt0425_string_damping = true;
-    cfg.felt_pack_hammers = true;
     // The silent strings move: every partial to 600 Hz of every string not sounding
     // (671 partials; frankensim-ie2zx). The board and mode cap are timed with them.
     cfg.silent_bank_hz = 600.0;

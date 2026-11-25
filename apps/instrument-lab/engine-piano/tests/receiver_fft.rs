@@ -62,8 +62,8 @@ fn full_piano_fft_preserves_pressure_mechanics_and_clone() {
     for (bank_hz, browser_tone) in [(0.0, false), (600.0, false), (600.0, true)] {
         let mut config = Config::live(48_000);
         config.silent_bank_hz = bank_hz;
-        // Match the actual browser's string-loss and measured-hammer choices
-        // as well as the native defaults; preserve both existing comparisons.
+        // The browser's string losses with the measured felt-pack hammers (the browser's
+        // choices until 2026-11-25) as well as the native defaults; preserve both comparisons.
         config.rt0425_string_damping = browser_tone;
         config.felt_pack_hammers = browser_tone;
         config.partitioned_receiver = false;

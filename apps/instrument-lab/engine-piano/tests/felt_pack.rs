@@ -1,4 +1,4 @@
-//! Hammers from the felt pack (`Config::felt_pack_hammers`), which the browser plays:
+//! Hammers from the felt pack (`Config::felt_pack_hammers`), a native option (the browser plays the estimated card):
 //! Stulov's 88 measured Abel hammers instead of RT-0425's per-key K_H and R_H.
 use fs_live_piano::{Config, Description, LivePiano};
 
