@@ -5580,6 +5580,60 @@ Six planted defects each failed at least one of the two graphs:
   source port at half the drive;
 - one in the Component: the graph resistor's heat left out of its receiver.
 
+Two more graphs declare the heat-assembly case and the separate-body
+regression in the same lane, each over two steps of 0.2 s at 10 V.
+
+The heat-assembly graph cools the cell through its authored boundary, 3 W/K
+to 290 K, on a card whose permeability rises 0.0004 per kelvin:
+- the ledger closes, its environment sink giving exactly the boundary's
+  `0.2 · 3 (T - 290)` J of each step;
+- on each interval the cell's `4 dT` is that cooling, the owner's heat and
+  the law's reversible heat, which is not zero (-9.345e-3 and -6.739e-3 J);
+- the winding's stored change is the field's internal energy,
+  `b²/(2 mu) (1 + T mu'/mu)` over the tetrahedra, with the end inductance's
+  `L i²/2`, within 5e-7 J;
+- each interval against the case's own path (`heat_assembly_candidate`, its
+  conductors the law's, bit for bit, and its external heat the boundary's):
+  within 2.022e-10 K, 2.457e-12 A, 7.105e-15 in the circuit state,
+  1.001e-13 Wb and 4.913e-12 J, and the reversible heat within 1.346e-9 J.
+
+The separate-body graph sends the graph resistor's heat to its own body's
+cell through a second heat port. A resistor law gives the resistor from the
+body's card at that port's temperature, resolving the resistivity alone from
+the claim the module's `CellResistor` pins. The second port has no
+tetrahedra, so the conductor law it must carry is never asked. On a fixed and
+a 0.5 %-per-kelvin resistor card:
+- the ledger closes;
+- on each interval, on the kernel's rows and the module's alike, the
+  resistance is `0.7 (1 + alpha (T_r - 300))` at the body's end temperature
+  within 1e-12 ohm, its heat `0.2 i² r` is the body's `4 dT`, and the coil
+  cell's `4 dT` is the strand and eddy heat;
+- each interval against the module's material step
+  (`step_material_candidate`, its resistor the law's at the body's end
+  temperature, bit for bit): within 2.083e-10 K, 1.234e-11 A, 3.553e-15,
+  5.760e-13 Wb and 4.989e-11 J, the fixed card's currents, state, potential
+  and energies to the bit;
+- the responsive body's currents stay below the fixed card's.
+The module's `admit_initial_graph_sources` refuses a circuit whose resistor
+disagrees with its body's thermal state ("accepted graph resistance/source
+does not match its original thermal state"). The kernel has no input that
+could express such a circuit: the law rebinds every graph resistor before
+the solve, so a construction circuit holding the body's card at 301 K steps
+to the original's bits, as the graph asserts.
+The heat-assembly graph's bounds sit 28 to 52 times above its values, the
+separate-body graph's 48 to 56 times.
+
+Five planted defects each failed one of the two graphs:
+- in the separate-body graph's declaration: the body's law answering at
+  300 K whatever its port receives, and the two heat ports swapped;
+- also there, and refused by the Component at construction: the resistor
+  routed to the coil's port, which leaves the body's port nothing ("a heat
+  receiver maps no element");
+- in the Component: the magnetic lane's reversible terms left out of the
+  balance, which fs-system's endpoint-energy check refuses in the
+  heat-assembly graph; and the graph resistors kept at the circuit's values
+  whatever their laws give.
+
 ## Tetrahedral material current closes finite enthalpy
 
 `circuit_enthalpy::conduction::spatial::SpatialConductionThermalNetwork` closes
