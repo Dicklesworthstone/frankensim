@@ -175,7 +175,12 @@ function initHowLinks(): void {
   };
   document.querySelectorAll<HTMLAnchorElement>('a[href^="#"]').forEach((a) => a.addEventListener("click", () => open(a.hash.slice(1))));
   const fromAddress = () => {
-    if (location.hash) open(decodeURIComponent(location.hash.slice(1)));
+    // A hand-edited address can carry a broken escape: it opens nothing rather than stopping the page's start.
+    try {
+      if (location.hash) open(decodeURIComponent(location.hash.slice(1)));
+    } catch {
+      /* not an id on this page */
+    }
   };
   window.addEventListener("hashchange", fromAddress);
   fromAddress();

@@ -1398,6 +1398,7 @@ a:hover > .joint,
 }
 .fig-foot.how summary::after {
   content: "";
+  display: inline-block;
   width: 0.4rem;
   height: 0.4rem;
   border-right: 1.5px solid var(--chapter);
