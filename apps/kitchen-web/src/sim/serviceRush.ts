@@ -19,6 +19,7 @@
 import { rng, spread, type Spread } from "./commissaryWeek";
 
 export type StationKey = "fryer" | "griddle" | "combi";
+export type PanLook = "braise" | "mac" | "chicken" | "tenders";
 export type Mode = "order" | "hold";
 
 export interface RushDish {
@@ -38,23 +39,23 @@ export interface RushDish {
   holdMin: number;
   /** Portions in one half pan on a cabinet shelf. */
   perPan: number;
-  /** Hotel-pan food the 3D view draws (smallwares food index). */
-  food: 0 | 1 | 2 | 3;
+  /** What the 3D view's cabinet pans show of it. */
+  look: PanLook;
 }
 
 export const RUSH_MENU: readonly RushDish[] = [
-  { key: "tenders", name: "Chicken tenders", station: "fryer", share: 0.28, batch: 6, cookMin: 5, loadBase: 0.3, loadPer: 0.05, holdMin: 20, perPan: 12, food: 0 },
-  { key: "burger", name: "Smash burger", station: "griddle", share: 0.24, batch: 8, cookMin: 4, loadBase: 0.2, loadPer: 0.25, holdMin: 8, perPan: 8, food: 0 },
-  { key: "thighs", name: "Grilled chicken thighs", station: "griddle", share: 0.16, batch: 16, cookMin: 8, loadBase: 0.3, loadPer: 0.06, holdMin: 45, perPan: 12, food: 2 },
-  { key: "mac", name: "Mac and cheese", station: "combi", share: 0.14, batch: 24, cookMin: 9, loadBase: 0.4, loadPer: 0.05, holdMin: 60, perPan: 12, food: 1 },
-  { key: "beef", name: "Braised beef, reheated", station: "combi", share: 0.18, batch: 24, cookMin: 7, loadBase: 0.4, loadPer: 0.05, holdMin: 120, perPan: 12, food: 0 },
+  { key: "tenders", name: "Chicken tenders", station: "fryer", share: 0.28, batch: 6, cookMin: 5, loadBase: 0.3, loadPer: 0.05, holdMin: 20, perPan: 12, look: "tenders" },
+  { key: "burger", name: "Smash burger", station: "griddle", share: 0.24, batch: 8, cookMin: 4, loadBase: 0.2, loadPer: 0.25, holdMin: 8, perPan: 8, look: "braise" },
+  { key: "thighs", name: "Grilled chicken thighs", station: "griddle", share: 0.16, batch: 16, cookMin: 8, loadBase: 0.3, loadPer: 0.06, holdMin: 45, perPan: 12, look: "chicken" },
+  { key: "mac", name: "Mac and cheese", station: "combi", share: 0.14, batch: 24, cookMin: 9, loadBase: 0.4, loadPer: 0.05, holdMin: 60, perPan: 12, look: "mac" },
+  { key: "beef", name: "Braised beef, reheated", station: "combi", share: 0.18, batch: 24, cookMin: 7, loadBase: 0.4, loadPer: 0.05, holdMin: 120, perPan: 12, look: "braise" },
 ];
 
 /**
  * The menu re-engineered for space: the thighs roast on sheet pans in the combi instead of grilling, taking the
  * griddle's second dish to the station with room in the rush.
  */
-export const RUSH_SWAP: RushDish = { key: "thighs", name: "Roast chicken thighs", station: "combi", share: 0.16, batch: 24, cookMin: 12, loadBase: 0.4, loadPer: 0.04, holdMin: 45, perPan: 12, food: 2 };
+export const RUSH_SWAP: RushDish = { key: "thighs", name: "Roast chicken thighs", station: "combi", share: 0.16, batch: 24, cookMin: 12, loadBase: 0.4, loadPer: 0.04, holdMin: 45, perPan: 12, look: "chicken" };
 export type RushMenu = "written" | "balanced";
 export const rushMenu = (m: RushMenu): RushDish[] => RUSH_MENU.map((d) => (m === "balanced" && d.key === RUSH_SWAP.key ? RUSH_SWAP : d));
 
@@ -235,7 +236,6 @@ export function simulateService(settings: RushSettings, seed: number): DayRun {
   const addBusy = (c: number, a: number, b: number, into = busy) => {
     for (let m = Math.floor(a); m < b && m < minutes; m++) into[c]![m]! += Math.min(b, m + 1) - Math.max(a, m);
   };
-  /** Portions of a dish on the way: cooking for it, not yet promised to a guest waiting. */
   /** Portions cooking, per dish: kept as batches go in and come out. */
   const ovenN = menu.map(() => 0);
   const inOven = (d: number) => ovenN[d]!;
@@ -473,6 +473,8 @@ export interface RushRun {
   prepLoad: Spread;
   rushLoad: Spread;
   waste: Spread;
+  /** Portions thrown out per dish, on average over the days. */
+  wasteMean: number[];
   /** The day the 3D view and the chart show: the median day by orders. Its orders do not depend on the plan, the
    *  menu or the crew, so every setting is shown on the same day. */
   shown: DayRun;
@@ -493,6 +495,7 @@ export function runRush(settings: RushSettings, days = 200, seed = 20261124): Ru
     prepLoad: spread(runs.map((d) => d.prepLoad)),
     rushLoad: spread(runs.map((d) => d.rushLoad)),
     waste: spread(runs.map((d) => d.wasteTotal)),
+    wasteMean: runs[0]!.wasted.map((_, i) => runs.reduce((a, d) => a + d.wasted[i]!, 0) / days),
     shown,
   };
 }

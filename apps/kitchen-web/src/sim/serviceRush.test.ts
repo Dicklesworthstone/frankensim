@@ -81,8 +81,7 @@ describe("the levers, across many days", () => {
   });
 
   test("a less certain forecast throws out more held food", () => {
-    const sure = runRush(held, 80);
     const unsure = runRush({ ...held, sigma: 0.3 }, 80);
-    expect(unsure.waste.p90).toBeGreaterThan(sure.waste.p90);
+    expect(unsure.waste.p90).toBeGreaterThan(hold.waste.p90);
   });
 });

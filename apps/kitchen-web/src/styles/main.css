@@ -2805,12 +2805,8 @@ button.wk-dish[aria-pressed="true"] {
 .rs-svg .ya {
   text-anchor: end;
 }
-.rs-svg .xa,
-.rs-svg .pk {
+.rs-svg .xa {
   text-anchor: middle;
-}
-.rs-svg .pk {
-  fill: var(--muted);
 }
 .rs-svg .g {
   stroke: rgb(255 255 255 / 0.07);

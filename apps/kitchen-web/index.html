@@ -970,7 +970,7 @@
               <div class="stage rs-stage" data-rush-stage>
                 <canvas data-rush-canvas tabindex="0" aria-label="A fast-casual hot line from the guests' side of the pass: a holding cabinet, a fryer, a griddle and a combi oven, three cooks, and a rail of order tickets over the pass that fills and empties through a lunch service. Drag to look around."></canvas>
                 <div class="wk-hud rs-hud" aria-hidden="true"><b data-rs-hud-clock>10:00</b><span data-rs-hud-tickets>Rail clear</span><em data-rs-hud-note>Doors at 11:00</em></div>
-                <p class="wk-legend rs-legend" aria-hidden="true"><span class="new">New ticket</span><span class="amber">Waiting 8 min</span><span class="ot">Waiting 15 min</span><span class="unit">1 pan = 12 portions</span></p>
+                <p class="wk-legend rs-legend" aria-hidden="true"><span class="new">New ticket</span><span class="amber">Waiting 8 min</span><span class="ot">Waiting 15 min</span><span class="unit">1 pan = 12 portions (8 burgers)</span></p>
               </div>
               <div class="lab rs-lab">
                 <div class="lab-view">
@@ -1021,7 +1021,7 @@
                 <p>The tiles are the middle of 120 simulated days. The line plays one of them: the tickets are the orders waiting, the pans are the portions held, and the cooks act out each ten minutes of computed work.</p>
               </div>
               <div>
-                <code class="formula">wait = plated − ordered<br />short_dish(t) = forecast orders in [t, done + 0.7 · hold] − held − cooking</code>
+                <code class="formula">wait = plated − ordered<br />short_dish(t) = forecast orders in [t, done + 0.7 · hold] − held − cooking + waiting</code>
                 <p class="model">Model: <code>runRush</code>. Batch sizes, cook and hands-on minutes and holding times are set for a fast-casual lunch line.</p>
               </div>
             </figcaption>

@@ -8,13 +8,16 @@
  *   - the holding cabinet's rails carry the held portions, a 2.5-inch half pan per 12 (8 for burgers);
  *   - the fryer's baskets drop and the griddle and the combi run by the batches each has cooking;
  *   - the bags on the pass are the orders handed out in the last two minutes;
- *   - the three cooks work their stations and plate at the pass for the minutes the model has them doing each in
- *     every ten-minute stretch, and stand when it has them idle: a kinematic illustration (people.ts Routines).
+ *   - the three cooks load their stations and plate at each station's landing for the minutes the model has them doing
+ *     each in every ten-minute stretch, and step back when it has them idle: a kinematic illustration (people.ts
+ *     Routines).
  */
 import * as THREE from "three";
-import { KEEPERS, RUSH_MENU, SERVICE, modesFor, runRush, rushMenu, type DayRun, type Mode, type RushDay, type RushRun, type RushSettings } from "../sim/serviceRush";
+import { KEEPERS, RUSH_MENU, SERVICE, modesFor, runRush, rushMenu, type DayRun, type Mode, type PanLook, type RushDay, type RushRun, type RushSettings } from "../sim/serviceRush";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Model } from "./models/all";
+import { T, hotelPan as tilePan } from "./models/cold";
+import { Shop } from "./models/shop";
 import { palette } from "./models/materials";
 import { Routine, makeStaff, type RoutineStep, type Staff, type WorkKind } from "./models/people";
 import { studioEnvironment, studioLights } from "./models/stage";
@@ -115,15 +118,26 @@ function bagTemplate(): THREE.Group {
   return g;
 }
 
+/** The goods-atlas food each pan look is drawn with (the braise is the hotel pan's own, with its chunks). */
+const LOOK_TILE: Record<Exclude<PanLook, "braise">, number> = { mac: T.mac, chicken: T.chicken, tenders: T.crust };
+const PAN_LOOKS: readonly PanLook[] = ["braise", "mac", "chicken", "tenders"];
+
 /** A 2.5-inch half pan of a food at a fill, its base centre at the origin, its length along z (as a cabinet holds it). */
-function panTemplate(food: number, fill: number): THREE.Group {
-  const m = buildFixture(PAN.id, PAN, 1);
-  m.hooks.set?.("food", food);
-  m.hooks.set?.("fill", fill);
-  m.group.position.set(-PAN.w / 2, 0, PAN.d / 2);
+function panTemplate(look: PanLook, fill: number): THREE.Group {
   const turn = new THREE.Group();
   turn.rotation.y = Math.PI / 2;
-  turn.add(m.group);
+  if (look === "braise") {
+    const m = buildFixture(PAN.id, PAN, 1);
+    m.hooks.set?.("food", 0);
+    m.hooks.set?.("fill", fill);
+    m.group.position.set(-PAN.w / 2, 0, PAN.d / 2);
+    turn.add(m.group);
+  } else {
+    // The cold chain's steam-table pan (centred on its base), its food from the goods atlas.
+    const s = new Shop(2, `NSF-HOTEL-PAN-HALF-${look.toUpperCase()}`);
+    tilePan(s, PAN.w, PAN.d, PAN.h, LOOK_TILE[look], fill, false, 17 + PAN_LOOKS.indexOf(look));
+    turn.add(s.build(true).group);
+  }
   const g = new THREE.Group();
   g.add(turn);
   return g;
@@ -276,11 +290,11 @@ export function mountRushLab(root: HTMLElement): void {
   tickets.setColorAt(0, COLOR.paper);
   scene.add(tickets);
 
-  /* The cabinet's pans: per food, three fills (full, part, last scrapings). */
+  /* The cabinet's pans: per look, three fills (full, part, last scrapings). */
   const panGroup = new THREE.Group();
   scene.add(panGroup);
   const FILLS = [0.85, 0.55, 0.28];
-  const panSets = [0, 1, 2].map((food) => FILLS.map((f) => new Instances(panTemplate(food, f), SERVICE.cabinetPans, panGroup)));
+  const panSets = new Map(PAN_LOOKS.map((look) => [look, FILLS.map((f) => new Instances(panTemplate(look, f), SERVICE.cabinetPans, panGroup))] as const));
   // Rails as the cabinet builds them (models/ovens.ts holdingCabinet), less the lowest, over its water pan.
   const cavY0 = 0.17 + 0.065;
   const rails: number[] = [];
@@ -510,7 +524,8 @@ export function mountRushLab(root: HTMLElement): void {
 
   function renderStatus(run: RushRun): void {
     if (!statusEl) return;
-    const held = RUSH_MENU.filter((d) => settings.modes[d.key] === "hold");
+    const menu = rushMenu(settings.menu ?? "written");
+    const held = menu.filter((d) => settings.modes[d.key] === "hold");
     const p90 = run.waitP90.p50;
     // The bottleneck: the cook busiest over the shown day's rush hour.
     const names = ["fryer", "griddle", "combi"];
@@ -530,7 +545,13 @@ export function mountRushLab(root: HTMLElement): void {
     if (!held.length) text = `Nothing gets cooked before 11:00, then the line falls behind: one guest in ten waits ${fmtMin(p90)}. Hold the dishes that keep.`;
     else if (p90 > 12) text = `The cabinet covers ${held.length === 1 ? held[0]!.name.toLowerCase() : `${held.length} dishes`}, but the ${names[hot]} still holds the line up: one guest in ten waits ${fmtMin(p90)}. ${hint}`;
     else text = `One guest in ten waits ${fmtMin(p90)}, for ${Math.round(run.waste.p50)} portions thrown out.`;
-    if (short.length) text += ` ${short.map((d) => d.name).join(" and ")} ${short.length > 1 ? "don't" : "doesn't"} hold long enough: most of the waste is ${short.length > 1 ? "theirs" : "its"}.`;
+    // Dishes that keep under half an hour: their share of what is thrown out, when it is most of it.
+    const all = run.wasteMean.reduce((a, b) => a + b, 0);
+    const theirs = menu.reduce((a, d, i) => a + (short.includes(d) ? run.wasteMean[i]! : 0), 0);
+    if (short.length && all >= 1 && theirs / all >= 0.5) {
+      const who = short.map((d, i) => (i ? d.name.toLowerCase() : d.name)).join(" and ");
+      text += ` ${who} ${short.length > 1 ? "keep" : "keeps"} under half an hour: ${Math.round((100 * theirs) / all)}% of what's thrown out.`;
+    }
     statusEl.textContent = text.trim();
     statusEl.dataset.state = p90 <= 12 ? "ok" : p90 <= 25 ? "warn" : "danger";
   }
@@ -686,7 +707,7 @@ export function mountRushLab(root: HTMLElement): void {
       if (tickets.instanceColor) tickets.instanceColor.needsUpdate = true;
 
       // The cabinet: each held dish's portions as half pans, full ones first.
-      for (const set of panSets) for (const s of set) s.begin();
+      for (const set of panSets.values()) for (const s of set) s.begin();
       let spot = 0;
       let heldNow = 0;
       const menu = rushMenu(settings.menu ?? "written");
@@ -698,11 +719,11 @@ export function mountRushLab(root: HTMLElement): void {
           const f = Math.min(1, left / dish.perPan);
           const fi = f > 0.7 ? 0 : f > 0.4 ? 1 : 2;
           M.compose(panSpots[spot++]!, Q.identity(), ONE);
-          panSets[dish.food === 3 ? 0 : Math.min(2, dish.food)]![fi]!.push(M);
+          panSets.get(dish.look)![fi]!.push(M);
           left -= dish.perPan;
         }
       });
-      for (const set of panSets) for (const s of set) s.end();
+      for (const set of panSets.values()) for (const s of set) s.end();
 
       // Bags out on the pass: orders handed over in the last two minutes.
       bags.begin();
