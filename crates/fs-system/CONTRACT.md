@@ -109,14 +109,15 @@ constructors:
   `thermal-contact` between two cells on a `thermal-contact-resistance` or
   `thermal-conductance` card covers a whole box face of each at its `:area`:
   `G = A / (d_a/k_a + d_b/k_b + R'')`, `d` half the side normal to that face
-  and each `k` the card's held `thermal_conductivity` (explicit scheme only;
-  no third body). The kernel's lumped contact is the card-only `d -> 0` form.
+  and each `k` the card's held `thermal_conductivity`; a third body is
+  refused. The kernel's lumped contact is the card-only `d -> 0` form.
   A cell outside
   the product law's `T` band is refused at lowering or stops the run; nothing
   clamps. The time plan's `scheme` is the timeline's; the mechanical owners
   run beside any scheme. Under `backward-euler` or `sdirk2` the cells step on
   fs-thermal's implicit conduction graph, with the step, tolerance and work
-  limits above and the graph's other controls at their defaults. Each law
+  limits above and the graph's other controls at their defaults. A contact
+  is a graph link with the same `d` and `R''`. Each law
   gives its implicit form; the product law's needs its `T` band and the
   card's `thermal_conductivity`, read at the declared query point and held
   for the run (`thermal_conductivity.held`). A law without one, and a

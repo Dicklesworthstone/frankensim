@@ -705,13 +705,15 @@ fn product_law_cells_step_implicitly_on_the_cards_conductivity_held_for_the_run(
 
 #[test]
 fn a_contact_between_cells_is_its_cards_resistance_in_series_with_their_bulk() {
-    use TimeScheme::{BackwardEuler, Explicit};
+    use TimeScheme::{BackwardEuler, Explicit, Sdirk2};
     let cell = |k: Option<f64>| {
         let mut values = vec![("density", 2.0, DENSITY)];
         values.push(("specific_heat_capacity", 500.0, SPECIFIC_HEAT));
         values.extend(k.map(|k| ("thermal_conductivity", k, Dims([1, 1, -3, -1, 0, 0]))));
         let datum = [("datum_temperature", 0.0, TEMPERATURE)];
-        material(&values, vec![model(SENSIBLE_HEAT_LAW, &datum)])
+        let mut law = model(SENSIBLE_HEAT_LAW, &datum);
+        law.validity = ValidityDomain::unconstrained().with("T", 250.0, 400.0);
+        material(&values, vec![law])
     };
     let lower = |draft: &DraftAssembly, cards: &CardStore| {
         let mut registry = LoweringRegistry::with_kernel_defaults();
@@ -752,7 +754,6 @@ fn a_contact_between_cells_is_its_cards_resistance_in_series_with_their_bulk() {
         (None, 1.0, Explicit, None, "conductivity of `cell0`"),
         (k, 0.5, Explicit, None, "covers a whole box face"),
         (k, 1.0, Explicit, Some(film), "third body"),
-        (k, 1.0, BackwardEuler, None, "no implicit form yet"),
     ] {
         let why = joined(k_a, area, scheme, third_body).err().unwrap();
         assert!(why.to_string().contains(want), "{why}");
@@ -783,6 +784,33 @@ fn a_contact_between_cells_is_its_cards_resistance_in_series_with_their_bulk() {
         (f64::from_bits(t0) - f64::from_bits(t1)).abs()
     });
     assert!(gap[0] < gap[1], "{gap:?} K");
+    // Under backward-euler and sdirk2 the joint is a graph link. The cells'
+    // heat does not depend on their temperatures, so on each backward-euler
+    // step their gap D with the link and D' without it obey
+    // D+ (1 + 2 G dt / C) - D = D'+ - D', with dt = 0.125 s and C = 1000 J/K.
+    let gaps = |run: &mut LoweredSystem| -> [f64; 5] {
+        let at = run.node_map["thermal-timeline"];
+        [0.0, 0.125, 0.25, 0.375, 0.5].map(|t| {
+            run_counting(&mut run.system, t);
+            let [t0, t1] = temperature_bits(&run.system, at).map(f64::from_bits);
+            t0 - t1
+        })
+    };
+    let free = gaps(&mut lower(&under(&draft, BackwardEuler, true), &cards).unwrap());
+    let z = 2.0 * g * 0.125 / 1000.0;
+    for scheme in [BackwardEuler, Sdirk2] {
+        let mut implicit = joined(k, 1.0, scheme, None).unwrap();
+        let d = gaps(&mut implicit);
+        for (with, without) in d.windows(2).zip(free.windows(2)) {
+            let defect = with[1] * (1.0 + z) - with[0] - (without[1] - without[0]);
+            let held = scheme != BackwardEuler || defect.abs() <= 1e-11;
+            assert!(held, "{defect:e} K");
+        }
+        let narrower = d[4].abs() < free[4].abs();
+        assert!(narrower, "{scheme:?}: the link carries heat: {d:?} K");
+        let residual = implicit.system.ledger().energy_residual_j();
+        assert!(residual.abs() <= 1e-11, "{scheme:?}: {residual:e} J");
+    }
 }
 
 #[test]

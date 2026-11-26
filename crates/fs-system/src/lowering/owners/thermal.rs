@@ -40,7 +40,7 @@ use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
     ImplicitConductionLinearControls, ImplicitConductionState,
 };
-use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductivityLaw};
+use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductiveLink, ConductivityLaw};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
@@ -372,7 +372,7 @@ fn lower(
     let ambient_k = input.environment.base.ambient_temperature.value;
     let mut out = LoweredGroupOutput::default();
     let boundaries = boundaries(ctx, &mut out)?;
-    let contacts = contacts(ctx, &mut out)?;
+    let (contacts, conductive) = contacts(ctx, &mut out)?;
     let sources = sources(ctx, &mut out)?;
     let first = &input.parts[ctx.selection.parts[0]];
     let budget = &first.fidelity.error_budget;
@@ -447,6 +447,7 @@ fn lower(
     // An implicit timeline always has its `environment` port.
     let environment =
         scheme != TimeScheme::Explicit || !boundaries.is_empty() || !sources.is_empty();
+    let implicit = (implicit, conductive);
     let timeline = timeline(&simulation, &implicit, environment, config, work, scheme)?;
     let start = timeline.start(&simulation).map_err(|err| fail(&err))?;
     let node = graph.add(TIMELINE, Some(first.entity), timeline, start)?;
@@ -468,13 +469,19 @@ fn lower(
     Ok(out)
 }
 
+/// The cells' laws' implicit forms and the contacts' links.
+type ImplicitForms = (
+    Vec<(MaterialId, Rc<dyn ImplicitCaloricLaw>)>,
+    Vec<ConductiveLink>,
+);
+
 /// The cells' timeline under the plan's `scheme`. An implicit one steps on
-/// fs-thermal's implicit conduction graph of the laws' implicit forms,
-/// without links, with the plan's step, the cells' absolute tolerance and
-/// work, and the graph's other controls at their defaults.
+/// fs-thermal's implicit conduction graph of the laws' implicit forms and
+/// the contacts' links, with the plan's step, the cells' absolute tolerance
+/// and work, and the graph's other controls at their defaults.
 fn timeline(
     simulation: &DepositionSimulation<'static>,
-    laws: &[(MaterialId, Rc<dyn ImplicitCaloricLaw>)],
+    (laws, links): &ImplicitForms,
     environment: bool,
     config: StepConfig,
     work: usize,
@@ -496,7 +503,7 @@ fn timeline(
         stepping.push((*id, Rc::clone(law) as Rc<dyn ImplicitConductionLaw>));
     }
     let ok = || Ok(());
-    let observer = ConductionObserver::new_shared(simulation, &conducting, &[], &[], ok);
+    let observer = ConductionObserver::new_shared(simulation, &conducting, links, &[], ok);
     let observer = observer.map_err(|err| fail(&err))?;
     let linear = ImplicitConductionLinearControls::default();
     let graph = ImplicitConductionGraph::new_shared(simulation, &observer, &stepping, linear, ok);
@@ -568,12 +575,13 @@ fn boundaries(
 /// Each contact between two cells, as a link from the start: the card's
 /// `R''` at `:area` in series with each cell's bulk conduction from its centre
 /// to the contact face, `G = A / (d_a/k_a + d_b/k_b + R'')`, each `k` held.
+/// An implicit graph gets the same `d` and `R''` as a `ConductiveLink`.
 fn contacts(
     ctx: &GroupLoweringContext<'_>,
     out: &mut LoweredGroupOutput,
-) -> Result<Vec<TimedEvent>, LoweringError> {
+) -> Result<(Vec<TimedEvent>, Vec<ConductiveLink>), LoweringError> {
     let input = ctx.draft.input();
-    let mut links = Vec::new();
+    let (mut links, mut conductive) = (Vec::new(), Vec::new());
     for &index in &ctx.selection.interfaces {
         let iface = &input.interfaces[index];
         let card = CONTACT_FAMILIES.map(|family| family_entry(ctx.cards, iface, family));
@@ -581,9 +589,6 @@ fn contacts(
             continue;
         };
         let mut it = Scoped::new("interface", &iface.name);
-        if input.time_plan.scheme != TimeScheme::Explicit {
-            return Err(it.invalid("a thermal contact has no implicit form yet"));
-        }
         let DraftInterfaceKind::ThermalContact { third_body, .. } = &iface.kind else {
             continue;
         };
@@ -645,9 +650,14 @@ fn contacts(
             time_s: 0.0,
             event: Event::Contact(link),
         });
+        conductive.push(ConductiveLink {
+            link_id: index as u64,
+            half_distances_m: [d_a, d_b],
+            contact_resistance_m2_k_w: r,
+        });
         out.interfaces.push(it.interface_output(Some(TIMELINE)));
     }
-    Ok(links)
+    Ok((links, conductive))
 }
 
 /// Half the side of a box of sides `sides` normal to its face of area `area`.
