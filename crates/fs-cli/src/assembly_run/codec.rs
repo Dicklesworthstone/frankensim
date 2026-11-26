@@ -266,6 +266,34 @@ fn parse_query_pairs(
         .collect()
 }
 
+/// A relaxation bushing's branch memory, `:memory (displacement-<k>-<axis> value ...)`: each
+/// pair is the state key `displacement_<k>_<axis>`, in m on x, y and z and in rad on rx, ry and rz.
+fn parse_memory(n: &Node, scope: &str) -> Result<Vec<(ParameterKey, QtyAny)>, SolveRefusal> {
+    let pairs = as_list(n, "memory")?;
+    if !pairs.len().is_multiple_of(2) {
+        return Err(err(format!("{scope}: :memory pairs keys with values")));
+    }
+    let mut state: Vec<(ParameterKey, QtyAny)> = Vec::new();
+    for pair in pairs.as_chunks::<2>().0 {
+        let key = as_sym(&pair[0], "memory key")?;
+        let rest = key.strip_prefix("displacement-");
+        let split = rest.and_then(|rest| rest.split_once('-'));
+        let branch = |k: &str| k.parse::<usize>().is_ok_and(|n| n.to_string() == k);
+        let dims = match split {
+            Some((k, "x" | "y" | "z")) if branch(k) => LENGTH,
+            Some((k, "rx" | "ry" | "rz")) if branch(k) => Dims::NONE,
+            _ => return Err(err(format!("{scope}: no :memory key `{key}`"))),
+        };
+        let name = key.replace('-', "_");
+        if state.iter().any(|(have, _)| have.name == name) {
+            return Err(err(format!("{scope} repeats `{key}` in :memory")));
+        }
+        let value = as_qty_d(&pair[1], dims, key)?;
+        state.push((ParameterKey::new(name, dims), value));
+    }
+    Ok(state)
+}
+
 fn parse_fidelity(n: &Node, scope: &str) -> Result<FidelityRung, SolveRefusal> {
     match &n.kind {
         NodeKind::Symbol(s) if s == "lumped" => Ok(FidelityRung::Lumped),
@@ -685,6 +713,7 @@ pub(crate) fn admit_assembly_source(
         .map_err(|e| err(format!("catalog error: {e}")))?;
     let mut entity_names = BTreeMap::from([(root, name.clone())]);
     let (mut by_name, mut families) = (BTreeMap::new(), BTreeMap::new());
+    let mut by_interface = BTreeMap::new();
     let (mut parts, mut joints, mut interfaces, mut sources, mut probes, mut requirements) = (
         Vec::new(),
         Vec::new(),
@@ -841,6 +870,7 @@ pub(crate) fn admit_assembly_source(
                         "physics",
                         "fidelity",
                         "initial",
+                        "max-work-units",
                     ],
                     &scope,
                 )?;
@@ -905,6 +935,13 @@ pub(crate) fn admit_assembly_source(
                     });
                 }
                 let fidelity = parse_fidelity(req(&kw, "fidelity", &scope)?, &scope)?;
+                // The work a part's owner may do in a step: a network's dense preparation.
+                let positive = ":max-work-units is a positive integer";
+                let work = match kw.get("max-work-units").map(|n| &n.kind) {
+                    None => 1_000_000,
+                    Some(NodeKind::Int(n)) if *n > 0 => n.unsigned_abs(),
+                    Some(_) => return Err(err(format!("{scope}: {positive}"))),
+                };
                 let initial = kw
                     .get("initial")
                     .map(|n| parse_initial(n, &scope))
@@ -921,7 +958,7 @@ pub(crate) fn admit_assembly_source(
                         error_budget: FidelityErrorBudget {
                             relative_tol: 1.0e-5,
                             absolute_tol: QtyAny::dimensionless(1.0e-12),
-                            max_work_units: Some(1_000_000),
+                            max_work_units: Some(work),
                         },
                     },
                     uncertainty: Vec::new(),
@@ -998,6 +1035,7 @@ pub(crate) fn admit_assembly_source(
                         "fluid",
                         "gap",
                         "fluid-at",
+                        "memory",
                     ],
                     &scope,
                 )?;
@@ -1021,6 +1059,7 @@ pub(crate) fn admit_assembly_source(
                     ))
                     .map_err(|e| err(format!("{scope}: {e}")))?;
                 entity_names.insert(entity, iname.clone());
+                by_interface.insert(iname.clone(), entity);
                 let mut card = || -> Result<ContentHash, SolveRefusal> {
                     let card = resolve_card(
                         packs,
@@ -1058,6 +1097,10 @@ pub(crate) fn admit_assembly_source(
                     let fraction = QtyAny::dimensionless(as_f64(n, "fraction")?);
                     state.push((ParameterKey::new("fraction", Dims::NONE), fraction));
                 }
+                if let Some(n) = kw.get("memory") {
+                    state.extend(parse_memory(n, &scope)?);
+                }
+                let bare = "a temperature source takes no card or state";
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
                     // A heat route is bookkeeping, not a material interface: no card.
                     "heat-route" if kw.contains_key("card") || kw.contains_key("family") => {
@@ -1082,8 +1125,17 @@ pub(crate) fn admit_assembly_source(
                         state,
                     },
                     "glue" => DraftInterfaceKind::Glue { law_card: card()? },
+                    // Its bushing joins the body `:a`; it reads the cell `:b`.
+                    "temperature-source" if kw.len() > 3 => {
+                        return Err(err(format!("{scope}: {bare}")));
+                    }
+                    "temperature-source" => DraftInterfaceKind::TemperatureSource,
                     o => return Err(err(format!("{scope} unsupported kind `{o}`"))),
                 };
+                let contact = matches!(kind, DraftInterfaceKind::MechanicalContact { .. });
+                if kw.contains_key("memory") && !contact {
+                    return Err(err(format!("{scope}: :memory needs a mechanical contact")));
+                }
                 interfaces.push(DraftInterfaceDecl {
                     name: iname,
                     entity,
@@ -1099,10 +1151,16 @@ pub(crate) fn admit_assembly_source(
                 )?
                 .to_string();
                 let scope = format!("source `{sname}`");
-                let kw = kwargs(&items[2..], &["part", "port", "history"], &scope)?;
-                let entity = *by_name
-                    .get(as_str(req(&kw, "part", &scope)?, "part")?)
-                    .ok_or_else(|| err(format!("{scope} unknown part")))?;
+                let ok = ["part", "interface", "port", "history"];
+                let kw = kwargs(&items[2..], &ok, &scope)?;
+                // A part's port, or an interface's, named earlier in the file.
+                let (names, what, named) = match (kw.get("part"), kw.get("interface")) {
+                    (Some(named), None) => (&by_name, "part", named),
+                    (None, Some(named)) => (&by_interface, "interface", named),
+                    _ => return Err(err(format!("{scope} names one :part or one :interface"))),
+                };
+                let entity = names.get(as_str(named, what)?);
+                let entity = *entity.ok_or_else(|| err(format!("{scope} unknown {what}")))?;
                 sources.push(SourceDecl {
                     name: sname,
                     target: SourceTarget::Port {
@@ -1487,6 +1545,121 @@ mod tests {
         assert_eq!(kind, &DraftInterfaceKind::HeatRoute { state });
         let r = route(" :card \"x\" :family \"y\"").err().unwrap();
         assert!(r.what.contains("a heat route takes no card"), "{}", r.what);
+    }
+
+    /// `admit_with`'s text closing the rotor's part, a thermal cell, and
+    /// `forms`, whose last parenthesis `admit_with` writes.
+    fn with_cell(forms: &str, raw: Vec<RawCardPack>) -> Result<AdmittedAssembly, SolveRefusal> {
+        let forms = forms.strip_suffix(')').expect("closed forms");
+        let cell = "(part \"cell\" :kind solid :geometry (box 0.1m 0.1m 0.1m) \
+                    :physics (thermal) :fidelity lumped)";
+        admit_with(&format!(") {cell} {forms}"), raw)
+    }
+
+    #[test]
+    fn memory_a_temperature_source_and_a_source_on_an_interface_admit_and_round_trip() {
+        // Any interface card shows the memory; admission reads no bushing law.
+        let bytes = include_bytes!("../../../../examples/contact-pair/cold-hot.fsintpk");
+        let raw = RawCardPack {
+            kind: CardPackKind::Interface,
+            source: "contact".to_owned(),
+            bytes: bytes.to_vec(),
+            expect: None,
+        };
+        let packs = CardPackSet::admit(vec![raw.clone()]).unwrap();
+        let law_card = packs.interfaces()[0].card();
+        let pad = "(part \"pad\" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) \
+                   :physics (mechanics) :fidelity lumped)";
+        let memory = "displacement-0-x 0.4m displacement-0-y 0m displacement-0-z 0m \
+                      displacement-0-rx 0rad displacement-0-ry 0rad displacement-1-rz 0.1rad";
+        let mount = format!(
+            "(interface \"mount\" :kind mechanical-contact :a \"rotor\" :b \"pad\" \
+             :card \"{}\" :family \"relaxation-bushing\" :memory ({memory}))",
+            law_card.to_hex()
+        );
+        let warm = "(interface \"warm\" :kind temperature-source :a \"rotor\" :b \"cell\")";
+        // Admission knows no ports: the lowering owns them.
+        let hold = "(source \"hold\" :interface \"mount\" :port \"drive_x\" \
+                    :history (constant 0.7N))";
+        let forms = format!("{pad} {mount} {warm} {hold}");
+        let a = with_cell(&forms, vec![raw]).expect("all three admit");
+        let input = a.draft.input();
+        let key = |name, value, dims| (ParameterKey::new(name, dims), QtyAny::new(value, dims));
+        let state = vec![
+            key("displacement_0_x", 0.4, LENGTH),
+            key("displacement_0_y", 0.0, LENGTH),
+            key("displacement_0_z", 0.0, LENGTH),
+            key("displacement_0_rx", 0.0, Dims::NONE),
+            key("displacement_0_ry", 0.0, Dims::NONE),
+            key("displacement_1_rz", 0.1, Dims::NONE),
+        ];
+        let third_body = None;
+        let contact = DraftInterfaceKind::MechanicalContact {
+            law_card,
+            third_body,
+            state,
+        };
+        assert_eq!(input.interfaces[0].kind, contact);
+        let source = &DraftInterfaceKind::TemperatureSource;
+        assert_eq!(&input.interfaces[1].kind, source);
+        let (entity, port) = (input.interfaces[0].entity, "drive_x".to_owned());
+        assert_eq!(input.sources[0].target, SourceTarget::Port { entity, port });
+        let again = admit_assembly_source(&a.canonical_source, &packs).unwrap();
+        let ast = fs_ir::sexpr::parse(std::str::from_utf8(&a.canonical_source).unwrap()).unwrap();
+        let json = fs_ir::json::print_checked(&ast).unwrap();
+        let from_json = admit_assembly_source(json.as_bytes(), &packs).unwrap();
+        for b in [again, from_json] {
+            assert_eq!(b.draft.input().interfaces, input.interfaces);
+            assert_eq!(b.draft.input().sources, input.sources);
+        }
+    }
+
+    #[test]
+    fn a_part_states_its_work_cap_as_a_positive_integer() {
+        let a = admit(" :max-work-units 340023768").expect("a positive cap admits");
+        let budget = &a.draft.input().parts[0].fidelity.error_budget;
+        assert_eq!(budget.max_work_units, Some(340_023_768));
+        for bad in ["0", "-1", "1.5e9"] {
+            let why = admit(&format!(" :max-work-units {bad}"))
+                .err()
+                .unwrap()
+                .what;
+            assert!(
+                why.contains(":max-work-units is a positive integer"),
+                "{bad}: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_keys_temperature_sources_and_interface_sources_refuse_by_name() {
+        let refused = |forms: &str| with_cell(forms, Vec::new()).err().unwrap().what;
+        let route = "(interface \"route\" :kind heat-route :a \"rotor\" :b \"cell\" :fraction 0.7";
+        for row in [
+            "displacement-0-w 0m | no :memory key `displacement-0-w`",
+            "displacement-01-x 0m | no :memory key `displacement-01-x`",
+            "displacement-0-x 0.1s | displacement-0-x has wrong SI dimensions",
+            "displacement-0-x 0m displacement-0-x 0m | repeats `displacement-0-x`",
+            "displacement-0-x 0m | :memory needs a mechanical contact",
+        ] {
+            let (memory, named) = row.split_once(" | ").unwrap();
+            let why = refused(&format!("{route} :memory ({memory}))"));
+            assert!(why.contains(named), "{memory}: {why}");
+        }
+        let warm =
+            "(interface \"warm\" :kind temperature-source :a \"rotor\" :b \"cell\" :card \"x\")";
+        let (why, bare) = (refused(warm), "a temperature source takes no card or state");
+        assert!(why.contains(bare), "{why}");
+        for row in [
+            ":part \"rotor\" :interface \"x\" | names one :part or one :interface",
+            " | names one :part or one :interface",
+            ":interface \"nowhere\" | unknown interface",
+        ] {
+            let (n, named) = row.split_once(" | ").unwrap();
+            let source = format!("(source \"s\" {n} :port \"p\" :history (constant 1N))");
+            let why = refused(&source);
+            assert!(why.contains(named), "{n}: {why}");
+        }
     }
 
     #[test]

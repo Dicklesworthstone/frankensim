@@ -70,6 +70,21 @@ CANCELLED=130}` table):
   cooling `run <project>` and `run <program.fs>` on their existing paths
   unchanged). Passing `--analysis` to a cooling `(project …)` file or a
   FrankenScript `*.fs` program refuses with `exit::USAGE`.
+- An assembly file's interfaces and sources reach fs-system's owner keys
+  (its CONTRACT's owner bullets) by these spellings, each refused by name
+  otherwise:
+  - `(interface "<n>" :kind temperature-source :a "<body>" :b "<cell>")`
+    reads the cell `:b` for the one bushing joining `:a`; it takes no other
+    keyword.
+  - `:memory (displacement-<k>-<axis> <value> ...)` on a `mechanical-contact`
+    declares the state key `displacement_<k>_<axis>`, `<axis>` one of `x`,
+    `y`, `z` (m) or `rx`, `ry`, `rz` (rad), each key once.
+  - `(source "<n>" :interface "<interface>" :port "<port>" :history ...)`
+    holds a port of an interface declared earlier in the file, such as a
+    relaxation bushing's `drive_x`. A source names one of `:part` and
+    `:interface`.
+  - `:max-work-units <n>` on a part caps its owner's work in a step
+    (default 1000000), such as a relaxation network's dense preparation.
 - `frankensim [--json] run --resume <run-id> <ledger.db>` resumes an
   interrupted assembly run from its last sealed stage checkpoint through
   `resume_assembly`.

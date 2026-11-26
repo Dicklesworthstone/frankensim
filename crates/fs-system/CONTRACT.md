@@ -99,7 +99,8 @@ constructors:
   branch `k`, a diagonal stiffness `stiffness_<k>_x` .. `_rz` (factor
   `L = sqrt(K)`) and `relaxation_time_<k>`. The memory has no default: the
   interface's state declares each branch's elastic displacement
-  `displacement_<k>_x` .. `_rz`, held as `a = L x`. The card may state a
+  `displacement_<k>_x` .. `_rz`, held as `a = L x` (an assembly file spells
+  them `:memory`, fs-cli's CONTRACT). The card may state a
   temperature shift `a_T` (fs-material's): `shift_reference_temperature`,
   `shift_lowest_temperature`, `shift_highest_temperature` and one model,
   `activation_energy` (J/mol) or `wlf_c1` and `wlf_c2`. Its Kelvin viscosity

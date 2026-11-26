@@ -129,10 +129,16 @@ fn thermal_interface_pack(g_w_k: f64) -> RawCardPack {
             "contact-g",
         ))
         .unwrap();
+    let sides = ["AISI-304", "AA6061"];
+    interface_pack("thermal-iface", sides, "dry-contact", claims)
+}
+
+/// An interface pack `pack-<tag>` of `claims` between two annealed wrought surfaces.
+fn interface_pack(tag: &str, sides: [&str; 2], medium: &str, claims: ClaimSet) -> RawCardPack {
     let norm = NormalizedPack::new(
-        "pack-thermal-iface",
+        format!("pack-{tag}"),
         "fs-cli-test-compiler-v1",
-        hash_bytes(b"thermal-iface"),
+        hash_bytes(tag.as_bytes()),
         "CC-BY-4.0",
         claims,
         Vec::new(),
@@ -149,10 +155,10 @@ fn thermal_interface_pack(g_w_k: f64) -> RawCardPack {
         texture_frame: "ground".into(),
     };
     let pack = NormalizedInterfacePack::new(
-        mk_surf("AISI-304"),
-        mk_surf("AA6061"),
+        mk_surf(sides[0]),
+        mk_surf(sides[1]),
         SystemContext {
-            medium: "dry-contact".into(),
+            medium: medium.into(),
             third_body: None,
             environment: "air".into(),
             history: "run-in".into(),
@@ -1151,4 +1157,126 @@ fn stage3_mode_budgets_si_refusal_and_modal_param_sweep() {
     };
     let ex = (fd(1.95 * 0.98) - fd(1.95)).abs();
     assert!((pv - ex).abs() / ex < 1.0e-6, "pv={pv} ex={ex}");
+}
+
+/// The rdh memory pair's bushing values, labelled as fixture values in each
+/// claim's provenance: Kelvin viscosity 0.4 N s/m and one branch of 1.69 N/m
+/// and 0.2 s, all on x, 0 on the other axes.
+const FIXTURE: &str = "[fixture: rdh relaxation memory_pair, not a measured compound]";
+
+/// A `relaxation-bushing` card of the fixture's values.
+fn relaxation_pack() -> RawCardPack {
+    let (damping, stiffness) = (Dims([0, 1, -1, 0, 0, 0]), Dims([0, 1, -2, 0, 0, 0]));
+    let turning = [Dims([2, 1, -1, 0, 0, 0]), Dims([2, 1, -2, 0, 0, 0])];
+    let time = Dims([0, 0, 1, 0, 0, 0]);
+    let mut values = vec![("relaxation_time_0".to_owned(), 0.2, time)];
+    for (axis, x) in ["x", "y", "z"].into_iter().enumerate() {
+        let on_x = if axis == 0 { 1.0 } else { 0.0 };
+        values.push((format!("damping_{x}"), 0.4 * on_x, damping));
+        values.push((format!("stiffness_0_{x}"), 1.69 * on_x, stiffness));
+        values.push((format!("damping_r{x}"), 0.0, turning[0]));
+        values.push((format!("stiffness_0_r{x}"), 0.0, turning[1]));
+    }
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, FIXTURE);
+    for (name, value, dims) in values {
+        let fixture = claim(&name, value, dims, obs, FIXTURE);
+        claims.insert_claim(fixture).unwrap();
+    }
+    interface_pack("relaxation", ["steel"; 2], "relaxation-bushing", claims)
+}
+
+/// A 2 kg steel box at rest at the origin, room for a relaxation network's
+/// dense preparation (340023768 multiply-adds a step for this pair).
+fn steel_box(name: &str) -> String {
+    format!(
+        r#"(part "{name}" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) :material "steel"
+    :query-temp 300K :physics (mechanics) :fidelity lumped :max-work-units 1000000000
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
+      :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))"#
+    )
+}
+
+/// A relaxation bushing `name` from `a` to `b` on `card`, its branch holding
+/// the fixture's elastic displacement 0.6 / 1.3 m on x.
+fn bushing(name: &str, (a, b): (&str, &str), card: &str) -> String {
+    format!(
+        r#"(interface "{name}" :kind mechanical-contact :a "{a}" :b "{b}"
+    :card "{card}" :family "relaxation-bushing"
+    :memory (displacement-0-x 0.4615384615384615m displacement-0-y 0m displacement-0-z 0m
+      displacement-0-rx 0rad displacement-0-ry 0rad displacement-0-rz 0rad))"#
+    )
+}
+
+/// Two boxes on a relaxation bushing `mount` whose `drive_x` holds `port`'s
+/// source at 0.7 N, then `extra`.
+fn held_bushing(card: &str, port: &str, extra: &str) -> String {
+    let (rotor, pad) = (steel_box("rotor"), steel_box("pad"));
+    let mount = bushing("mount", ("rotor", "pad"), card);
+    format!(
+        r#"(assembly "held_bushing" (version 1) (units "SI") (seed 0x43)
+  (versions (constellation "2026-07") (workspace "11-2-codec")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled) (environment earth-lab-air)
+  (time-plan :horizon 0.02s :dt 0.005s :sample-rate 200Hz)
+  {rotor} {pad} {mount}
+  (source "hold" :interface "mount" :port "{port}" :history (constant 0.7N))
+  {extra}
+  (probe "pad_vel" :kind field-quantity :target "pad" :sample-rate 200Hz :quantity "velocity-x"
+    :dims (1 0 -1 0 0 0)))"#
+    )
+}
+
+#[test]
+fn a_held_relaxation_bushing_with_declared_memory_runs_from_its_fsim() {
+    let steel = material_pack("steel", 8000.0, 500.0, 193.0e9);
+    let packs = CardPackSet::admit(vec![steel, relaxation_pack()]).unwrap();
+    let card = packs.interfaces()[0].card().to_hex();
+    let run = |port: &str, extra: &str| {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let src = held_bushing(&card, port, extra);
+        let out = run_assembly(
+            &ledger,
+            src.as_bytes(),
+            &packs,
+            AssemblyAnalysisMode::Transient,
+            &mut step_clock(0.1),
+            AssemblyCancelPlan::default(),
+        );
+        // Boxed: a refusal is large.
+        out.map(|(out, _)| (ledger, out)).map_err(Box::new)
+    };
+    let (ledger, out) = run("drive_x", "").expect("the held bushing runs");
+    assert_eq!(out.status, SolveRunStatus::Completed);
+    let explained =
+        explain_assembly_run(&ledger, SolveRunId::parse_hex(&out.run).unwrap()).unwrap();
+    let receipt = explained.lowering_receipt_json.as_deref().unwrap();
+    for shown in [
+        "\"card_family\":\"relaxation-bushing\"",
+        "\"parameter\":\"state.displacement_0_x\"",
+        "\"parameter\":\"state.displacement_0_rz\"",
+        "{\"source_name\":\"hold\",\"target\":\"",
+        ".drive_x\",\"created_nodes\":[\"relaxation-network\"]",
+    ] {
+        assert!(receipt.contains(shown), "{shown}: {receipt}");
+    }
+    // A cell for the temperature sources below to read.
+    let cell = r#"(part "cell" :kind solid :geometry (box 0.1m 0.1m 0.1m) :material "steel"
+    :query-temp 300K :physics (thermal) :fidelity lumped)"#;
+    let free = cell.replace("\"cell\"", "\"free\"");
+    let warm =
+        |a: &str| format!("(interface \"warm\" :kind temperature-source :a \"{a}\" :b \"cell\")");
+    let unjoined = format!("{cell} {free} {}", warm("free"));
+    let mount2 = bushing("mount2", ("rotor", "pad2"), &card);
+    let twice = format!("{cell} {} {mount2} {}", steel_box("pad2"), warm("rotor"));
+    let one = "interface:warm: feature_a must be on a part exactly one bushing joins";
+    for (port, extra, named) in [
+        ("drive_w", "", "has no exposed port 'drive_w'"),
+        ("drive_x", unjoined.as_str(), one),
+        ("drive_x", twice.as_str(), one),
+    ] {
+        let why = run(port, extra).err().unwrap();
+        assert_eq!(why.code, "cli-assembly-lower", "{named}: {}", why.what);
+        assert!(why.what.contains(named), "{named}: {}", why.what);
+    }
 }
