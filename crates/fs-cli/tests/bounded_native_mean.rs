@@ -47,18 +47,22 @@ fn pack(finite: bool) -> (Vec<u8>, String, String) {
         source:"constant-fixture".into(), bytes:bytes.clone(), expect:None }]).unwrap();
     (bytes, set.materials()[0].card().to_hex(), set.materials()[0].identity().to_string())
 }
+/// A fresh directory `{prefix}-{pid}-{n}` under the system temp dir.
+fn scratch_dir(prefix: &str) -> PathBuf {
+    let mut index = 0;
+    loop {
+        let p = std::env::temp_dir().join(format!("{prefix}-{}-{index}", std::process::id()));
+        match std::fs::create_dir(&p) {
+            Ok(()) => return p,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => index += 1,
+            Err(e) => panic!("fixture directory: {e}"),
+        }
+    }
+}
 struct Fixture { dir: PathBuf, project: fs_project::ProjectSpec, mesh: PathBuf }
 impl Fixture {
     fn new(finite: bool, cube: bool) -> Self {
-        let mut index=0;
-        let dir=loop {
-            let p=std::env::temp_dir().join(format!("fs-native-finite-mean-{}-{index}",std::process::id()));
-            match std::fs::create_dir(&p) {
-                Ok(())=>break p,
-                Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>index+=1,
-                Err(e)=>panic!("fixture directory: {e}"),
-            }
-        };
+        let dir = scratch_dir("fs-native-finite-mean");
         let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut project=fs_project::parse_sexpr_migrating(&std::fs::read_to_string(
             root.join("data/reference-project/cooling-reference.fsim")).unwrap()).unwrap().decoded.spec;
@@ -192,4 +196,89 @@ fn unsupported_geometry_and_insufficient_barriers_remain_refusals() {
         assert_ne!(result.exit_code,fs_cli::exit::SUCCESS);
         assert!(format!("{}{}",result.stdout,result.stderr).contains("finite spans"));
     }
+}
+
+/// `examples/verified-mean` as its README runs it: the tracked project, the
+/// tracked unit cube and the tracked AA6061 pack, no synthetic card. The strict
+/// parse keeps the example canonical; the checks are properties of the bound,
+/// not its measured floats.
+#[test]
+fn the_tracked_verified_mean_example_bounds_the_real_card_end_to_end() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = root.join("examples/verified-mean/verified-mean.fsim");
+    fs_project::parse_sexpr(&std::fs::read_to_string(&project).unwrap()).unwrap();
+    let ledger = scratch_dir("fs-verified-mean-example").join("runs.db");
+    let (cube, card) = (
+        root.join("examples/contact-pair/cold-body.stl"),
+        root.join("data/reference-project/aa6061.fsmcdpk"),
+    );
+    let (project, ledger_str) = (project.to_str().unwrap(), ledger.to_str().unwrap());
+    command(&[
+        "--json",
+        "import",
+        project,
+        cube.to_str().unwrap(),
+        ledger_str,
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]);
+    let solved = command(&[
+        "--json",
+        "solve",
+        project,
+        ledger_str,
+        "--materials",
+        card.to_str().unwrap(),
+    ]);
+    let run = artifact(&ledger, solved.str_field("run_receipt").unwrap());
+    let stage = run
+        .get("stages")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s.str_field("stage") == Some("conduction"))
+        .unwrap();
+    let receipt = artifact(&ledger, stage.str_field("receipt").unwrap());
+    let bound = receipt.get("volume_mean_bound").unwrap();
+    let within = |interval: &J, x: f64| {
+        interval.f64_field("lower").unwrap() <= x && x <= interval.f64_field("upper").unwrap()
+    };
+    assert_eq!(bound.str_field("authority"), Some("Verified"));
+    assert!(within(
+        bound.get("enclosure_k").unwrap(),
+        bound.f64_field("value_k").unwrap()
+    ));
+    assert!(within(bound.get("region_volume_m3").unwrap(), 1.0));
+    let validity = bound.get("material_validity").unwrap();
+    assert_eq!(
+        validity.str_field("method"),
+        Some("continuum-slab-comparison")
+    );
+    let range = validity.get("continuum_temperature_range_k").unwrap();
+    let domain = validity.get("retained_material_domain_k").unwrap();
+    assert!(within(domain, range.f64_field("lower").unwrap()));
+    assert!(within(domain, range.f64_field("upper").unwrap()));
+    let id = solved.str_field("run").unwrap();
+    let exported = command(&["--json", "report", id, ledger_str]);
+    let report =
+        J::parse(&std::fs::read_to_string(exported.str_field("report_json").unwrap()).unwrap())
+            .unwrap();
+    let mean = report
+        .get("qois")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q.str_field("name") == Some("temperature-volume-mean-bound"))
+        .unwrap();
+    assert_eq!(mean.str_field("color"), Some("Verified"));
+    let exported = command(&["--json", "package", id, ledger_str]);
+    let package = fs_package::EvidencePackage::from_json(
+        &std::fs::read_to_string(exported.str_field("package").unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(fs_checker::check(&package).passed());
 }

@@ -5,8 +5,9 @@ constant scalar material cards with a finite temperature domain. It does not
 silently treat those cards as globally valid, use the nodal minimum/maximum as a
 continuum proof, or change the normal conduction solve.
 
-Build the CLI with `fs-cli/thermal-verification` and add the existing report
-request alongside the original maximum objective:
+The default CLI build includes `fs-cli/thermal-verification`. Add the existing
+report request alongside the original maximum objective
+(`examples/verified-mean` does this on the tracked AA6061 card):
 
 ```lisp
 (outputs
@@ -48,8 +49,13 @@ The existing comparison requires an exterior on bounding-box planes, a fully
 Dirichlet/positive-Robin cooling end, zero other Neumann flux and common uncoupled
 axial conductivity. It also checks anchoring. The reusable library API preserves
 constant tensors and permits tangential heterogeneity under that condition.
-Finite-domain contact, radiation, feedback convection and temperature-dependent
-conductivity remain unsupported. Previously supported global constant-source
+A finite-domain contact resistance is admitted only when the layered form of
+that whole-continuum comparison, which carries the contacts' finite-resistance
+jumps, places the entire range inside every used material domain and the
+contact domain (fs-conduction
+`verification::region::material_range::bound_temperature_region_mean_with_contact_slab_validity`).
+Radiation, feedback convection and temperature-dependent conductivity remain
+unsupported. Previously supported global constant-source
 and matching-contact bounds retain their original producer.
 
 For a 0.1 m slab with k=10 W/(m K), both ends cooled with h=20 W/(m2 K)

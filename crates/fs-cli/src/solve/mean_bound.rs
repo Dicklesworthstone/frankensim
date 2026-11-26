@@ -31,8 +31,8 @@ fn bad(message: impl Into<String>) -> SolveRefusal {
 fn unavailable() -> SolveRefusal {
     conduction_error(
         "cli-solve-mean-bound-feature",
-        "temperature-volume-mean-bound requires the opt-in thermal-verification feature",
-        "build frankensim with --features fs-cli/thermal-verification, then rerun the unchanged project",
+        "temperature-volume-mean-bound requires fs-cli's thermal-verification feature, which this build omits",
+        "rebuild frankensim with its default features (or --features fs-cli/thermal-verification), then rerun the unchanged project",
     )
 }
 

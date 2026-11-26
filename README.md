@@ -315,8 +315,12 @@ exactly; `examples/marquee/bracket-2d.fs` drives the 2-D marquee through
 `study.run`; any other operator refuses as not executable before a ledger
 opens. A project that omits `cooling.conduction` refuses at
 conduction by name (`cli-solve-conduction-undeclared`); one that omits a
-`temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated;
-its verdict stays indeterminate while any budget term is NO-DATA. A project
+`temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated
+except the `temperature-volume-mean-bound` report a project can request: a
+Verified numerical interval for the temperature-max region's volume mean under
+the nominal linear conduction PDE, never the maximum (`examples/verified-mean`).
+An Estimated QoI's verdict stays indeterminate while any budget term is
+NO-DATA. A project
 that declares `(solver :fidelity "ladder")` gets a measured discretization
 term from a three-rung uniform h-ladder (Richardson/GCI, or the Eça–Hoekstra
 data-range fallback when no order is observable). `(solver :fidelity

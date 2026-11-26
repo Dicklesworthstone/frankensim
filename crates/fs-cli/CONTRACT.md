@@ -5424,25 +5424,30 @@ No unsafe code.
 
 - `sdf3-study` enables the numerical 3-D compliance and stress-constrained
   study producers described above.
-- `thermal-verification` enables an explicitly requested
+- `thermal-verification` (on by default) computes an explicitly requested
   `temperature-volume-mean-bound` report on native conduction solves. Declare
   exactly one report without an output `:region`; the selected volume is the
   existing `temperature-max` requirement region. The separate mean output
   does not replace or certify that maximum-temperature requirement.
+  `examples/verified-mean` runs one end to end on the tracked AA6061 card.
 
 The mean producer bounds the nominal linear PDE on the final published
 polyhedral mesh domain using the existing equilibrated primal and dual flux
 verifier. It retains the original field, source, boundary data, material cards
-and exact pinned property receipts. A global constant representation is
-admitted only from an explicitly unconstrained scalar constant source claim;
-finite material validity spans and flat sampled curves remain refused.
-Matching finite-resistance contacts preserve the original paired faces,
-independent temperature traces and source query receipts. Their
+and exact pinned property receipts. Constant scalar conductivity is admitted
+from an explicitly unconstrained source claim, or from a finite
+`ConstantWithinValidity` temperature domain when the retained whole-continuum
+slab comparison places the entire continuum temperature range inside that
+domain (`docs/FINITE_MATERIAL_MEAN_BOUNDS.md`); flat sampled curves remain
+refused. Matching finite-resistance contacts preserve the original paired
+faces, independent temperature traces and source query receipts. Their
 resistance-weighted temperature jumps enter the existing broken-H1 continuum
 majorant; the selected region is bounded in the complete contacted assembly.
-Contact resistance must likewise come from an explicitly unconstrained scalar
-constant claim. Finite validity spans, sampled/state laws, caller-supplied maps
-and nonmatching contacts require their own source-validity admission.
+Contact resistance must likewise be a constant scalar claim whose source
+domain is unconstrained or established by the same whole-continuum
+comparison, which then carries the contacts' finite-resistance jumps.
+Sampled/state laws, caller-supplied maps and nonmatching contacts require
+their own source-validity admission.
 Transient, nonlinear, radiation and natural/forced-convection feedback models
 require their own bounds and are refused by this producer.
 Cell and iteration allowances bound work, and cancellation is cooperative;
@@ -5453,7 +5458,8 @@ interval as a distinct QoI, while all unknown physical uncertainty stays
 unknown. The standalone package retains the exact interval and source
 receipt address as an Estimated statement: its existing structural checker
 does not independently authenticate or reverify the continuum producer.
-Builds without the feature explicitly refuse this output request.
+Builds without the feature (`--no-default-features`) refuse this output
+request by name (`cli-solve-mean-bound-feature`).
 
 Native steady mixed convection is available without a feature flag. Separate
 `natural-convection` and `airflow-convection` targets exchange heat through the

@@ -350,9 +350,20 @@ fn g0_native_enclosure_refuses_unsupported_bounds_and_bad_mesh_reciprocity() {
             &mut Vec::new(),
         )
         .unwrap_err();
-        assert!(
-            error.what.contains("enclosure") || error.what.contains("reciprocity"),
-            "{kind}: {error:?}"
-        );
+        if kind == "mean-bound" {
+            // The output's own admission refuses radiation before any
+            // enclosure work; a build without the verifier refuses it by name.
+            let code = if cfg!(feature = "thermal-verification") {
+                "cli-solve-mean-bound"
+            } else {
+                "cli-solve-mean-bound-feature"
+            };
+            assert_eq!(error.code, code, "{kind}: {error:?}");
+        } else {
+            assert!(
+                error.what.contains("enclosure") || error.what.contains("reciprocity"),
+                "{kind}: {error:?}"
+            );
+        }
     }
 }
