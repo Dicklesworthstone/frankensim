@@ -381,7 +381,7 @@
       "title": "Browser-facing reduced flagship campaigns",
       "level": "L1",
       "owner": "CyanBarn",
-      "last_review": "2026-07-22",
+      "last_review": "2026-11-26",
       "crates": ["fs-wasm"],
       "evidence": [
         {
@@ -389,7 +389,7 @@
           "ref": "crates/fs-wasm/CONTRACT.md"
         }
       ],
-      "notes": "Builds again as of the safe-step propagation (bead f85xj.2.39): the browser payload now carries an interval-derived certified sign margin at schema v3 instead of a nominal |f|/L quotient; v3 also crosses the typed surface-localization record through the ABI (bead frankensim-o33vo). Still L1: two campaign tests (grammarforge, sensorforge) are red from an earlier code-first slice, so no test evidence is cited yet."
+      "notes": "Deployed to frankensim.org on 2026-11-26 from source c45e5a3723, which made the ornithoid and frame flagships run in the browser again (bead frankensim-rc-root-q61wp.33); the build receipt with both artifact sha256s is https://frankensim.org/fs-wasm/BUILD.json. The browser payload carries an interval-derived certified sign margin at schema v3 (bead f85xj.2.39) and the typed surface-localization record (bead frankensim-o33vo). Still L1: on that source the native lib tests give 56 passed, 3 failed (campaigns grammarforge_defaults, sensorforge_defaults and trusspath_defaults; bead frankensim-vxnd3) and 1 ignored, so no test evidence is cited."
     }
   ]
 }
