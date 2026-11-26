@@ -67,24 +67,7 @@ fn reg_obs(claims: &mut ClaimSet, tag: &str) -> fs_matdb::ObservationId {
         .unwrap()
 }
 
-fn material_pack(chem: &str, rho: f64, cp: f64, youngs: f64) -> RawCardPack {
-    let mut claims = ClaimSet::new();
-    let obs = reg_obs(&mut claims, chem);
-    claims
-        .insert_claim(claim("density", rho, DENSITY, obs, "asm-rho"))
-        .unwrap();
-    claims
-        .insert_claim(claim(
-            "specific_heat_capacity",
-            cp,
-            SPECIFIC_HEAT,
-            obs,
-            "asm-cp",
-        ))
-        .unwrap();
-    claims
-        .insert_claim(claim("youngs_modulus", youngs, MODULUS, obs, "asm-e"))
-        .unwrap();
+fn pack_from_claims(chem: &str, claims: ClaimSet) -> RawCardPack {
     let norm = NormalizedPack::new(
         format!("pack-{chem}"),
         "fs-cli-test-compiler-v1",
@@ -111,6 +94,27 @@ fn material_pack(chem: &str, rho: f64, cp: f64, youngs: f64) -> RawCardPack {
         bytes: pack.to_bytes(),
         expect: None,
     }
+}
+
+fn material_pack(chem: &str, rho: f64, cp: f64, youngs: f64) -> RawCardPack {
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, chem);
+    claims
+        .insert_claim(claim("density", rho, DENSITY, obs, "asm-rho"))
+        .unwrap();
+    claims
+        .insert_claim(claim(
+            "specific_heat_capacity",
+            cp,
+            SPECIFIC_HEAT,
+            obs,
+            "asm-cp",
+        ))
+        .unwrap();
+    claims
+        .insert_claim(claim("youngs_modulus", youngs, MODULUS, obs, "asm-e"))
+        .unwrap();
+    pack_from_claims(chem, claims)
 }
 
 fn thermal_interface_pack(g_w_k: f64) -> RawCardPack {
@@ -797,5 +801,139 @@ fn qoi_budget_measures_stated_card_corners_resumes_without_recompute_and_refuses
     assert!(
         w_qb.contains("\"status\":\"budget_exceeded\"") && w_qb.contains("wall budget"),
         "{w_qb}"
+    );
+}
+
+fn run_budget(packs: &CardPackSet, src: &str) -> String {
+    let ledger = Ledger::open(":memory:").unwrap();
+    let (out, _) = run_assembly(
+        &ledger,
+        src.as_bytes(),
+        packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .unwrap();
+    explain_assembly_run(&ledger, SolveRunId::parse_hex(&out.run).unwrap())
+        .unwrap()
+        .qoi_budget_json
+        .unwrap()
+}
+
+fn claim_pack(
+    chem: &str,
+    prop: &str,
+    value: f64,
+    dims: Dims,
+    unc: UncertaintyModel,
+) -> RawCardPack {
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, chem);
+    let mut c = claim(prop, value, dims, obs, chem);
+    c.uncertainty = unc;
+    claims.insert_claim(c).unwrap();
+    pack_from_claims(chem, claims)
+}
+
+#[test]
+fn shear_film_third_body_qoi_budget_handles_unstated_and_stated_viscosity() {
+    let visc = Dims([-1, 1, -1, 0, 0, 0]);
+    let zero = UncertaintyModel::HalfWidth {
+        half_width: 0.0,
+        confidence: 0.95,
+    };
+    let body = claim_pack("steel-exact", "density", 8000.0, DENSITY, zero);
+    let src = r#"(assembly "shear_film_budget" (version 1) (units "SI") (seed 0x41)
+  (versions (constellation "2026-07") (workspace "0h46c")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled) (environment earth-lab-air) (time-plan :horizon 0.05s :dt 0.005s :sample-rate 200Hz)
+  (part "rotor" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) :material "steel-exact" :query-temp 300K :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (1m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (part "pad" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) :material "steel-exact" :query-temp 300K :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (interface "film" :kind shear-film :a "rotor" :b "pad" :fluid "test-oil" :gap 0.001m :fluid-at (T 300K) :area 0.01m^2)
+  (probe "rotor_vel" :kind field-quantity :target "rotor" :sample-rate 200Hz :quantity "velocity-x" :dims (1 0 -1 0 0 0))
+  (requirement "v_end" :probe "rotor_vel" :stat final :relation at-most :limit 0.95m/s))"#;
+    let run_with = |unc| {
+        let p = CardPackSet::admit(vec![
+            body.clone(),
+            claim_pack("test-oil", "dynamic_viscosity", 2.0, visc, unc),
+        ])
+        .unwrap();
+        run_budget(&p, src)
+    };
+    let u = run_with(UncertaintyModel::Unstated);
+    assert!(
+        u.contains("\"kind\":\"parameters\",\"state\":\"no-data\"")
+            && u.contains("dynamic_viscosity"),
+        "{u}"
+    );
+    let s = run_with(UncertaintyModel::HalfWidth {
+        half_width: 0.5,
+        confidence: 0.95,
+    });
+    assert!(
+        s.contains("\"kind\":\"parameters\",\"state\":\"measured\"")
+            && s.contains("dynamic_viscosity"),
+        "{s}"
+    );
+    assert!(
+        !s.contains(
+            "\"kind\":\"parameters\",\"state\":\"measured\",\"value\":0.00000000000000000e0"
+        ),
+        "{s}"
+    );
+}
+
+#[test]
+fn declared_envelopes_yield_determinate_pass_fail_and_indeterminate_on_drop() {
+    let packs = CardPackSet::admit(vec![material_pack("fixture", 1000.0, 500.0, 1.0e9)]).unwrap();
+    let g_env =
+        "\n  (envelope geometry :part \"body\" :axis lx :half-width 0.001m :source \"ISO 2768-m\")";
+    let rest = "\n  (envelope boundary-conditions :target \"heater\" :half-width 5W :source \"PSU 1%\")\
+                \n  (envelope measurement :probe \"temperature\" :half-width 0.0005K :source \"SPRT cal\")\
+                \n  (envelope model-form :probe \"temperature\" :half-width 0.0005K :source \"Biot<0.01\")";
+    let case =
+        |extra: &str| run_budget(&packs, &HEATED_BODY.replace("\n)", &format!("{extra}\n)")));
+    let pass = case(&format!(
+        "{g_env}{rest}\n  (requirement \"t_lim\" :probe \"temperature\" :stat final :relation at-most :limit 305K)"
+    ));
+    for k in [
+        "\"outcome\":\"pass\"",
+        "\"unmeasured_terms\":[]",
+        "\"kind\":\"geometry\",\"state\":\"measured\"",
+        "\"kind\":\"boundary-conditions\",\"state\":\"measured\"",
+        "\"kind\":\"measurement\",\"state\":\"measured\"",
+        "\"kind\":\"model-form\",\"state\":\"measured\"",
+        "\"label\":\"geom_corner_1\"",
+        "\"label\":\"bc_corner_1\"",
+        "omits O(eps^2) cross-category terms",
+        "\"wall_s\":",
+    ] {
+        assert!(pass.contains(k), "missing `{k}` in {pass}");
+    }
+    assert!(
+        !pass.contains(
+            "\"kind\":\"geometry\",\"state\":\"measured\",\"value\":0.00000000000000000e0"
+        )
+    );
+    assert!(!pass.contains(
+        "\"kind\":\"boundary-conditions\",\"state\":\"measured\",\"value\":0.00000000000000000e0"
+    ));
+    let fail = case(&format!(
+        "{g_env}{rest}\n  (requirement \"t_lim\" :probe \"temperature\" :stat final :relation at-most :limit 300.001K)"
+    ));
+    assert!(
+        fail.contains("\"outcome\":\"fail\"") && fail.contains("\"unmeasured_terms\":[]"),
+        "{fail}"
+    );
+    let ind = case(&format!(
+        "{rest}\n  (requirement \"t_lim\" :probe \"temperature\" :stat final :relation at-most :limit 305K)"
+    ));
+    assert!(
+        ind.contains("\"outcome\":\"indeterminate\"")
+            && ind.contains("\"unmeasured_terms\":[\"geometry\"]"),
+        "{ind}"
     );
 }

@@ -91,9 +91,15 @@ CANCELLED=130}` table):
 No-claim boundary: `.11.8` Stage 1 adds eight-term QoI uncertainty budgets and
 tri-state verdicts (`pass`/`fail`/`indeterminate`) for declared assembly
 requirements; unmeasured terms stay explicit `NO-DATA` (never zero) and runs
-retain Estimate-only authority without external validation. The CLI
-lineage/replay-audit verbs landed separately (`frankensim-dhqf7`, ed1876af96;
-see the section above).
+retain Estimate-only authority without external validation. Stage 2a adds
+declared `(envelope geometry|boundary-conditions|measurement|model-form ...)`
+clauses (box axes only for geometry, refusing other primitive shapes by name,
+and populating `DraftPartDecl.uncertainty`; at most 4 inputs / 16 corners per
+swept category, disclosing that per-category sweeps omit `O(eps^2)`
+cross-category terms; positive `:half-width` + non-empty `:source` on
+`model-form`), and fixes third-body (`ShearFilm` / TIM) material-card auditing and
+corner remapping (`frankensim-0h46c`) plus `Surface2D` claim perturbation. The CLI lineage/replay-audit verbs landed separately (`frankensim-dhqf7`,
+ed1876af96; see the section above).
 
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
 

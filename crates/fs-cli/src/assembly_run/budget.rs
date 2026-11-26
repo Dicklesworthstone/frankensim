@@ -17,13 +17,16 @@ use fs_matdb::{
 use fs_qty::Dims;
 use fs_report::{BudgetTermItem, RequirementReportItem};
 use fs_scenario::Scenario;
-use fs_scenario::assembly::draft::{DraftAssembly, DraftInterfaceKind, ProbeKind, StepPolicy};
+use fs_scenario::assembly::draft::{
+    DraftAssembly, DraftAssemblyInput, DraftGeometrySource, DraftInterfaceKind, PrimitiveShape,
+    ProbeKind, StepPolicy, TimeHistory,
+};
 use fs_system::{
     BlockSolveMode, BlockSolverPolicy, CardStore, LoweredSystem, LoweringReceipt, MonolithicConfig,
     ParameterSource, SolveConfig,
 };
 
-use super::codec::{AdmittedAssembly, AssemblyRequirement, ProbeStat};
+use super::codec::{AdmittedAssembly, AssemblyRequirement, BOX_AXES, ProbeStat, TargetEnvelope};
 use super::report::{EvaluatedProbe, RunTrace, evaluate_probes};
 use crate::import::json_string as js;
 use crate::json_read::JsonValue;
@@ -105,9 +108,10 @@ fn roundoff_term(
         return nodata("probe has no single target part");
     };
     let par = |n: &str| {
-        let c = rec.components.iter().find(|c| c.entity == ent)?;
-        c.parameter_sources
+        rec.components
             .iter()
+            .filter(|c| c.entity == ent)
+            .flat_map(|c| &c.parameter_sources)
             .find(|p| p.parameter == n && p.value > 0.0)
             .map(|p| p.value)
     };
@@ -159,12 +163,16 @@ fn audit_cards(rec: &LoweringReceipt, cards: &CardStore) -> Result<Vec<UClaim>, 
             continue;
         }
         total += 1;
-        let cl = if iface {
-            cards.interface(h).and_then(|e| e.card.claims().claim(cid))
-        } else {
-            cards.material(h).and_then(|c| c.claims().claim(cid))
-        }
-        .ok_or_else(|| format!("missing claim `{prop}` in card store"))?;
+        let (cl, is_iface) =
+            if iface && let Some(c) = cards.interface(h).and_then(|e| e.card.claims().claim(cid)) {
+                (c, true)
+            } else {
+                let c = cards
+                    .material(h)
+                    .and_then(|c| c.claims().claim(cid))
+                    .ok_or_else(|| format!("missing claim `{prop}` in card store"))?;
+                (c, false)
+            };
         match cl.uncertainty {
             UncertaintyModel::Unstated => {
                 unstated.insert(prop.clone());
@@ -173,7 +181,7 @@ fn audit_cards(rec: &LoweringReceipt, cards: &CardStore) -> Result<Vec<UClaim>, 
             | UncertaintyModel::RelativeHalfWidth { fraction: x, .. }
                 if x > 0.0 =>
             {
-                out.push((*h, iface, cid, prop.clone()));
+                out.push((*h, is_iface, cid, prop.clone()));
             }
             _ => {}
         }
@@ -238,12 +246,42 @@ fn perturb_claims(src: &ClaimSet, edits: &BTreeMap<ClaimId, f64>) -> Result<Clai
                         dims: *dims,
                     }
                 }
-                PropertyValue::Surface2D { .. } => return Err("Surface2D unsupported".into()),
+                PropertyValue::Surface2D {
+                    axes,
+                    axis_dims,
+                    samples,
+                    triangles,
+                    dims,
+                } => {
+                    let mut ns = Vec::with_capacity(samples.len());
+                    for &(pt, z) in samples {
+                        ns.push((pt, shift(z, &cl.uncertainty, s)?));
+                    }
+                    PropertyValue::Surface2D {
+                        axes: axes.clone(),
+                        axis_dims: *axis_dims,
+                        samples: ns,
+                        triangles: triangles.clone(),
+                        dims: *dims,
+                    }
+                }
             };
         }
         cs.insert_claim(next).map_err(|e| format!("{e}"))?;
     }
     Ok(cs)
+}
+
+fn relower_input(
+    adm: &AdmittedAssembly,
+    inp: DraftAssemblyInput,
+    store: &CardStore,
+) -> Result<LoweredSystem, String> {
+    let scen = Scenario::new(&adm.name, adm.seed, inp.environment.base.clone());
+    let draft = DraftAssembly::admit(inp, &scen).map_err(|e| format!("{e}"))?;
+    super::lowering_registry()
+        .lower(&draft, store)
+        .map_err(|e| format!("{e}"))
 }
 
 fn lower_corner(
@@ -258,14 +296,17 @@ fn lower_corner(
             .or_default()
             .insert(*cid, if (mask >> b) & 1 == 0 { -1.0 } else { 1.0 });
     }
-    let (mut remap, mut store, mut inp) =
-        (BTreeMap::new(), CardStore::new(), adm.draft.input().clone());
-    for part in &mut inp.parts {
-        for mr in &mut part.materials {
-            let old = mr.card;
-            if let Some(&h) = remap.get(&old) {
-                mr.card = h;
-                continue;
+    let (mut remap, mut store, mut inp) = (
+        BTreeMap::<(ContentHash, bool), ContentHash>::new(),
+        CardStore::new(),
+        adm.draft.input().clone(),
+    );
+    {
+        let mut remap_mat = |slot: &mut ContentHash| -> Result<(), String> {
+            let old = *slot;
+            if let Some(&h) = remap.get(&(old, false)) {
+                *slot = h;
+                return Ok(());
             }
             let c = adm
                 .card_store
@@ -281,8 +322,26 @@ fn lower_corner(
                 None => c.clone(),
             };
             let h = store.insert_material(nc);
-            remap.insert(old, h);
-            mr.card = h;
+            remap.insert((old, false), h);
+            *slot = h;
+            Ok(())
+        };
+        for part in &mut inp.parts {
+            for mr in &mut part.materials {
+                remap_mat(&mut mr.card)?;
+            }
+        }
+        for iface in &mut inp.interfaces {
+            let tb = match &mut iface.kind {
+                DraftInterfaceKind::ShearFilm { third_body, .. } => Some(third_body),
+                DraftInterfaceKind::ThermalContact { third_body, .. }
+                | DraftInterfaceKind::MechanicalContact { third_body, .. }
+                | DraftInterfaceKind::ElectricalContact { third_body, .. } => third_body.as_mut(),
+                _ => None,
+            };
+            if let Some(tb) = tb {
+                remap_mat(&mut tb.material_card)?;
+            }
         }
     }
     for iface in &mut inp.interfaces {
@@ -296,7 +355,7 @@ fn lower_corner(
             | DraftInterfaceKind::ShearFilm { .. } => continue,
         };
         let old = *lc;
-        if let Some(&h) = remap.get(&old) {
+        if let Some(&h) = remap.get(&(old, true)) {
             *lc = h;
             continue;
         }
@@ -318,14 +377,103 @@ fn lower_corner(
         let h = store
             .insert_interface(en.family.clone(), nc)
             .map_err(|e| format!("{e}"))?;
-        remap.insert(old, h);
+        remap.insert((old, true), h);
         *lc = h;
     }
-    let scen = Scenario::new(&adm.name, adm.seed, inp.environment.base.clone());
-    let draft = DraftAssembly::admit(inp, &scen).map_err(|e| format!("{e}"))?;
-    super::lowering_registry()
-        .lower(&draft, &store)
-        .map_err(|e| format!("{e}"))
+    relower_input(adm, inp, &store)
+}
+
+fn lower_geom_corner(adm: &AdmittedAssembly, mask: usize) -> Result<LoweredSystem, String> {
+    let mut inp = adm.draft.input().clone();
+    for (b, g) in adm.envelopes.geometry.iter().enumerate() {
+        let s = if (mask >> b) & 1 == 0 { -1.0 } else { 1.0 };
+        let part = inp
+            .parts
+            .iter_mut()
+            .find(|p| p.name == g.part)
+            .ok_or("missing geometry part")?;
+        let DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, ly, lz }) = &mut part.geometry
+        else {
+            return Err("geometry corner requires box primitive".into());
+        };
+        [lx, ly, lz][g.axis].value += s * g.half_width_m;
+    }
+    relower_input(adm, inp, &adm.card_store)
+}
+
+fn lower_bc_corner(adm: &AdmittedAssembly, mask: usize) -> Result<LoweredSystem, String> {
+    let mut inp = adm.draft.input().clone();
+    for (b, bc) in adm.envelopes.boundary_conditions.iter().enumerate() {
+        let s = if (mask >> b) & 1 == 0 { -1.0 } else { 1.0 };
+        let src = inp
+            .sources
+            .iter_mut()
+            .find(|x| x.name == bc.target)
+            .ok_or("missing bc source")?;
+        let (TimeHistory::Constant(q) | TimeHistory::Harmonic { offset: q, .. }) = &mut src.history
+        else {
+            return Err("bc corner requires constant/harmonic source".into());
+        };
+        q.value += s * bc.half_width.value;
+    }
+    relower_input(adm, inp, &adm.card_store)
+}
+
+fn sweep_corners<B, F>(
+    acc: &mut ExtraAcc<'_>,
+    kind: &str,
+    empty: &str,
+    labels: &[String],
+    noms: &[(String, Dims, f64)],
+    mut build: B,
+    run_transient: &mut F,
+) -> Result<(Vec<f64>, String), String>
+where
+    B: FnMut(usize) -> Result<LoweredSystem, String>,
+    F: FnMut(&mut LoweredSystem, Option<f64>) -> Result<RunTrace, SolveRefusal>,
+{
+    if labels.is_empty() {
+        return Err(empty.into());
+    }
+    if labels.len() > 4 {
+        return Err(format!("{} inputs exceed 16-corner cap", labels.len()));
+    }
+    let (corners, mut md) = (1usize << labels.len(), vec![0.0f64; noms.len()]);
+    for mask in 0..corners {
+        let lbl = format!("{kind}_{mask}");
+        let meta = (kind, lbl.as_str(), acc.dt, acc.rel, acc.mono, None);
+        let vs = run_extra(acc, meta, || build(mask), run_transient)?;
+        for (slot, (&(_, _, nom), v)) in md.iter_mut().zip(noms.iter().zip(vs)) {
+            *slot = slot.max((v - nom).abs());
+        }
+    }
+    Ok((
+        md,
+        format!(
+            "max over {corners} corners ({}; omits O(eps^2) cross-category terms, Estimated)",
+            labels.join(", ")
+        ),
+    ))
+}
+
+fn direct_term(
+    list: &[TargetEnvelope],
+    probe: &str,
+    dims: Dims,
+    empty_msg: &str,
+) -> Result<(TermValue, String), SolveRefusal> {
+    let Some(e) = list.iter().find(|e| e.target == probe) else {
+        return Ok(nodata(empty_msg));
+    };
+    if e.half_width.dims != dims {
+        return Err(req_refusal(format!(
+            "envelope on probe `{probe}` dimensions do not match probe"
+        )));
+    }
+    Ok((
+        TermValue::interval(0.0, e.half_width.value).unwrap(),
+        format!("Declared: {}", e.source),
+    ))
 }
 
 fn ev_id(s: &str) -> String {
@@ -430,6 +578,9 @@ struct ExtraAcc<'a> {
     adm: &'a AdmittedAssembly,
     t0: Instant,
     consumed: f64,
+    dt: f64,
+    rel: f64,
+    mono: f64,
     json: Vec<String>,
     metrics: Vec<(i64, String, f64)>,
 }
@@ -551,7 +702,7 @@ where
         }
         let nom = probe_stat(&p.values, r.stat)
             .ok_or_else(|| req_refusal(format!("probe `{}` empty/non-finite", p.name)))?;
-        noms.push((p.unit.clone(), nom));
+        noms.push((p.unit.clone(), d, nom));
     }
     let dt = match adm.draft.input().time_plan.step_policy {
         StepPolicy::Fixed { dt } => dt.value,
@@ -566,6 +717,9 @@ where
         adm,
         t0: Instant::now(),
         consumed: consumed_wall_s,
+        dt,
+        rel: d_rel,
+        mono: d_mono,
         json: Vec::new(),
         metrics: Vec::new(),
     };
@@ -602,40 +756,49 @@ where
                 "all claims declare zero half-width".into(),
             )),
             Ok(uc) => {
-                let (corners, mut md, mut fail) =
-                    (1usize << uc.len(), vec![0.0f64; reqs.len()], None);
-                for mask in 0..corners {
-                    let lbl = format!("param_corner_{mask}");
-                    match run_extra(
-                        &mut acc,
-                        ("param_corner", &lbl, dt, d_rel, d_mono, None),
-                        || lower_corner(adm, &uc, mask),
-                        &mut run_transient,
-                    ) {
-                        Ok(vs) => {
-                            for (s, (&(_, n), v)) in md.iter_mut().zip(noms.iter().zip(vs)) {
-                                *s = s.max((v - n).abs());
-                            }
-                        }
-                        Err(e) => {
-                            fail = Some(e);
-                            break;
-                        }
-                    }
-                }
-                let ns: Vec<_> = uc.iter().map(|c| c.3.as_str()).collect();
-                fail.map_or_else(
-                    || {
-                        Ok((
-                            md,
-                            format!("max over {corners} corners ({}, Estimated)", ns.join(", ")),
-                        ))
-                    },
-                    Err,
+                let ns: Vec<_> = uc.iter().map(|c| c.3.clone()).collect();
+                sweep_corners(
+                    &mut acc,
+                    "param_corner",
+                    "",
+                    &ns,
+                    &noms,
+                    |m| lower_corner(adm, &uc, m),
+                    &mut run_transient,
                 )
             }
         },
     };
+    let gl: Vec<_> = adm
+        .envelopes
+        .geometry
+        .iter()
+        .map(|g| format!("{}.{} ({})", g.part, BOX_AXES[g.axis], g.source))
+        .collect();
+    let geom = sweep_corners(
+        &mut acc,
+        "geom_corner",
+        "no as-built geometry tolerance declared",
+        &gl,
+        &noms,
+        |m| lower_geom_corner(adm, m),
+        &mut run_transient,
+    );
+    let bl: Vec<_> = adm
+        .envelopes
+        .boundary_conditions
+        .iter()
+        .map(|b| format!("{} ({})", b.target, b.source))
+        .collect();
+    let bc = sweep_corners(
+        &mut acc,
+        "bc_corner",
+        "no boundary-condition envelope declared",
+        &bl,
+        &noms,
+        |m| lower_bc_corner(adm, m),
+        &mut run_transient,
+    );
     let (mut req_items, mut term_items) = (
         Vec::with_capacity(reqs.len()),
         Vec::with_capacity(reqs.len() * 8),
@@ -646,7 +809,7 @@ where
         adm.wall_budget_s
     );
     let opt = |o: Option<f64>| o.map_or_else(|| "null".into(), |v| format!("{v:.17e}"));
-    for (i, (r, (unit, nom))) in reqs.iter().zip(&noms).enumerate() {
+    for (i, (r, (unit, dims, nom))) in reqs.iter().zip(&noms).enumerate() {
         let ro = roundoff_term(&r.probe, unit, adm, rec, energy_defect_j);
         let sol = match &tight {
             Ok(v) => (
@@ -664,16 +827,23 @@ where
             ),
             Err(w) => nodata(w),
         };
-        let par = match &param {
+        let pick = |res: &Result<(Vec<f64>, String), String>| match res {
             Ok((v, w)) => (TermValue::interval(0.0, v[i]).unwrap(), w.clone()),
             Err(w) => nodata(w),
         };
-        let (g, b, m, s) = (
-            nodata("no as-built geometry tolerance declared"),
-            nodata("no boundary-condition envelope declared"),
-            nodata("no model-form discrepancy bound declared"),
-            nodata("no sensor or measurement uncertainty declared"),
-        );
+        let (par, g, b) = (pick(&param), pick(&geom), pick(&bc));
+        let m = direct_term(
+            &adm.envelopes.model_form,
+            &r.probe,
+            *dims,
+            "no model-form discrepancy bound declared",
+        )?;
+        let s = direct_term(
+            &adm.envelopes.measurement,
+            &r.probe,
+            *dims,
+            "no sensor or measurement uncertainty declared",
+        )?;
         let specs = [
             (Uk::Roundoff, ro.0, ro.1, "window-ledger"),
             (Uk::SolverAlgebraic, sol.0, sol.1, "solver-tight"),
@@ -796,12 +966,16 @@ impl EvaluatedQoiBudget {
 }
 
 pub(crate) fn attach_wall_metrics(raw: &str, metrics: &[(i64, String, f64)]) -> String {
-    let mut out = raw.to_string();
+    let mut by_key = BTreeMap::new();
     for (_, key, val) in metrics {
         if key.starts_with("driver.budget.") {
-            let pat = format!("\"wall_s_metric\":{}", js(key));
-            out = out.replace(&pat, &format!("{pat},\"wall_s\":{val:.17e}"));
+            by_key.insert(key.as_str(), *val);
         }
+    }
+    let mut out = raw.to_string();
+    for (key, val) in by_key {
+        let pat = format!("\"wall_s_metric\":{}", js(key));
+        out = out.replace(&pat, &format!("{pat},\"wall_s\":{val:.17e}"));
     }
     out
 }
@@ -809,7 +983,80 @@ pub(crate) fn attach_wall_metrics(raw: &str, metrics: &[(i64, String, f64)]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        InterpolationPolicy, ObservationDataset, PropertyClaim, PropertyKey, Provenance,
+    };
     use fs_qty::QtyAny;
+
+    #[test]
+    fn surface2d_perturbation_and_wall_metric_dedup() {
+        let pr = Provenance {
+            source: "NIST".into(),
+            license: "CC0".into(),
+            artifact: Some(hash_bytes(b"nist")),
+        };
+        let mut cs = ClaimSet::new();
+        let obs = cs
+            .register_observation(ObservationDataset {
+                specimen: "srm".into(),
+                method: "ghp".into(),
+                artifact: hash_bytes(b"srm"),
+                caveats: "none".into(),
+                provenance: pr.clone(),
+            })
+            .unwrap();
+        let k = Dims([1, 1, -3, -1, 0, 0]);
+        let cid = cs
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new("thermal_conductivity", k),
+                value: PropertyValue::Surface2D {
+                    axes: ["T".into(), "rho".into()],
+                    axis_dims: [Dims([0, 0, 0, 1, 0, 0]), Dims([-3, 1, 0, 0, 0, 0])],
+                    samples: vec![
+                        ([280.0, 37.0], 0.030),
+                        ([320.0, 37.0], 0.036),
+                        ([320.0, 46.0], 0.038),
+                    ],
+                    triangles: vec![[0, 1, 2]],
+                    dims: k,
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with("T", 280.0, 320.0)
+                    .with("rho", 37.0, 46.0),
+                uncertainty: UncertaintyModel::RelativeHalfWidth {
+                    fraction: 0.015,
+                    confidence: 0.95,
+                },
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![obs],
+                provenance: pr,
+            })
+            .unwrap();
+        for (s, mult) in [(1.0, 1.015), (-1.0, 0.985)] {
+            let p = perturb_claims(&cs, &BTreeMap::from([(cid, s)])).unwrap();
+            let PropertyValue::Surface2D {
+                samples, triangles, ..
+            } = &p.claims_ordered().next().unwrap().1.value
+            else {
+                panic!()
+            };
+            assert_eq!(triangles, &vec![[0, 1, 2]]);
+            assert!(
+                (samples[0].1 - 0.030 * mult).abs() < 1.0e-15
+                    && (samples[2].1 - 0.038 * mult).abs() < 1.0e-15
+            );
+        }
+        let glued = attach_wall_metrics(
+            r#"{"wall_s_metric":"driver.budget.step_halving.wall_s"}"#,
+            &[
+                (9, "driver.budget.step_halving.wall_s".into(), 0.1),
+                (9, "driver.budget.step_halving.wall_s".into(), 0.2),
+            ],
+        );
+        assert_eq!(glued.matches("\"wall_s\":").count(), 1);
+        assert!(glued.contains("2.000000000000000"));
+    }
 
     #[test]
     fn assess_one_emits_pass_fail_and_indeterminate_via_evidence_budget() {

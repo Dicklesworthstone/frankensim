@@ -15,7 +15,8 @@ use fs_scenario::assembly::draft::{
     PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
     TimeHistory, TimePlan, TimingEdge,
 };
-use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
+use fs_scenario::assembly::{DimensionBound, MaterialRef, ParameterKey, ReferenceState};
+use fs_scenario::entity::ToleranceSource;
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
 use fs_system::CardStore;
 
@@ -56,6 +57,28 @@ pub(crate) struct AssemblyRequirement {
     pub(crate) limit: QtyAny,
 }
 
+pub(crate) const BOX_AXES: [&str; 3] = ["lx", "ly", "lz"];
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GeomEnvelope {
+    pub(crate) part: String,
+    pub(crate) axis: usize,
+    pub(crate) half_width_m: f64,
+    pub(crate) source: String,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TargetEnvelope {
+    pub(crate) target: String,
+    pub(crate) half_width: QtyAny,
+    pub(crate) source: String,
+}
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DeclaredEnvelopes {
+    pub(crate) geometry: Vec<GeomEnvelope>,
+    pub(crate) boundary_conditions: Vec<TargetEnvelope>,
+    pub(crate) measurement: Vec<TargetEnvelope>,
+    pub(crate) model_form: Vec<TargetEnvelope>,
+}
+
 /// Admitted assembly document, Five Explicits, and resolved card store.
 pub(crate) struct AdmittedAssembly {
     pub(crate) canonical_source: Vec<u8>,
@@ -74,6 +97,7 @@ pub(crate) struct AdmittedAssembly {
     pub(crate) harmonic_frequencies_hz: Vec<f64>,
     pub(crate) modal_max_modes: usize,
     pub(crate) requirements: Vec<AssemblyRequirement>,
+    pub(crate) envelopes: DeclaredEnvelopes,
 }
 
 fn err(what: impl Into<String>) -> SolveRefusal {
@@ -431,6 +455,136 @@ fn parse_probe(
     })
 }
 
+fn parse_envelope(items: &[Node], out: &mut DeclaredEnvelopes) -> Result<(), SolveRefusal> {
+    let k = as_sym(
+        items.get(1).ok_or_else(|| err("envelope missing kind"))?,
+        "envelope.kind",
+    )?;
+    let sc = format!("envelope `{k}`");
+    let src = |kw: &BTreeMap<&str, &Node>| {
+        let s = as_str(req(kw, "source", &sc)?, "source")?.trim();
+        (!s.is_empty())
+            .then(|| s.to_string())
+            .ok_or_else(|| err(format!("{sc} requires non-empty :source")))
+    };
+    if k == "geometry" {
+        let kw = kwargs(&items[2..], &["part", "axis", "half-width", "source"], &sc)?;
+        let part = as_str(req(&kw, "part", &sc)?, "part")?.to_string();
+        let ax_s = as_sym(req(&kw, "axis", &sc)?, "axis")?;
+        let axis = BOX_AXES
+            .iter()
+            .position(|&a| a == ax_s)
+            .ok_or_else(|| err(format!("{sc} unsupported box axis `{ax_s}`")))?;
+        let hw = as_qty_d(req(&kw, "half-width", &sc)?, LENGTH, "half-width")?.value;
+        if hw <= 0.0
+            || out
+                .geometry
+                .iter()
+                .any(|g| g.part == part && g.axis == axis)
+        {
+            return Err(err(format!("{sc} invalid or duplicate ({part}, {ax_s})")));
+        }
+        out.geometry.push(GeomEnvelope {
+            part,
+            axis,
+            half_width_m: hw,
+            source: src(&kw)?,
+        });
+        return Ok(());
+    }
+    let (key, list, zero_ok) = match k {
+        "boundary-conditions" => ("target", &mut out.boundary_conditions, false),
+        "measurement" => ("probe", &mut out.measurement, true),
+        "model-form" => ("probe", &mut out.model_form, false),
+        o => return Err(err(format!("unsupported envelope kind `{o}`"))),
+    };
+    let kw = kwargs(&items[2..], &[key, "half-width", "source"], &sc)?;
+    let target = as_str(req(&kw, key, &sc)?, key)?.to_string();
+    let hw = as_qty(req(&kw, "half-width", &sc)?, "half-width")?;
+    if hw.value < 0.0 || (!zero_ok && hw.value == 0.0) || list.iter().any(|d| d.target == target) {
+        return Err(err(format!(
+            "{sc} invalid :half-width or duplicate `{target}`"
+        )));
+    }
+    list.push(TargetEnvelope {
+        target,
+        half_width: hw,
+        source: src(&kw)?,
+    });
+    Ok(())
+}
+
+fn bind_envelopes(
+    envelopes: &DeclaredEnvelopes,
+    parts: &mut [DraftPartDecl],
+    sources: &[SourceDecl],
+    probes: &[ProbeDecl],
+) -> Result<(), SolveRefusal> {
+    for g in &envelopes.geometry {
+        let p = parts
+            .iter_mut()
+            .find(|p| p.name == g.part)
+            .ok_or_else(|| err(format!("geometry envelope unknown part `{}`", g.part)))?;
+        let dim = match &p.geometry {
+            DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, ly, lz }) => {
+                [lx, ly, lz][g.axis].value
+            }
+            other => {
+                let sh = match other {
+                    DraftGeometrySource::Primitive(PrimitiveShape::Cylinder { .. }) => "cylinder",
+                    DraftGeometrySource::Primitive(PrimitiveShape::Sphere { .. }) => "sphere",
+                    DraftGeometrySource::Primitive(PrimitiveShape::Tube { .. }) => "tube",
+                    _ => "non-box",
+                };
+                return Err(err(format!(
+                    "geometry envelope `{}`: box only, not `{sh}`",
+                    g.part
+                )));
+            }
+        };
+        let ax = BOX_AXES[g.axis];
+        if g.half_width_m >= dim {
+            return Err(err(format!(
+                "geometry envelope `{}` {ax} half-width must be < nominal",
+                g.part
+            )));
+        }
+        p.uncertainty.push(DimensionBound {
+            property: ParameterKey::new(ax, LENGTH),
+            lower: QtyAny::new(dim - g.half_width_m, LENGTH),
+            upper: QtyAny::new(dim + g.half_width_m, LENGTH),
+            source: ToleranceSource::Standard {
+                clause: g.source.clone(),
+            },
+        });
+    }
+    for b in &envelopes.boundary_conditions {
+        let s = sources
+            .iter()
+            .find(|s| s.name == b.target)
+            .ok_or_else(|| err(format!("bc envelope unknown source `{}`", b.target)))?;
+        let (TimeHistory::Constant(q) | TimeHistory::Harmonic { offset: q, .. }) = &s.history
+        else {
+            return Err(err(format!(
+                "bc envelope `{}`: constant/harmonic sources only",
+                b.target
+            )));
+        };
+        if b.half_width.dims != q.dims {
+            return Err(err(format!(
+                "bc envelope `{}` dims do not match source",
+                b.target
+            )));
+        }
+    }
+    for d in envelopes.measurement.iter().chain(&envelopes.model_form) {
+        if !probes.iter().any(|p| p.name == d.target) {
+            return Err(err(format!("envelope unknown probe `{}`", d.target)));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn admit_assembly_source(
     source: &[u8],
@@ -473,6 +627,7 @@ pub(crate) fn admit_assembly_source(
         Vec::new(),
     );
     let mut req_ids = BTreeSet::new();
+    let mut envelopes = DeclaredEnvelopes::default();
 
     for clause in &root_items[2..] {
         let items = as_list(clause, "clause")?;
@@ -909,6 +1064,7 @@ pub(crate) fn admit_assembly_source(
                     limit,
                 });
             }
+            "envelope" => parse_envelope(items, &mut envelopes)?,
             "analysis-options" => {
                 let kw = kwargs(
                     &items[1..],
@@ -949,6 +1105,7 @@ pub(crate) fn admit_assembly_source(
     }
     let environment = env.ok_or_else(|| err("missing required (environment ...)"))?;
     let time_plan = time_plan.ok_or_else(|| err("missing required (time-plan ...)"))?;
+    bind_envelopes(&envelopes, &mut parts, &sources, &probes)?;
     let scenario = Scenario::new(&name, seed, environment.base.clone());
     let draft = DraftAssembly::admit(
         DraftAssemblyInput {
@@ -995,6 +1152,7 @@ pub(crate) fn admit_assembly_source(
         harmonic_frequencies_hz: harm_hz,
         modal_max_modes: modal_max,
         requirements,
+        envelopes,
     })
 }
 
@@ -1239,5 +1397,58 @@ mod tests {
         assert_eq!(state, &vec![key("area", 0.01, AREA)]);
         let why = film(" :card \"x\"").err().unwrap().what;
         assert!(why.contains("a film's one card is its fluid"), "{why}");
+    }
+
+    #[test]
+    fn envelope_clauses_bind_uncertainty_and_refuse_non_box_or_bad_targets() {
+        let with = |extra: &str| {
+            admit(&format!(
+                ") (part \"c\" :kind solid :geometry (cylinder 0.02m 0.05m) :physics (thermal) :fidelity lumped) \
+                 (source \"h\" :part \"rotor\" :port \"thermal\" :history (constant 10W)) {extra} \
+                 (probe \"tp\" :kind thermocouple :target \"rotor\" :sample-rate 1000Hz"
+            ))
+        };
+        let ok = with(
+            "(envelope geometry :part \"rotor\" :axis lx :half-width 0.001m :source \"ISO 2768-m\") \
+             (envelope boundary-conditions :target \"h\" :half-width 0.5W :source \"PSU 5%\") \
+             (envelope measurement :probe \"tp\" :half-width 0.05K :source \"SPRT\") \
+             (envelope model-form :probe \"tp\" :half-width 0.1K :source \"Biot<0.01\")",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                ok.draft.input().parts[0].uncertainty.len(),
+                ok.envelopes.boundary_conditions.len()
+            ),
+            (1, 1)
+        );
+        let chk = |bad: &str, needle: &str| {
+            let e = with(bad).err().unwrap();
+            assert!(e.what.contains(needle), "`{}` missing `{needle}`", e.what);
+        };
+        chk(
+            "(envelope geometry :part \"c\" :axis lx :half-width 0.001m :source \"s\")",
+            "cylinder",
+        );
+        chk(
+            "(envelope geometry :part \"rotor\" :axis lx :half-width 0.1m :source \"s\")",
+            "< nominal",
+        );
+        chk(
+            "(envelope boundary-conditions :target \"h\" :half-width 1K :source \"s\")",
+            "dims do not match",
+        );
+        chk(
+            "(envelope model-form :probe \"tp\" :half-width 0K :source \"s\")",
+            "invalid :half-width",
+        );
+        chk(
+            "(envelope measurement :probe \"missing\" :half-width 0.1K :source \"s\")",
+            "unknown probe",
+        );
+        chk(
+            "(envelope measurement :probe \"tp\" :half-width 0.1K :source \" \")",
+            "non-empty :source",
+        );
     }
 }
