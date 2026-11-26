@@ -32,7 +32,7 @@ case "${COMMAND}" in
     cargo check -p fs-cli --bin frankensim
     ;;
   --self-test)
-    cargo test -p fs-cli --bin frankensim uq_command
+    cargo test -p fs-cli --lib uq_command
     cargo test -p fs-cli --test cooling_network_uq
     ;;
   --run)
