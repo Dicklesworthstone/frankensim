@@ -376,6 +376,90 @@ fn binary_solve_two_ledgers_pass_replay_audit_cleanly() {
     );
 }
 
+fn assert_study_replay_clean_and_idempotent(
+    fsim: &Path,
+    dir: &Path,
+    tag: &str,
+    expected_ops: Option<usize>,
+) {
+    let (da, db) = (
+        dir.join(format!("{tag}_a.db")),
+        dir.join(format!("{tag}_b.db")),
+    );
+    let (f_s, a_s, b_s) = (
+        fsim.to_str().unwrap(),
+        da.to_str().unwrap(),
+        db.to_str().unwrap(),
+    );
+    let (ja, _) = run_bin(&["--json", "study", f_s, a_s], exit::SUCCESS);
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let (jb, _) = run_bin(&["--json", "study", f_s, b_s], exit::SUCCESS);
+    let run_id = jstr(&ja, "run_id");
+    assert_eq!(run_id, jstr(&jb, "run_id"), "{tag}: study-<hash> drifted");
+    assert!(
+        !ja.contains("\"consumed_wall_s\""),
+        "{tag} leaked wall_s: {ja}"
+    );
+    let (audit, _) = run_bin(&["--json", "replay-audit", a_s, b_s], exit::SUCCESS);
+    for needle in [
+        "\"status\":\"clean\"",
+        "\"clean\":true",
+        "\"deterministic_mismatches\":[]",
+        "\"structure_mismatch\":null",
+    ] {
+        assert!(audit.contains(needle), "{tag} missing {needle}: {audit}");
+    }
+    let la = Ledger::open(a_s).unwrap();
+    let ops = la.visible_op_ids(MAIN_BRANCH, None).unwrap();
+    if let Some(n) = expected_ops {
+        assert_eq!(ops.len(), n, "{tag} op count");
+        assert!(audit.contains(&format!("\"compared\":{n}")), "{audit}");
+    }
+    let last_op = *ops.last().unwrap();
+    assert!(
+        la.metrics_for_op(last_op)
+            .unwrap()
+            .iter()
+            .any(|(t, n, _)| *t == 1 && n == "study.consumed_wall_s")
+    );
+    drop(la);
+    // Option (a): same-ledger rerun re-attests and returns identical run_id with 0 new ops.
+    let (jr, _) = run_bin(&["--json", "study", f_s, a_s], exit::SUCCESS);
+    assert_eq!(jstr(&jr, "run_id"), run_id);
+    assert_eq!(
+        Ledger::open(a_s).unwrap().table_count("ops").unwrap(),
+        ops.len() as u64
+    );
+    run_bin(&["--json", "report", run_id, a_s], exit::SUCCESS);
+}
+
+#[test]
+fn binary_thermal_and_uncertainty_studies_replay_cleanly_and_rerun_idempotently() {
+    let dir = scratch_dir("study_replay");
+    let root = repo_root();
+
+    let thermal_src = std::fs::read_to_string(root.join("examples/marquee/thermal-2d.fsim"))
+        .unwrap()
+        .replace(":steps 8", ":steps 2")
+        .replace(":mesh-level 4", ":mesh-level 3");
+    let thermal_fsim = dir.join("thermal-short.fsim");
+    std::fs::write(&thermal_fsim, thermal_src).unwrap();
+    assert_study_replay_clean_and_idempotent(&thermal_fsim, &dir, "th", Some(3));
+
+    let ref_dir = root.join("data/reference-project");
+    for name in ["cooling-reference.fsim", "plate.stl", "aa6061.fsmcdpk"] {
+        std::fs::copy(ref_dir.join(name), dir.join(name)).unwrap();
+    }
+    let uq_src = std::fs::read_to_string(root.join("examples/native-uncertainty/study.fsim"))
+        .unwrap()
+        .replace(":samples 8", ":samples 2")
+        .replace(":wall-time 120s", ":wall-time 300s")
+        .replace("../../data/reference-project/", "");
+    let uq_fsim = dir.join("uq-short.fsim");
+    std::fs::write(&uq_fsim, uq_src).unwrap();
+    assert_study_replay_clean_and_idempotent(&uq_fsim, &dir, "uq", None);
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn binary_package_coverage_all_four_standards_default_unchanged_and_study_refused() {

@@ -256,14 +256,14 @@ fn persist(
     }
     let seed = study.seed().to_le_bytes();
     let versions = format!("{{\"driver\":{driver:?},\"solve_driver\":{}}}", crate::SOLVE_DRIVER_VERSION);
-    let budgets = format!("{{\"evaluations\":{},\"wall_s\":{},\"consumed_wall_s\":{used_wall}}}",
+    let budgets = format!("{{\"evaluations\":{},\"wall_s\":{}}}",
         study.samples(), study.wall_seconds());
     ledger.begin()?;
     let result = (|| {
         let op = ledger.begin_op(Some(id.as_bytes()), &ir(driver, id, n), &FiveExplicits {
             seed: &seed, versions: &versions, budget: &budgets,
             capability: presentation.capability,
-        }, 0)?;
+        }, STUDY_OP_START_T)?;
         if model.retain(ledger, op)? != id { return Err(invalid("retained native model identity differs")); }
         if let Some(previous) = predecessor { ledger.link(op, &previous, EdgeRole::In)?; }
         let mut children = std::collections::BTreeSet::new();
@@ -289,14 +289,15 @@ fn persist(
             quoted(&a.hash.to_hex())
         } else { "null".into() };
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{driver:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"consumed_wall_s\":{used_wall},\"selected_project\":{selected_project},\"failure\":{failure_json},\"predecessor\":{}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{driver:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected_project\":{selected_project},\"failure\":{failure_json},\"predecessor\":{}{refs}}}",
             quoted(&id.to_hex()), quoted(&id.to_hex()), quoted(status), quoted(termination),
             study.samples(), predecessor.map_or_else(|| "null".into(), |h| quoted(&h.to_hex()))
         );
         let a = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
         ledger.link(op, &a.hash, EdgeRole::Out)?;
         if ledger.artifact_output_seal(&a.hash)?.is_none() { ledger.seal_artifact_output(&a.hash, op)?; }
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
+        record_study_wall_s(ledger, op, used_wall)?;
+        ledger.finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)?;
         Ok(Outcome { pointer: format!("study-{}", a.hash.to_hex()), receipt,
             status: status.into(), authority: "estimated-native-design" })
     })();
@@ -344,6 +345,40 @@ pub(super) fn validate_loaded(ledger: &Ledger, hash: ContentHash, value: J, byte
     Ok(Loaded { hash, value, bytes })
 }
 
+fn find_completed_design(model: &Model, ledger: &Ledger, driver: &str) -> Result<Option<Outcome>> {
+    for hash in retained_study_receipts(ledger, model.identity(), RECEIPT_KIND)? {
+        let pointer = format!("study-{}", hash.to_hex());
+        if let Ok(loaded) = load(ledger, &pointer)
+            && resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).is_ok()
+            && loaded.value.str_field("driver") == Some(driver)
+            && loaded.value.str_field("status") == Some("completed")
+        {
+            return Ok(Some(Outcome {
+                pointer,
+                receipt: String::from_utf8(loaded.bytes).map_err(|e| invalid(e.to_string()))?,
+                status: "completed".into(),
+                authority: "estimated-native-design",
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn resume_wall_s(ledger: &Ledger, old: &Loaded, wall_s: f64) -> Result<f64> {
+    let used = resolve_study_wall_s(ledger, &old.hash, &old.value).map_err(invalid)?;
+    if used >= wall_s {
+        return Err(Failure {
+            code: "cli-uncertainty-resume-budget",
+            message: format!(
+                "retained wall consumption already exhausts the study budget; retained checkpoint: study-{}",
+                old.hash.to_hex()
+            ),
+            exit: exit::BUDGET,
+        });
+    }
+    Ok(used)
+}
+
 pub(super) fn drive(
     model: &Model, ledger: &Ledger, cap: Option<usize>, gate: &CancelGate,
     started: Instant, prior: Option<&Loaded>,
@@ -351,6 +386,14 @@ pub(super) fn drive(
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
     let driver = study_driver(study, policy);
+    if prior.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && !ledger.in_transaction()
+        && let Some(retained) = find_completed_design(model, ledger, driver)?
+    {
+        return Ok(retained);
+    }
     let observations = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
@@ -386,8 +429,7 @@ pub(super) fn drive(
             model.verify_sample(ledger, &sample)?;
             rows.push(observe(model, ledger, sample)?);
         }
-        old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| invalid("invalid retained design wall charge"))?
+        resume_wall_s(ledger, old, study.wall_seconds())?
     } else { 0.0 };
     let start_count = rows.len();
     let mut predecessor = prior.map(|old| old.hash);

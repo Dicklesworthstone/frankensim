@@ -15,6 +15,10 @@ use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_project::study::{StudySpec, parse_study_strict, print_study_sexpr};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionId};
 
+use super::{
+    STUDY_OP_END_T, STUDY_OP_START_T, record_study_wall_s, resolve_study_wall_s,
+    retained_study_receipts,
+};
 use crate::json_read::JsonValue;
 use crate::{
     CommandOutput, Diagnostic, MAX_PROJECT_BYTES, OutputMode, exit, push_json_string, refusal,
@@ -338,6 +342,24 @@ pub(crate) fn study_path(
     }
 }
 
+fn find_completed_run(a: &Admitted, ledger: &Ledger) -> Result<Option<Outcome>> {
+    for hash in retained_study_receipts(ledger, a.id, RECEIPT_KIND)? {
+        let pointer = format!("study-{}", hash.to_hex());
+        if let Ok(loaded) = load(ledger, &pointer)
+            && resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).is_ok()
+            && loaded.value.str_field("status") == Some("completed")
+            && integer(&loaded.value, "iterations_completed").ok() == Some(a.config.steps)
+        {
+            return Ok(Some(Outcome {
+                pointer,
+                receipt: loaded.bytes,
+                status: "completed",
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn drive(
     a: &Admitted,
     ledger: &Ledger,
@@ -359,6 +381,12 @@ fn drive(
             "study requires its own ledger transaction",
         ));
     }
+    if prior.is_none()
+        && cap.is_none()
+        && let Some(retained) = find_completed_run(a, ledger)?
+    {
+        return Ok(retained);
+    }
     let mut runner = StudyRunner::new(design(&a.spec), a.config.clone())
         .map_err(|e| fail("cli-study-geometry", e.to_string()))?;
     let mut used_wall = 0.0;
@@ -378,12 +406,18 @@ fn drive(
                 "retained iteration count exceeds requested steps",
             ));
         }
-        used_wall = old
-            .value
-            .f64_field("consumed_wall_s")
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| fail("cli-study-resume-budget", "invalid retained wall charge"))?;
+        used_wall = resolve_study_wall_s(ledger, &old.hash, &old.value)
+            .map_err(|msg| fail("cli-study-resume-budget", msg))?;
         let checkpoint = format!("study-{}", old.hash.to_hex());
+        if used_wall >= a.wall_s {
+            return Err(Failure {
+                code: "cli-study-resume-budget",
+                message: format!(
+                    "retained wall consumption already exhausts the study budget; no publication; retained checkpoint: {checkpoint}"
+                ),
+                exit: exit::BUDGET,
+            });
+        }
         for _ in 0..count {
             let mut stopped = None;
             runner
@@ -675,7 +709,7 @@ fn persist(
         hash_bytes(include_bytes!("../../../constellation.lock")).to_hex()
     );
     let budget_json = format!(
-        "{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{},\"consumed_wall_s\":{wall_s}}}",
+        "{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{}}}",
         a.wall_s,
         a.memory_bytes,
         a.spec
@@ -687,7 +721,7 @@ fn persist(
     let seed = a.spec.seeds.as_ref().expect("seed").root.to_le_bytes();
     ledger.begin()?;
     let result = (|| -> Result<Outcome> {
-        let op = ledger.begin_op(Some(a.id.as_bytes()), &ir(a.id, n), &FiveExplicits { seed: &seed, versions: &versions, budget: &budget_json, capability: "{\"ops\":[\"optimization.thermal-radii\",\"geometry.sdf\",\"physics.cutfem\"]}" }, 0)?;
+        let op = ledger.begin_op(Some(a.id.as_bytes()), &ir(a.id, n), &FiveExplicits { seed: &seed, versions: &versions, budget: &budget_json, capability: "{\"ops\":[\"optimization.thermal-radii\",\"geometry.sdf\",\"physics.cutfem\"]}" }, STUDY_OP_START_T)?;
         if let Some(previous) = predecessor {
             ledger.link(op, &previous, EdgeRole::In)?;
         }
@@ -706,7 +740,7 @@ fn persist(
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{n},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{wall_s},\"predecessor\":{},\"stages\":[\"study-admit\",{},\"study-report\",\"study-package\"]{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{n},\"target_iterations\":{},\"trace_hash\":\"{}\",\"predecessor\":{},\"stages\":[\"study-admit\",{},\"study-report\",\"study-package\"]{refs}}}",
             a.id.to_hex(),
             source.hash.to_hex(),
             a.config.steps,
@@ -723,7 +757,8 @@ fn persist(
         if ledger.artifact_output_seal(&artifact.hash)?.is_none() {
             ledger.seal_artifact_output(&artifact.hash, op)?;
         }
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
+        record_study_wall_s(ledger, op, wall_s)?;
+        ledger.finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)?;
         Ok(Outcome {
             pointer: format!("study-{}", artifact.hash.to_hex()),
             receipt,
@@ -759,6 +794,7 @@ fn persist(
 struct Loaded {
     hash: ContentHash,
     value: JsonValue,
+    bytes: String,
 }
 fn integer(value: &JsonValue, key: &str) -> Result<usize> {
     value
@@ -842,7 +878,11 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         }
         artifact(ledger, h, kind)?;
     }
-    Ok(Loaded { hash, value })
+    Ok(Loaded {
+        hash,
+        value,
+        bytes: text.to_string(),
+    })
 }
 
 pub(crate) fn resume_path(
@@ -1225,13 +1265,77 @@ mod tests {
         assert_eq!(ticks.get(), 4, "deadline is checked after the state solve");
         let saved = load(&ledger, &out.pointer).unwrap();
         assert_eq!(integer(&saved.value, "iterations_completed").unwrap(), 0);
-        assert_eq!(saved.value.f64_field("consumed_wall_s"), Some(a.wall_s));
+        assert!(saved.value.get("consumed_wall_s").is_none());
+        assert_eq!(
+            resolve_study_wall_s(&ledger, &saved.hash, &saved.value).unwrap(),
+            a.wall_s
+        );
+        let exhausted_resume = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &|| 0.0,
+            Some(&saved),
+        )
+        .unwrap_err();
+        assert_eq!(exhausted_resume.code, "cli-study-resume-budget");
+        assert_eq!(exhausted_resume.exit, exit::BUDGET);
         let initial = StudyRunner::new(design(&a.spec), a.config.clone()).unwrap().report();
         assert_eq!(saved.value.str_field("trace_hash"), Some(initial.trace_hash.as_str()));
         let package = linked(&ledger, &saved.value, "package", "study-package").unwrap();
         let package = EvidencePackage::from_json(std::str::from_utf8(&package).unwrap()).unwrap();
         assert!(package.declared_claims_unverified().is_empty());
         assert_eq!(ledger.table_count("ops").unwrap(), 2);
+    }
+
+    #[test]
+    fn g4_same_ledger_rerun_is_idempotent_and_missing_metric_refuses_resume() {
+        let a = admit(&short_source(), false).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let gate = CancelGate::new_clock_free();
+        let first = drive(&a, &ledger, None, &gate, &|| 0.25, None).unwrap();
+        let ops_after = ledger.table_count("ops").unwrap();
+        let second = drive(&a, &ledger, None, &gate, &|| 9.5, None).unwrap();
+        assert_eq!(
+            (second.pointer, second.receipt),
+            (first.pointer.clone(), first.receipt)
+        );
+        assert_eq!(ledger.table_count("ops").unwrap(), ops_after);
+
+        // Tamper: copy sealed op without `study.consumed_wall_s` metric -> resume refuses.
+        let saved = load(&ledger, &first.pointer).unwrap();
+        let prod_op = ledger.artifact_output_seal(&saved.hash).unwrap().unwrap();
+        let row = ledger.op(prod_op).unwrap().unwrap();
+        let tampered = Ledger::open(":memory:").unwrap();
+        let op = tampered
+            .begin_op(
+                row.session.as_deref(),
+                &row.ir,
+                &FiveExplicits {
+                    seed: &row.seed,
+                    versions: &row.versions,
+                    budget: &row.budget,
+                    capability: &row.capability,
+                },
+                STUDY_OP_START_T,
+            )
+            .unwrap();
+        let edges = ledger.op_artifact_edges_bounded(prod_op, 64).unwrap().edges;
+        for edge in edges {
+            let info = ledger.artifact_info(&edge.artifact).unwrap().unwrap();
+            let bytes = ledger.get_artifact(&edge.artifact).unwrap().unwrap();
+            tampered.put_artifact(&info.kind, &bytes, None).unwrap();
+            tampered.link(op, &edge.artifact, edge.role).unwrap();
+        }
+        tampered.seal_artifact_output(&saved.hash, op).unwrap();
+        tampered
+            .finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)
+            .unwrap();
+        let loaded = load(&tampered, &first.pointer).unwrap();
+        let err = drive(&a, &tampered, None, &gate, &|| 0.0, Some(&loaded)).unwrap_err();
+        assert_eq!(err.code, "cli-study-resume-budget");
+        assert!(err.message.contains("lacks retained"), "{}", err.message);
     }
 
     #[test]

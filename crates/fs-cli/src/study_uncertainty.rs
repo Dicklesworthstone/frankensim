@@ -15,7 +15,10 @@ use fs_uq::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UqExecution, UqPlan, UqStatus,
 };
 
-use super::STUDY_RUN_RECEIPT_SCHEMA;
+use super::{
+    STUDY_OP_END_T, STUDY_OP_START_T, STUDY_RUN_RECEIPT_SCHEMA, record_study_wall_s,
+    resolve_study_wall_s, retained_study_receipts,
+};
 use crate::json_read::JsonValue as J;
 use crate::{CommandOutput, Diagnostic, OutputMode, exit, push_json_string, refusal};
 
@@ -507,7 +510,7 @@ fn persist(
         crate::SOLVE_DRIVER_VERSION
     );
     let budgets = format!(
-        "{{\"samples\":{},\"wall_s\":{},\"consumed_wall_s\":{used_wall}{control_budget}}}",
+        "{{\"samples\":{},\"wall_s\":{}{control_budget}}}",
         model.bound.study().samples(),
         model.bound.study().wall_seconds()
     );
@@ -516,7 +519,7 @@ fn persist(
         let op = ledger.begin_op(Some(id.as_bytes()), &op_ir(id, n), &FiveExplicits {
             seed: &seed, versions: &versions, budget: &budgets,
             capability: "{\"ops\":[\"native-project-uncertainty\"],\"physical_ops\":\"inherited-from-retained-base-project\"}",
-        }, 0)?;
+        }, STUDY_OP_START_T)?;
         let model_hash = model.retain(ledger, op)?;
         if model_hash != id {
             return Err(fail(
@@ -561,7 +564,7 @@ fn persist(
             "null".into()
         };
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"samples_completed\":{n},\"samples_planned\":{},\"consumed_wall_s\":{used_wall},\"failure\":{failure},\"checkpoint\":{checkpoint_hash},\"predecessor\":{}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"samples_completed\":{n},\"samples_planned\":{},\"failure\":{failure},\"checkpoint\":{checkpoint_hash},\"predecessor\":{}{refs}}}",
             quoted(&id.to_hex()),
             quoted(&id.to_hex()),
             quoted(status),
@@ -574,7 +577,8 @@ fn persist(
         if ledger.artifact_output_seal(&a.hash)?.is_none() {
             ledger.seal_artifact_output(&a.hash, op)?;
         }
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
+        record_study_wall_s(ledger, op, used_wall)?;
+        ledger.finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)?;
         Ok(Outcome {
             pointer: format!("study-{}", a.hash.to_hex()),
             receipt,
@@ -687,6 +691,27 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
     Ok(Loaded { hash, value, bytes })
 }
 
+fn find_completed_run(model: &Model, ledger: &Ledger) -> Result<Option<Outcome>> {
+    for hash in retained_study_receipts(ledger, model.identity(), RECEIPT_KIND)? {
+        let pointer = format!("study-{}", hash.to_hex());
+        if let Ok(loaded) = load(ledger, &pointer)
+            && resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).is_ok()
+            && loaded.value.str_field("driver") == Some(DRIVER)
+            && let Some(status @ ("completed" | "decision-reached")) =
+                loaded.value.str_field("status")
+        {
+            return Ok(Some(Outcome {
+                pointer,
+                receipt: String::from_utf8(loaded.bytes)
+                    .map_err(|e| fail("cli-uncertainty-run", e.to_string()))?,
+                status: status.into(),
+                authority: "estimated-native-model-sampling",
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn drive(
     model: &Model,
     ledger: &Ledger,
@@ -695,6 +720,14 @@ fn drive(
     started: Instant,
     prior: Option<&Loaded>,
 ) -> Result<Outcome> {
+    if prior.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && !ledger.in_transaction()
+        && let Some(retained) = find_completed_run(model, ledger)?
+    {
+        return Ok(retained);
+    }
     // Calibration is deterministic and kept out of the sampling stream. On
     // recovery each probe and the original coefficients are verified first.
     let mut calibration = mean_control::Calibration::recover(model, ledger, prior)?;
@@ -760,11 +793,18 @@ fn drive(
                 "checkpoint values differ from child QoIs",
             ));
         }
-        let used = old
-            .value
-            .f64_field("consumed_wall_s")
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| fail("cli-uncertainty-resume", "invalid retained wall charge"))?;
+        let used = resolve_study_wall_s(ledger, &old.hash, &old.value)
+            .map_err(|msg| fail("cli-uncertainty-resume", msg))?;
+        if used >= model.bound.study().wall_seconds() {
+            return Err(Failure {
+                code: "cli-uncertainty-resume-budget",
+                message: format!(
+                    "retained wall consumption already exhausts the study budget; retained checkpoint: study-{}",
+                    old.hash.to_hex()
+                ),
+                exit: exit::BUDGET,
+            });
+        }
         (execution, rows, used)
     } else {
         (

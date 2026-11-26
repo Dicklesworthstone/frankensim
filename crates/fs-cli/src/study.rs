@@ -91,6 +91,113 @@ impl PreparedStudyFile {
 /// an explicit `driver` field inside every receipt.
 pub const STUDY_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.study-run-receipt.v1";
 
+/// Logical begin/end timestamps of one study persistence op (carries no other metrics).
+pub(crate) const STUDY_OP_START_T: i64 = 0;
+pub(crate) const STUDY_OP_END_T: i64 = 1;
+/// Reserved metric key recording cumulative study wall-seconds outside content-addressed
+/// `ops.budget` and `study-run-receipt` bytes (bead `frankensim-4fs7g`).
+pub(crate) const STUDY_CONSUMED_WALL_S_METRIC: &str = "study.consumed_wall_s";
+
+/// Atomically persist cumulative study wall-seconds on `op` at `STUDY_OP_END_T`.
+#[allow(clippy::result_large_err)]
+pub(crate) fn record_study_wall_s(
+    ledger: &fs_ledger::Ledger,
+    op: i64,
+    wall_s: f64,
+) -> Result<(), fs_ledger::LedgerError> {
+    if !wall_s.is_finite() || wall_s < 0.0 {
+        return Err(fs_ledger::LedgerError::Invalid {
+            field: STUDY_CONSUMED_WALL_S_METRIC.to_string(),
+            problem: format!("study wall charge {wall_s} must be finite and nonnegative"),
+        });
+    }
+    ledger.record_metric(op, STUDY_OP_END_T, STUDY_CONSUMED_WALL_S_METRIC, wall_s)
+}
+
+/// Resolve and validate cumulative wall-seconds for an attested study receipt from its
+/// producing op's atomic `metrics` row (`study.consumed_wall_s` at `STUDY_OP_END_T`) or
+/// legacy pre-`4fs7g` JSON field. Fail-closed on unsealed, missing, duplicate, mistimed,
+/// conflicting, negative, or non-finite values.
+#[allow(clippy::float_cmp)]
+pub(crate) fn resolve_study_wall_s(
+    ledger: &fs_ledger::Ledger,
+    receipt_hash: &fs_blake3::ContentHash,
+    receipt: &crate::json_read::JsonValue,
+) -> Result<f64, String> {
+    let op_id = ledger
+        .artifact_output_seal(receipt_hash)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "unsealed study receipt lacks producing operation".to_string())?;
+    let mut metric_wall: Option<f64> = None;
+    for (t, name, value) in ledger.metrics_for_op(op_id).map_err(|e| e.to_string())? {
+        if name == STUDY_CONSUMED_WALL_S_METRIC
+            && (t != STUDY_OP_END_T || metric_wall.replace(value).is_some())
+        {
+            return Err(format!(
+                "study op {op_id} carries duplicate or mistimed `{STUDY_CONSUMED_WALL_S_METRIC}` metric"
+            ));
+        }
+    }
+    let legacy_wall = match receipt.get("consumed_wall_s") {
+        Some(v) => Some(v.as_f64().ok_or_else(|| {
+            format!("study op {op_id} receipt has non-numeric `consumed_wall_s` field")
+        })?),
+        None => None,
+    };
+    let wall_s = match (metric_wall, legacy_wall) {
+        (Some(m), Some(l)) if m != l => {
+            return Err(format!(
+                "study op {op_id} wall metric conflicts with legacy receipt field"
+            ));
+        }
+        (Some(m), _) => m,
+        (None, Some(l)) => l,
+        (None, None) => {
+            return Err(format!(
+                "study op {op_id} lacks retained `{STUDY_CONSUMED_WALL_S_METRIC}` metric"
+            ));
+        }
+    };
+    if !wall_s.is_finite() || wall_s < 0.0 {
+        return Err(format!("study op {op_id} carries invalid wall charge"));
+    }
+    Ok(wall_s)
+}
+
+/// Return retained `receipt_kind` output artifact hashes for completed ops of `study_id`
+/// on `MAIN_BRANCH`, newest first, for same-ledger idempotent rerun re-attestation.
+#[allow(clippy::result_large_err)]
+pub(crate) fn retained_study_receipts(
+    ledger: &fs_ledger::Ledger,
+    study_id: fs_blake3::ContentHash,
+    receipt_kind: &str,
+) -> Result<Vec<fs_blake3::ContentHash>, fs_ledger::LedgerError> {
+    let mut out = Vec::new();
+    for id in ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)?
+        .into_iter()
+        .rev()
+    {
+        let Some(row) = ledger.op(id)? else { continue };
+        if row.session.as_deref() != Some(study_id.as_bytes().as_slice())
+            || row.outcome.as_deref() != Some("ok")
+        {
+            continue;
+        }
+        for edge in ledger.op_artifact_edges_bounded(id, 64)?.edges {
+            if edge.role == fs_ledger::EdgeRole::Out
+                && ledger
+                    .artifact_info(&edge.artifact)?
+                    .is_some_and(|info| info.kind == receipt_kind)
+                && !out.contains(&edge.artifact)
+            {
+                out.push(edge.artifact);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn study_path(
     path: &Path,
     ledger_path: &Path,
