@@ -652,6 +652,8 @@ export function mountCrowdLab(root: HTMLElement): void {
         camera.clearViewOffset();
         camera.position.set(...eye);
         controls.target.set(...at);
+        // A close look may come nearer than a drag can.
+        controls.minDistance = Math.min(2, 0.9 * camera.position.distanceTo(controls.target));
         controls.update();
       },
     },

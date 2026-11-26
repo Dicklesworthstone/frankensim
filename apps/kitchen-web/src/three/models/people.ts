@@ -2725,6 +2725,178 @@ export function metresPerUv(g: THREE.BufferGeometry): number {
  * The file's meshes, made ready to bind to a Staff's skeleton: positions (which the file may store quantized, undone
  * by its skin) carried to body space at the bind pose, normals to plain floats, bone indices renumbered by name.
  */
+/**
+ * Tuck the skin under a garment, as a tailor would: skin the cloth covers moves as the cloth does, and skin deep under
+ * it is dropped. A body's skin and its jacket are skinned to the bones separately, so where they differ a bowed head
+ * or a bent back pushes the skin out through the cloth (the neck's base through the back of the collar). Skin under
+ * the cloth (behind the nearest cloth corner's outward normal, or within `out` metres outside it) takes that corner's
+ * bone weights and is set 4 mm under the cloth, both fading back within 0.3 to 1.2 cm of the cloth's open edges
+ * (collar, cuffs, hem, front) so skin an opening shows stays and moves as it was; skin triangles all of whose corners are under the cloth and
+ * more than `margin` from an open edge are dropped. The cloth's corners are welded by position first, so its texture
+ * seams are not taken for edges. Both geometries in bind pose, skinIndex already in this rig's bone order. Returns
+ * the skin corners retargeted and the triangles dropped.
+ */
+export function tuckUnder(skin: THREE.BufferGeometry, cover: THREE.BufferGeometry, margin = 0.03, out = 0.004): { moved: number; dropped: number } {
+  /** Metres outside the cloth that skin far from its openings still counts as through it. */
+  const POKE = 0.015;
+  /** Metres under the cloth the skin it covers is set. */
+  const DEEP = 0.004;
+  let deflated = false;
+  const none = { moved: 0, dropped: 0 };
+  const cpA = cover.getAttribute("position");
+  const spA = skin.getAttribute("position");
+  const ci = cover.getIndex();
+  const si = skin.getIndex();
+  const ciA = cover.getAttribute("skinIndex");
+  const cwA = cover.getAttribute("skinWeight");
+  const siA = skin.getAttribute("skinIndex");
+  const swA = skin.getAttribute("skinWeight");
+  if (!cpA || !spA || !ci || !si || !ciA || !cwA || !siA || !swA) return none;
+  if (!cover.getAttribute("normal")) cover.computeVertexNormals();
+  const cp = attributeValues(cpA, 3);
+  const cn = attributeValues(cover.getAttribute("normal"), 3);
+  const sp = attributeValues(spA, 3);
+  const snA = skin.getAttribute("normal");
+  const sn = snA ? attributeValues(snA, 3) : null;
+  const cI = attributeValues(ciA, 4);
+  const cW = attributeValues(cwA, 4);
+  const nC = cpA.count;
+  const nS = spA.count;
+  // Weld the cloth's corners (to a tenth of a millimetre) and find its open edges: edges of one triangle only.
+  const q = (v: number) => Math.round(v * 1e4) + 32768;
+  const weld = new Int32Array(nC);
+  const seen = new Map<number, number>();
+  for (let v = 0; v < nC; v++) {
+    const key = (q(cp[3 * v]!) * 65536 + q(cp[3 * v + 1]!)) * 65536 + q(cp[3 * v + 2]!);
+    let w = seen.get(key);
+    if (w === undefined) seen.set(key, (w = v));
+    weld[v] = w;
+  }
+  const edges = new Map<number, number>();
+  for (let t = 0; t < ci.count; t += 3)
+    for (let e = 0; e < 3; e++) {
+      const a = weld[ci.getX(t + e)]!;
+      const b = weld[ci.getX(t + ((e + 1) % 3))]!;
+      const key = a < b ? a * nC + b : b * nC + a;
+      edges.set(key, (edges.get(key) ?? 0) + 1);
+    }
+  const onRim = new Uint8Array(nC);
+  // At a rim corner, the way into the cloth: the mean of its edges (the edges along the rim cancel).
+  const inward = new Float64Array(3 * nC);
+  for (const [key, n] of edges) {
+    const a = Math.floor(key / nC);
+    const b = key % nC;
+    if (n === 1) onRim[a] = onRim[b] = 1;
+    for (let k = 0; k < 3; k++) {
+      inward[3 * a + k] += cp[3 * b + k]! - cp[3 * a + k]!;
+      inward[3 * b + k] += cp[3 * a + k]! - cp[3 * b + k]!;
+    }
+  }
+  // Buckets of the cloth's welded corners and of its rim corners.
+  const cell = Math.max(margin, 0.02);
+  const B = 1024;
+  const bk = (bx: number, by: number, bz: number) => ((bx + B / 2) * B + (by + B / 2)) * B + (bz + B / 2);
+  const grid = new Map<number, number[]>();
+  const rimGrid = new Map<number, number[]>();
+  for (let v = 0; v < nC; v++) {
+    if (weld[v] !== v) continue;
+    const key = bk(Math.floor(cp[3 * v]! / cell), Math.floor(cp[3 * v + 1]! / cell), Math.floor(cp[3 * v + 2]! / cell));
+    for (const g of onRim[v] ? [grid, rimGrid] : [grid]) {
+      const l = g.get(key);
+      if (l) l.push(v);
+      else g.set(key, [v]);
+    }
+  }
+  // The skin's own weights, to be rewritten where it is retargeted.
+  const sI = Float64Array.from(attributeValues(siA, 4));
+  const sW = Float64Array.from(attributeValues(swA, 4));
+  const covered = new Uint8Array(nS);
+  const acc = new Map<number, number>();
+  let moved = 0;
+  for (let v = 0; v < nS; v++) {
+    const x = sp[3 * v]!;
+    const y = sp[3 * v + 1]!;
+    const z = sp[3 * v + 2]!;
+    const bx = Math.floor(x / cell);
+    const by = Math.floor(y / cell);
+    const bz = Math.floor(z / cell);
+    let best = -1;
+    let bd = Infinity;
+    let rd = Infinity;
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++) {
+          const key = bk(bx + dx, by + dy, bz + dz);
+          for (const c of grid.get(key) ?? []) {
+            const d = (cp[3 * c]! - x) ** 2 + (cp[3 * c + 1]! - y) ** 2 + (cp[3 * c + 2]! - z) ** 2;
+            if (d < bd) {
+              bd = d;
+              best = c;
+            }
+          }
+          for (const c of rimGrid.get(key) ?? []) rd = Math.min(rd, (cp[3 * c]! - x) ** 2 + (cp[3 * c + 1]! - y) ** 2 + (cp[3 * c + 2]! - z) ** 2);
+        }
+    if (best < 0) continue;
+    // The cloth's outer face only: an inner face (a lining, the inside of a collar) faces the skin, not away with it.
+    if (sn && cn[3 * best]! * sn[3 * v]! + cn[3 * best + 1]! * sn[3 * v + 1]! + cn[3 * best + 2]! * sn[3 * v + 2]! < 0.3) continue;
+    const side = (x - cp[3 * best]!) * cn[3 * best]! + (y - cp[3 * best + 1]!) * cn[3 * best + 1]! + (z - cp[3 * best + 2]!) * cn[3 * best + 2]!;
+    // Past an opening (beyond a cuff, above a collar), not under the cloth.
+    if (onRim[best]) {
+      const ix = inward[3 * best]!;
+      const iy = inward[3 * best + 1]!;
+      const iz = inward[3 * best + 2]!;
+      // Along the cloth: the inward way and the offset with their parts along the normal taken out.
+      const inN = ix * cn[3 * best]! + iy * cn[3 * best + 1]! + iz * cn[3 * best + 2]!;
+      if ((x - cp[3 * best]!) * ix + (y - cp[3 * best + 1]!) * iy + (z - cp[3 * best + 2]!) * iz - side * inN < 0) continue;
+    }
+    const rim = Math.sqrt(rd);
+    // Under the cloth, or through it: skin a little outside the cloth, close to it and far from any opening, is skin
+    // the file already pushes through (an apron strap hides it at rest).
+    if (side > out && !(side < POKE && bd < POKE * POKE && rim > margin)) continue;
+    if (rim > margin) covered[v] = 1;
+    // Retarget: the cloth's weights, faded in from the open edges.
+    const f = smooth(0.003, 0.012, rim);
+    if (f <= 0) continue;
+    // And sits a few millimetres under it, not on it, where nothing shows.
+    if (side > -DEEP) {
+      const k = -(side + DEEP) * f;
+      spA.setXYZ(v, x + cn[3 * best]! * k, y + cn[3 * best + 1]! * k, z + cn[3 * best + 2]! * k);
+      deflated = true;
+    }
+    acc.clear();
+    for (let k = 0; k < 4; k++) {
+      const wo = sW[4 * v + k]! * (1 - f);
+      if (wo > 0) acc.set(sI[4 * v + k]!, (acc.get(sI[4 * v + k]!) ?? 0) + wo);
+      const wc = cW[4 * best + k]! * f;
+      if (wc > 0) acc.set(cI[4 * best + k]!, (acc.get(cI[4 * best + k]!) ?? 0) + wc);
+    }
+    const top = [...acc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+    const sum = top.reduce((a, e) => a + e[1], 0);
+    if (sum <= 0) continue;
+    for (let k = 0; k < 4; k++) {
+      sI[4 * v + k] = top[k]?.[0] ?? 0;
+      sW[4 * v + k] = (top[k]?.[1] ?? 0) / sum;
+    }
+    moved++;
+  }
+  if (deflated) spA.needsUpdate = true;
+  if (moved) {
+    skin.setAttribute("skinIndex", new THREE.BufferAttribute(Uint8Array.from(sI), 4));
+    skin.setAttribute("skinWeight", new THREE.BufferAttribute(Float32Array.from(sW), 4));
+  }
+  const keep: number[] = [];
+  let dropped = 0;
+  for (let t = 0; t < si.count; t += 3) {
+    const a = si.getX(t);
+    const b = si.getX(t + 1);
+    const c = si.getX(t + 2);
+    if (covered[a] && covered[b] && covered[c]) dropped++;
+    else keep.push(a, b, c);
+  }
+  if (dropped) skin.setIndex(nS > 65535 ? new THREE.Uint32BufferAttribute(keep, 1) : new THREE.Uint16BufferAttribute(keep, 1));
+  return { moved, dropped };
+}
+
 function prepareDetailed(cohort: Cohort, gltf: GLTF): DetailedAsset {
   gltf.scene.updateMatrixWorld(true);
   const J = layout(cohort).J;
@@ -2768,6 +2940,11 @@ function prepareDetailed(cohort: Cohort, gltf: GLTF): DetailedAsset {
   });
   if (spread > 1e-4 || jointErr > 0.002)
     console.warn(`staff ${cohort}: the file's bind pose is off this rig's (matrix spread ${spread.toExponential(1)}, joints ${(jointErr * 1000).toFixed(1)} mm)`);
+  // The skin under the jacket moves with it, and what lies deep under it goes: else a bowed head or a bent back
+  // pushes it through the cloth.
+  const body = parts.find((p) => p.role === "body");
+  const whites = parts.find((p) => p.role === "whites");
+  if (body && whites) tuckUnder(body.geometry, whites.geometry);
   return { parts };
 }
 
