@@ -71,7 +71,10 @@ fn a_flat_battery_holds_its_stationary_discharge_and_heats_each_body_by_its_resi
     // E - (Rs + Rp) i are stationary under the load current i: only the
     // chemical charge moves, by i t, and each resistance R takes R i^2.
     let current = E / (RS + RP + RL);
-    let mut scene = fs_cli::SystemScene::from_text(&scene(""), "battery.json").unwrap();
+    // `examples/system/battery_discharge.json` is this scene, `scene("")`.
+    let path = super::example("battery_discharge.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut scene = fs_cli::SystemScene::from_text(&text, &path).unwrap();
     scene_context(|cx, _| scene.run(cx).unwrap());
     let t = scene.time_s();
     close(t, 10.0, "time");

@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 10.0, "step_s": 0.1,
+  "elements": {
+    "k": {"kind": "kirchhoff_circuit", "node_count": 5, "branches": [
+        {"nodes": [1, 0], "voltage_port": 0},
+        {"nodes": [2, 3], "resistance_ohm": 1},
+        {"nodes": [3, 0], "inductance_h": 2},
+        {"nodes": [4, 0], "inductance_h": 3},
+        {"nodes": [4, 0], "resistance_ohm": 0.5}],
+      "mutual": [{"branches": [2, 3], "inductance_h": 1}],
+      "transformers": [{"primary": [1, 0], "secondary": [2, 0], "ratio": 2}],
+      "energy_tolerance_j": 1e-9},
+    "series": {"kind": "heat_capacity", "capacity_j_k": 40, "temperature_k": 300.0},
+    "loop": {"kind": "heat_capacity", "capacity_j_k": 40, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"prescribe": "k.source0", "voltage_v": 10},
+    {"join": ["k.heat1", "series.heat"]},
+    {"join": ["k.heat4", "loop.heat"]}
+  ]
+}

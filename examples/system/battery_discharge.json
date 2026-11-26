@@ -1,0 +1,21 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 10.0, "step_s": 0.1,
+  "elements": {
+    "cell": {"kind": "battery", "capacity_c": 3600, "soc_voltage": [[0, 12], [1, 12]],
+      "series_resistance_ohm": 0.05, "polarization_resistance_ohm": 0.02,
+      "polarization_capacitance_f": 100, "bus_capacitance_f": 1,
+      "soc": 0.9, "polarization_v": 0.12, "bus_v": 11.58,
+      "energy_tolerance_j": 1e-9},
+    "load": {"kind": "resistor_branch", "resistance_ohm": 1.93},
+    "series_body": {"kind": "heat_capacity", "capacity_j_k": 50, "temperature_k": 300.0},
+    "polarization_body": {"kind": "heat_capacity", "capacity_j_k": 25, "temperature_k": 300.0},
+    "load_body": {"kind": "heat_capacity", "capacity_j_k": 1000, "temperature_k": 300.0}
+  },
+  "connections": [
+    {"common_effort": ["cell.terminal", "load.a"]},
+    {"prescribe": "load.b", "voltage_v": 0},
+    {"join": ["cell.heat_series", "series_body.heat"]},
+    {"join": ["cell.heat_polarization", "polarization_body.heat"]},
+    {"route": "load.heat", "to": [["load_body.heat", 1.0]]}
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "frankensim.system.v0", "duration_s": 0.7, "step_s": 0.005,
+  "elements": {
+    "d": {"kind": "motor_drive",
+      "battery": {"capacity_c": 3600, "soc_voltage": [[0, 11], [0.5, 12], [1, 12.6]],
+        "series_resistance_ohm": 0.1, "polarization_resistance_ohm": 0.1,
+        "polarization_capacitance_f": 2, "bus_capacitance_f": 0.5},
+      "lead_resistance_ohm": 0.1,
+      "converter": {"inductance_h": 0.3, "bus_capacitance_f": [0.2, 0.4],
+        "winding_resistance_ohm": 0.1, "switch": [
+          {"on_resistance_ohm": 0.1, "off_resistance_ohm": 100,
+          "diode_forward_v": 0.7, "diode_resistance_ohm": 0.2, "max_reverse_v": 100,
+          "max_channel_a": 1000, "max_diode_a": 1000},
+          {"on_resistance_ohm": 0.11, "off_resistance_ohm": 120,
+          "diode_forward_v": 0.7, "diode_resistance_ohm": 0.2, "max_reverse_v": 100,
+          "max_channel_a": 1000, "max_diode_a": 1000},
+          {"on_resistance_ohm": 0.12, "off_resistance_ohm": 140,
+          "diode_forward_v": 0.7, "diode_resistance_ohm": 0.2, "max_reverse_v": 100,
+          "max_channel_a": 1000, "max_diode_a": 1000},
+          {"on_resistance_ohm": 0.13, "off_resistance_ohm": 160,
+          "diode_forward_v": 0.7, "diode_resistance_ohm": 0.2, "max_reverse_v": 100,
+          "max_channel_a": 1000, "max_diode_a": 1000}]},
+      "motor": {"inductance_h": 0.05, "winding_resistance_ohm": 0.1,
+        "rotor_inertia_kg_m2": 0.4, "stator_inertia_kg_m2": 0.8,
+        "coupling_nm_per_a": 0.2, "bearing_drag_nm_s_per_rad": 0.0003},
+      "program": {"intervals": [{"on": [true, false, true, false], "duration_s": 0.0025},
+        {"on": [false, true, true, false], "duration_s": 0.0025}], "substeps": 3},
+      "start": {"soc": 0.8, "polarization_v": 0.05, "bus_v": 12.2,
+        "converter_current_a": 1.0, "converter_bus_v": [12, 7], "node_v": [12, 7],
+        "motor_current_a": 0.8, "shaft_rad_s": [30, 2]},
+      "energy_tolerance_j": 1e-9, "output_capacitance_f": [0.025, 0.04, 0.035, 0.05]}
+  },
+  "connections": [
+    {"prescribe": "d.rotor", "torque_n_m": 0},
+    {"prescribe": "d.stator", "torque_n_m": 0},
+    {"prescribe": "d.heat_converter_winding", "temperature_k": 300},
+    {"prescribe": "d.heat_input_high", "temperature_k": 300},
+    {"prescribe": "d.heat_input_low", "temperature_k": 300},
+    {"prescribe": "d.heat_output_high", "temperature_k": 300},
+    {"prescribe": "d.heat_output_low", "temperature_k": 300},
+    {"prescribe": "d.heat_battery_series", "temperature_k": 300},
+    {"prescribe": "d.heat_battery_polarization", "temperature_k": 300},
+    {"prescribe": "d.heat_lead", "temperature_k": 300},
+    {"prescribe": "d.heat_motor_winding", "temperature_k": 300},
+    {"prescribe": "d.heat_bearing", "temperature_k": 300}
+  ]
+}

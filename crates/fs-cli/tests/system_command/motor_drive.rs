@@ -168,7 +168,9 @@ fn free_shafts_keep_their_momentum_through_a_switching_program() {
     // act between them, so J_r w_r + J_s w_s keeps its start. 0.7 s is 140
     // periods of 5 ms whose summed time misses the last one by more than
     // the owner's 64 rounding units: the last step is still the period.
-    let scene = run(&buck(), 0.7);
+    // `examples/system/motor_drive_buck.json` is this scene, `buck()`.
+    let text = std::fs::read_to_string(super::example("motor_drive_buck.json")).unwrap();
+    let scene = run(&text, 0.7);
     let momentum = [
         probe(&scene, "rotor_momentum_n_m_s"),
         probe(&scene, "stator_momentum_n_m_s"),

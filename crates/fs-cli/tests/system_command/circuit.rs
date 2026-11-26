@@ -189,20 +189,10 @@ const RL: f64 = 0.5;
 
 #[test]
 fn coupled_inductors_behind_a_transformer_follow_the_midpoint_rule() {
-    let text = scene(
-        &format!(
-            r#""node_count": 5, "branches": [
-        {{"nodes": [1, 0], "voltage_port": 0}},
-        {{"nodes": [2, 3], "resistance_ohm": {RS}}},
-        {{"nodes": [3, 0], "inductance_h": {L1}}},
-        {{"nodes": [4, 0], "inductance_h": {L2}}},
-        {{"nodes": [4, 0], "resistance_ohm": {RL}}}],
-      "mutual": [{{"branches": [2, 3], "inductance_h": {M}}}],
-      "transformers": [{{"primary": [1, 0], "secondary": [2, 0], "ratio": {N}}}]"#
-        ),
-        &[("series", "heat1", 40.0), ("loop", "heat4", 40.0)],
-        Some(VT),
-    );
+    // `examples/system/transformer_coupled_loops.json`: the circuit on these
+    // constants, `VT` held on port 0, and 40 J/K bodies `series` on heat1 and
+    // `loop` on heat4.
+    let text = std::fs::read_to_string(super::example("transformer_coupled_loops.json")).unwrap();
     let scene = run(&text);
     // (L / dt + R / 2) i' = (L / dt - R / 2) i + (VT / N, 0) for the
     // inductance matrix L = [[L1, M], [M, L2]] and R = diag(RS, RL): the

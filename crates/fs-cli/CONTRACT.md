@@ -1346,10 +1346,13 @@ stood behind the sentence.) An element whose owner has no codec is still
 refused by its name, with exit 4 and no file. No example has one now, so no
 test here shows it: the kernel's refusal by a node's name is tested in
 fs-system (a thermal timeline and a port-Hamiltonian owner with no codec).
-Each of the 47 kind names is the kind of an element of some example:
+Each of the 64 kind names is the kind of an element of some example:
 `hydraulic_accumulator.json`, `rlc_loop.json` and `torsion_pendulum.json` use
-the four that had none (`accumulator` and `flow_source`, `capacitor`,
-`torsion_spring`). A unit test of `src/system_command.rs`,
+the four that had none when this test came (`accumulator` and `flow_source`,
+`capacitor`, `torsion_spring`), and `battery_discharge.json`,
+`transformer_coupled_loops.json` and `motor_drive_buck.json` the three added
+later with none (`battery`, `kirchhoff_circuit`, `motor_drive`); the tests
+of those three kinds named in the README run the example files. A unit test of `src/system_command.rs`,
 `every_kind_is_the_kind_of_an_element_of_some_example_scene`, reads the
 directory and fails, naming the kinds, when a name of the table is the kind
 of no element. So each kind is saved and resumed by a test here, in the form
