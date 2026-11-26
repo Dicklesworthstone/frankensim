@@ -21,7 +21,7 @@ deprecation horizon.
 
 | Id | Owner | Version constant | Current |
 |----|-------|------------------|---------|
-| `project.fsim` | `fs-project` | `FSIM_VERSION` | 10 |
+| `project.fsim` | `fs-project` | `FSIM_VERSION` | 17 |
 | `study.fsim` | `fs-project` | `STUDY_FSIM_VERSION` | 1 |
 | `package.format` | `fs-package` | `FORMAT_VERSION` | 9 |
 | `checker.protocol` | `fs-checker` | `CHECKER_PROTOCOL_VERSION` | 7 |
@@ -31,6 +31,8 @@ deprecation horizon.
 | `euler.protocol` | `fs-euler-disc-e2e` | `EULER_PROTOCOL_SCHEMA_VERSION` | 1 |
 | `scenario.ir` | `fs-scenario` | `SCENARIO_IR_VERSION` | 2 |
 | `scenario.assembly` | `fs-scenario` | `ASSEMBLY_DESCRIPTION_SCHEMA_VERSION` | 1 |
+| `scenario.gesture` | `fs-scenario` | `GESTURE_SCHEDULE_SCHEMA_VERSION` | 2 |
+| `scenario.performance` | `fs-scenario` | `PERFORMANCE_SCHEMA_VERSION` | 1 |
 | `matdb.pack` | `fs-matdb` | `MATDB_SURFACE_PACK_SCHEMA_VERSION` | 8 |
 | `ledger.schema` | `fs-ledger` | `SCHEMA_VERSION` | 20 |
 | `sbom.source_manifest` | `xtask` | `SCHEMA` | `frankensim-source-manifest-v1` |
