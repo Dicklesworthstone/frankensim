@@ -1211,7 +1211,7 @@ export function makeTool(kind: ToolKind, knife?: THREE.Object3D, knifeExt?: { w:
 }
 
 /** A white plate with food on it, for the pass and the makeline. */
-function makePlate(): THREE.Object3D {
+export function makePlate(): THREE.Object3D {
   const g = new THREE.Group();
   const china = new THREE.MeshPhysicalMaterial({ color: 0xf4f1ea, roughness: 0.25, clearcoat: 0.6 });
   const prof = [[0, 0], [0.075, 0], [0.085, 0.004], [0.125, 0.016], [0.13, 0.019], [0.128, 0.021], [0.08, 0.009], [0, 0.009]].map(([x, y]) => new THREE.Vector2(x, y));

@@ -804,7 +804,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>05</b><i></i>The crew</p>
               <h2 class="d3" id="brigade-title">Three cooks, one aisle, <em class="g">a full pan</em>.</h2>
               <p class="kicker">
-                A short, an average and a tall cook each lift a full hotel pan off a low shelf. Narrow the aisle or add weight to see who runs out of room and how hard each back works.
+                A short, an average and a tall cook each lift a full hotel pan off a low shelf. Narrow the aisle or add weight to see who runs out of room and how hard each back works. Then move one cook's plating table and count the steps a service takes.
               </p>
             </div>
             <a class="more" href="#brigade-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -861,6 +861,59 @@
               <div>
                 <code class="formula">τ_L5/S1 = m_upper · g · L_torso · sin θ_lean + m_pan · g · d_reach</code>
                 <p class="model">Aisle presets and the rack clearance come from the kitchens' build manifests.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal pv-fig" id="pivot">
+            <header class="fig-head">
+              <p class="todo">Move the plating table, then count the steps</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="lab">
+                <div class="lab-view">
+                  <div class="stage pv-stage" data-pivot-stage>
+                    <canvas data-pivot-canvas tabindex="0" aria-label="Two identical cooking stations side by side, a six-burner range and a plating table at each, and the same cook at both sauteing, turning to plate and turning back. On the left the table stands across a wide aisle and down the line; on the right it is moved close. Every footstep lands as a footprint on the floor. Drag to look around."></canvas>
+                    <div class="pv-hud a" aria-hidden="true"><b>As built</b><span data-pv-hud-a>…</span></div>
+                    <div class="pv-hud b" aria-hidden="true"><b data-pv-name-b>Behind, 36 in</b><span data-pv-hud-b>…</span></div>
+                    <p class="wk-legend pv-legend" aria-hidden="true"><span class="done">A step for this plate</span><span class="pivot">A pivot</span><span class="next">Still to come</span></p>
+                  </div>
+                </div>
+
+                <div class="lab-side">
+                  <p class="pv-lead">From the burner to the plate should be a pivot, not a pivot, step, step, drop.</p>
+                  <div class="field">
+                    <p class="micro">Move the plating table</p>
+                    <div class="seg fill" role="group" aria-label="Plating table">
+                      <button type="button" data-pv-move="behind" aria-pressed="true">Behind, 36 in aisle</button>
+                      <button type="button" data-pv-move="beside" aria-pressed="false">Beside the range</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Plates a service</b><output data-pv-plates-val>150 plates</output></span><input type="range" min="50" max="400" step="25" value="150" data-pv-plates aria-label="Plates a service" /></label>
+                  <div class="wk-tiles pv-tiles">
+                    <div class="wk-tile"><span>Steps a plate</span><b><i data-pv-steps>…</i><em data-pv-steps-d hidden></em></b><small data-pv-steps-s>…</small></div>
+                    <div class="wk-tile"><span>Steps a service</span><b><i data-pv-service>…</i></b><small data-pv-service-s>…</small></div>
+                    <div class="wk-tile"><span>Time on the move</span><b><i data-pv-time>…</i></b><small data-pv-time-s>…</small></div>
+                    <div class="wk-tile"><span>A year's walking</span><b><i data-pv-year>…</i></b><small data-pv-year-s>…</small></div>
+                  </div>
+                  <div class="status" data-pv-status data-state="ok">Counting the steps…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="pivot-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>Both stations have a six-burner range and a 48-inch worktable to plate on, and the same average-height cook. A plate is the same at both: saute at the front burner, go to the table, plate, go back. The cook's moves are planned into footsteps by the same walking model as every cook on this page: a walk is strides at a steady pace, a turn on the spot is a quarter turn or so a pair of steps, and a short move along or across a counter is short steps without turning.</p>
+                <p>Each footfall is either a step, which carries the cook somewhere (walking, or a short step along or across a counter), or part of a pivot, a turn on the spot. The figure counts both for one plate at each station, and the seconds spent moving. It then multiplies by the plates in a service, and by 300 services a year (six a week for fifty weeks) for the distance. The time at the burner and the table is shortened on screen; the moves run at walking speed.</p>
+              </div>
+              <div>
+                <code class="formula">steps a service = steps a plate × plates<br />walking a year = metres a plate × plates × 300</code>
+                <p class="model">Model: the walking model's own footsteps (<code>Routine.footfalls</code>). Station sizes are the catalogue's.</p>
               </div>
                 </div>
               </details>

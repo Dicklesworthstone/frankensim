@@ -3196,3 +3196,83 @@ button.wk-dish[aria-pressed="true"] {
     display: none;
   }
 }
+
+/* Chapter 05, second figure: every step at the station. */
+.pv-stage {
+  aspect-ratio: 16 / 11;
+}
+.pv-hud {
+  position: absolute;
+  top: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 10px;
+  background: rgb(14 11 8 / 0.72);
+  pointer-events: none;
+}
+.pv-hud.a {
+  left: 0.7rem;
+}
+.pv-hud.b {
+  right: 0.7rem;
+  text-align: right;
+}
+.pv-hud b {
+  font: 600 0.85rem/1.1 var(--sans);
+  color: #fff;
+}
+.pv-hud span {
+  font: 500 0.8rem/1.1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: #fbbf24;
+}
+.pv-legend {
+  text-shadow:
+    0 1px 2px rgb(0 0 0 / 0.95),
+    0 0 8px rgb(0 0 0 / 0.8);
+}
+.pv-legend .done {
+  --k: #fbbf24;
+}
+.pv-legend .pivot {
+  --k: #7dd3fc;
+}
+.pv-legend .next {
+  --k: #8f867c;
+}
+.pv-lead {
+  margin: 0 0 1.1rem;
+  font: 500 1.02rem/1.45 var(--sans);
+  color: var(--text);
+}
+.pv-tiles {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1rem 0;
+}
+@media (max-width: 720px) {
+  .pv-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .pv-hud {
+    top: 0.5rem;
+    max-width: calc(50% - 0.9rem);
+    padding: 0.35rem 0.5rem;
+  }
+  .pv-hud.a {
+    left: 0.5rem;
+  }
+  .pv-hud.b {
+    right: 0.5rem;
+  }
+  .pv-hud span {
+    line-height: 1.3;
+  }
+  .pv-hud b {
+    font-size: 0.75rem;
+  }
+  .pv-hud span {
+    font-size: 0.7rem;
+  }
+}

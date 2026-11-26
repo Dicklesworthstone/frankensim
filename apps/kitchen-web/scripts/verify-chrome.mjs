@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 10 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 11 WebGL canvases render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -165,8 +165,8 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 10 WebGL canvases render non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush", "morning"];
+    // 4. Mount all chapters cleanly by scrolling through each and verifying all 11 WebGL canvases render non-blank frames
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -174,6 +174,7 @@ async function main() {
       "[data-oven-canvas]",
       "[data-cold-canvas]",
       "[data-brigade-canvas]",
+      "[data-pivot-canvas]",
       "[data-week-canvas]",
       "[data-floor-canvas]",
       "[data-rush-canvas]",
@@ -442,6 +443,26 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-rush.png");
       }
 
+      if (sid === "pivot") {
+        // Moving the plating table must take steps off every plate, beside the range most of all; the counts come from
+        // the walking model's own footfalls.
+        const info = () => page.$eval("[data-pivot-stage]", (el) => el.pivot.info());
+        await page.click('[data-pv-move="behind"]');
+        await sleep(300);
+        const behind = await info();
+        await page.click('[data-pv-move="beside"]');
+        await sleep(300);
+        const beside = await info();
+        const status = await page.$eval("[data-pv-status]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Pivot steps a plate: as built ${behind.built.steps} (+${behind.built.pivots} pivots) -> behind ${behind.moved.steps} -> beside ${beside.moved.steps} | ${status.slice(0, 80)}`);
+        if (!(behind.moved.steps < behind.built.steps && beside.moved.steps <= behind.moved.steps && beside.moved.moveS < behind.built.moveS)) {
+          throw new Error(`Moving the plating table did not save steps: ${JSON.stringify({ behind, beside })}`);
+        }
+        await page.click('[data-pv-move="behind"]');
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch5-pivot.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch5-pivot.png");
+      }
+
       if (sid === "morning") {
         // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
         // must say which, and the worker must post every menu's limit, cooked today and ahead.
@@ -468,9 +489,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 10 WebGL canvases render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 11 WebGL canvases render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush", "morning"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -478,6 +499,7 @@ async function main() {
         "[data-oven-canvas]",
         "[data-cold-canvas]",
         "[data-brigade-canvas]",
+        "[data-pivot-canvas]",
         "[data-week-canvas]",
         "[data-floor-canvas]",
         "[data-rush-canvas]",
@@ -488,7 +510,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 10 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 11 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -526,7 +548,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 10/10 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 11/11 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

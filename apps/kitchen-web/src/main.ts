@@ -17,6 +17,7 @@ import { WEEK_PIECES, mountWeekLab } from "./three/weekLab";
 import { floorPieces, mountFloorLab } from "./three/floorLab";
 import { RUSH_PIECES, mountRushLab } from "./three/rushLab";
 import { MORNING_PIECES, mountMorningLab } from "./three/morningLab";
+import { PIVOT_PIECES, mountPivotLab } from "./three/pivotLab";
 
 declare global {
   interface Window {
@@ -251,6 +252,7 @@ function bootstrap(): void {
     { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false, pieces: OVEN_PIECES },
     { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false, pieces: coldPieces() },
     { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false, pieces: BRIGADE_PIECES },
+    { id: "pivot", el: document.getElementById("pivot")!, mount: mountPivotLab, done: false, pieces: PIVOT_PIECES },
     { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false, pieces: WEEK_PIECES },
     { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false, pieces: floorPieces },
     { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false, pieces: RUSH_PIECES },

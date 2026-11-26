@@ -5743,6 +5743,17 @@ export class Routine {
   }
 
   /** Place and pose the person at time t; returns what they are doing. */
+  /**
+   * Every footstep the routine plans, in time order: where each foot lands, facing which way, and when it lands and
+   * lifts (seconds from the start). The feet's places at the start are not steps. For counting the steps a layout
+   * costs and drawing where they fall.
+   */
+  footfalls(): { side: Side; x: number; z: number; yaw: number; tOn: number; tOff: number }[] {
+    const out: { side: Side; x: number; z: number; yaw: number; tOn: number; tOff: number }[] = [];
+    for (const side of ["L", "R"] as const) for (const p of this.plants[side]) if (p.arrive !== "init") out.push({ side, x: p.x, z: p.z, yaw: p.yaw, tOn: p.tOn, tOff: p.tOff });
+    return out.sort((a, b) => a.tOn - b.tOn);
+  }
+
   apply(t: number): RoutineState {
     const st = this.staff;
     const B = st.B;
