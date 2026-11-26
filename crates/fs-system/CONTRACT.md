@@ -25,6 +25,22 @@ elements such as `Admittance`, `FlowSource`, `Gyrator`, `GapField`, `ControlledS
 and `add_with_tangent` callers do not attach `StageResidual`. Verification lives in
 `tests/elements_stage_residual.rs`.
 
+## Assembly source admission
+
+The lowering registry checks source-history dimensions against the receiving
+port before constructing a source or a scheduled boundary. Power ports require
+their domain's canonical effort or flow units according to the input role;
+heat ports require temperature in kelvin or heat rate in watts. Scalar histories
+cannot broadcast into vector ports or mixed-unit material streams. Signal ports
+currently declare no physical dimensions, so only dimensionless scalar source
+histories are supported there. A source refusal names its declaration and target
+port. An assembly declaring a controller refuses by name until controller
+lowering exists; its feedback law is never silently dropped. These admission
+checks leave the existing kernel signal/controller components available to
+callers constructing their graphs explicitly. Regression coverage uses the
+lowering source tests and the real mechanical, thermal and electrical graphs in
+`tests/lowering_registry.rs`.
+
 ## Live passive constitutive laws for scalar dissipation
 
 A Damper can follow an `Arc<dyn DissipationLaw>` through `Damper::following`.

@@ -17,10 +17,11 @@ use fs_matdb::{
 use fs_ports::PortKind;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInterfaceDecl,
-    DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget, FidelityPolicy,
-    FidelityRung, GearGenerator, GearMeshDecl, JointDecl, JointKind, PhysicsDomain, PrimitiveShape,
-    SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan,
+    ControllerDecl, ControllerLaw, DraftAssembly, DraftAssemblyInput, DraftEnvironment,
+    DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind,
+    FidelityErrorBudget, FidelityPolicy, FidelityRung, GearGenerator, GearMeshDecl, JointDecl,
+    JointKind, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
+    TimeHistory, TimePlan,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState, UnknownProperty};
 use fs_scenario::{
@@ -433,6 +434,74 @@ fn slice_a_draft_lowers_to_exact_hand_built_graph_match() {
         *t_final > t0,
         "dissipated mechanical energy heated the slider"
     );
+
+    // Every history must retain its units when it becomes a force or boundary.
+    let kelvin = QtyAny::new(300.0, TEMPERATURE);
+    for (port, history) in [
+        ("mechanics", TimeHistory::Constant(kelvin)),
+        (
+            "mechanics",
+            TimeHistory::Harmonic {
+                amplitude: kelvin,
+                frequency: QtyAny::new(3.0, FREQUENCY),
+                phase: QtyAny::dimensionless(0.0),
+                offset: kelvin,
+            },
+        ),
+        (
+            "mechanics",
+            TimeHistory::PiecewiseLinear {
+                knots: vec![
+                    (QtyAny::new(0.0, TIME), kelvin),
+                    (QtyAny::new(0.1, TIME), kelvin),
+                ],
+            },
+        ),
+        (
+            "mechanics",
+            TimeHistory::Step {
+                t_switch: QtyAny::new(0.05, TIME),
+                before: kelvin,
+                after: kelvin,
+            },
+        ),
+        ("thermal", TimeHistory::Constant(kelvin)),
+    ] {
+        let mut wrong_units = draft.input().clone();
+        wrong_units.sources[0].target = SourceTarget::Port {
+            entity: slider,
+            port: port.to_owned(),
+        };
+        wrong_units.sources[0].history = history;
+        let wrong_units = DraftAssembly::admit(wrong_units, &scenario).unwrap();
+        let error = registry
+            .lower(&wrong_units, &cards)
+            .err()
+            .expect("wrong source units refuse");
+        assert!(matches!(&error, LoweringError::Invalid { item, detail }
+            if item == "source:drive_force" && detail.contains("dimensions") && detail.contains(port)));
+    }
+
+    let mut controlled = draft.input().clone();
+    controlled.controllers.push(ControllerDecl {
+        name: "velocity_feedback".to_owned(),
+        sensor_ports: vec![(slider, "velocity".to_owned())],
+        actuator_port: (slider, "command".to_owned()),
+        sample_rate: QtyAny::new(1000.0, FREQUENCY),
+        law: ControllerLaw::Pid {
+            kp: QtyAny::dimensionless(1.0),
+            ki: QtyAny::new(0.0, FREQUENCY),
+            kd: QtyAny::new(0.0, TIME),
+            setpoint: QtyAny::dimensionless(1.0),
+        },
+    });
+    let controlled = DraftAssembly::admit(controlled, &scenario).unwrap();
+    let error = registry
+        .lower(&controlled, &cards)
+        .err()
+        .expect("feedback cannot silently disappear");
+    assert!(matches!(error, LoweringError::Invalid { ref item, .. }
+        if item == "controller:velocity_feedback"));
 }
 
 #[test]
@@ -1410,6 +1479,40 @@ fn owner_extensibility_custom_em_constructors_register_without_kernel_edits() {
         "RC discharge must dissipate positive Joule heat"
     );
     assert!(lowered.system.ledger().energy_residual_j().abs() <= 1.0e-12);
+
+    // A capacitor receives current, even though its output is voltage. Keep
+    // a positive physical control: 2 A for 0.1 ms adds exactly 0.2 mC.
+    let mut driven = draft.input().clone();
+    driven.interfaces.clear();
+    driven.sources.push(SourceDecl {
+        name: "charging_current".to_owned(),
+        target: SourceTarget::Port {
+            entity: cap_entity,
+            port: "electrical".to_owned(),
+        },
+        history: TimeHistory::Constant(QtyAny::new(2.0, Dims([0, 0, 0, 0, 1, 0]))),
+    });
+    let current_draft = DraftAssembly::admit(driven.clone(), &scenario).unwrap();
+    let mut charged = registry
+        .lower(&current_draft, &cards)
+        .expect("current source lowers");
+    with_cx(&gate, |cx| {
+        charged.system.step(1.0e-4, cx).unwrap();
+    });
+    let charge: &f64 = charged.system.state(charged.node_map["bus_cap"]).unwrap();
+    assert!((*charge - 5.2e-3).abs() <= 1.0e-15);
+    assert!(charged.system.ledger().energy_residual_j().abs() <= 1.0e-12);
+
+    driven.sources[0].history = TimeHistory::Constant(QtyAny::new(2.0, Dims([2, 1, -3, 0, -1, 0])));
+    let voltage_draft = DraftAssembly::admit(driven, &scenario).unwrap();
+    let error = registry
+        .lower(&voltage_draft, &cards)
+        .err()
+        .expect("voltage is not current");
+    assert!(
+        matches!(error, LoweringError::Invalid { ref item, ref detail }
+        if item == "source:charging_current" && detail.contains("dimensions"))
+    );
 }
 
 #[test]

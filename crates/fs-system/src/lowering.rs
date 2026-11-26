@@ -1598,7 +1598,7 @@ pub struct LoweringGraph {
     node_map: BTreeMap<String, NodeId>,
     entity_nodes: BTreeMap<EntityId, Vec<NodeId>>,
     entity_ports: BTreeMap<(EntityId, String), PortRef>,
-    port_meta: BTreeMap<PortRef, (Carrier, PortRole)>,
+    port_meta: BTreeMap<PortRef, (Carrier, PortRole, usize)>,
     common_flow_hubs: BTreeMap<PortRef, Vec<(PortRef, f64)>>,
     common_effort_hubs: BTreeMap<PortRef, Vec<(PortRef, f64)>>,
     heat_routes: Vec<HeatRouteSpec>,
@@ -1652,10 +1652,10 @@ impl LoweringGraph {
         C: fs_ports::component::PortTangent + 'static,
         C::State: 'static,
     {
-        let specs: Vec<(Carrier, PortRole)> = component
+        let specs: Vec<(Carrier, PortRole, usize)> = component
             .ports()
             .iter()
-            .map(|p| (p.carrier(), p.role()))
+            .map(|p| (p.carrier(), p.role(), p.width()))
             .collect();
         let node = self.builder.add_with_tangent(name, component, state)?;
         self.register_node_meta(name, owner, node, &specs);
@@ -1680,10 +1680,10 @@ impl LoweringGraph {
         C: fs_ports::component::PortTangent + fs_ports::component::StageResidual + 'static,
         C::State: 'static,
     {
-        let specs: Vec<(Carrier, PortRole)> = component
+        let specs: Vec<(Carrier, PortRole, usize)> = component
             .ports()
             .iter()
-            .map(|p| (p.carrier(), p.role()))
+            .map(|p| (p.carrier(), p.role(), p.width()))
             .collect();
         let node = self
             .builder
@@ -1708,10 +1708,10 @@ impl LoweringGraph {
         C: fs_ports::component::Component + 'static,
         C::State: 'static,
     {
-        let specs: Vec<(Carrier, PortRole)> = component
+        let specs: Vec<(Carrier, PortRole, usize)> = component
             .ports()
             .iter()
-            .map(|p| (p.carrier(), p.role()))
+            .map(|p| (p.carrier(), p.role(), p.width()))
             .collect();
         let node = self.builder.add(name, component, state)?;
         self.register_node_meta(name, owner, node, &specs);
@@ -1723,15 +1723,15 @@ impl LoweringGraph {
         name: &str,
         owner: Option<EntityId>,
         node: NodeId,
-        specs: &[(Carrier, PortRole)],
+        specs: &[(Carrier, PortRole, usize)],
     ) {
         self.node_map.insert(name.to_owned(), node);
         if let Some(entity) = owner {
             self.entity_nodes.entry(entity).or_default().push(node);
         }
-        for (port, &(carrier, role)) in specs.iter().enumerate() {
+        for (port, &(carrier, role, width)) in specs.iter().enumerate() {
             self.port_meta
-                .insert(PortRef { node: node.0, port }, (carrier, role));
+                .insert(PortRef { node: node.0, port }, (carrier, role, width));
         }
     }
 
@@ -1812,7 +1812,9 @@ impl LoweringGraph {
     /// graph.
     #[must_use]
     pub fn port_meta(&self, port: PortRef) -> Option<(Carrier, PortRole)> {
-        self.port_meta.get(&port).copied()
+        self.port_meta
+            .get(&port)
+            .map(|&(carrier, role, _)| (carrier, role))
     }
 
     /// Attach a `FlowIn` power port to a shared `common_flow` junction driven by
@@ -1907,7 +1909,7 @@ impl LoweringGraph {
         // effort-in ports so thermal loops start inside the valid T > 0 K
         // domain without altering any conservation law.
         if ambient_temp_k.is_finite() && ambient_temp_k > 0.0 {
-            for (&port, &(carrier, role)) in &self.port_meta {
+            for (&port, &(carrier, role, _)) in &self.port_meta {
                 if carrier == Carrier::Heat && role == PortRole::EffortIn {
                     let _ = system.guess(port, &[ambient_temp_k]);
                 }
@@ -2726,6 +2728,12 @@ impl LoweringRegistry {
         cards: &CardStore,
     ) -> Result<LoweredSystem, LoweringError> {
         let input = draft.input();
+        if let Some(controller) = input.controllers.first() {
+            return Err(LoweringError::Invalid {
+                item: format!("controller:{}", controller.name),
+                detail: "controller lowering is not registered; construct and connect a signal-port controller explicitly instead of omitting its feedback law".to_owned(),
+            });
+        }
         let mut graph = LoweringGraph::new();
         let mut component_receipts = Vec::with_capacity(input.parts.len());
         let mut joint_receipts = Vec::with_capacity(input.joints.len());
@@ -3158,16 +3166,65 @@ fn lower_source(
             entity,
             port: port_name.to_owned(),
         })?;
-    let (carrier, role) = graph
-        .port_meta(target_port)
-        .ok_or_else(|| LoweringError::Invalid {
-            item: scope.clone(),
-            detail: format!("target port '{port_name}' has no registered carrier metadata"),
-        })?;
+    let (carrier, role, width) =
+        graph
+            .port_meta
+            .get(&target_port)
+            .copied()
+            .ok_or_else(|| LoweringError::Invalid {
+                item: scope.clone(),
+                detail: format!("target port '{port_name}' has no registered carrier metadata"),
+            })?;
     let target_description = format!("{}.{}", entity.token(), port_name);
 
     // Record every numeric source parameter explicitly.
     let history_dims = record_time_history_provenance(&scope, &src.history, &mut recorder);
+    if carrier == Carrier::Stream {
+        return Err(LoweringError::Invalid {
+            item: scope,
+            detail: format!(
+                "scalar source cannot drive stream port '{port_name}': mass, enthalpy and carried quantities require a stream component with explicit coordinate units"
+            ),
+        });
+    }
+    if width != 1 {
+        return Err(LoweringError::Invalid {
+            item: scope,
+            detail: format!(
+                "scalar source cannot drive {width}-coefficient port '{port_name}'; declare a component with the required field or signal shape"
+            ),
+        });
+    }
+    let expected_dims = match (carrier, role) {
+        (Carrier::Power(kind), PortRole::EffortIn) => kind.canonical_effort_dimensions(),
+        (Carrier::Power(kind), PortRole::FlowIn) => kind.canonical_flow_dimensions(),
+        (Carrier::Heat, PortRole::EffortIn) => TEMPERATURE_DIMS,
+        (Carrier::Heat, PortRole::FlowIn) => POWER_DIMS,
+        // Signal ports currently carry no physical-unit declaration. Only a
+        // dimensionless source can enter without discarding authored units.
+        (Carrier::Signal, PortRole::SignalIn) => Dims::NONE,
+        (_, PortRole::SignalOut) => {
+            return Err(LoweringError::Invalid {
+                item: scope,
+                detail: format!("cannot drive output-only signal port '{port_name}' with a source"),
+            });
+        }
+        _ => {
+            return Err(LoweringError::Invalid {
+                item: scope,
+                detail: format!("port '{port_name}' has no supported scalar source input"),
+            });
+        }
+    };
+    if history_dims != expected_dims {
+        return Err(LoweringError::Invalid {
+            item: scope,
+            detail: format!(
+                "source history dimensions {:?} do not match port '{port_name}' input dimensions {:?}",
+                history_dims.0, expected_dims.0
+            ),
+        });
+    }
 
     match (carrier, role) {
         (Carrier::Power(kind), PortRole::EffortIn) => {
@@ -3190,7 +3247,7 @@ fn lower_source(
                 parameter_sources,
             })
         }
-        (Carrier::Heat, PortRole::FlowIn) if history_dims == POWER_DIMS => {
+        (Carrier::Heat, PortRole::FlowIn) => {
             // Attach a Joule Heater to the thermal body's common_effort hub.
             let waveform = time_history_to_waveform(&scope, &src.history)?;
             let heater = Heater::new(waveform).map_err(|source| LoweringError::Element {
@@ -5086,4 +5143,74 @@ fn push_json_param_sources(out: &mut String, params: &[ParameterProvenance]) {
         out.push('}');
     }
     out.push(']');
+}
+
+#[cfg(test)]
+mod source_admission_tests {
+    use super::*;
+    use crate::elements::{GasVolume, SignalLimiter};
+    use fs_qty::QtyAny;
+    use fs_scenario::EntityDeclaration;
+
+    #[test]
+    fn scalar_sources_preserve_signal_units_and_refuse_vector_or_stream_broadcast() {
+        let mut catalog = EntityCatalog::new();
+        let root = catalog
+            .declare(EntityDeclaration::assembly("sources"))
+            .unwrap();
+        let entity = catalog
+            .declare(EntityDeclaration::part(root, "receiver"))
+            .unwrap();
+        let mut graph = LoweringGraph::new();
+        for (name, width) in [("scalar", 1), ("vector", 2)] {
+            let node = graph
+                .add_with_tangent(
+                    name,
+                    Some(entity),
+                    SignalLimiter::new(vec![0.0; width], vec![1.0; width]).unwrap(),
+                    (),
+                )
+                .unwrap();
+            let port = graph.port(node, "input").unwrap();
+            graph.expose_port(entity, name, port);
+        }
+        let gas = GasVolume::new(287.0, 1.4, 0).unwrap();
+        let contents = gas.contents(101_325.0, 300.0, 1.0, &[]).unwrap();
+        let node = graph
+            .add_with_tangent("gas", Some(entity), gas, contents)
+            .unwrap();
+        let port = graph.port(node, "stream").unwrap();
+        graph.expose_port(entity, "stream", port);
+
+        for (port, dims, reason) in [
+            ("scalar", TEMPERATURE_DIMS, "dimensions"),
+            ("vector", Dims::NONE, "2-coefficient"),
+            ("stream", Dims([0, 1, -1, 0, 0, 0]), "stream component"),
+        ] {
+            let source = SourceDecl {
+                name: "drive".to_owned(),
+                target: SourceTarget::Port {
+                    entity,
+                    port: port.to_owned(),
+                },
+                history: TimeHistory::Constant(QtyAny::new(0.5, dims)),
+            };
+            let error = lower_source(&source, &catalog, &mut graph)
+                .expect_err("scalar source cannot discard dimensions or invent a vector shape");
+            assert!(
+                matches!(error, LoweringError::Invalid { ref item, ref detail }
+                if item == "source:drive" && detail.contains(port) && detail.contains(reason))
+            );
+        }
+        let source = SourceDecl {
+            name: "dimensionless".to_owned(),
+            target: SourceTarget::Port {
+                entity,
+                port: "scalar".to_owned(),
+            },
+            history: TimeHistory::Constant(QtyAny::dimensionless(0.5)),
+        };
+        lower_source(&source, &catalog, &mut graph)
+            .expect("dimensionless scalar signal remains supported");
+    }
 }
