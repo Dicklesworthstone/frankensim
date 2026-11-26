@@ -88,7 +88,8 @@ CANCELLED=130}` table):
 
 No-claim boundary: Stage 3 wires CLI and FrankenScript dispatch with
 Estimate-only probe authority; generalized 8-term QoI error budgets (`.11.8`)
-and CLI lineage/replay-audit verbs (`frankensim-dhqf7`) remain separate beads.
+remain a separate bead. The CLI lineage/replay-audit verbs landed separately
+(`frankensim-dhqf7`, ed1876af96; see the section above).
 
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
 
