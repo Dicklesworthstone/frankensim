@@ -980,7 +980,88 @@ fn srm1453_slab_stationary_matches_closed_form_and_refuses_transient() {
         .nth(1)
         .unwrap();
     let q: f64 = t.split(',').next().unwrap().parse().unwrap();
-    let qr = (0.00111 - 0.0000424 * 41.0 + 0.000115 * 297.15) * (0.25 * 0.25 / 0.0254) * 20.0;
-    assert!(exp.qoi_budget_json.is_none() && (q - qr).abs() / qr <= 1.0e-12);
-    assert!(ps.contains("stationary.residual_norm"));
+    let qr = (0.00111 - 0.0000424 * 41.0 + 0.000115 * 297.15) * (0.25 * 0.25 / 0.01343) * 20.0;
+    assert!((q - qr).abs() / qr <= 1.0e-12 && ps.contains("stationary.residual_norm"));
+    let qb = exp.qoi_budget_json.unwrap();
+    for k in [
+        "\"outcome\":\"pass\"",
+        "\"unmeasured_terms\":[]",
+        "\"kind\":\"discretization\",\"state\":\"negligible\"",
+        "\"kind\":\"model-form\",\"state\":\"negligible\"",
+        "covered by source",
+    ] {
+        assert!(qb.contains(k), "missing `{k}` in {qb}");
+    }
+    let s_str = std::str::from_utf8(s).unwrap();
+    let run_src = |src: &str, packs: &CardPackSet, mode| {
+        run_assembly(&l, src.as_bytes(), packs, mode, &mut step_clock(0.1), cp)
+    };
+    let q_of = |a: &str, b: &str| {
+        let (o, _) = run_src(&s_str.replace(a, b), &p, AssemblyAnalysisMode::Stationary).unwrap();
+        explain_assembly_run(&l, SolveRunId::parse_hex(&o.run).unwrap())
+            .unwrap()
+            .qoi_budget_json
+            .unwrap()
+    };
+    assert!(q_of("3.35W", "2.95W").contains("\"outcome\":\"fail\""));
+    assert!(q_of("3.35W", "3.20W").contains("\"outcome\":\"indeterminate\""));
+    let drop_m = q_of(
+        "(envelope measurement :probe \"slab_heat_rate\" :half-width 0.005W :source \"declared apparatus tolerance (not measured)\")",
+        "",
+    );
+    assert!(
+        drop_m.contains("\"outcome\":\"indeterminate\"")
+            && drop_m.contains("\"unmeasured_terms\":[\"measurement\"]")
+    );
+    let assert_ref = |src: &str, packs: &CardPackSet, mode, needle: &str| {
+        let w = run_src(src, packs, mode).unwrap_err().what;
+        assert!(w.contains(needle), "expected `{needle}` in `{w}`");
+    };
+    assert_ref(
+        &s_str.replace("0.01343m", "0.0254m"),
+        &p,
+        AssemblyAnalysisMode::Stationary,
+        "[12.86, 13.88] mm",
+    );
+    assert_ref(
+        &s_str.replace("307.15K", "309.15K"),
+        &p,
+        AssemblyAnalysisMode::Stationary,
+        "20 K",
+    );
+    assert_ref(
+        &s_str
+            .replace("307.15K", "305.15K")
+            .replace("287.15K", "285.15K"),
+        &p,
+        AssemblyAnalysisMode::Stationary,
+        "mean-temperature",
+    );
+    let p_k = CardPackSet::admit(vec![material_pack("fixture", 1000.0, 500.0, 1.0e9)]).unwrap();
+    let tr_cov = HEATED_BODY.replace(
+        "\n)",
+        "\n  (envelope model-form :probe \"temperature\" :covered-by-source \"NIST\")\n  (requirement \"r\" :probe \"temperature\" :stat final :relation at-most :limit 305K)\n)",
+    );
+    assert_ref(&tr_cov, &p_k, AssemblyAnalysisMode::Transient, "stationary");
+    let p_non = CardPackSet::admit(vec![claim_pack(
+        "other-eps",
+        "thermal_conductivity",
+        0.04,
+        Dims([1, 1, -3, -1, 0, 0]),
+        UncertaintyModel::RelativeHalfWidth {
+            fraction: 0.01,
+            confidence: 0.95,
+        },
+    )])
+    .unwrap();
+    let non_srm = s_str.replace("eps-nist-srm1453-2013", "other-eps").replace(
+        ":query-at (mean-temperature 297.15K bulk-density 41kg/m^3 temperature-difference 20K\n               source-lot-srm1453 1 source-conditioning-protocol-satisfied 1\n               unstacked-unsliced-uncontaminated-board 1)",
+        ":query-temp 297.15K",
+    );
+    assert_ref(
+        &non_srm,
+        &p_non,
+        AssemblyAnalysisMode::Stationary,
+        "other-eps",
+    );
 }

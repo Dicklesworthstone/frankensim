@@ -137,6 +137,18 @@ NO_AREA="$ARTIFACT_DIR/two_body_no_area.fsim"
 sed 's/:area 0.0025m\^2 //' "$ASM_DIR/two_body_conduction.fsim" > "$NO_AREA"
 expect_refusal missing_area 4 "requires positive :area" --json run "$NO_AREA" "$ARTIFACT_DIR/ledgers/ref3.db" --materials "$ALUM_PACK" --interfaces "$ATKINS_PACK"
 expect_refusal srm_transient 4 "cli-assembly-fidelity-analysis" --json run "$ASM_DIR/srm1453_slab.fsim" "$ARTIFACT_DIR/ledgers/ref4.db" --materials "$SRM_PACK" --analysis transient
+SRM_BAD_DT="$ARTIFACT_DIR/srm1453_bad_dt.fsim"
+sed 's/307.15K/309.15K/' "$ASM_DIR/srm1453_slab.fsim" > "$SRM_BAD_DT"
+expect_refusal srm_bad_dt 4 "face temperature difference must be 20 K" --json run "$SRM_BAD_DT" "$ARTIFACT_DIR/ledgers/ref5.db" --materials "$SRM_PACK" --analysis stationary
+SRM_BAD_LX="$ARTIFACT_DIR/srm1453_bad_lx.fsim"
+sed 's/0.01343m/0.0254m/' "$ASM_DIR/srm1453_slab.fsim" > "$SRM_BAD_LX"
+expect_refusal srm_bad_lx 4 "outside SRM 1453 production-run range" --json run "$SRM_BAD_LX" "$ARTIFACT_DIR/ledgers/ref6.db" --materials "$SRM_PACK" --analysis stationary
+SRM_FAIL="$ARTIFACT_DIR/srm1453_fail.fsim"
+sed 's/3.35W/2.95W/' "$ASM_DIR/srm1453_slab.fsim" > "$SRM_FAIL"
+run_case srm1453_fail "$SRM_FAIL" --materials "$SRM_PACK" --analysis stationary
+SRM_IND="$ARTIFACT_DIR/srm1453_ind.fsim"
+sed 's/3.35W/3.20W/' "$ASM_DIR/srm1453_slab.fsim" > "$SRM_IND"
+run_case srm1453_ind "$SRM_IND" --materials "$SRM_PACK" --analysis stationary
 
 # Independent closed-form Python oracles + summary receipt emission
 python3 - "$ARTIFACT_DIR" "$SOURCE_IDENTITY" "$RUNNER_SHA256" "$JSONL" "$RECEIPT" \
@@ -248,12 +260,21 @@ sf_c = max(abs(Cc * (T - 293.15) - f * Qt(i * 0.01)) / (2.0 * math.ulp(T) * Cc)
            for f, k in ((0.7, "lower_cell_temp"), (0.2, "upper_cell_temp")) for i, T in enumerate(psf[k]))
 assert all(len(v) == 101 for v in psf.values()) and len(psf) == 4 and sf_w <= 1e-12 and sf_c <= 1.0, (sf_w, sf_c)
 
-# 7. NIST SRM 1453 EPS slab (stationary 1-D steady conduction, deltaT=20 K, Tm=297.15 K, rho=41 kg/m^3)
+# 7. NIST SRM 1453 EPS slab (stationary 1-D steady conduction + 8-term determinate pass/fail/indeterminate)
 e_srm = ld("srm1453.explain.json"); psrm = probes(e_srm)
 k_srm = 0.00111 - 0.0000424 * 41.0 + 0.000115 * 297.15
-q_srm = k_srm * (0.25 * 0.25 / 0.0254) * 20.0
+q_srm = k_srm * (0.25 * 0.25 / 0.01343) * 20.0
 srm_rel = abs(psrm["slab_heat_rate"][0] - q_srm) / q_srm
 assert srm_rel <= 1e-12 and psrm["stationary.residual_norm"][0] == 0.0, (srm_rel, psrm)
+r_pass = e_srm["qoi_budget"]["requirements"][0]
+byk_srm = {t["kind"]: t for t in r_pass["terms"]}
+assert r_pass["outcome"] == "pass" and r_pass["unmeasured_terms"] == [] and [t["kind"] for t in r_pass["terms"]] == CANON_TERMS, r_pass
+assert byk_srm["discretization"]["state"] == "negligible" and byk_srm["model-form"]["state"] == "negligible", byk_srm
+assert all(byk_srm[k]["state"] == "measured" and byk_srm[k]["value"] > 0.0 for k in ("roundoff", "parameters", "geometry", "boundary-conditions", "measurement")), byk_srm
+r_fail = ld("srm1453_fail.explain.json")["qoi_budget"]["requirements"][0]
+r_ind = ld("srm1453_ind.explain.json")["qoi_budget"]["requirements"][0]
+assert r_fail["outcome"] == "fail" and r_fail["unmeasured_terms"] == [], r_fail
+assert r_ind["outcome"] == "indeterminate" and r_ind["unmeasured_terms"] == [], r_ind
 
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
@@ -272,9 +293,10 @@ receipt = {
       "errors": {"free_pair_dissipated_rel": sf_q, "ledger_accounts_rel": sf_acc, "energy_residual_j": wres(e_sf),
                  "disc_spin_rel": sf_w, "cell_heat_over_2ulp_floor": sf_c}},
     "srm1453_slab": {"run": ld("srm1453.run.json")["run"],
+      "verdict": {"id": r_pass["id"], "outcome": r_pass["outcome"], "fail_drill": r_fail["outcome"], "indeterminate_drill": r_ind["outcome"], "unmeasured_terms": r_pass["unmeasured_terms"]},
       "errors": {"heat_rate_rel": srm_rel, "stationary_residual_norm": psrm["stationary.residual_norm"][0]}},
   },
-  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient"]},
+  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx"]},
 }
 pathlib.Path(rcpt_p).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 with open(jsonl_p, "a") as w:

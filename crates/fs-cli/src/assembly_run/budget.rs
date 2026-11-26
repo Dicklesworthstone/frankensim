@@ -18,8 +18,8 @@ use fs_qty::Dims;
 use fs_report::{BudgetTermItem, RequirementReportItem};
 use fs_scenario::Scenario;
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftAssemblyInput, DraftGeometrySource, DraftInterfaceKind, PrimitiveShape,
-    ProbeKind, StepPolicy, TimeHistory,
+    DraftAssembly, DraftAssemblyInput, DraftGeometrySource, DraftInterfaceKind, FidelityRung,
+    PrimitiveShape, ProbeKind, SourceTarget, StepPolicy, TimeHistory,
 };
 use fs_system::{
     BlockSolveMode, BlockSolverPolicy, CardStore, LoweredSystem, LoweringReceipt, MonolithicConfig,
@@ -51,12 +51,19 @@ fn req_refusal(detail: impl Into<String>) -> SolveRefusal {
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BudgetMode {
+    Transient { energy_defect_j: Option<f64> },
+    Stationary { residual_norm: Option<f64> },
+}
+
 fn unit_dims(u: &str) -> Option<Dims> {
     match u {
         "K" => Some(Dims([0, 0, 0, 1, 0, 0])),
         "m" => Some(Dims([1, 0, 0, 0, 0, 0])),
         "m/s" => Some(Dims([1, 0, -1, 0, 0, 0])),
         "s" => Some(Dims([0, 0, 1, 0, 0, 0])),
+        "W" => Some(Dims([2, 1, -3, 0, 0, 0])),
         "Hz" | "rad/s" => Some(Dims([0, 0, -1, 0, 0, 0])),
         "1" => Some(Dims::NONE),
         _ => None,
@@ -414,7 +421,8 @@ fn lower_bc_corner(adm: &AdmittedAssembly, mask: usize) -> Result<LoweredSystem,
         else {
             return Err("bc corner requires constant/harmonic source".into());
         };
-        q.value += s * bc.half_width.value;
+        let hw = bc.half_width.ok_or("bc envelope missing half-width")?.value;
+        q.value += s * hw;
     }
     relower_input(adm, inp, &adm.card_store)
 }
@@ -456,6 +464,163 @@ where
     ))
 }
 
+fn is_exact_one_d_conductance(
+    adm: &AdmittedAssembly,
+    rec: Option<&LoweringReceipt>,
+    probe: &str,
+) -> Option<(fs_scenario::EntityId, usize)> {
+    let inp = adm.draft.input();
+    let target = inp.probes.iter().find_map(|p| match &p.kind {
+        ProbeKind::FieldQuantity {
+            target, quantity, ..
+        } if p.name == probe && quantity.name == "heat_rate" => Some(*target),
+        _ => None,
+    })?;
+    let rec = rec?;
+    let comp = rec.components.iter().find(|c| c.entity == target)?;
+    if comp.chosen_fidelity == (FidelityRung::OneDField { cells: 1 })
+        && comp
+            .parameter_sources
+            .iter()
+            .any(|ps| ps.parameter == "thermal_conductance")
+    {
+        let idx = inp.parts.iter().position(|p| p.entity == target)?;
+        Some((target, idx))
+    } else {
+        None
+    }
+}
+
+fn check_srm1453_axes(
+    mat: &fs_scenario::assembly::MaterialRef,
+    tm_faces: f64,
+    deny: &impl Fn(&str) -> SolveRefusal,
+) -> Result<(f64, f64), SolveRefusal> {
+    let ax = |name: &str| {
+        mat.query_point
+            .iter()
+            .find(|(k, _)| k.name == name)
+            .map(|(_, q)| q.value)
+            .ok_or_else(|| deny(&format!("missing query axis `{name}`")))
+    };
+    let (tm, rho, td) = (
+        ax("mean-temperature")?,
+        ax("bulk-density")?,
+        ax("temperature-difference")?,
+    );
+    if !(281.0..=313.0).contains(&tm) || (tm - tm_faces).abs() > 1.0e-9 {
+        return Err(deny(&format!(
+            "mean-temperature {tm:.3} K must be in [281, 313] K and match face mean {tm_faces:.3} K"
+        )));
+    }
+    if !(37.0..=46.0).contains(&rho) {
+        return Err(deny(&format!(
+            "bulk-density {rho:.3} kg/m^3 outside [37, 46] kg/m^3"
+        )));
+    }
+    if (td - 20.0).abs() > 1.0e-9 {
+        return Err(deny(&format!("temperature-difference {td:.3} K != 20 K")));
+    }
+    for f in [
+        "source-lot-srm1453",
+        "source-conditioning-protocol-satisfied",
+        "unstacked-unsliced-uncontaminated-board",
+    ] {
+        let v = ax(f)?;
+        if (v - 1.0).abs() > 1.0e-12 {
+            return Err(deny(&format!("certificate flag `{f}` must be 1, got {v}")));
+        }
+    }
+    Ok((tm, rho))
+}
+
+fn verify_covered_by_source(
+    mode: BudgetMode,
+    adm: &AdmittedAssembly,
+    rec: Option<&LoweringReceipt>,
+    probe: &str,
+    citation: &str,
+) -> Result<(TermValue, String), SolveRefusal> {
+    let deny = |why: &str| {
+        req_refusal(format!(
+            "model-form :covered-by-source on probe `{probe}` refused: {why}"
+        ))
+    };
+    if !matches!(mode, BudgetMode::Stationary { .. }) {
+        return Err(deny("analysis must be stationary (not transient)"));
+    }
+    let Some((target, pidx)) = is_exact_one_d_conductance(adm, rec, probe) else {
+        return Err(deny(
+            "probe must target a (one-d-field 1) conductance heat_rate lowering",
+        ));
+    };
+    let inp = adm.draft.input();
+    let part = &inp.parts[pidx];
+    let lx = match &part.geometry {
+        DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, .. }) => lx.value,
+        _ => return Err(deny("part geometry must be a single SRM 1453 box board")),
+    };
+    if !(0.01286..=0.01388).contains(&lx) {
+        return Err(deny(&format!(
+            "board thickness lx={:.2} mm outside SRM 1453 production-run range [12.86, 13.88] mm (SP 260-175 Table 2)",
+            lx * 1.0e3
+        )));
+    }
+    let mat = part
+        .materials
+        .first()
+        .ok_or_else(|| deny(&format!("part `{}` has no material card", part.name)))?;
+    let card = adm
+        .card_store
+        .material(&mat.card)
+        .ok_or_else(|| deny("material card missing from card store"))?;
+    let obs_ok = rec.is_some_and(|r| {
+        r.components.iter().any(|c| {
+            c.entity == target
+                && c.property_receipts
+                    .iter()
+                    .any(|pr| pr.property == "thermal-conductivity" && pr.observation_backed)
+        })
+    });
+    if card.id().chemistry != "eps-nist-srm1453-2013" || !obs_ok {
+        return Err(deny(&format!(
+            "card `{}` is not observation-backed `eps-nist-srm1453-2013`",
+            card.id().chemistry
+        )));
+    }
+    let face_t = |port: &str| -> Result<f64, SolveRefusal> {
+        inp.sources
+            .iter()
+            .find_map(|s| match (&s.target, &s.history) {
+                (SourceTarget::Port { entity, port: sp }, TimeHistory::Constant(q))
+                    if *entity == target && sp == port && q.dims == Dims([0, 0, 0, 1, 0, 0]) =>
+                {
+                    Some(q.value)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                deny(&format!(
+                    "missing constant temperature source on port `{port}` of `{}`",
+                    part.name
+                ))
+            })
+    };
+    let (ta, tb) = (face_t("a")?, face_t("b")?);
+    let (dt_k, tm_faces) = ((ta - tb).abs(), 0.5 * (ta + tb));
+    if (dt_k - 20.0).abs() > 1.0e-9 {
+        return Err(deny(&format!(
+            "face temperature difference must be 20 K per SRM 1453 certificate, got {dt_k:.6} K"
+        )));
+    }
+    let (tm, rho) = check_srm1453_axes(mat, tm_faces, &deny)?;
+    let r = format!(
+        "covered by source ({citation}): SRM 1453 expanded uncertainty already includes 1-D guarded-hot-plate apparatus model error for metered-section heat rate under certificate conditions (lx={:.2} mm, dT=20 K, Tm={tm:.2} K, rho={rho:.2} kg/m^3)",
+        lx * 1.0e3
+    );
+    Ok((TermValue::negligible(&r).unwrap(), r))
+}
+
 fn direct_term(
     list: &[TargetEnvelope],
     probe: &str,
@@ -465,13 +630,18 @@ fn direct_term(
     let Some(e) = list.iter().find(|e| e.target == probe) else {
         return Ok(nodata(empty_msg));
     };
-    if e.half_width.dims != dims {
+    let Some(hw) = e.half_width else {
+        return Err(req_refusal(format!(
+            "envelope on probe `{probe}` missing numeric :half-width"
+        )));
+    };
+    if hw.dims != dims {
         return Err(req_refusal(format!(
             "envelope on probe `{probe}` dimensions do not match probe"
         )));
     }
     Ok((
-        TermValue::interval(0.0, e.half_width.value).unwrap(),
+        TermValue::interval(0.0, hw.value).unwrap(),
         format!("Declared: {}", e.source),
     ))
 }
@@ -677,9 +847,9 @@ pub(crate) fn evaluate_qoi_budgets<F>(
     adm: &AdmittedAssembly,
     probes: &[EvaluatedProbe],
     rec: Option<&LoweringReceipt>,
-    energy_defect_j: Option<f64>,
+    mode: BudgetMode,
     consumed_wall_s: f64,
-    mut run_transient: F,
+    mut run_case: F,
 ) -> Result<BudgetEvalOut, SolveRefusal>
 where
     F: FnMut(&mut LoweredSystem, Option<f64>) -> Result<RunTrace, SolveRefusal>,
@@ -728,24 +898,28 @@ where
             .lower(&adm.draft, &adm.card_store)
             .map_err(|e| format!("{e}"))
     };
-    let half = run_extra(
-        &mut acc,
-        (
-            "step_halving",
-            "step_halving",
-            dt * 0.5,
-            d_rel,
-            d_mono,
-            Some(dt * 0.5),
-        ),
-        relower,
-        &mut run_transient,
-    );
+    let half = if matches!(mode, BudgetMode::Transient { .. }) {
+        Some(run_extra(
+            &mut acc,
+            (
+                "step_halving",
+                "step_halving",
+                dt * 0.5,
+                d_rel,
+                d_mono,
+                Some(dt * 0.5),
+            ),
+            relower,
+            &mut run_case,
+        ))
+    } else {
+        None
+    };
     let tight = run_extra(
         &mut acc,
         ("solver_tight", "solver_tight", dt, t_rel, t_mono, None),
         || tight_system(adm, t_rel, t_mono),
-        &mut run_transient,
+        &mut run_case,
     );
     let param = match rec {
         None => Err("no lowering receipt for card uncertainty audit".into()),
@@ -764,7 +938,7 @@ where
                     &ns,
                     &noms,
                     |m| lower_corner(adm, &uc, m),
-                    &mut run_transient,
+                    &mut run_case,
                 )
             }
         },
@@ -782,7 +956,7 @@ where
         &gl,
         &noms,
         |m| lower_geom_corner(adm, m),
-        &mut run_transient,
+        &mut run_case,
     );
     let bl: Vec<_> = adm
         .envelopes
@@ -797,7 +971,7 @@ where
         &bl,
         &noms,
         |m| lower_bc_corner(adm, m),
-        &mut run_transient,
+        &mut run_case,
     );
     let (mut req_items, mut term_items) = (
         Vec::with_capacity(reqs.len()),
@@ -810,7 +984,27 @@ where
     );
     let opt = |o: Option<f64>| o.map_or_else(|| "null".into(), |v| format!("{v:.17e}"));
     for (i, (r, (unit, dims, nom))) in reqs.iter().zip(&noms).enumerate() {
-        let ro = roundoff_term(&r.probe, unit, adm, rec, energy_defect_j);
+        let (ro, ro_owner) = match mode {
+            BudgetMode::Transient { energy_defect_j } => (
+                roundoff_term(&r.probe, unit, adm, rec, energy_defect_j),
+                "window-ledger",
+            ),
+            BudgetMode::Stationary { residual_norm } => {
+                let term = match residual_norm.filter(|v| v.is_finite() && *v >= 0.0) {
+                    Some(res) if unit == "W" => {
+                        let hw = res + 8.0 * f64::EPSILON * nom.abs();
+                        (
+                            TermValue::interval(0.0, hw).unwrap(),
+                            format!(
+                                "stationary port residual {res:.3e} W + 8*eps*|Q| roundoff floor"
+                            ),
+                        )
+                    }
+                    _ => nodata("no stationary roundoff conversion for this probe"),
+                };
+                (term, "stationary-residual")
+            }
+        };
         let sol = match &tight {
             Ok(v) => (
                 TermValue::interval(0.0, (nom - v[i]).abs()).unwrap(),
@@ -818,26 +1012,48 @@ where
             ),
             Err(w) => nodata(w),
         };
-        let disc = match &half {
-            Ok(v) => (
-                TermValue::interval(0.0, 2.0 * (nom - v[i]).abs()).unwrap(),
-                format!(
-                    "2*|stat(dt)-stat(dt/2)| for nominal dt={dt}s assuming order p>=1 (Estimated)"
+        let (disc, disc_owner) = match &half {
+            Some(Ok(v)) => (
+                (
+                    TermValue::interval(0.0, 2.0 * (nom - v[i]).abs()).unwrap(),
+                    format!(
+                        "2*|stat(dt)-stat(dt/2)| for nominal dt={dt}s assuming order p>=1 (Estimated)"
+                    ),
                 ),
+                "step-halving",
             ),
-            Err(w) => nodata(w),
+            Some(Err(w)) => (nodata(w), "step-halving"),
+            None => {
+                let term = if is_exact_one_d_conductance(adm, rec, &r.probe).is_some() {
+                    let msg = "no time discretisation; a single conductance is exact for 1-D steady conduction at the declared mean temperature";
+                    (TermValue::negligible(msg).unwrap(), msg.into())
+                } else {
+                    nodata("no stationary discretisation estimate for this fidelity")
+                };
+                (term, "stationary-exact")
+            }
         };
         let pick = |res: &Result<(Vec<f64>, String), String>| match res {
             Ok((v, w)) => (TermValue::interval(0.0, v[i]).unwrap(), w.clone()),
             Err(w) => nodata(w),
         };
         let (par, g, b) = (pick(&param), pick(&geom), pick(&bc));
-        let m = direct_term(
-            &adm.envelopes.model_form,
-            &r.probe,
-            *dims,
-            "no model-form discrepancy bound declared",
-        )?;
+        let m = match adm
+            .envelopes
+            .model_form
+            .iter()
+            .find(|e| e.target == r.probe)
+        {
+            Some(e) if e.half_width.is_none() => {
+                verify_covered_by_source(mode, adm, rec, &r.probe, &e.source)?
+            }
+            _ => direct_term(
+                &adm.envelopes.model_form,
+                &r.probe,
+                *dims,
+                "no model-form discrepancy bound declared",
+            )?,
+        };
         let s = direct_term(
             &adm.envelopes.measurement,
             &r.probe,
@@ -845,9 +1061,9 @@ where
             "no sensor or measurement uncertainty declared",
         )?;
         let specs = [
-            (Uk::Roundoff, ro.0, ro.1, "window-ledger"),
+            (Uk::Roundoff, ro.0, ro.1, ro_owner),
             (Uk::SolverAlgebraic, sol.0, sol.1, "solver-tight"),
-            (Uk::Discretization, disc.0, disc.1, "step-halving"),
+            (Uk::Discretization, disc.0, disc.1, disc_owner),
             (Uk::Geometry, g.0, g.1, "geometry"),
             (Uk::Parameters, par.0, par.1, "card-store"),
             (Uk::BoundaryConditions, b.0, b.1, "boundary-conditions"),

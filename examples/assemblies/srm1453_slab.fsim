@@ -6,7 +6,7 @@
   (reference-state assembled)
   (environment :ambient-temp 297.15K :ambient-pressure 101325Pa)
   (time-plan :horizon 1s :dt 0.01s :sample-rate 100Hz)
-  (part "slab" :kind solid :geometry (box 0.0254m 0.25m 0.25m)
+  (part "slab" :kind solid :geometry (box 0.01343m 0.25m 0.25m)
     :material "eps-nist-srm1453-2013"
     :query-at (mean-temperature 297.15K bulk-density 41kg/m^3 temperature-difference 20K
                source-lot-srm1453 1 source-conditioning-protocol-satisfied 1
@@ -16,4 +16,12 @@
   (source "cold_face" :part "slab" :port "b" :history (constant 287.15K))
   (probe "slab_heat_rate" :kind field-quantity :target "slab"
     :quantity "heat_rate" :dims (2 1 -3 0 0 0) :sample-rate 1Hz)
+  (envelope geometry :part "slab" :axis lx :half-width 0.00025m :source "declared apparatus tolerance (not measured)")
+  (envelope geometry :part "slab" :axis ly :half-width 0.0005m :source "declared apparatus tolerance (not measured)")
+  (envelope geometry :part "slab" :axis lz :half-width 0.0005m :source "declared apparatus tolerance (not measured)")
+  (envelope boundary-conditions :target "hot_face" :half-width 0.05K :source "declared apparatus tolerance (not measured)")
+  (envelope boundary-conditions :target "cold_face" :half-width 0.05K :source "declared apparatus tolerance (not measured)")
+  (envelope measurement :probe "slab_heat_rate" :half-width 0.005W :source "declared apparatus tolerance (not measured)")
+  (envelope model-form :probe "slab_heat_rate" :covered-by-source "NIST SP 260-175 Eq. (8) & Table 8 (k=2 expanded uncertainty)")
+  (requirement "slab_heat_limit" :probe "slab_heat_rate" :stat final :relation at-most :limit 3.35W)
 )

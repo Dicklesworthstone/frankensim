@@ -68,7 +68,7 @@ pub(crate) struct GeomEnvelope {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TargetEnvelope {
     pub(crate) target: String,
-    pub(crate) half_width: QtyAny,
+    pub(crate) half_width: Option<QtyAny>,
     pub(crate) source: String,
 }
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -534,23 +534,46 @@ fn parse_envelope(items: &[Node], out: &mut DeclaredEnvelopes) -> Result<(), Sol
         });
         return Ok(());
     }
-    let (key, list, zero_ok) = match k {
-        "boundary-conditions" => ("target", &mut out.boundary_conditions, false),
-        "measurement" => ("probe", &mut out.measurement, true),
-        "model-form" => ("probe", &mut out.model_form, false),
+    let (key, list, zero_ok, cov_ok) = match k {
+        "boundary-conditions" => ("target", &mut out.boundary_conditions, false, false),
+        "measurement" => ("probe", &mut out.measurement, true, false),
+        "model-form" => ("probe", &mut out.model_form, false, true),
         o => return Err(err(format!("unsupported envelope kind `{o}`"))),
     };
-    let kw = kwargs(&items[2..], &[key, "half-width", "source"], &sc)?;
+    let ok_kw: &[&str] = if cov_ok {
+        &[key, "half-width", "source", "covered-by-source"]
+    } else {
+        &[key, "half-width", "source"]
+    };
+    let kw = kwargs(&items[2..], ok_kw, &sc)?;
     let target = as_str(req(&kw, key, &sc)?, key)?.to_string();
+    if list.iter().any(|d| d.target == target) {
+        return Err(err(format!("{sc} duplicate `{target}`")));
+    }
+    if let Some(cov) = kw.get("covered-by-source") {
+        if kw.contains_key("half-width") || kw.contains_key("source") {
+            return Err(err(format!(
+                "{sc}: :covered-by-source cannot be combined with :half-width or :source"
+            )));
+        }
+        let cite = as_str(cov, "covered-by-source")?.trim();
+        if cite.is_empty() {
+            return Err(err(format!("{sc} requires non-empty :covered-by-source")));
+        }
+        list.push(TargetEnvelope {
+            target,
+            half_width: None,
+            source: cite.to_string(),
+        });
+        return Ok(());
+    }
     let hw = as_qty(req(&kw, "half-width", &sc)?, "half-width")?;
-    if hw.value < 0.0 || (!zero_ok && hw.value == 0.0) || list.iter().any(|d| d.target == target) {
-        return Err(err(format!(
-            "{sc} invalid :half-width or duplicate `{target}`"
-        )));
+    if hw.value < 0.0 || (!zero_ok && hw.value == 0.0) {
+        return Err(err(format!("{sc} invalid :half-width for `{target}`")));
     }
     list.push(TargetEnvelope {
         target,
-        half_width: hw,
+        half_width: Some(hw),
         source: src(&kw)?,
     });
     Ok(())
@@ -612,7 +635,7 @@ fn bind_envelopes(
                 b.target
             )));
         };
-        if b.half_width.dims != q.dims {
+        if b.half_width.is_none_or(|hw| hw.dims != q.dims) {
             return Err(err(format!(
                 "bc envelope `{}` dims do not match source",
                 b.target
@@ -1522,6 +1545,22 @@ mod tests {
         chk(
             "(envelope measurement :probe \"tp\" :half-width 0.1K :source \" \")",
             "non-empty :source",
+        );
+        let cov =
+            with("(envelope model-form :probe \"tp\" :covered-by-source \"NIST SP 260-175\")")
+                .unwrap();
+        assert!(cov.envelopes.model_form[0].half_width.is_none());
+        chk(
+            "(envelope model-form :probe \"tp\" :covered-by-source \"s\" :half-width 0.1K)",
+            "cannot be combined",
+        );
+        chk(
+            "(envelope model-form :probe \"tp\" :covered-by-source \" \")",
+            "non-empty :covered-by-source",
+        );
+        chk(
+            "(envelope measurement :probe \"tp\" :covered-by-source \"s\")",
+            "rejects unknown keyword `:covered-by-source`",
         );
     }
 

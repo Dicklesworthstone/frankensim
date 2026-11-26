@@ -9,7 +9,9 @@ pub(crate) mod cli;
 mod codec;
 mod report;
 
-use budget::{EvaluatedQoiBudget, QOI_BUDGET_KIND, attach_wall_metrics, evaluate_qoi_budgets};
+use budget::{
+    BudgetMode, EvaluatedQoiBudget, QOI_BUDGET_KIND, attach_wall_metrics, evaluate_qoi_budgets,
+};
 
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
@@ -919,29 +921,50 @@ impl StagePipeline for AssemblyPipeline<'_> {
                 )?;
                 let series_artifact = side.artifact;
                 let mut side_artifacts = vec![side];
-                let qoi_budget = if self.admitted.requirements.is_empty()
-                    || self.analysis != AssemblyAnalysisMode::Transient
-                {
-                    None
-                } else {
-                    let defect = ctx
-                        .energy_residual_j
-                        .map(f64::abs)
-                        .into_iter()
-                        .chain(ctx.largest_energy_defect_j.map(f64::abs))
-                        .reduce(f64::max);
+                let want_budget = !self.admitted.requirements.is_empty()
+                    && (self.analysis == AssemblyAnalysisMode::Transient
+                        || (self.analysis == AssemblyAnalysisMode::Stationary
+                            && self
+                                .admitted
+                                .requirements
+                                .iter()
+                                .any(|r| probes.iter().any(|p| p.name == r.probe))));
+                let qoi_budget = if want_budget {
+                    let mode = if self.analysis == AssemblyAnalysisMode::Stationary {
+                        BudgetMode::Stationary {
+                            residual_norm: trace.stationary_norm,
+                        }
+                    } else {
+                        let defect = ctx
+                            .energy_residual_j
+                            .map(f64::abs)
+                            .into_iter()
+                            .chain(ctx.largest_energy_defect_j.map(f64::abs))
+                            .reduce(f64::max);
+                        BudgetMode::Transient {
+                            energy_defect_j: defect,
+                        }
+                    };
                     let (qb, qs, bm) = evaluate_qoi_budgets(
                         self.admitted,
                         &probes,
                         ctx.lowered.as_ref().map(|l| &l.receipt),
-                        defect,
+                        mode,
                         state.consumed_wall_s,
-                        |ls, dt| self.run_transient_with(ls, dt).map(|(tr, _)| tr),
+                        |ls, dt| {
+                            if self.analysis == AssemblyAnalysisMode::Stationary {
+                                self.run_non_transient(ls)
+                            } else {
+                                self.run_transient_with(ls, dt).map(|(tr, _)| tr)
+                            }
+                        },
                     )?;
                     let qa = qs.artifact;
                     side_artifacts.push(qs);
                     ctx.pending_metrics.extend(bm);
                     Some((qa, qb))
+                } else {
+                    None
                 };
                 Ok(StageExecution {
                     receipt_json,
