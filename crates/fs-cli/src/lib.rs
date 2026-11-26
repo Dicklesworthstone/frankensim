@@ -87,7 +87,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | run <program.fs|program.fs.json> <ledger.db> | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project|assembly> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... [--analysis transient|stationary|modal|harmonic] | run --resume <run-id> <ledger.db> | run <program.fs|program.fs.json> <ledger.db> | explain <run-id> [<ledger.db>] | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 const COUPLED_USAGE: &str = "Experimental coupled workflows:\n  system <scene.json>\n  cooling-cht <scene.json>\n  electrothermal <scene.json> [--transient <time.json>]\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json> [options]\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface. These workflows retain their own numerical scope and do not produce ledger-backed .fsim runs; system runs a device described as data on the composition kernel and reports its energy ledger. Embedded UQ and component design require an explicit CommandContext cooling worker.\n";
 
@@ -159,6 +159,15 @@ enum Command {
         project: PathBuf,
         ledger: PathBuf,
         cards: Vec<(CardPackKind, PathBuf)>,
+        analysis: Option<AssemblyAnalysisMode>,
+    },
+    RunResume {
+        run_id: String,
+        ledger: PathBuf,
+    },
+    Explain {
+        run_id: String,
+        ledger: Option<PathBuf>,
     },
     Compare {
         left: String,
@@ -288,24 +297,14 @@ fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> 
             project,
             ledger,
             cards,
-        } if frankenscript::is_program(&project) => {
-            if cards.is_empty() {
-                frankenscript::run_program_path(&project, &ledger, mode)
-            } else {
-                let diagnostic = Diagnostic::new(
-                    "run",
-                    "cli-run-program-cards",
-                    "a FrankenScript program declares its card packs itself",
-                    "move the packs into the program's :materials / :interfaces arguments",
-                );
-                refusal(mode, exit::USAGE, &diagnostic, None)
-            }
+            analysis,
+        } => dispatch_run(&project, &ledger, &cards, analysis, mode),
+        Command::RunResume { run_id, ledger } => {
+            assembly_run::cli::resume_assembly_path(&run_id, &ledger, mode)
         }
-        Command::Run {
-            project,
-            ledger,
-            cards,
-        } => run_workflow_path(&project, &ledger, &cards, mode),
+        Command::Explain { run_id, ledger } => {
+            assembly_run::cli::explain_assembly_path(&run_id, ledger.as_deref(), mode)
+        }
         Command::Compare {
             left,
             right,
@@ -322,6 +321,46 @@ fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> 
             budget,
         } => study::resume_path(&run, &ledger, budget.as_deref(), mode),
     }
+}
+
+fn dispatch_run(
+    project: &Path,
+    ledger: &Path,
+    cards: &[(CardPackKind, PathBuf)],
+    analysis: Option<AssemblyAnalysisMode>,
+    mode: OutputMode,
+) -> CommandOutput {
+    if frankenscript::is_program(project) {
+        if cards.is_empty() && analysis.is_none() {
+            return frankenscript::run_program_path(project, ledger, mode);
+        }
+        let diagnostic = Diagnostic::new(
+            "run",
+            "cli-run-program-cards",
+            "a FrankenScript program declares its card packs and analysis options itself",
+            "move :materials, :interfaces, and :analysis into the program clauses",
+        );
+        return refusal(mode, exit::USAGE, &diagnostic, None);
+    }
+    if assembly_run::cli::is_assembly_file(project) {
+        return assembly_run::cli::run_assembly_path(
+            project,
+            ledger,
+            cards,
+            analysis.unwrap_or(AssemblyAnalysisMode::Transient),
+            mode,
+        );
+    }
+    if analysis.is_some() {
+        let diagnostic = Diagnostic::new(
+            "run",
+            "cli-run-analysis-project",
+            "`--analysis` applies to canonical `(assembly …)` files, not cooling `(project …)` files",
+            "omit `--analysis` for cooling projects or pass a canonical `(assembly …)` file",
+        );
+        return refusal(mode, exit::USAGE, &diagnostic, None);
+    }
+    run_workflow_path(project, ledger, cards, mode)
 }
 
 /// Run the CLI from platform arguments excluding the executable name.
@@ -503,13 +542,34 @@ fn parse_args(
                 ledger: Some(PathBuf::from(ledger)),
             }
         }
+        [verb, flag, run_id, ledger]
+            if verb == "run" && flag == "--resume" && is_operand(run_id) && is_operand(ledger) =>
+        {
+            Command::RunResume {
+                run_id: run_id.clone(),
+                ledger: PathBuf::from(ledger),
+            }
+        }
         [verb, project, ledger, rest @ ..]
             if verb == "run" && is_operand(project) && is_operand(ledger) =>
         {
+            let (cards, analysis) =
+                parse_run_args(rest).map_err(|diagnostic| (mode, diagnostic))?;
             Command::Run {
                 project: PathBuf::from(project),
                 ledger: PathBuf::from(ledger),
-                cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
+                cards,
+                analysis,
+            }
+        }
+        [verb, run_id] if verb == "explain" && is_operand(run_id) => Command::Explain {
+            run_id: run_id.clone(),
+            ledger: None,
+        },
+        [verb, run_id, ledger] if verb == "explain" && is_operand(run_id) && is_operand(ledger) => {
+            Command::Explain {
+                run_id: run_id.clone(),
+                ledger: Some(PathBuf::from(ledger)),
             }
         }
         [verb, left, right] if verb == "compare" && is_operand(left) && is_operand(right) => {
@@ -630,6 +690,67 @@ fn solve_usage_diagnostic() -> Diagnostic {
         "solve card-pack flags must be `--materials <pack>` or `--interfaces <pack>` pairs",
         USAGE,
     )
+}
+
+type RunArgs = (Vec<(CardPackKind, PathBuf)>, Option<AssemblyAnalysisMode>);
+
+fn parse_run_args(args: &[String]) -> Result<RunArgs, Diagnostic> {
+    let mut cards = Vec::new();
+    let mut analysis = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--materials" | "--interfaces" => {
+                let kind = if args[index] == "--materials" {
+                    CardPackKind::Material
+                } else {
+                    CardPackKind::Interface
+                };
+                let Some(value) = args.get(index + 1).filter(|v| is_operand(v)) else {
+                    return Err(solve_usage_diagnostic());
+                };
+                if cards.len() >= MAX_CARD_PACKS {
+                    return Err(Diagnostic::new(
+                        "run",
+                        "cli-solve-card-pack-count",
+                        format!("the invocation declares more than {MAX_CARD_PACKS} card packs"),
+                        "reduce the pack set to the cards the input actually binds",
+                    ));
+                }
+                cards.push((kind, PathBuf::from(value)));
+            }
+            "--analysis" => {
+                let Some(value) = args.get(index + 1).filter(|v| is_operand(v)) else {
+                    return Err(Diagnostic::new(
+                        "run",
+                        "cli-run-analysis-usage",
+                        "`--analysis` requires one of transient, stationary, modal, or harmonic",
+                        USAGE,
+                    ));
+                };
+                if analysis.is_some() {
+                    return Err(Diagnostic::new(
+                        "run",
+                        "cli-run-analysis-usage",
+                        "`--analysis` may be stated at most once",
+                        "pass a single `--analysis` mode",
+                    ));
+                }
+                let Some(parsed) = AssemblyAnalysisMode::parse(value) else {
+                    return Err(Diagnostic::new(
+                        "run",
+                        "cli-run-analysis-usage",
+                        format!("unknown analysis mode `{value}`"),
+                        "choose one of transient, stationary, modal, or harmonic",
+                    ));
+                };
+                analysis = Some(parsed);
+            }
+            _ => return Err(solve_usage_diagnostic()),
+        }
+        index += 2;
+    }
+    Ok((cards, analysis))
 }
 
 fn parse_import_args(args: &[String]) -> Result<ImportCommand, Diagnostic> {

@@ -84,13 +84,14 @@ use crate::{
 };
 
 /// Verbs with a stage binding, in catalog order.
-pub const EXECUTABLE_VERBS: [&str; 6] = [
+pub const EXECUTABLE_VERBS: [&str; 7] = [
     "cooling.project",
     "cooling.import",
     "cooling.solve",
     "cooling.run",
     "cooling.study",
     "study.run",
+    "assembly.run",
 ];
 
 const LENGTH: fs_qty::Dims = fs_qty::Dims([1, 0, 0, 0, 0, 0]);
@@ -119,6 +120,12 @@ enum Step {
         cards: Vec<(CardPackKind, PathBuf)>,
     },
     StudyFile(native_study::FileStudyStep),
+    AssemblyRun {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        cards: Vec<(CardPackKind, PathBuf)>,
+        analysis: crate::AssemblyAnalysisMode,
+    },
 }
 
 impl Step {
@@ -129,6 +136,7 @@ impl Step {
             Self::Solve { .. } => "cooling.solve",
             Self::Run { .. } => "cooling.run",
             Self::StudyFile(_) => "study.run",
+            Self::AssemblyRun { .. } => "assembly.run",
         }
     }
 }
@@ -368,7 +376,10 @@ impl Binder<'_> {
             );
             return None;
         }
-        let step = match self.native_studies.prepare_file(path.clone(), pin, self.seed, budget) {
+        let step = match self
+            .native_studies
+            .prepare_file(path.clone(), pin, self.seed, budget)
+        {
             Ok(step) => step,
             Err((code, message)) => {
                 refusals.push(code, format!("study `{}`: {message}", path.display()),
@@ -381,6 +392,171 @@ impl Binder<'_> {
             hash: step.source_hash().to_hex(),
         });
         Some(Step::StudyFile(step))
+    }
+
+    /// `(assembly.run "device.fsim" [:materials (...)] [:interfaces (...)]
+    /// [:analysis "transient"|"stationary"|"modal"|"harmonic"] [:hash "..."])`:
+    /// runs any canonical assembly through the durable assembly stage driver.
+    #[allow(clippy::too_many_lines)]
+    fn bind_assembly(
+        &mut self,
+        positional: &[&Node],
+        named: &[(&str, &Node)],
+        refusals: &mut Refusals,
+    ) -> Option<Step> {
+        let raw_path = match positional {
+            [only] => string_of(only),
+            _ => None,
+        };
+        let mut cards = Vec::new();
+        let mut analysis = crate::AssemblyAnalysisMode::Transient;
+        let mut pin = None;
+        for (key, value) in named {
+            match *key {
+                "materials" | "interfaces" => {
+                    let kind = if *key == "materials" {
+                        CardPackKind::Material
+                    } else {
+                        CardPackKind::Interface
+                    };
+                    let Some(paths) = string_list(value) else {
+                        refusals.push(
+                            "frankenscript-argument",
+                            format!("`assembly.run` :{key} must be a list of path strings"),
+                            format!("write :{key} (\"a.fsmcdpk\" …)"),
+                        );
+                        return None;
+                    };
+                    cards.extend(paths.into_iter().map(|p| (kind, self.resolve(p))));
+                }
+                "analysis" => {
+                    let Some(name) = string_of(value) else {
+                        refusals.push(
+                            "frankenscript-argument",
+                            "`assembly.run` :analysis must be a mode string",
+                            "write :analysis \"transient\"|\"stationary\"|\"modal\"|\"harmonic\"",
+                        );
+                        return None;
+                    };
+                    let Some(parsed) = crate::AssemblyAnalysisMode::parse(name) else {
+                        refusals.push(
+                            "frankenscript-argument",
+                            format!("`assembly.run` unknown :analysis `{name}`"),
+                            "choose one of transient, stationary, modal, or harmonic",
+                        );
+                        return None;
+                    };
+                    analysis = parsed;
+                }
+                "hash" => {
+                    let Some(h) = string_of(value) else {
+                        refusals.push(
+                            "frankenscript-argument",
+                            "`assembly.run` :hash must be a string",
+                            "write :hash \"<64-char canonical assembly hash>\"",
+                        );
+                        return None;
+                    };
+                    pin = Some(h);
+                }
+                other => {
+                    refusals.push(
+                        "frankenscript-argument",
+                        format!("`assembly.run` keyword :{other} is not admitted here"),
+                        "use :materials, :interfaces, :analysis, and :hash",
+                    );
+                    return None;
+                }
+            }
+        }
+        let Some(raw_path) = raw_path else {
+            refusals.push(
+                "frankenscript-argument",
+                "`assembly.run` takes one assembly path string",
+                "write (assembly.run \"device.fsim\")",
+            );
+            return None;
+        };
+        let path = self.resolve(raw_path);
+        let bytes = match crate::assembly_run::cli::read_assembly_bytes(&path, "run", refusals.mode)
+        {
+            Ok(b) => b,
+            Err(out) => {
+                refusals.stderr.push_str(&out.stderr);
+                refusals.count += 1;
+                return None;
+            }
+        };
+        let header = match crate::assembly_run::cli::parse_assembly_header(&bytes) {
+            Ok(h) => h,
+            Err(msg) => {
+                refusals.push(
+                    "frankenscript-assembly",
+                    format!("assembly `{}`: {msg}", path.display()),
+                    "provide a canonical (assembly \"name\" …) .fsim or fs-ir JSON file",
+                );
+                return None;
+            }
+        };
+        let hash = header.source_hash.to_hex();
+        if let Some(pin) = pin
+            && pin != hash
+        {
+            refusals.push(
+                "frankenscript-assembly-hash",
+                format!(
+                    "assembly `{}` hashes to {hash}, not the pinned {pin}",
+                    path.display()
+                ),
+                "re-pin :hash after reviewing the assembly change, or restore the pinned file",
+            );
+            return None;
+        }
+        if self.seed.is_some() && header.seed != self.seed {
+            refusals.push(
+                "frankenscript-explicit-seed",
+                format!(
+                    "the study seed {:?} differs from the assembly seed {:?}",
+                    self.seed, header.seed
+                ),
+                "state the assembly's seed in (seed …) so the program records the seed it runs",
+            );
+            return None;
+        }
+        if let (Some(wall), Some(aw)) = (self.wall_seconds, header.wall_budget_s)
+            && wall < aw
+        {
+            refusals.push(
+                "frankenscript-explicit-budget",
+                format!("the study wall budget {wall} s is below the assembly wall budget {aw} s"),
+                "raise (budget (wall …)) to cover the assembly's wall budget",
+            );
+            return None;
+        }
+        if let (Some(mem), Some(am)) = (
+            self.native_studies.declared_memory(),
+            header.mem_budget_bytes,
+        ) && mem < am
+        {
+            refusals.push(
+                "frankenscript-explicit-budget",
+                format!(
+                    "the study memory budget {mem} B is below the assembly memory budget {am} B"
+                ),
+                "raise (budget (mem …)) to cover the assembly's memory budget",
+            );
+            return None;
+        }
+        self.studies.push(ProjectBinding {
+            path: path.clone(),
+            hash,
+        });
+        Some(Step::AssemblyRun {
+            path,
+            bytes,
+            cards,
+            analysis,
+        })
     }
 
     #[allow(clippy::too_many_lines)] // one keyword grammar per verb
@@ -401,6 +577,9 @@ impl Binder<'_> {
         let (positional, named) = keywords(items, refusals, verb)?;
         if verb == "study.run" {
             return self.bind_study(&positional, &named, refusals);
+        }
+        if verb == "assembly.run" {
+            return self.bind_assembly(&positional, &named, refusals);
         }
         let project = self.project_operand(verb, &positional, refusals)?;
         match verb {
@@ -653,7 +832,8 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
         seed: study.seed,
         wall_seconds: study.budget.and_then(|budget| declared_budget(budget).0),
         native_studies: native_study::SnapshotCache::new(
-            study.budget.and_then(|budget| declared_budget(budget).1)),
+            study.budget.and_then(|budget| declared_budget(budget).1),
+        ),
         projects: Vec::new(),
         studies: Vec::new(),
     };
@@ -786,6 +966,14 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             Step::Solve { project, cards } => solve_path(project, ledger, cards, mode),
             Step::Run { project, cards } => run_workflow_path(project, ledger, cards, mode),
             Step::StudyFile(study) => study.run(ledger, mode),
+            Step::AssemblyRun {
+                path,
+                bytes,
+                cards,
+                analysis,
+            } => crate::assembly_run::cli::run_assembly_bytes(
+                path, bytes, ledger, cards, *analysis, mode,
+            ),
         };
         stderr.push_str(&output.stderr);
         records.push((step.verb(), output.exit_code, output.stdout));

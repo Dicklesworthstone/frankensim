@@ -4,6 +4,7 @@
 
 #![allow(clippy::result_large_err)]
 
+pub(crate) mod cli;
 mod codec;
 mod report;
 
@@ -151,7 +152,7 @@ impl AssemblyAnalysisMode {
             Self::Modal => "modal",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "transient" => Some(Self::Transient),
             "stationary" => Some(Self::Stationary),

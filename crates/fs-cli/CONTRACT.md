@@ -1,5 +1,39 @@
 # CONTRACT: fs-cli
 
+## Assembly CLI verbs & FrankenScript `assembly.run` (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 3)
+
+Stage 3 completes bead `frankensim-rc-1109-root-3gc12.11.7` by exposing the
+six-stage durable assembly pipeline (`admit -> lower -> plan -> run -> probe ->
+report`) through the real `frankensim` binary and FrankenScript with no new
+process exit codes (all outcomes and structured refusals use the existing
+`exit::{SUCCESS=0, USAGE=2, INPUT=3, REFUSED=4, UNAVAILABLE=5, BUDGET=6,
+CANCELLED=130}` table):
+
+- `frankensim [--json] run <assembly.fsim|assembly.json> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... [--analysis transient|stationary|modal|harmonic]`
+  dispatches when the file's canonical root form is `(assembly …)` (leaving
+  cooling `run <project>` and `run <program.fs>` on their existing paths
+  unchanged). Passing `--analysis` to a cooling `(project …)` file or a
+  FrankenScript `*.fs` program refuses with `exit::USAGE`.
+- `frankensim [--json] run --resume <run-id> <ledger.db>` resumes an
+  interrupted assembly run from its last sealed stage checkpoint through
+  `resume_assembly`.
+- `frankensim [--json] explain <run-id> [<ledger.db>]` projects retained
+  `LoweringReceipt`, `ExecutionPlan` (`plan_hash`), `CausalizationAudit`, and
+  `WindowLedger` receipts from `explain_assembly_run` without replaying
+  physics. Omitting `<ledger.db>` refuses with `exit::INPUT`
+  (`cli-export-ledger-required`), matching `report`, `package`, and `compare`.
+- FrankenScript adds `"assembly.run"` to `EXECUTABLE_VERBS`:
+  `(assembly.run "<path>" [:materials (…)] [:interfaces (…)] [:analysis "transient"|"stationary"|"modal"|"harmonic"] [:hash "<64-hex canonical assembly source_hash>"])`.
+  Binding verifies path readability, canonical `:hash` pin
+  (`frankenscript-assembly-hash`), `(seed …)` equality, and `(budget …)`
+  coverage before execution, then executes through `run_assembly_path` so a
+  program and direct `frankensim run` yield the identical `run` id and
+  `plan_hash`.
+
+No-claim boundary: Stage 3 wires CLI and FrankenScript dispatch with
+Estimate-only probe authority; generalized 8-term QoI error budgets (`.11.8`)
+and CLI lineage/replay-audit verbs (`frankensim-dhqf7`) remain separate beads.
+
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
 
 `crates/fs-cli/src/assembly_run.rs` (with `assembly_run/codec.rs` and

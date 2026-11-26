@@ -41,6 +41,7 @@ impl FileStudyStep {
 /// the first admitted snapshot, even if the filesystem changes between clauses.
 /// Distinct paths share one aggregate input-byte allowance (not an RSS claim).
 pub(super) struct SnapshotCache {
+    declared_memory: Option<u64>,
     limit: u64,
     used: u64,
     models: BTreeMap<PathBuf, Rc<PreparedStudy>>,
@@ -51,9 +52,12 @@ impl SnapshotCache {
     pub(super) fn new(memory: Option<u64>) -> Self {
         // Match the native model's input-storage allocation; leave room for
         // decoded state and numerical work. No implicit unlimited grant.
-        Self { limit: memory.map_or(0, |bytes| (bytes / 4).min(256 * 1024 * 1024)),
+        Self { declared_memory: memory,
+            limit: memory.map_or(0, |bytes| (bytes / 4).min(256 * 1024 * 1024)),
             used: 0, models: BTreeMap::new(), files: BTreeMap::new() }
     }
+
+    pub(super) const fn declared_memory(&self) -> Option<u64> { self.declared_memory }
 
     pub(super) fn prepare_file(
         &mut self, source: PathBuf, pin: Option<&str>, seed: Option<u64>, budget: Option<String>,
