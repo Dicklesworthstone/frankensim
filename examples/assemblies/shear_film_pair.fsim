@@ -33,4 +33,12 @@
                phase-liquid 1 source-pressure-known 0 volume-reference-temperature-known 0))
   (interface "lower_route" :kind heat-route :a "lower" :b "lower_cell" :fraction 0.7)
   (interface "upper_route" :kind heat-route :a "upper" :b "upper_cell" :fraction 0.2)
+  (probe "lower_spin" :kind field-quantity :target "lower"
+    :quantity "angular-velocity-z" :dims (0 0 -1 0 0 0) :sample-rate 100Hz)
+  (probe "upper_spin" :kind field-quantity :target "upper"
+    :quantity "angular-velocity-z" :dims (0 0 -1 0 0 0) :sample-rate 100Hz)
+  (probe "lower_cell_temp" :kind field-quantity :target "lower_cell"
+    :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 100Hz)
+  (probe "upper_cell_temp" :kind field-quantity :target "upper_cell"
+    :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 100Hz)
 )

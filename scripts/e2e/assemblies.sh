@@ -236,6 +236,14 @@ sf_q = abs(Qf / (0.5 * (Iz / 2.0) * 20.0**2 * (1.0 - math.exp(-4.0 * ct * wl["du
 sf_acc = max(abs(nodes["thermal-timeline"]["stored_change_j"] - 0.9 * Qf), abs(tot["sink_heat_j"] - 0.1 * Qf),
              abs(nodes["viscous-network"]["stored_change_j"] + Qf), wres(e_sf), abs(tot["numerical_loss_j"])) / Qf
 assert wl["duration_s"] == 1.0 and tot["boundary_energy_in_j"] == 0.0 and sf_q <= 1e-12 and sf_acc <= 1e-12, (sf_q, sf_acc, tot)
+# Each disc's spin decays at 2 c_t / I_z (the energy at twice that); each cell's C (T - T0) is its share of the heat,
+# within two roundings at T's size, 2 ulp(T) C, from each sample's own T (MB 39197, 39225).
+psf = probes(e_sf); Cc = 2700.0 * 0.02**3 * 945.584; Qt = lambda t: 0.5 * (Iz / 2.0) * 20.0**2 * (1.0 - math.exp(-4.0 * ct * t / Iz))
+sf_w = max(abs(w - s * 10.0 * math.exp(-2.0 * ct * i * 0.01 / Iz)) / 10.0
+           for s, k in ((1.0, "lower_spin"), (-1.0, "upper_spin")) for i, w in enumerate(psf[k]))
+sf_c = max(abs(Cc * (T - 293.15) - f * Qt(i * 0.01)) / (2.0 * math.ulp(T) * Cc)
+           for f, k in ((0.7, "lower_cell_temp"), (0.2, "upper_cell_temp")) for i, T in enumerate(psf[k]))
+assert all(len(v) == 101 for v in psf.values()) and len(psf) == 4 and sf_w <= 1e-12 and sf_c <= 1.0, (sf_w, sf_c)
 
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
@@ -251,7 +259,8 @@ receipt = {
     "thermo_mech_slider": {"run": sr["run"], "verdict": bv_sl,
       "errors": {"pos_m": sl_ex, "vel_m_s": sl_ev, "midpoint_total_energy_j": sl_etot, "midpoint_thermal_energy_j": sl_eth, "thermocouple_lag_k": sl_tc, "energy_residual_j": wres(e_sl)}},
     "shear_film_pair": {"run": ld("film.run.json")["run"],
-      "errors": {"free_pair_dissipated_rel": sf_q, "ledger_accounts_rel": sf_acc, "energy_residual_j": wres(e_sf)}},
+      "errors": {"free_pair_dissipated_rel": sf_q, "ledger_accounts_rel": sf_acc, "energy_residual_j": wres(e_sf),
+                 "disc_spin_rel": sf_w, "cell_heat_over_2ulp_floor": sf_c}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area"]},
 }

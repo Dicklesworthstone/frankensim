@@ -25,6 +25,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
 use fs_scenario::assembly::draft::{PhysicsDomain, StepPolicy};
 use fs_system::elements::Motion;
+use fs_system::lowering::Observed;
 use fs_system::{
     AnalysisError, AnalysisOutcome, AnalysisRequest, LinearizeConfig, LoweredSystem,
     LoweringRegistry, ModalConfig, NodeId, OutputChannel, StateMap, StationaryConfig, System,
@@ -421,7 +422,18 @@ impl AssemblyPipeline<'_> {
                     position_m: None,
                     velocity_m_s: None,
                     temperature_k: None,
+                    motion: None,
                 };
+                // A part in a slot of an owner node (a body in a network, a cell in a timeline).
+                let observer = lowered.observers.get(&part.entity);
+                match observer.and_then(|read| read(sys)) {
+                    Some(Observed::Body {
+                        velocity_m_s: [vx, vy, vz],
+                        angular_velocity_rad_s: [wx, wy, wz],
+                    }) => s.motion = Some([vx, vy, vz, wx, wy, wz]),
+                    Some(Observed::Cell(t)) => s.temperature_k = Some(t),
+                    None => {}
+                }
                 for &node in lowered.entity_nodes.get(&part.entity).into_iter().flatten() {
                     if let Some(m) = sys.state::<Motion>(node) {
                         s.position_m = Some(m.position_m);

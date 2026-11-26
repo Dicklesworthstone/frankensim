@@ -32,12 +32,15 @@ pub(crate) const ASSEMBLY_REPORT_SCHEMA: &str = "frankensim.cli.assembly-report.
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
+const ANGULAR_VELOCITY: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 #[derive(Debug, Clone)]
 pub(crate) struct EntitySample {
     pub(crate) position_m: Option<f64>,
     pub(crate) velocity_m_s: Option<f64>,
     pub(crate) temperature_k: Option<f64>,
+    /// A body moving in 3-D: velocity (m/s), then angular velocity (rad/s).
+    pub(crate) motion: Option<[f64; 6]>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +52,13 @@ pub(crate) struct RunTrace {
     pub(crate) harmonic_points: Vec<(f64, f64, f64)>,
     pub(crate) stationary_norm: Option<f64>,
     pub(crate) stationary_state: Vec<(String, f64)>,
+}
+
+/// A trace sample's six-number `motion` list, when it has one.
+fn motion_field(sample: &JsonValue) -> Option<[f64; 6]> {
+    let list = sample.get("motion")?.as_array()?;
+    let values: Option<Vec<f64>> = list.iter().map(JsonValue::as_f64).collect();
+    values?.try_into().ok()
 }
 
 fn push_f64_list(out: &mut String, vals: &[f64]) {
@@ -88,6 +98,11 @@ impl RunTrace {
                 }
                 if let Some(v) = s.temperature_k {
                     parts.push(format!("\"temperature_k\":{v:.17e}"));
+                }
+                if let Some(motion) = s.motion {
+                    let mut list = String::new();
+                    push_f64_list(&mut list, &motion);
+                    parts.push(format!("\"motion\":{list}"));
                 }
                 let _ = write!(out, "{{{}}}", parts.join(","));
             }
@@ -162,6 +177,7 @@ impl RunTrace {
                                 position_m: o.f64_field("position_m"),
                                 velocity_m_s: o.f64_field("velocity_m_s"),
                                 temperature_k: o.f64_field("temperature_k"),
+                                motion: motion_field(o),
                             })
                             .collect(),
                     );
@@ -239,14 +255,33 @@ fn entity_series(
     let vals: Vec<f64> = samples
         .iter()
         .map(|s| {
-            get(s)
-                .ok_or_else(|| probe_refusal(probe, format!("`{ename}` has no lowered `{label}`")))
+            get(s).ok_or_else(|| {
+                let what = match (s.motion, label) {
+                    (Some(_), "velocity_m_s") => {
+                        "a 3-D velocity: probe `velocity-x`, `velocity-y` or `velocity-z`".into()
+                    }
+                    _ => format!("no lowered `{label}`"),
+                };
+                probe_refusal(probe, format!("`{ename}` has {what}"))
+            })
         })
         .collect::<Result<_, _>>()?;
     if vals.is_empty() {
         return Err(probe_refusal(probe, format!("empty trace for `{ename}`")));
     }
     Ok(vals)
+}
+
+/// The index in [`EntitySample::motion`] and the unit of a body's component
+/// `velocity-x|y|z` or `angular-velocity-x|y|z`, when `dims` are its own.
+fn motion_component(name: &str, dims: Dims) -> Option<(usize, &'static str)> {
+    let (quantity, axis) = name.rsplit_once('-')?;
+    let k = ["x", "y", "z"].iter().position(|a| *a == axis)?;
+    match quantity {
+        "velocity" if dims == VELOCITY => Some((k, "m/s")),
+        "angular-velocity" if dims == ANGULAR_VELOCITY => Some((k + 3, "rad/s")),
+        _ => None,
+    }
 }
 
 fn make_probe(name: impl Into<String>, kind: &str, unit: &str, values: Vec<f64>) -> EvaluatedProbe {
@@ -392,11 +427,16 @@ pub(crate) fn evaluate_probes(
                             "temperature_k",
                         )?,
                     ),
-                    _ => {
-                        return Err(probe_refusal(
-                            &p.name,
-                            format!("quantity `{}` is not lowered", quantity.name),
-                        ));
+                    (name, dims) => {
+                        let Some((k, unit)) = motion_component(name, dims) else {
+                            return Err(probe_refusal(
+                                &p.name,
+                                format!("quantity `{}` is not lowered", quantity.name),
+                            ));
+                        };
+                        let get = |s: &EntitySample| s.motion.map(|m| m[k]);
+                        let series = entity_series(trace, names, *target, &p.name, get, name)?;
+                        ("field-quantity", unit, series)
                     }
                 },
                 ProbeKind::Microphone { .. } => {
@@ -756,4 +796,62 @@ pub(crate) fn build_assembly_report(
             },
         ],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use fs_qty::QtyAny;
+    use fs_scenario::assembly::ParameterKey;
+    use fs_scenario::{EntityCatalog, EntityDeclaration, FrameId};
+
+    use super::*;
+
+    #[test]
+    fn a_body_in_3d_serves_its_motion_components_and_refuses_plain_velocity() {
+        let mut catalog = EntityCatalog::new();
+        let root = catalog.declare(EntityDeclaration::assembly("a")).unwrap();
+        let part = EntityDeclaration::part(root, "disc");
+        let disc = catalog.declare(part).unwrap();
+        let names = BTreeMap::from([(disc, "disc".to_owned())]);
+        let sample = EntitySample {
+            position_m: None,
+            velocity_m_s: None,
+            temperature_k: None,
+            motion: Some([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        };
+        let trace = RunTrace {
+            analysis: "transient".to_owned(),
+            times_s: vec![0.0, 0.1],
+            entities: BTreeMap::from([("disc".to_owned(), vec![sample; 2])]),
+            modal_modes: Vec::new(),
+            harmonic_points: Vec::new(),
+            stationary_norm: None,
+            stationary_state: Vec::new(),
+        };
+        // The motion survives the written trace.
+        let trace = RunTrace::from_json(&trace.to_json()).unwrap();
+        let probe = |quantity: &str, dims| {
+            let kind = ProbeKind::FieldQuantity {
+                target: disc,
+                position: [QtyAny::new(0.0, LENGTH); 3],
+                quantity: ParameterKey::new(quantity, dims),
+            };
+            let probe = ProbeDecl {
+                name: quantity.to_owned(),
+                frame: FrameId(0),
+                sample_rate: QtyAny::new(10.0, Dims([0, 0, -1, 0, 0, 0])),
+                kind,
+            };
+            evaluate_probes(&[probe], &names, &trace).map(|(_, _, probes)| probes[0].clone())
+        };
+        let spin = probe("angular-velocity-z", ANGULAR_VELOCITY).unwrap();
+        assert_eq!((spin.values, spin.unit.as_str()), (vec![6.0; 2], "rad/s"));
+        assert_eq!(probe("velocity-y", VELOCITY).unwrap().values, [2.0; 2]);
+        let plain = probe("velocity", VELOCITY).unwrap_err().what;
+        let want = "`disc` has a 3-D velocity: probe `velocity-x`, `velocity-y` or `velocity-z`";
+        assert!(plain.ends_with(want), "{plain}");
+        let wrong = probe("angular-velocity-z", VELOCITY).unwrap_err().what;
+        let want = "quantity `angular-velocity-z` is not lowered";
+        assert!(wrong.ends_with(want), "{wrong}");
+    }
 }
