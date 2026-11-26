@@ -29,12 +29,13 @@ use std::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, MatDbError, MaterialCard, PropertySample, PropertyUsageReceipt,
-    Provenance, QueryPoint, SelectionPolicy,
+    ClaimSet, InterfaceSystemCard, MatDbError, MaterialCard, PropertyKey, PropertySample,
+    PropertyUsageReceipt, Provenance, QueryPoint, SelectionPolicy,
 };
 use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole};
-use fs_qty::semantic::{QuantityKind::AbsoluteTemperature as AbsTemp, SemanticType, ValueForm};
+use fs_qty::semantic::QuantityKind::{AbsoluteTemperature as AbsTemp, ThermalConductivity};
+use fs_qty::semantic::{SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
@@ -87,6 +88,7 @@ const DAMPING_DIMS: Dims = Dims([0, 1, -1, 0, 0, 0]);
 const TORSIONAL_DAMPING_DIMS: Dims = Dims([2, 1, -1, 0, 0, 0]);
 const HEAT_CAPACITY_DIMS: Dims = Dims([2, 1, -2, -1, 0, 0]);
 const CONDUCTANCE_DIMS: Dims = Dims([2, 1, -3, -1, 0, 0]);
+const THERMAL_CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
 const AREA_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
 const CONTACT_RESISTANCE_DIMS: Dims = Dims([0, -1, 3, 1, 0, 0]);
 const TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
@@ -2030,13 +2032,22 @@ impl ProvenanceRecorder {
             env.ambient_pressure_pa,
             (card.claims(), property),
         )?;
-        let answer = card
-            .claims()
-            .query(property, &point, env.policy)
-            .map_err(|source| LoweringError::MatDb {
-                item: item_scope.to_owned(),
-                source: Box::new(source),
-            })?;
+        let k_spec =
+            QuantitySpec::semantic(SemanticType::new(ThermalConductivity, ValueForm::Static));
+        let k_list = card.claims().claims_for(property);
+        let is_k = matches!(property, "thermal-conductivity" | "thermal_conductivity")
+            && !k_list.is_empty()
+            && k_list.iter().all(|(_, c)| c.key.quantity() == k_spec);
+        let answer = if is_k {
+            let key = PropertyKey::with_quantity(property, k_spec);
+            card.claims().query_typed(&key, &point, env.policy)
+        } else {
+            card.claims().query(property, &point, env.policy)
+        }
+        .map_err(|source| LoweringError::MatDb {
+            item: item_scope.to_owned(),
+            source: Box::new(source),
+        })?;
         let sample = answer.evidence.value.clone();
         let receipt = answer.receipt;
         self.record_matdb_claim(parameter_name, &sample, mat_ref.card, &receipt);
@@ -2709,6 +2720,8 @@ pub enum Observed {
     },
     /// A cell's temperature, K, computed from its stored enthalpy.
     Cell(f64),
+    /// A 1-D thermal conductance's steady heat rate [W] entering port `"a"`.
+    HeatRate(f64),
 }
 
 /// Reads one part's [`Observed`] value from a state of its lowered system.
@@ -3806,6 +3819,16 @@ pub fn register_kernel_defaults(registry: &mut LoweringRegistry) {
         lower_lumped_thermal_solid,
     );
 
+    // 3b. Solid + {Thermal} + OneDField (1-cell 1-D steady conductance).
+    registry.register_part(
+        PartLoweringKey::new(
+            DraftPartKind::Solid,
+            [PhysicsDomain::Thermal],
+            FidelityRungKind::OneDField,
+        ),
+        lower_one_d_thermal_conductance,
+    );
+
     // 4. SpringBeam + {Mechanics} + Lumped (axial or spiral torsional spring).
     registry.register_part(
         PartLoweringKey::new(
@@ -4097,6 +4120,77 @@ fn lower_lumped_thermal_solid(
     graph.expose_port(ctx.part.entity, "thermal", port);
 
     let (property_receipts, parameter_sources) = recorder.finish();
+    Ok(LoweredPartOutput {
+        created_nodes: vec![ctx.part.name.clone()],
+        property_receipts,
+        parameter_sources,
+    })
+}
+
+fn lower_one_d_thermal_conductance(
+    ctx: &PartLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+) -> Result<LoweredPartOutput, LoweringError> {
+    let scope = format!("part:{}", ctx.part.name);
+    let inv = |detail| LoweringError::Invalid {
+        item: scope.clone(),
+        detail,
+    };
+    if *ctx.chosen_rung != (FidelityRung::OneDField { cells: 1 }) {
+        return Err(inv(format!(
+            "requires (one-d-field 1), got {:?}",
+            ctx.chosen_rung
+        )));
+    }
+    let DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, ly, lz }) = &ctx.part.geometry
+    else {
+        let g = geometry_generator_label(&ctx.part.geometry);
+        return Err(inv(format!("requires box geometry, got `{g}`")));
+    };
+    let prop = ctx
+        .part
+        .materials
+        .first()
+        .and_then(|m| ctx.cards.material(&m.card))
+        .filter(|c| !c.claims().claims_for("thermal-conductivity").is_empty())
+        .map_or("thermal_conductivity", |_| "thermal-conductivity");
+    let mut rec = ProvenanceRecorder::default();
+    let (k, _) = ctx.query_material(&mut rec, 0, prop, "thermal_conductivity")?;
+    if k.dims != THERMAL_CONDUCTIVITY_DIMS {
+        return Err(inv(format!(
+            "conductivity needs W/(m*K), got {:?}",
+            k.dims.0
+        )));
+    }
+    let (aol, gf, gl) = (
+        (ly.value * lz.value) / lx.value,
+        ctx.geometry_fingerprint,
+        "Primitive.Box.draft.v1",
+    );
+    let g_w_k = k.value * aol;
+    rec.record_geometry_derived("area_over_length", aol, LENGTH_DIMS, gf, gl, "(ly*lz)/lx");
+    rec.record_geometry_derived(
+        "thermal_conductance",
+        g_w_k,
+        CONDUCTANCE_DIMS,
+        gf,
+        gl,
+        "k*A/L",
+    );
+    let cond = Conductance::new(g_w_k).map_err(|source| LoweringError::Element {
+        item: scope,
+        source,
+    })?;
+    let node =
+        graph.add_with_tangent_and_residual(&ctx.part.name, Some(ctx.part.entity), cond, ())?;
+    let (pa, pb) = (graph.port(node, "a")?, graph.port(node, "b")?);
+    graph.expose_port(ctx.part.entity, "a", pa);
+    graph.expose_port(ctx.part.entity, "b", pb);
+    graph.observers.insert(
+        ctx.part.entity,
+        Box::new(move |sys| sys.last_output(pa).first().copied().map(Observed::HeatRate)),
+    );
+    let (property_receipts, parameter_sources) = rec.finish();
     Ok(LoweredPartOutput {
         created_nodes: vec![ctx.part.name.clone()],
         property_receipts,

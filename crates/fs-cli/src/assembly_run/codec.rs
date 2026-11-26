@@ -243,6 +243,48 @@ fn req<'a>(kw: &BTreeMap<&str, &'a Node>, k: &str, scope: &str) -> Result<&'a No
         .ok_or_else(|| err(format!("{scope} missing `:{k}`")))
 }
 
+fn parse_query_pairs(
+    n: &Node,
+    scope: &str,
+    flag: &str,
+) -> Result<Vec<(ParameterKey, QtyAny)>, SolveRefusal> {
+    let at = as_list(n, flag)?;
+    if !at.len().is_multiple_of(2) {
+        return Err(err(format!("{scope}: :{flag} pairs keys with values")));
+    }
+    at.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let key = as_sym(&pair[0], &format!("{flag} key"))?;
+            let q = as_qty(&pair[1], key)
+                .or_else(|_| as_f64(&pair[1], key).map(QtyAny::dimensionless))?;
+            Ok((ParameterKey::new(key, q.dims), q))
+        })
+        .collect()
+}
+
+fn parse_fidelity(n: &Node, scope: &str) -> Result<FidelityRung, SolveRefusal> {
+    match &n.kind {
+        NodeKind::Symbol(s) if s == "lumped" => Ok(FidelityRung::Lumped),
+        NodeKind::List(v)
+            if v.len() == 2 && matches!(&v[0].kind, NodeKind::Symbol(s) if s == "one-d-field") =>
+        {
+            match v[1].kind {
+                NodeKind::Int(1) => Ok(FidelityRung::OneDField { cells: 1 }),
+                NodeKind::Int(n) => Err(err(format!(
+                    "{scope}: :fidelity (one-d-field {n}) unsupported"
+                ))),
+                _ => Err(err(format!(
+                    "{scope}: :fidelity (one-d-field ...) needs integer cells"
+                ))),
+            }
+        }
+        NodeKind::Symbol(s) => Err(err(format!("{scope}: unsupported :fidelity `{s}`"))),
+        _ => Err(err(format!("{scope}: unsupported :fidelity"))),
+    }
+}
+
 fn parse_geom(n: &Node) -> Result<DraftGeometrySource, SolveRefusal> {
     let v = as_list(n, "geometry")?;
     Ok(DraftGeometrySource::Primitive(
@@ -761,12 +803,23 @@ pub(crate) fn admit_assembly_source(
                         "geometry",
                         "material",
                         "query-temp",
+                        "query-at",
                         "physics",
                         "fidelity",
                         "initial",
                     ],
                     &scope,
                 )?;
+                if kw.contains_key("query-at") {
+                    if kw.contains_key("query-temp") {
+                        return Err(err(format!(
+                            "{scope}: use :query-at or :query-temp, not both"
+                        )));
+                    }
+                    if !kw.contains_key("material") {
+                        return Err(err(format!("{scope}: :query-at requires :material")));
+                    }
+                }
                 let entity = catalog
                     .declare(EntityDeclaration::part(root, &pname))
                     .map_err(|e| err(format!("{scope}: {e}")))?;
@@ -787,14 +840,19 @@ pub(crate) fn admit_assembly_source(
                         as_str(mn, "material")?,
                         &scope,
                     )?;
-                    let qt = kw
-                        .get("query-temp")
-                        .map_or(Ok(QtyAny::new(293.15, TEMPERATURE)), |n| {
-                            as_qty_d(n, TEMPERATURE, "query-temp")
-                        })?;
+                    let query_point = if let Some(at) = kw.get("query-at") {
+                        parse_query_pairs(at, &scope, "query-at")?
+                    } else {
+                        let qt = kw
+                            .get("query-temp")
+                            .map_or(Ok(QtyAny::new(293.15, TEMPERATURE)), |n| {
+                                as_qty_d(n, TEMPERATURE, "query-temp")
+                            })?;
+                        vec![(ParameterKey::new("T", TEMPERATURE), qt)]
+                    };
                     materials.push(MaterialRef {
                         card,
-                        query_point: vec![(ParameterKey::new("T", TEMPERATURE), qt)],
+                        query_point,
                         frame: FrameId(0),
                         layer: None,
                         unknown: Vec::new(),
@@ -812,9 +870,7 @@ pub(crate) fn admit_assembly_source(
                         o => return Err(err(format!("unknown domain `{o}`"))),
                     });
                 }
-                if as_sym(req(&kw, "fidelity", &scope)?, "fidelity")? != "lumped" {
-                    return Err(err(format!("{scope} only :fidelity lumped is supported")));
-                }
+                let fidelity = parse_fidelity(req(&kw, "fidelity", &scope)?, &scope)?;
                 let initial = kw
                     .get("initial")
                     .map(|n| parse_initial(n, &scope))
@@ -827,7 +883,7 @@ pub(crate) fn admit_assembly_source(
                     materials,
                     physics,
                     fidelity: FidelityPolicy {
-                        rungs: vec![FidelityRung::Lumped],
+                        rungs: vec![fidelity],
                         error_budget: FidelityErrorBudget {
                             relative_tol: 1.0e-5,
                             absolute_tol: QtyAny::dimensionless(1.0e-12),
@@ -945,17 +1001,8 @@ pub(crate) fn admit_assembly_source(
                 // A shear film's fluid, its gap `h` and the whole point `mu` is read at.
                 let film = || -> Result<ThirdBodyDecl, SolveRefusal> {
                     let (fluid, gap) = (req(&kw, "fluid", &scope)?, req(&kw, "gap", &scope)?);
-                    let at = as_list(req(&kw, "fluid-at", &scope)?, "fluid-at")?;
-                    if at.len() % 2 != 0 {
-                        return Err(err(format!("{scope}: :fluid-at pairs keys with values")));
-                    }
-                    let mut query_point = Vec::new();
-                    for pair in at.chunks(2) {
-                        let (key, v) = (as_sym(&pair[0], "fluid-at key")?, &pair[1]);
-                        let q = as_qty(v, key)
-                            .or_else(|_| as_f64(v, key).map(QtyAny::dimensionless))?;
-                        query_point.push((ParameterKey::new(key, q.dims), q));
-                    }
+                    let query_point =
+                        parse_query_pairs(req(&kw, "fluid-at", &scope)?, &scope, "fluid-at")?;
                     let fluid = as_str(fluid, "fluid")?;
                     Ok(ThirdBodyDecl {
                         material_card: resolve_card(packs, CardPackKind::Material, fluid, &scope)?,
@@ -1450,5 +1497,39 @@ mod tests {
             "(envelope measurement :probe \"tp\" :half-width 0.1K :source \" \")",
             "non-empty :source",
         );
+    }
+
+    #[test]
+    fn part_query_at_and_one_d_field_fidelity_admit_and_refuse() {
+        let b =
+            include_bytes!("../../../../examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk");
+        let pk = RawCardPack {
+            kind: CardPackKind::Material,
+            source: "srm".into(),
+            bytes: b.to_vec(),
+            expect: None,
+        };
+        let slab = |e: &str, f: &str| {
+            let s = format!(
+                ") (part \"s\" :kind solid :geometry (box 0.0254m 0.25m 0.25m) :material \"eps-nist-srm1453-2013\" {e} :physics (thermal) :fidelity {f}"
+            );
+            admit_with(&s, vec![pk.clone()])
+        };
+        let ok = slab(
+            ":query-at (mean-temperature 297.15K bulk-density 41kg/m^3 source-lot-srm1453 1)",
+            "(one-d-field 1)",
+        )
+        .unwrap();
+        let p = &ok.draft.input().parts[1];
+        assert_eq!(p.fidelity.rungs, [FidelityRung::OneDField { cells: 1 }]);
+        assert_eq!(p.materials[0].query_point.len(), 3);
+        for (e, f, n) in [
+            (":query-at (T 300K) :query-temp 300K", "lumped", "not both"),
+            (":query-at (T)", "lumped", "pairs keys"),
+            (":query-at (T 300K)", "(one-d-field 2)", "(one-d-field 2)"),
+            (":query-at (T 300K)", "modal", "`modal`"),
+        ] {
+            assert!(slab(e, f).err().unwrap().what.contains(n));
+        }
     }
 }

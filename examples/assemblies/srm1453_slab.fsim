@@ -1,0 +1,19 @@
+(assembly "srm1453_slab"
+  (version 1) (units "SI") (seed 0x1453)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 297.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 1s :dt 0.01s :sample-rate 100Hz)
+  (part "slab" :kind solid :geometry (box 0.0254m 0.25m 0.25m)
+    :material "eps-nist-srm1453-2013"
+    :query-at (mean-temperature 297.15K bulk-density 41kg/m^3 temperature-difference 20K
+               source-lot-srm1453 1 source-conditioning-protocol-satisfied 1
+               unstacked-unsliced-uncontaminated-board 1)
+    :physics (thermal) :fidelity (one-d-field 1))
+  (source "hot_face" :part "slab" :port "a" :history (constant 307.15K))
+  (source "cold_face" :part "slab" :port "b" :history (constant 287.15K))
+  (probe "slab_heat_rate" :kind field-quantity :target "slab"
+    :quantity "heat_rate" :dims (2 1 -3 0 0 0) :sample-rate 1Hz)
+)

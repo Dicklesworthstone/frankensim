@@ -1400,8 +1400,7 @@ impl System {
     ) -> Result<StationarySolution, AnalysisError> {
         self.check_analysis_capabilities(AnalysisKind::Stationary)?;
         let n = state_map.dim();
-        if n == 0
-            || !config.probe_dt_s.is_finite()
+        if !config.probe_dt_s.is_finite()
             || config.probe_dt_s <= 0.0
             || !config.absolute_tolerance.is_finite()
             || config.absolute_tolerance <= 0.0
@@ -1412,13 +1411,45 @@ impl System {
             || config.fd_eps <= 0.0
         {
             return Err(AnalysisError::Invalid {
-                what: "stationary solve requires positive state dim, probe_dt_s, tolerances, fd_eps, and max_iterations",
+                what: "stationary solve requires positive probe_dt_s, tolerances, fd_eps, and max_iterations",
             });
         }
         cx.checkpoint().map_err(|_| AnalysisError::Cancelled)?;
 
         let checkpoint = self.checkpoint()?;
         let saved_policy = self.solver_policy;
+        if n == 0 {
+            self.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(config.monolithic));
+            let res = self.step_diagnosed(config.probe_dt_s, cx);
+            self.set_solver_policy(saved_policy);
+            let (report, diag) = res.map_err(|(e, _)| {
+                let _ = self.restore(&checkpoint);
+                AnalysisError::from(e)
+            })?;
+            if !diag.residual_l2.is_finite() {
+                let _ = self.restore(&checkpoint);
+                return Err(AnalysisError::NotConverged {
+                    analysis: AnalysisKind::Stationary,
+                    iterations: report.iterations as usize,
+                    residual: diag.residual_l2,
+                });
+            }
+            let (eq_in, eq_out) = (self.accepted_inputs.clone(), self.accepted_outputs.clone());
+            self.restore(&checkpoint)?;
+            if config.commit {
+                self.accepted_inputs.copy_from_slice(&eq_in);
+                self.accepted_outputs.copy_from_slice(&eq_out);
+            }
+            return Ok(StationarySolution {
+                state: Vec::new(),
+                inputs: eq_in,
+                outputs: eq_out,
+                residual_norm: diag.residual_l2,
+                iterations: report.iterations as usize,
+                residual_calls: 1,
+                jacobian_calls: 0,
+            });
+        }
         let mut x0 = vec![0.0_f64; n];
         state_map.read(self, &mut x0)?;
 

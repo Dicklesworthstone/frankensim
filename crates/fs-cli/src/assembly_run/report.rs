@@ -33,14 +33,16 @@ const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const ANGULAR_VELOCITY: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct EntitySample {
     pub(crate) position_m: Option<f64>,
     pub(crate) velocity_m_s: Option<f64>,
     pub(crate) temperature_k: Option<f64>,
     /// A body moving in 3-D: velocity (m/s), then angular velocity (rad/s).
     pub(crate) motion: Option<[f64; 6]>,
+    pub(crate) heat_rate_w: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +105,9 @@ impl RunTrace {
                     let mut list = String::new();
                     push_f64_list(&mut list, &motion);
                     parts.push(format!("\"motion\":{list}"));
+                }
+                if let Some(v) = s.heat_rate_w {
+                    parts.push(format!("\"heat_rate_w\":{v:.17e}"));
                 }
                 let _ = write!(out, "{{{}}}", parts.join(","));
             }
@@ -178,6 +183,7 @@ impl RunTrace {
                                 velocity_m_s: o.f64_field("velocity_m_s"),
                                 temperature_k: o.f64_field("temperature_k"),
                                 motion: motion_field(o),
+                                heat_rate_w: o.f64_field("heat_rate_w"),
                             })
                             .collect(),
                     );
@@ -304,6 +310,12 @@ pub(crate) fn evaluate_probes(
     trace: &RunTrace,
 ) -> Result<(String, RetainedSideArtifact, Vec<EvaluatedProbe>), SolveRefusal> {
     let mut evaluated = Vec::new();
+    let heat_rate = |e, n: &str, d| -> Result<Vec<f64>, SolveRefusal> {
+        if d != POWER {
+            return Err(probe_refusal(n, "heat_rate requires dims (2 1 -3 0 0 0)"));
+        }
+        entity_series(trace, names, e, n, |s| s.heat_rate_w, "heat_rate_w")
+    };
     if trace.analysis == "transient" {
         for p in probes {
             let (kind, unit, values) = match &p.kind {
@@ -427,6 +439,7 @@ pub(crate) fn evaluate_probes(
                             "temperature_k",
                         )?,
                     ),
+                    ("heat_rate", d) => ("field-quantity", "W", heat_rate(*target, &p.name, d)?),
                     (name, dims) => {
                         let Some((k, unit)) = motion_component(name, dims) else {
                             return Err(probe_refusal(
@@ -488,6 +501,16 @@ pub(crate) fn evaluate_probes(
                 "SI",
                 vec![*val],
             ));
+        }
+        for p in probes {
+            if let ProbeKind::FieldQuantity {
+                target, quantity, ..
+            } = &p.kind
+                && quantity.name == "heat_rate"
+            {
+                let v = heat_rate(*target, &p.name, quantity.dims)?;
+                evaluated.push(make_probe(p.name.clone(), "field-quantity", "W", v));
+            }
         }
     }
 
@@ -662,7 +685,11 @@ pub(crate) fn build_assembly_report(
             status: "Estimate".to_string(),
             statement: no_claim_stmt.to_string(),
         })
-        .with_replay_command(format!("frankensim run <assembly.fsim> <ledger> --analysis {} # source {} run {run_hex}", inp.analysis, inp.source_hash.to_hex()));
+        .with_replay_command(format!(
+            "frankensim run <assembly.fsim> <ledger> --analysis {} # source {} run {run_hex}",
+            inp.analysis,
+            inp.source_hash.to_hex()
+        ));
 
     let (html_bytes, json_bytes, content_hash) = (
         report.render_html().into_bytes(),
@@ -814,10 +841,8 @@ mod tests {
         let disc = catalog.declare(part).unwrap();
         let names = BTreeMap::from([(disc, "disc".to_owned())]);
         let sample = EntitySample {
-            position_m: None,
-            velocity_m_s: None,
-            temperature_k: None,
             motion: Some([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            ..Default::default()
         };
         let trace = RunTrace {
             analysis: "transient".to_owned(),

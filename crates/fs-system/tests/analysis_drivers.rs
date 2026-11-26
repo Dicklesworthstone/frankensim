@@ -1920,3 +1920,40 @@ fn adjoint_verified_via_verify_gradient_case2_equivalent_temperature_heat_route(
         }
     });
 }
+
+#[test]
+fn stationary_stateless_zero_dim_reports_port_residual_and_respects_commit() {
+    struct EmptyMap;
+    impl StateMap for EmptyMap {
+        fn dim(&self) -> usize {
+            0
+        }
+        fn read(&self, _: &System, _: &mut [f64]) -> Result<(), AnalysisError> {
+            Ok(())
+        }
+        fn write(&self, _: &mut System, _: &[f64]) -> Result<(), AnalysisError> {
+            Ok(())
+        }
+    }
+    let (mut b, g) = (SystemBuilder::new(), 0.08253900098425197_f64);
+    let c = b
+        .add_with_tangent_and_stage_residual("cond", Conductance::new(g).unwrap(), ())
+        .unwrap();
+    let (pa, pb) = (b.port(c, "a").unwrap(), b.port(c, "b").unwrap());
+    b.boundary(pa, Box::new(|_, _, o| o[0] = 307.15)).unwrap();
+    b.boundary(pb, Box::new(|_, _, o| o[0] = 287.15)).unwrap();
+    let mut sys = b.seal().unwrap();
+    with_cx(&CancelGate::new(), |cx| {
+        let s0 = sys
+            .solve_stationary(&EmptyMap, StationaryConfig::default(), cx)
+            .unwrap();
+        assert!(s0.state.is_empty() && s0.residual_norm == 0.0 && sys.last_output(pa)[0] == 0.0);
+        let cfg = StationaryConfig {
+            commit: true,
+            ..StationaryConfig::default()
+        };
+        let s1 = sys.solve_stationary(&EmptyMap, cfg, cx).unwrap();
+        assert_eq!(s1.residual_norm, 0.0);
+        assert!((sys.last_output(pa)[0] - g * 20.0).abs() <= 1.0e-14);
+    });
+}

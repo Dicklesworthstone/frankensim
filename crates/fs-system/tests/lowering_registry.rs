@@ -1755,7 +1755,10 @@ fn acoustic_assembly_families_lower_through_registry_and_refuse_unknown_family()
     let inertance = 18.0;
     let resistance = 500.0;
     let initial_q = 1.2e-5;
-    lowered.system.set_accepted_state(cavity, initial_q).unwrap();
+    lowered
+        .system
+        .set_accepted_state(cavity, initial_q)
+        .unwrap();
     reference
         .system
         .set_accepted_state(reference_cavity, initial_q)
@@ -2055,4 +2058,76 @@ fn an_owner_group_lowers_its_part_whole_and_two_groups_cannot_share_one() {
     };
     assert_eq!(item, "part:block");
     assert_eq!(detail, "selected by owner groups 'toy' and 'other'");
+}
+
+#[test]
+fn one_d_field_thermal_conductance_lowers_observes_and_refuses_invalid() {
+    let (mut cards, mut catalog) = (CardStore::new(), EntityCatalog::new());
+    let ch = cards.insert_material(tim_paste_card());
+    let root = catalog.declare(EntityDeclaration::assembly("s")).unwrap();
+    let slab = catalog
+        .declare(EntityDeclaration::part(root, "slab"))
+        .unwrap();
+    let sources = [("h", "a", 307.15), ("c", "b", 287.15)]
+        .map(|(n, p, t)| SourceDecl {
+            name: n.into(),
+            target: SourceTarget::Port {
+                entity: slab,
+                port: p.into(),
+            },
+            history: TimeHistory::Constant(QtyAny::new(t, TEMPERATURE)),
+        })
+        .into();
+    let mut input = DraftAssemblyInput {
+        name: "s".into(),
+        root,
+        catalog,
+        reference_state: Some(ReferenceState::Assembled),
+        environment: DraftEnvironment::earth_lab_air(),
+        time_plan: fixed_time_plan(1.0, 0.1),
+        parts: vec![DraftPartDecl {
+            name: "slab".into(),
+            entity: slab,
+            kind: DraftPartKind::Solid,
+            geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
+                lx: QtyAny::new(0.02, LENGTH),
+                ly: QtyAny::new(0.5, LENGTH),
+                lz: QtyAny::new(0.5, LENGTH),
+            }),
+            materials: vec![mat_ref(ch)],
+            physics: BTreeSet::from([PhysicsDomain::Thermal]),
+            fidelity: policy_rungs(vec![FidelityRung::OneDField { cells: 1 }]),
+            uncertainty: Vec::new(),
+            initial: None,
+        }],
+        joints: Vec::new(),
+        gear_meshes: Vec::new(),
+        interfaces: Vec::new(),
+        sources,
+        controllers: Vec::new(),
+        probes: Vec::new(),
+    };
+    let (reg, scen) = (LoweringRegistry::with_kernel_defaults(), base_scenario("s"));
+    let mut lo = reg
+        .lower(&DraftAssembly::admit(input.clone(), &scen).unwrap(), &cards)
+        .unwrap();
+    with_cx(&CancelGate::new(), |cx| lo.system.step(0.1, cx).unwrap());
+    assert!(matches!(
+        lo.observers[&slab](&lo.system),
+        Some(fs_system::lowering::Observed::HeatRate(q)) if (q - 1000.0).abs() <= 1.0e-12
+    ));
+    let bad = |i| {
+        reg.lower(&DraftAssembly::admit(i, &scen).unwrap(), &cards)
+            .err()
+            .unwrap()
+            .to_string()
+    };
+    input.parts[0].fidelity = policy_rungs(vec![FidelityRung::OneDField { cells: 2 }]);
+    assert!(bad(input.clone()).contains("cells: 2"));
+    input.parts[0].fidelity = policy_rungs(vec![FidelityRung::OneDField { cells: 1 }]);
+    input.parts[0].geometry = DraftGeometrySource::Primitive(PrimitiveShape::Cylinder {
+        radius: QtyAny::new(0.1, LENGTH),
+        height: QtyAny::new(0.02, LENGTH),
+    });
+    assert!(bad(input).contains("Cylinder"));
 }

@@ -23,7 +23,7 @@ use fs_exec::solver::{
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
-use fs_scenario::assembly::draft::{PhysicsDomain, StepPolicy};
+use fs_scenario::assembly::draft::{FidelityRung, PhysicsDomain, StepPolicy};
 use fs_system::elements::Motion;
 use fs_system::lowering::Observed;
 use fs_system::{
@@ -418,12 +418,7 @@ impl AssemblyPipeline<'_> {
             .collect();
         let sample = |sys: &System, ents: &mut BTreeMap<String, Vec<EntitySample>>| {
             for part in &self.admitted.draft.input().parts {
-                let mut s = EntitySample {
-                    position_m: None,
-                    velocity_m_s: None,
-                    temperature_k: None,
-                    motion: None,
-                };
+                let mut s = EntitySample::default();
                 // A part in a slot of an owner node (a body in a network, a cell in a timeline).
                 let observer = lowered.observers.get(&part.entity);
                 match observer.and_then(|read| read(sys)) {
@@ -432,6 +427,7 @@ impl AssemblyPipeline<'_> {
                         angular_velocity_rad_s: [wx, wy, wz],
                     }) => s.motion = Some([vx, vy, vz, wx, wy, wz]),
                     Some(Observed::Cell(t)) => s.temperature_k = Some(t),
+                    Some(Observed::HeatRate(q)) => s.heat_rate_w = Some(q),
                     None => {}
                 }
                 for &node in lowered.entity_nodes.get(&part.entity).into_iter().flatten() {
@@ -514,6 +510,7 @@ impl AssemblyPipeline<'_> {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_non_transient(&self, lowered: &mut LoweredSystem) -> Result<RunTrace, SolveRefusal> {
         let smap = LoweredStateMap::from_lowered(lowered);
         let outcome = ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -533,7 +530,10 @@ impl AssemblyPipeline<'_> {
                 AssemblyAnalysisMode::Stationary => lowered.system.run_analysis(
                     AnalysisRequest::Stationary {
                         state_map: &smap,
-                        config: StationaryConfig::default(),
+                        config: StationaryConfig {
+                            commit: true,
+                            ..StationaryConfig::default()
+                        },
                     },
                     &cx,
                 ),
@@ -611,6 +611,19 @@ impl AssemblyPipeline<'_> {
             AnalysisOutcome::Stationary(s) => {
                 trace.stationary_norm = Some(s.residual_norm);
                 trace.stationary_state = smap.labels().into_iter().zip(s.state).collect();
+                for part in &self.admitted.draft.input().parts {
+                    if let Some(Observed::HeatRate(q)) = lowered
+                        .observers
+                        .get(&part.entity)
+                        .and_then(|read| read(&lowered.system))
+                    {
+                        let s = EntitySample {
+                            heat_rate_w: Some(q),
+                            ..Default::default()
+                        };
+                        trace.entities.insert(part.name.clone(), vec![s]);
+                    }
+                }
             }
             _ => {}
         }
@@ -662,6 +675,25 @@ impl StagePipeline for AssemblyPipeline<'_> {
                 let bytes = self.analysis.as_str().as_bytes().to_vec();
                 let artifact = hash_bytes(&bytes);
                 let inp = self.admitted.draft.input();
+                if self.analysis != AssemblyAnalysisMode::Stationary
+                    && let Some(p) = inp.parts.iter().find(|p| {
+                        p.fidelity
+                            .rungs
+                            .iter()
+                            .any(|r| matches!(r, FidelityRung::OneDField { .. }))
+                    })
+                {
+                    let m = self.analysis.as_str();
+                    return Err(staged_refusal(
+                        "cli-assembly-fidelity-analysis",
+                        "admit",
+                        format!(
+                            "part `{}` (one-d-field 1) requires --analysis stationary (got `{m}`)",
+                            p.name
+                        ),
+                        "re-run with --analysis stationary",
+                    ));
+                }
                 let receipt_json = format!(
                     "{{\"schema\":\"frankensim.cli.assembly-admit.v1\",\"assembly\":{},\"analysis\":{},\"source_hash\":{},\"parts\":{},\"joints\":{},\"interfaces\":{},\"sources\":{},\"probes\":{},\"card_packs\":{}}}",
                     json_string(&self.admitted.name),

@@ -937,3 +937,38 @@ fn declared_envelopes_yield_determinate_pass_fail_and_indeterminate_on_drop() {
         "{ind}"
     );
 }
+
+#[test]
+fn srm1453_slab_stationary_matches_closed_form_and_refuses_transient() {
+    let b = include_bytes!("../../../examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk");
+    let raw = RawCardPack {
+        kind: CardPackKind::Material,
+        source: "srm".into(),
+        bytes: b.to_vec(),
+        expect: None,
+    };
+    let p = CardPackSet::admit(vec![raw]).unwrap();
+    let l = Ledger::open(":memory:").unwrap();
+    let s = include_bytes!("../../../examples/assemblies/srm1453_slab.fsim");
+    let (mut c, cp) = (step_clock(0.1), AssemblyCancelPlan::default());
+    let mut r = |m| run_assembly(&l, s, &p, m, &mut c, cp);
+    let e = r(AssemblyAnalysisMode::Transient).unwrap_err();
+    assert_eq!(
+        (e.code, e.what.contains("transient")),
+        ("cli-assembly-fidelity-analysis", true)
+    );
+    let (out, _) = r(AssemblyAnalysisMode::Stationary).unwrap();
+    let exp = explain_assembly_run(&l, SolveRunId::parse_hex(&out.run).unwrap()).unwrap();
+    let ps = exp.probe_series_json.unwrap();
+    let t = ps
+        .split("\"slab_heat_rate\"")
+        .nth(1)
+        .unwrap()
+        .split("\"final\":")
+        .nth(1)
+        .unwrap();
+    let q: f64 = t.split(',').next().unwrap().parse().unwrap();
+    let qr = (0.00111 - 0.0000424 * 41.0 + 0.000115 * 297.15) * (0.25 * 0.25 / 0.0254) * 20.0;
+    assert!(exp.qoi_budget_json.is_none() && (q - qr).abs() / qr <= 1.0e-12);
+    assert!(ps.contains("stationary.residual_norm"));
+}

@@ -98,7 +98,7 @@ and populating `DraftPartDecl.uncertainty`; at most 4 inputs / 16 corners per
 swept category, disclosing that per-category sweeps omit `O(eps^2)`
 cross-category terms; positive `:half-width` + non-empty `:source` on
 `model-form`), and fixes third-body (`ShearFilm` / TIM) material-card auditing and
-corner remapping (`frankensim-0h46c`) plus `Surface2D` claim perturbation. The CLI lineage/replay-audit verbs landed separately (`frankensim-dhqf7`,
+corner remapping (`frankensim-0h46c`) plus `Surface2D` claim perturbation. Stage 2b-1 adds `dim() == 0` stationary solves reporting the port solver's own residual norm (`StepDiagnostic.residual_l2`), lowers `(Solid, [Thermal], (one-d-field 1))` to `Conductance` along box `x` (`G = k*(ly*lz)/lx`) with `Observed::HeatRate` (refusing `cells != 1`, non-box geometry, and non-stationary analyses by name), adds part-level `:query-at` sharing the `:fluid-at` pair parser (refusing `:query-at` with `:query-temp`), evaluates stationary `heat_rate` (`W`) probes, and tracks `examples/assemblies/srm1453_slab.fsim` + `examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk` (verified to `<= 1e-12` relative). The CLI lineage/replay-audit verbs landed separately (`frankensim-dhqf7`,
 ed1876af96; see the section above).
 
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)

@@ -54,7 +54,8 @@ ALUM_PACK="$ASM_DIR/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk"
 ATKINS_PACK="examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk"
 SENS_PACK="$ASM_DIR/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
 PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
-FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK")
+SRM_PACK="$ASM_DIR/packs/eps-nist-srm1453-2013.fsmcdpk"
+FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -110,6 +111,7 @@ run_case fo_stationary "$ASM_DIR/forced_oscillator.fsim" --materials "$STEEL_PAC
 run_case two_body "$ASM_DIR/two_body_conduction.fsim" --materials "$ALUM_PACK" --interfaces "$ATKINS_PACK"
 run_case slider "$ASM_DIR/thermo_mech_slider.fsim" --materials "$STEEL_PACK"
 run_case film "$ASM_DIR/shear_film_pair.fsim" --materials "$SENS_PACK" --materials "$PG50_PACK"
+run_case srm1453 "$ASM_DIR/srm1453_slab.fsim" --materials "$SRM_PACK" --analysis stationary
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -134,6 +136,7 @@ expect_refusal bad_analysis 2 "cli-run-analysis-usage" --json run "$ASM_DIR/ther
 NO_AREA="$ARTIFACT_DIR/two_body_no_area.fsim"
 sed 's/:area 0.0025m\^2 //' "$ASM_DIR/two_body_conduction.fsim" > "$NO_AREA"
 expect_refusal missing_area 4 "requires positive :area" --json run "$NO_AREA" "$ARTIFACT_DIR/ledgers/ref3.db" --materials "$ALUM_PACK" --interfaces "$ATKINS_PACK"
+expect_refusal srm_transient 4 "cli-assembly-fidelity-analysis" --json run "$ASM_DIR/srm1453_slab.fsim" "$ARTIFACT_DIR/ledgers/ref4.db" --materials "$SRM_PACK" --analysis transient
 
 # Independent closed-form Python oracles + summary receipt emission
 python3 - "$ARTIFACT_DIR" "$SOURCE_IDENTITY" "$RUNNER_SHA256" "$JSONL" "$RECEIPT" \
@@ -245,6 +248,13 @@ sf_c = max(abs(Cc * (T - 293.15) - f * Qt(i * 0.01)) / (2.0 * math.ulp(T) * Cc)
            for f, k in ((0.7, "lower_cell_temp"), (0.2, "upper_cell_temp")) for i, T in enumerate(psf[k]))
 assert all(len(v) == 101 for v in psf.values()) and len(psf) == 4 and sf_w <= 1e-12 and sf_c <= 1.0, (sf_w, sf_c)
 
+# 7. NIST SRM 1453 EPS slab (stationary 1-D steady conduction, deltaT=20 K, Tm=297.15 K, rho=41 kg/m^3)
+e_srm = ld("srm1453.explain.json"); psrm = probes(e_srm)
+k_srm = 0.00111 - 0.0000424 * 41.0 + 0.000115 * 297.15
+q_srm = k_srm * (0.25 * 0.25 / 0.0254) * 20.0
+srm_rel = abs(psrm["slab_heat_rate"][0] - q_srm) / q_srm
+assert srm_rel <= 1e-12 and psrm["stationary.residual_norm"][0] == 0.0, (srm_rel, psrm)
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -261,8 +271,10 @@ receipt = {
     "shear_film_pair": {"run": ld("film.run.json")["run"],
       "errors": {"free_pair_dissipated_rel": sf_q, "ledger_accounts_rel": sf_acc, "energy_residual_j": wres(e_sf),
                  "disc_spin_rel": sf_w, "cell_heat_over_2ulp_floor": sf_c}},
+    "srm1453_slab": {"run": ld("srm1453.run.json")["run"],
+      "errors": {"heat_rate_rel": srm_rel, "stationary_residual_norm": psrm["stationary.residual_norm"][0]}},
   },
-  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area"]},
+  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient"]},
 }
 pathlib.Path(rcpt_p).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 with open(jsonl_p, "a") as w:
