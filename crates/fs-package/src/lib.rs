@@ -50,6 +50,7 @@ pub use coverage::{
     package_coverage, package_coverage_with, package_presence, package_presence_with,
     verified_package_coverage, verified_package_presence,
 };
+pub use fs_crosswalk::{PackageConcept, Standard};
 pub use no_useful_bound::{
     MAX_NO_USEFUL_BOUND_CLAIM_ID_BYTES, NoUsefulBoundRecord, NoUsefulBoundRecordError,
 };

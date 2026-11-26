@@ -1,5 +1,35 @@
 # CONTRACT: fs-cli
 
+## Ledger Lineage, Replay Audit, and Package Standards Coverage (bead `frankensim-dhqf7`)
+
+Exposes finished `fs-ledger` lineage/replay-audit queries and `fs-package`
+standards coverage through the real `frankensim` binary using the existing
+process exit-code table (no new exit codes):
+
+- `frankensim [--json] lineage <artifact-hash> <ledger.db> [--depth <N>]`
+  walks the causal DAG backward via `Ledger::explain` (default `--depth 64`,
+  bounded `1..=512`). Opens `<ledger.db>` through `open_export_ledger` and
+  refuses a missing file with `exit::INPUT` before touching SQLite (never
+  creates a database file). Unknown artifacts and corrupt lineage refuse with
+  `exit::REFUSED`; invalid hex hashes or depth bounds refuse with `exit::USAGE`.
+- `frankensim [--json] replay-audit <a.db> <b.db> [--branch-a <b1>] [--branch-b <b2>]`
+  audits two existing ledgers via `Ledger::replay_verdict` (defaulting both
+  branches to `MAIN_BRANCH` / `"main"`, accepting numeric branch ids or names).
+  Refuses either missing ledger with `exit::INPUT` before opening SQLite (never
+  creates a file). When `<a.db>` and `<b.db>` resolve to the same file on two
+  distinct branches, also attaches `Ledger::branch_diff`. Exits `exit::SUCCESS`
+  when `is_replay_clean()` (reporting any `fast_divergences`) and `exit::REFUSED`
+  with the full structured `ReplayVerdict` on deterministic or structural mismatch.
+- `frankensim [--json] package <run-id> [<ledger.db>] [--coverage <standard>]`
+  accepts `asme-vv-10`, `asme-vv-20`, `asme-vv-40`, and `faa-easa-cba`
+  (matching `Standard::label()`). Without `--coverage`, output is unchanged.
+  With `--coverage`, evaluates `verified_package_coverage` (or honest deny-all
+  `package_coverage` when `verify()` declines), validates `decision_hash`, and
+  emits per-concept rows (`covered`, `mapped-but-absent`, `no-claim`) without
+  minting coverage from static crosswalk tables. Calling `--coverage` on a
+  `study-*` pointer refuses explicitly by name (`cli-package-study-coverage-unsupported`,
+  `exit::REFUSED`).
+
 ## Assembly CLI verbs & FrankenScript `assembly.run` (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 3)
 
 Stage 3 completes bead `frankensim-rc-1109-root-3gc12.11.7` by exposing the

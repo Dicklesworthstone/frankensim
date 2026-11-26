@@ -17,6 +17,7 @@ mod electrothermal_command;
 mod frankenscript;
 mod import;
 mod json_read;
+mod ledger_audit;
 mod material_state_input;
 mod network_command;
 mod package;
@@ -87,7 +88,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project|assembly> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... [--analysis transient|stationary|modal|harmonic] | run --resume <run-id> <ledger.db> | run <program.fs|program.fs.json> <ledger.db> | explain <run-id> [<ledger.db>] | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] [--coverage <standard>] | run <project|assembly> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... [--analysis transient|stationary|modal|harmonic] | run --resume <run-id> <ledger.db> | run <program.fs|program.fs.json> <ledger.db> | explain <run-id> [<ledger.db>] | lineage <artifact-hash> <ledger.db> [--depth <N>] | replay-audit <a.db> <b.db> [--branch-a <b1>] [--branch-b <b2>] | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 const COUPLED_USAGE: &str = "Experimental coupled workflows:\n  system <scene.json>\n  cooling-cht <scene.json>\n  electrothermal <scene.json> [--transient <time.json>]\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json> [options]\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface. These workflows retain their own numerical scope and do not produce ledger-backed .fsim runs; system runs a device described as data on the composition kernel and reports its energy ledger. Embedded UQ and component design require an explicit CommandContext cooling worker.\n";
 
@@ -154,6 +155,18 @@ enum Command {
     Package {
         run_id: String,
         ledger: Option<PathBuf>,
+        coverage: Option<fs_package::Standard>,
+    },
+    Lineage {
+        artifact: String,
+        ledger: PathBuf,
+        depth: usize,
+    },
+    ReplayAudit {
+        left: PathBuf,
+        right: PathBuf,
+        branch_a: Option<String>,
+        branch_b: Option<String>,
     },
     Run {
         project: PathBuf,
@@ -290,9 +303,28 @@ fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> 
         } => solve_path(&project, &ledger, &cards, mode),
         Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
         Command::Report { run_id, ledger } => report::report_path(&run_id, ledger.as_deref(), mode),
-        Command::Package { run_id, ledger } => {
-            package::package_path(&run_id, ledger.as_deref(), mode)
-        }
+        Command::Package {
+            run_id,
+            ledger,
+            coverage,
+        } => package::package_path(&run_id, ledger.as_deref(), coverage, mode),
+        Command::Lineage {
+            artifact,
+            ledger,
+            depth,
+        } => ledger_audit::lineage_path(&artifact, &ledger, depth, mode),
+        Command::ReplayAudit {
+            left,
+            right,
+            branch_a,
+            branch_b,
+        } => ledger_audit::replay_audit_path(
+            &left,
+            &right,
+            branch_a.as_deref(),
+            branch_b.as_deref(),
+            mode,
+        ),
         Command::Run {
             project,
             ledger,
@@ -532,14 +564,36 @@ fn parse_args(
                 ledger: Some(PathBuf::from(ledger)),
             }
         }
-        [verb, run_id] if verb == "package" && is_operand(run_id) => Command::Package {
-            run_id: run_id.clone(),
-            ledger: None,
-        },
-        [verb, run_id, ledger] if verb == "package" && is_operand(run_id) && is_operand(ledger) => {
+        [verb, run_id, rest @ ..] if verb == "package" && is_operand(run_id) => {
+            let (ledger, coverage) =
+                package::parse_package_args(rest).map_err(|diagnostic| (mode, diagnostic))?;
             Command::Package {
                 run_id: run_id.clone(),
-                ledger: Some(PathBuf::from(ledger)),
+                ledger,
+                coverage,
+            }
+        }
+        [verb, artifact, ledger, rest @ ..]
+            if verb == "lineage" && is_operand(artifact) && is_operand(ledger) =>
+        {
+            let depth = ledger_audit::parse_lineage_args(rest)
+                .map_err(|diagnostic| (mode, *diagnostic))?;
+            Command::Lineage {
+                artifact: artifact.clone(),
+                ledger: PathBuf::from(ledger),
+                depth,
+            }
+        }
+        [verb, left, right, rest @ ..]
+            if verb == "replay-audit" && is_operand(left) && is_operand(right) =>
+        {
+            let (branch_a, branch_b) = ledger_audit::parse_replay_audit_args(rest)
+                .map_err(|diagnostic| (mode, *diagnostic))?;
+            Command::ReplayAudit {
+                left: PathBuf::from(left),
+                right: PathBuf::from(right),
+                branch_a,
+                branch_b,
             }
         }
         [verb, flag, run_id, ledger]
