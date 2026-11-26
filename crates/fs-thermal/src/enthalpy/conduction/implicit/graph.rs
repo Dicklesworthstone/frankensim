@@ -52,6 +52,28 @@ pub(super) enum LinearTopology {
 pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
+impl ImplicitConductionGraph<'static> {
+    /// [`Self::new`] for laws the graph keeps alive itself, so a timeline
+    /// on it borrows nothing. Each caloric and conductivity law is matched by
+    /// address: give the `Rc`s the shared simulation and `conduction` hold.
+    /// Contact, link and boundary laws stay borrowed, so `'static` here: a
+    /// shared graph with them needs the shared form of those maps too.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn new_shared(
+        thermal: &DepositionSimulation<'_>,
+        conduction: &ConductionObserver<'static>,
+        laws: &[(MaterialId, Rc<dyn ImplicitConductionLaw>)],
+        linear: ImplicitConductionLinearControls,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        let laws = laws
+            .iter()
+            .map(|(id, law)| (*id, LawRef::Shared(Rc::clone(law))));
+        Self::build(thermal, conduction, laws.collect(), linear, checkpoint)
+    }
+}
 impl<'a> ImplicitConductionGraph<'a> {
     /// Conserve each closed component's original stored energy at common T.
     /// The chain owner retains original calorics, latent allocation refusals,
@@ -287,6 +309,17 @@ impl<'a> ImplicitConductionGraph<'a> {
         linear: ImplicitConductionLinearControls,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
+        let laws = laws.iter().map(|&(id, law)| (id, LawRef::Borrowed(law)));
+        Self::build(thermal, conduction, laws.collect(), linear, checkpoint)
+    }
+
+    fn build(
+        thermal: &DepositionSimulation<'_>,
+        conduction: &ConductionObserver<'a>,
+        laws: Vec<(MaterialId, LawRef<'a, dyn ImplicitConductionLaw + 'a>)>,
+        linear: ImplicitConductionLinearControls,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
         if linear.restart == 0
             || linear.restart > 128
             || linear.maximum_cycles_per_solve == 0
@@ -299,7 +332,7 @@ impl<'a> ImplicitConductionGraph<'a> {
             ));
         }
         Ok(Self {
-            inner: ImplicitConductionChain::prepare(
+            inner: ImplicitConductionChain::bind(
                 thermal,
                 conduction,
                 laws,

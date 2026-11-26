@@ -202,7 +202,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 },
                 |i, energy| {
                     let cell = &initial.cells[&self.ids[component[i]]];
-                    let law = self.laws[&cell.material_id];
+                    let law = &*self.laws[&cell.material_id];
                     // The exact original caloric owner is authoritative. Its
                     // analytic tangent accelerates only the scalar temperature
                     // solve, and must agree with the source's admitted slope.

@@ -175,7 +175,7 @@ struct BoundReservoir {
 /// faces) data and performs O((cells + faces) log(cells)) work per substep.
 #[derive(Clone)]
 pub struct ConductionObserver<'a> {
-    laws: BTreeMap<MaterialId, &'a dyn ConductivityLaw>,
+    laws: BTreeMap<MaterialId, LawRef<'a, dyn ConductivityLaw + 'a>>,
     cells: BTreeMap<CellId, BoundCell>,
     links: BTreeMap<u64, BoundLink>,
     /// Contacts named by [`Self::with_links_carried_outside`].
@@ -192,6 +192,27 @@ pub struct ConductionObserver<'a> {
     prepared: bool,
 }
 
+impl ConductionObserver<'static> {
+    /// [`Self::new`] for laws the observer keeps alive itself, so it borrows
+    /// nothing. A graph prepared from it matches its laws by address: give it
+    /// the same `Rc`s, which the shared simulation also holds.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn new_shared(
+        thermal: &DepositionSimulation<'_>,
+        laws: &[(MaterialId, Rc<dyn ConductivityLaw>)],
+        links: &[ConductiveLink],
+        reservoirs: &[ConductiveReservoir],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        let laws = laws
+            .iter()
+            .map(|(id, law)| (*id, LawRef::Shared(Rc::clone(law))));
+        Self::bind(thermal, laws.collect(), links, reservoirs, checkpoint)
+    }
+}
+
 impl<'a> ConductionObserver<'a> {
     /// Bind already-active cells/faces, validating original geometry and the
     /// initial source domain. Cell/link budgets are inherited from the admitted
@@ -199,6 +220,17 @@ impl<'a> ConductionObserver<'a> {
     pub fn new(
         thermal: &DepositionSimulation<'_>,
         laws: &[(MaterialId, &'a dyn ConductivityLaw)],
+        links: &[ConductiveLink],
+        reservoirs: &[ConductiveReservoir],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        let laws = laws.iter().map(|&(id, law)| (id, LawRef::Borrowed(law)));
+        Self::bind(thermal, laws.collect(), links, reservoirs, checkpoint)
+    }
+
+    fn bind(
+        thermal: &DepositionSimulation<'_>,
+        laws: Vec<(MaterialId, LawRef<'a, dyn ConductivityLaw + 'a>)>,
         links: &[ConductiveLink],
         reservoirs: &[ConductiveReservoir],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -227,7 +259,7 @@ impl<'a> ConductionObserver<'a> {
             current_geometry: None,
             prepared: false,
         };
-        for (i, &(id, law)) in laws.iter().enumerate() {
+        for (i, (id, law)) in laws.into_iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }

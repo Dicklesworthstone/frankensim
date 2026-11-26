@@ -346,7 +346,7 @@ impl ImplicitConductionWorkspace {
 /// not the lifetime of this optional tangent adapter.
 pub struct ImplicitConductionChain<'a> {
     conduction: ConductionObserver<'a>,
-    laws: BTreeMap<MaterialId, &'a dyn ImplicitConductionLaw>,
+    laws: BTreeMap<MaterialId, LawRef<'a, dyn ImplicitConductionLaw + 'a>>,
     cells: BTreeMap<CellId, BoundCell>,
     ids: Vec<CellId>,
     index: BTreeMap<CellId, usize>,
@@ -431,6 +431,17 @@ impl<'a> ImplicitConductionChain<'a> {
         conduction: &ConductionObserver<'a>,
         laws: &[(MaterialId, &'a dyn ImplicitConductionLaw)],
         topology: LinearTopology,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        let laws = laws.iter().map(|&(id, law)| (id, LawRef::Borrowed(law)));
+        Self::bind(thermal, conduction, laws.collect(), topology, checkpoint)
+    }
+
+    fn bind(
+        thermal: &DepositionSimulation<'_>,
+        conduction: &ConductionObserver<'a>,
+        laws: Vec<(MaterialId, LawRef<'a, dyn ImplicitConductionLaw + 'a>)>,
+        topology: LinearTopology,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
@@ -441,7 +452,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ));
         }
         let mut bindings = BTreeMap::new();
-        for &(id, law) in laws {
+        for (id, law) in laws {
             checkpoint()?;
             if bindings.insert(id, law).is_some() {
                 return Err(ImplicitConductionError::Invalid(
@@ -598,7 +609,7 @@ impl<'a> ImplicitConductionChain<'a> {
             }
             if let Some(k) = self.conduction.laws.get(&cell.material_id) {
                 if !std::ptr::addr_eq(
-                    *k as *const dyn ConductivityLaw,
+                    &**k as *const dyn ConductivityLaw,
                     law.conductivity_law() as *const dyn ConductivityLaw,
                 ) {
                     return Err(ImplicitConductionError::Invalid(
@@ -662,7 +673,7 @@ impl<'a> ImplicitConductionChain<'a> {
         for &id in &self.ids {
             checkpoint()?;
             let cell = &thermal.cells[&id];
-            let law = self.laws[&cell.material_id];
+            let law = &*self.laws[&cell.material_id];
             let [lo, hi] = law.enthalpy_bounds_j_kg();
             if !(lo..=hi).contains(&cell.specific_h_j_kg) {
                 return Err(DepositionError::MaterialDomain.into());

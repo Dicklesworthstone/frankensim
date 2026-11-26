@@ -315,7 +315,11 @@ alive itself (`Rc<dyn ThermalLaw>`), so the simulation is `'static`. A lowering
 can then own its timeline as a Component without leaking the laws. Borrowed
 and shared laws go through one handle and step through the same code.
 fs-system's `thermal_timeline_slice` suite runs on both forms
-(`FS_THERMAL_SHARED_LAWS`).
+(`FS_THERMAL_SHARED_LAWS`). `ConductionObserver::new_shared` and
+`ImplicitConductionGraph::new_shared` do the same for the implicit graph. Laws
+match by address: one `Rc` reaches the simulation, the observer and the graph,
+and an equal law in another `Rc` refuses. Contact, link and boundary laws stay
+borrowed: a shared graph with them needs their shared form too.
 
 The focused regression follows explicit split/replay trajectories through a
 birth, contact and boundary change, cancels after candidate work, retries from

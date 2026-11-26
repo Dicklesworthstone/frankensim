@@ -77,12 +77,13 @@ impl ImplicitConductionLaw for Law {
 fn id(i: usize) -> CellId {
     CellId(7 + 3 * i as u64)
 }
-fn setup<'a>(
-    law: &'a Law,
+/// The cells of `h` and `mass` in a row, joined by `edges` (with their contact
+/// resistances), and the links' conduction geometry.
+fn scene(
     h: &[f64],
     mass: &[f64],
     edges: &[(usize, usize, f64)],
-) -> (DepositionSimulation<'a>, ConductionObserver<'a>) {
+) -> (Vec<TimedEvent>, Vec<ConductiveLink>) {
     let mut events: Vec<_> = h
         .iter()
         .enumerate()
@@ -128,31 +129,47 @@ fn setup<'a>(
             contact_resistance_m2_k_w: resistance,
         });
     }
-    let initial = DepositionSimulation::new(
-        events,
-        &[(MaterialId(1), law)],
-        DepositionBudget {
-            max_cells: 1024,
-            max_links: 4096,
-            max_events: 8192,
-            max_substeps: 100_000,
-        },
-    )
-    .unwrap();
-    let (thermal, _) = initial
-        .advance_to(
-            0.0,
-            StepConfig {
-                max_dt_s: 1.0,
-                energy_tolerance_j: 0.0,
-            },
-            || Ok(()),
-        )
-        .unwrap();
+    (events, geometry)
+}
+const BUDGET: DepositionBudget = DepositionBudget {
+    max_cells: 1024,
+    max_links: 4096,
+    max_events: 8192,
+    max_substeps: 100_000,
+};
+const START: StepConfig = StepConfig {
+    max_dt_s: 1.0,
+    energy_tolerance_j: 0.0,
+};
+fn setup<'a>(
+    law: &'a Law,
+    h: &[f64],
+    mass: &[f64],
+    edges: &[(usize, usize, f64)],
+) -> (DepositionSimulation<'a>, ConductionObserver<'a>) {
+    let (events, geometry) = scene(h, mass, edges);
+    let initial = DepositionSimulation::new(events, &[(MaterialId(1), law)], BUDGET).unwrap();
+    let (thermal, _) = initial.advance_to(0.0, START, || Ok(())).unwrap();
     let observer =
         ConductionObserver::new(&thermal, &[(MaterialId(1), law)], &geometry, &[], || Ok(()))
             .unwrap();
     (thermal, observer)
+}
+/// [`setup`] on shared laws: the simulation and the observer hold one `Rc`.
+fn shared_setup(
+    law: &Rc<Law>,
+    h: &[f64],
+    mass: &[f64],
+    edges: &[(usize, usize, f64)],
+) -> (DepositionSimulation<'static>, ConductionObserver<'static>) {
+    let (events, geometry) = scene(h, mass, edges);
+    let caloric: Rc<dyn ThermalLaw> = law.clone();
+    let initial = DepositionSimulation::new_shared(events, &[(MaterialId(1), caloric)], BUDGET);
+    let (thermal, _) = initial.unwrap().advance_to(0.0, START, || Ok(())).unwrap();
+    let conductivity: Rc<dyn ConductivityLaw> = law.clone();
+    let laws = [(MaterialId(1), conductivity)];
+    let observer = ConductionObserver::new_shared(&thermal, &laws, &geometry, &[], || Ok(()));
+    (thermal, observer.unwrap())
 }
 fn graph<'a>(
     thermal: &DepositionSimulation<'_>,
@@ -227,6 +244,46 @@ fn stiff_star_matches_independent_unequal_capacity_endpoint_and_conserves_heat()
     for link in next.links().values() {
         assert_eq!(link.conductance_w_k, 0.0);
     }
+}
+
+#[test]
+fn shared_laws_step_as_borrowed_ones_to_the_bit_and_match_by_address() {
+    let law = Rc::new(Law {
+        plateau: false,
+        nonlinear: true,
+    });
+    let (h, masses) = ([600.0, 200.0, 300.0, 400.0], [3.0, 2.0, 1.0, 4.0]);
+    let edges = [(0, 1, 0.5), (0, 2, 1.0), (0, 3, 0.0)];
+    let (thermal, observer) = setup(&law, &h, &masses, &edges);
+    let borrowed = graph(&thermal, &observer, &law);
+    let (start, conduction) = shared_setup(&law, &h, &masses, &edges);
+    let shared = |law: Rc<dyn ImplicitConductionLaw>| {
+        let laws = [(MaterialId(1), law)];
+        let linear = ImplicitConductionLinearControls::default();
+        ImplicitConductionGraph::new_shared(&start, &conduction, &laws, linear, || Ok(()))
+    };
+    // One `Rc` held by the simulation, the observer and the graph.
+    let kept = shared(law.clone()).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(4).unwrap();
+    let dt = 100.0;
+    for sdirk2 in [false, true] {
+        let mut step = |graph: &ImplicitConductionGraph<'_>, from| {
+            let controls = controls(dt);
+            let run = if sdirk2 {
+                graph.advance_sdirk2_to(from, dt, controls, &mut workspace, || Ok(()))
+            } else {
+                graph.advance_to(from, dt, controls, &mut workspace, || Ok(()))
+            };
+            // Debug text round-trips each f64: the cells and the accounts.
+            let (next, report) = run.unwrap();
+            format!("{:?} {report:?}", next.cells)
+        };
+        let runs = (step(&borrowed, &thermal), step(&kept, &start));
+        assert_eq!(runs.0, runs.1, "sdirk2 {sdirk2}");
+    }
+    // An equal law in another `Rc` is not the simulation's law.
+    let refused = format!("{:?}", shared(Rc::new(Law { ..*law })).err());
+    assert!(refused.contains("caloric object differs"), "{refused}");
 }
 
 #[test]

@@ -442,6 +442,33 @@ impl<'a> core::ops::Deref for ThermalLawRef<'a> {
     }
 }
 
+/// A conduction law, borrowed or kept alive by its holder, as
+/// [`ThermalLawRef`] holds a caloric one.
+pub(crate) enum LawRef<'a, T: ?Sized> {
+    Borrowed(&'a T),
+    Shared(Rc<T>),
+}
+
+impl<T: ?Sized> Clone for LawRef<'_, T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(law) => Self::Borrowed(law),
+            Self::Shared(law) => Self::Shared(Rc::clone(law)),
+        }
+    }
+}
+
+impl<T: ?Sized> core::ops::Deref for LawRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match self {
+            Self::Borrowed(law) => law,
+            Self::Shared(law) => law,
+        }
+    }
+}
+
 fn finite(value: f64) -> Result<f64, DepositionError> {
     if value.is_finite() {
         Ok(value)
