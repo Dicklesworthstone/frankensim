@@ -35,6 +35,8 @@ function matrices(): [string, THREE.Matrix4][] {
     ["rotate", new THREE.Matrix4().makeRotationFromQuaternion(q)],
     ["scale", new THREE.Matrix4().makeScale(1.7, 0.3, 2.9)],
     ["mirror", new THREE.Matrix4().makeScale(-1, 1, 1)],
+    // Singular: the normal matrix is all zeros, so every normal is zero length.
+    ["flatten", new THREE.Matrix4().makeScale(1, 0, 1)],
     ["compose", new THREE.Matrix4().compose(new THREE.Vector3(0.71, 0.92, -2.3), q, new THREE.Vector3(0.4, 1.6, 0.9))],
     ["perspective", persp.multiply(new THREE.Matrix4().makeTranslation(0, 0, -3))],
   ];
@@ -44,6 +46,11 @@ function same(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
   return true;
+}
+
+function sameBox(a: THREE.Box3 | null, b: THREE.Box3 | null): boolean {
+  if (!a || !b) return a === b;
+  return same(a.min.toArray(), b.min.toArray()) && same(a.max.toArray(), b.max.toArray());
 }
 
 function sameSphere(a: THREE.Sphere | null, b: THREE.Sphere | null): boolean {
@@ -65,8 +72,10 @@ describe("shop fast paths", () => {
           const ref = g.clone();
           const fast = g.clone();
           if (bounded) {
-            ref.computeBoundingSphere();
-            fast.computeBoundingSphere();
+            for (const x of [ref, fast]) {
+              x.computeBoundingBox();
+              x.computeBoundingSphere();
+            }
           }
           ref.applyMatrix4(m);
           transformGeometry(fast, m);
@@ -75,8 +84,27 @@ describe("shop fast paths", () => {
           expect(same(fast.attributes.normal!.array, ref.attributes.normal!.array), `${where}: normal`).toBe(true);
           expect(fast.attributes.position!.version, `${where}: position version`).toBe(ref.attributes.position!.version);
           expect(fast.attributes.normal!.version, `${where}: normal version`).toBe(ref.attributes.normal!.version);
+          expect(sameBox(fast.boundingBox, ref.boundingBox), `${where}: box`).toBe(true);
           expect(sameSphere(fast.boundingSphere, ref.boundingSphere), `${where}: sphere`).toBe(true);
         }
+      }
+    }
+  });
+
+  test("transformGeometry matches applyMatrix4 without normals", () => {
+    for (const [gn, g] of geometries()) {
+      const bare = new THREE.BufferGeometry();
+      bare.setAttribute("position", g.attributes.position!.clone());
+      for (const [mn, m] of matrices()) {
+        const ref = bare.clone();
+        const fast = bare.clone();
+        ref.computeBoundingSphere();
+        fast.computeBoundingSphere();
+        ref.applyMatrix4(m);
+        transformGeometry(fast, m);
+        expect(same(fast.attributes.position!.array, ref.attributes.position!.array), `${gn} × ${mn}: position`).toBe(true);
+        expect(fast.attributes.normal, `${gn} × ${mn}: still no normals`).toBeUndefined();
+        expect(sameSphere(fast.boundingSphere, ref.boundingSphere), `${gn} × ${mn}: sphere`).toBe(true);
       }
     }
   });
