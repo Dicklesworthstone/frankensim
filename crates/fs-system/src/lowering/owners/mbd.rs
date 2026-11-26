@@ -42,8 +42,8 @@ use super::{
 use crate::RouteTemperature;
 use crate::lowering::{
     AREA_DIMS, CardStore, DAMPING_DIMS, GroupLoweringContext, GroupSelection, INERTIA_DIMS,
-    LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS, TORSIONAL_DAMPING_DIMS,
-    VOLUME_DIMS, geometry_volume_m3,
+    LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS, TEMPERATURE_DIMS,
+    TORSIONAL_DAMPING_DIMS, VOLUME_DIMS, geometry_volume_m3,
 };
 
 /// Group name of the viscous network.
@@ -233,14 +233,20 @@ fn film(
     coefficients: &mut [[f64; 6]; 6],
 ) -> Result<(), LoweringError> {
     let mu = it.third_body(ctx, fluid, "dynamic_viscosity", VISCOSITY)?;
+    // Only a temperature is held; the other keys are plain declared values.
     for (key, q) in &fluid.query_point {
-        let held = "held: mu does not follow the film's temperature (one-way)";
-        it.r.record_declared_field(&key.name, q.value, q.dims, &it.item, held);
+        let held = (q.dims == TEMPERATURE_DIMS)
+            .then_some("held: mu does not follow the film's temperature (one-way)");
+        let why = held.unwrap_or(&key.name);
+        it.r.record_declared_field(&key.name, q.value, q.dims, &it.item, why);
     }
     it.declare("third_body.film_thickness", fluid.film_thickness);
     let wetted = ParameterKey::new("area", AREA_DIMS);
     let area = state.iter().find(|(k, _)| *k == wetted).map(|&(_, q)| q);
     let area = area.ok_or_else(|| it.invalid("a film needs `area`"))?;
+    if area.value <= 0.0 {
+        return Err(it.invalid("a film's `area` must be positive"));
+    }
     it.declare("state.area", area);
     let (a, h) = (area.value, fluid.film_thickness.value);
     let (j, disk) = (a * a / (2.0 * PI), "disk: J = A^2 / (2 pi)");

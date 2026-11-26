@@ -12,8 +12,8 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
     DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
     FidelityPolicy, FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain,
-    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, TimeHistory,
-    TimePlan, TimingEdge,
+    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
+    TimeHistory, TimePlan, TimingEdge,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
@@ -750,6 +750,9 @@ pub(crate) fn admit_assembly_source(
                         "normal-pressure",
                         "thickness",
                         "fraction",
+                        "fluid",
+                        "gap",
+                        "fluid-at",
                     ],
                     &scope,
                 )?;
@@ -784,6 +787,27 @@ pub(crate) fn admit_assembly_source(
                     families.insert(card, family.to_string());
                     Ok(card)
                 };
+                // A shear film's fluid, its gap `h` and the whole point `mu` is read at.
+                let film = || -> Result<ThirdBodyDecl, SolveRefusal> {
+                    let (fluid, gap) = (req(&kw, "fluid", &scope)?, req(&kw, "gap", &scope)?);
+                    let at = as_list(req(&kw, "fluid-at", &scope)?, "fluid-at")?;
+                    if at.len() % 2 != 0 {
+                        return Err(err(format!("{scope}: :fluid-at pairs keys with values")));
+                    }
+                    let mut query_point = Vec::new();
+                    for pair in at.chunks(2) {
+                        let (key, v) = (as_sym(&pair[0], "fluid-at key")?, &pair[1]);
+                        let q = as_qty(v, key)
+                            .or_else(|_| as_f64(v, key).map(QtyAny::dimensionless))?;
+                        query_point.push((ParameterKey::new(key, q.dims), q));
+                    }
+                    let fluid = as_str(fluid, "fluid")?;
+                    Ok(ThirdBodyDecl {
+                        material_card: resolve_card(packs, CardPackKind::Material, fluid, &scope)?,
+                        film_thickness: as_qty_d(gap, LENGTH, "gap")?,
+                        query_point,
+                    })
+                };
                 let mut state = Vec::new();
                 for (flag, key, dims) in [
                     ("area", "area", AREA),
@@ -804,6 +828,13 @@ pub(crate) fn admit_assembly_source(
                         return Err(err(format!("{scope}: a heat route takes no card")));
                     }
                     "heat-route" => DraftInterfaceKind::HeatRoute { state },
+                    "shear-film" if kw.contains_key("card") || kw.contains_key("family") => {
+                        return Err(err(format!("{scope}: a film's one card is its fluid")));
+                    }
+                    "shear-film" => DraftInterfaceKind::ShearFilm {
+                        third_body: film()?,
+                        state,
+                    },
                     "thermal-contact" => DraftInterfaceKind::ThermalContact {
                         law_card: card()?,
                         third_body: None,
@@ -970,10 +1001,15 @@ pub(crate) fn admit_assembly_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cards::RawCardPack;
 
     const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
     fn admit(attrs: &str) -> Result<AdmittedAssembly, SolveRefusal> {
+        admit_with(attrs, Vec::new())
+    }
+
+    fn admit_with(attrs: &str, raw: Vec<RawCardPack>) -> Result<AdmittedAssembly, SolveRefusal> {
         let src = format!(
             "(assembly \"init_check\" (version 1) (units \"SI\") (seed 0x1) \
              (versions (constellation \"2026-07\") (workspace \"pkg-1c\")) \
@@ -984,7 +1020,7 @@ mod tests {
              (part \"rotor\" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) \
              :physics (mechanics thermal) :fidelity lumped {attrs}))\n"
         );
-        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        let packs = CardPackSet::admit(raw).unwrap();
         admit_assembly_source(src.as_bytes(), &packs)
     }
 
@@ -1163,5 +1199,45 @@ mod tests {
         assert_eq!(kind, &DraftInterfaceKind::HeatRoute { state });
         let r = route(" :card \"x\" :family \"y\"").err().unwrap();
         assert!(r.what.contains("a heat route takes no card"), "{}", r.what);
+    }
+
+    #[test]
+    fn shear_film_names_its_fluid_gap_and_query_point_and_no_card() {
+        // Any material card shows the binding; the lowering reads its viscosity.
+        let bytes = include_bytes!(
+            "../../../../examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk"
+        );
+        let raw = RawCardPack {
+            kind: CardPackKind::Material,
+            source: "fluid".to_owned(),
+            bytes: bytes.to_vec(),
+            expect: None,
+        };
+        let film = |extra: &str| {
+            let pad = "(part \"pad\" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) \
+                 :physics (mechanics) :fidelity lumped)";
+            let film = "(interface \"film\" :kind shear-film :a \"rotor\" :b \"pad\" \
+                 :fluid \"aluminum-pure-nbs-c447\" :gap 0.0001m";
+            let at = ":fluid-at (T 313.15K phase-liquid 1)";
+            admit_with(
+                &format!(") {pad} {film} {at} :area 0.01m^2{extra}"),
+                vec![raw.clone()],
+            )
+        };
+        let a = film("").expect("a shear film admits with its fluid");
+        let kind = &a.draft.input().interfaces[0].kind;
+        let DraftInterfaceKind::ShearFilm { third_body, state } = kind else {
+            panic!("{kind:?}")
+        };
+        let fluid = a.card_store.material(&third_body.material_card).unwrap();
+        assert_eq!(fluid.id().chemistry, "aluminum-pure-nbs-c447");
+        assert_eq!(third_body.film_thickness, QtyAny::new(0.0001, LENGTH));
+        let key = |name, value, dims| (ParameterKey::new(name, dims), QtyAny::new(value, dims));
+        let t = key("T", 313.15, TEMPERATURE);
+        let liquid = key("phase-liquid", 1.0, Dims::NONE);
+        assert_eq!(third_body.query_point, vec![t, liquid]);
+        assert_eq!(state, &vec![key("area", 0.01, AREA)]);
+        let why = film(" :card \"x\"").err().unwrap().what;
+        assert!(why.contains("a film's one card is its fluid"), "{why}");
     }
 }

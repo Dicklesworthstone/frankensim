@@ -2223,6 +2223,27 @@ fn build_query_point(
         && list
             .iter()
             .all(|(_, c)| c.validity.axis_quantities().get("T") == Some(&abs_t));
+    // A declared key takes the one spec its bounding claims agree on; never a guess. A bare
+    // quantity has dims alone, so the one semantic kind it takes is absolute temperature
+    // (kelvin); under another it stays untyped and the query refuses the axis.
+    let spec = |name: &str, dims: Dims| {
+        let spec_of = |c: &fs_matdb::PropertyClaim| c.validity.axis_quantities().get(name).copied();
+        let mut bounding = list
+            .iter()
+            .filter(|(_, c)| c.validity.bound(name).is_some());
+        let first = bounding.next().and_then(|(_, c)| spec_of(c));
+        let agreed = bounding.all(|(_, c)| spec_of(c) == first);
+        match first {
+            _ if !agreed => Err("its claims disagree on its quantity"),
+            Some(s) if s.dims() != dims => Err("its dims are not its claims' axis dims"),
+            Some(s) if s.semantic_type().is_none() || s == abs_t => Ok(Some(s)),
+            _ => Ok(None),
+        }
+        .map_err(|why| LoweringError::Invalid {
+            item: item_scope.to_owned(),
+            detail: format!("query key `{name}`: {why}"),
+        })
+    };
     let mut point = QueryPoint::new();
     let mut has_temp = false;
     let mut has_pressure = false;
@@ -2233,10 +2254,9 @@ fn build_query_point(
         if k.name == "P" {
             has_pressure = true;
         }
-        point = if typed_t && k.name == "T" && q.dims == TEMPERATURE_DIMS {
-            point.with_quantity("T", abs_t, q.value)
-        } else {
-            point.with(&k.name, q.value)
+        point = match spec(&k.name, q.dims)? {
+            Some(s) => point.with_quantity(&k.name, s, q.value),
+            None => point.with(&k.name, q.value),
         }
         .map_err(|source| LoweringError::MatDb {
             item: item_scope.to_owned(),

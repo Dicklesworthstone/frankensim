@@ -67,6 +67,12 @@ callers constructing their graphs explicitly. Regression coverage uses the
 lowering source tests and the real mechanical, thermal and electrical graphs in
 `tests/lowering_registry.rs`.
 
+A declared query-point key takes the axis spec that every claim bounding that
+axis gives it: a dimension-only spec when the dims match, or absolute
+temperature for a kelvin value. A key the claims type differently, or whose dims
+differ from their spec, is refused by name. Under any other semantic kind the
+key stays untyped, and the query refuses that axis.
+
 ## Owner groups and owner constructors (bead `frankensim-rc-1109-root-3gc12.11.2`)
 
 `LoweringRegistry::register_group` adds a named group. Before any per-item

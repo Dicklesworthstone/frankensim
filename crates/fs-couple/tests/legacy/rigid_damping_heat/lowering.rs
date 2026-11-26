@@ -622,15 +622,25 @@ fn a_shear_film_of_mu_a_over_h_steps_as_its_card_bushing_bit_for_bit() {
     let viscosity = ("dynamic_viscosity", 0.175, Dims([-1, 1, -1, 0, 0, 0]));
     let fluid = cards.insert_material(material(&[viscosity], Vec::new()));
     let at = |name, value, dims| vec![(ParameterKey::new(name, dims), QtyAny::new(value, dims))];
+    let mut query_point = at("T", 300.0, TEMPERATURE);
+    query_point.extend(at("phase-liquid", 1.0, Dims::NONE));
     let third_body = ThirdBodyDecl {
         material_card: fluid,
         film_thickness: QtyAny::new(0.5, LENGTH),
-        query_point: at("T", 300.0, TEMPERATURE),
+        query_point,
     };
-    let (mut input, state) = (draft.input().clone(), at("area", 2.0, AREA));
-    input.interfaces[0].kind = DraftInterfaceKind::ShearFilm { third_body, state };
-    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
-    let film = lower(&DraftAssembly::admit(input, &scenario).unwrap(), &cards);
+    let film_of = |area: f64| {
+        let (mut input, state) = (draft.input().clone(), at("area", area, AREA));
+        let third_body = third_body.clone();
+        input.interfaces[0].kind = DraftInterfaceKind::ShearFilm { third_body, state };
+        let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+        DraftAssembly::admit(input, &scenario).unwrap()
+    };
+    let mut registry = LoweringRegistry::with_kernel_defaults();
+    register_owners(&mut registry, fixture_laws());
+    let why = registry.lower(&film_of(0.0), &cards).err().unwrap();
+    assert!(why.to_string().contains("`area` must be positive"), "{why}");
+    let film = lower(&film_of(2.0), &cards);
     let r = &film.receipt.interfaces[0];
     assert_eq!((r.card_hash, r.third_body_card), (None, Some(fluid)));
     assert_eq!(r.card_family, "shear-film");
@@ -639,10 +649,14 @@ fn a_shear_film_of_mu_a_over_h_steps_as_its_card_bushing_bit_for_bit() {
     assert_eq!(source("damping_x").value.to_bits(), 0.7_f64.to_bits());
     let twist = 0.175 * 2.0 * 2.0 / (2.0 * PI * 0.5); // mu A^2 / (2 pi h), by hand
     assert!((source("damping_rz").value / twist - 1.0).abs() <= 1e-15);
-    let ParameterSource::DeclaredAssemblyField { field, .. } = &source("damping_z").source else {
-        panic!("{:?}", source("damping_z"));
+    let field = |name: &str| match &source(name).source {
+        ParameterSource::DeclaredAssemblyField { field, .. } => field.clone(),
+        other => panic!("{other:?}"),
     };
-    assert_eq!(field, "absent: squeeze is not linear");
+    assert_eq!(field("damping_z"), "absent: squeeze is not linear");
+    // Only the temperature is held; the other key is a plain declared value.
+    let held = "held: mu does not follow the film's temperature (one-way)";
+    assert_eq!([field("T"), field("phase-liquid")], [held, "phase-liquid"]);
     let names = ["viscous-network", "thermal-timeline"];
     let [film_n, card_n] = [&film, &card].map(|l| names.map(|k| l.node_map[k]));
     let (mut film, mut card) = (film.system, card.system);

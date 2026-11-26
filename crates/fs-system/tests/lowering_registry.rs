@@ -1893,6 +1893,42 @@ fn typed_t_axis_matches_absolute_temperature_keeps_legacy_and_refuses_mismatch()
     ));
 }
 
+#[test]
+fn a_declared_key_takes_its_claims_axis_spec_or_is_refused_by_name() {
+    let env = fs_system::MatDbQueryEnv {
+        ambient_temp_k: 293.15,
+        ambient_pressure_pa: 101_325.0,
+        policy: fs_matdb::SelectionPolicy::SingleClaimOnly,
+    };
+    let one = fs_qty::QuantitySpec::dimensional(Dims::NONE);
+    // `phase-liquid` bounded at 1, untyped or typed; one density claim per domain.
+    let legacy = ValidityDomain::unconstrained().with("phase-liquid", 1.0, 1.0);
+    let typed = legacy.clone().with_quantity("phase-liquid", one, 1.0, 1.0);
+    let run = |domains: &[&ValidityDomain], dims: Dims| {
+        let (mut claims, mut cards) = (ClaimSet::new(), CardStore::new());
+        for (i, &validity) in domains.iter().enumerate() {
+            let mut c = scalar_claim("density", 7800.0, DENSITY, &format!("claim {i}"));
+            c.validity = validity.clone();
+            claims.insert_claim(c).unwrap();
+        }
+        let card = MaterialCard::assemble(steel_card().id().clone(), claims, vec![]).unwrap();
+        let mut mr = mat_ref(cards.insert_material(card));
+        let key = ParameterKey::new("phase-liquid", dims);
+        mr.query_point.push((key, QtyAny::new(1.0, dims)));
+        let mut r = ProvenanceRecorder::default();
+        let answer = r.query_material_property("part:m", &cards, &mr, "density", "density", env);
+        answer.map(|_| ()).map_err(|e| e.to_string())
+    };
+    // Typed by its claim, where it went in untyped and was refused before.
+    assert_eq!(run(&[&typed], Dims::NONE), Ok(()));
+    assert_eq!(run(&[&legacy], Dims::NONE), Ok(()));
+    let named = |why: &str| format!("query key `phase-liquid`: its {why}");
+    let refusal = run(&[&typed], TEMPERATURE).unwrap_err();
+    assert!(refusal.contains(&named("dims are not")), "{refusal}");
+    let refusal = run(&[&typed, &legacy], Dims::NONE).unwrap_err();
+    assert!(refusal.contains(&named("claims disagree")), "{refusal}");
+}
+
 /// A toy owner group: one heat capacity of the card's density and specific
 /// heat over the part's box volume, each with its receipt.
 fn toy_capacity(
