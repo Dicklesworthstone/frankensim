@@ -26,20 +26,30 @@ Regression coverage is in `tests/driver_modes_and_store.rs`.
 
 ## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
 
-The seven default lumped elements used by `LoweringRegistry::with_kernel_defaults`
-implement `fs_ports::component::StageResidual`:
+Eleven lumped elements implement `fs_ports::component::StageResidual`:
 
-- Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`.
-- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`.
+- Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`, `Storage`.
+- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`.
+
+The dual laws support common-effort networks with the same source clocks,
+work, heat and entropy accounts as their ordinary proposal path. A publishing
+flow source retains both endpoint values in its signal output. The gyrator
+keeps its lossless cross-domain power relation.
 
 `LoweringGraph::add_with_tangent_and_residual` registers components carrying both
-`PortTangent` and `StageResidual`; the default lumped constructors in `lowering.rs`
-use it for these seven elements while leaving `Storage` (and all other non-default
-elements such as `Admittance`, `FlowSource`, `Gyrator`, `GapField`, `ControlledSource`,
-`Slider`, `Restriction`, `GasVolume`, `ConductanceMatrix`) without `StageResidual` so
-`AnalysisError::MissingTier(StageResidual)` remains pinned. Direct `SystemBuilder::add`
-and `add_with_tangent` callers do not attach `StageResidual`. Verification lives in
-`tests/elements_stage_residual.rs`.
+`PortTangent` and `StageResidual`; the default lumped and acoustic cavity
+constructors in `lowering.rs` use it. A cavity's integrated volume is its storage
+unknown, so the existing cavity/duct graph can participate in monolithic solves
+and stationary-analysis admission. Other elements such as `GapField`,
+`ControlledSource`, `Slider`, `Restriction`, `GasVolume` and `ConductanceMatrix`
+still lack this tier. Direct `SystemBuilder::add` and `add_with_tangent` callers
+do not attach `StageResidual`, even when the concrete type implements it.
+
+`tests/elements_stage_residual.rs` checks residual conformance, derivative
+identities, current-driven capacitor transients and the independent equilibrium
+`V = I/G`, and refusal when the tier was not registered. The acoustic lowering
+test compares cavity/duct evolution with an independent midpoint recurrence,
+the interface solver, and the energy account.
 
 ## Assembly source admission
 

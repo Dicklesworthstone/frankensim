@@ -131,7 +131,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo +nightly-2026-07-06 test --no-fail-fast -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --locked 2>&1 | tee "${RUNNER_TEMP}/composition-kernel.log"
+          cargo +nightly-2026-07-06 test --no-fail-fast -p fs-system --features constitutive --lib --test system_g0 --test elements --test step_cost --test power_maps --test parallel_elements --test checkpoints --test adaptive --test constitutive --test affine_signal --test sampled_controller --test signal_source --test signal_maps --test load_line --test multiple_load_lines --test electrical_switches --test snapshots --test driver_modes_and_store --test elements_stage_residual --test lowering_registry --test structural_planner --locked 2>&1 | tee "${RUNNER_TEMP}/composition-kernel.log"
       - name: Upload kernel test log
         if: ${{ !cancelled() && steps.constellation.outcome == 'success' }}
         uses: actions/upload-artifact@v4

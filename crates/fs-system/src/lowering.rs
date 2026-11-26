@@ -4920,7 +4920,7 @@ fn lower_acoustic_cavity_family(
     let compliance = acoustic_param(ctx.member, "acoustic_compliance_m5_n", &mut recorder)?;
 
     let c_name = format!("{}.compliance", ctx.member.name);
-    let c_node = graph.add_with_tangent(
+    let c_node = graph.add_with_tangent_and_residual(
         &c_name,
         None,
         Storage::in_domain(PortKind::FluidPressureFlux, compliance).map_err(|source| {

@@ -1045,6 +1045,95 @@ impl PortTangent for Storage {
     }
 }
 
+impl StageResidual for Storage {
+    fn unknowns(&self) -> usize {
+        1
+    }
+
+    fn initial_guess(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        inputs_finite(inputs)?;
+        z[0] = old + dt_s * inputs[0];
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        old: &f64,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(inputs)?;
+        inputs_finite(z)?;
+        r[0] = (z[0] - old) - dt_s * inputs[0];
+        outputs[0] = (0.5 * old + 0.5 * z[0]) / self.capacity;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &f64,
+        _dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(z)?;
+        dr[0] = dz[0];
+        d_outputs[0] = 0.5 * dz[0] / self.capacity;
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &f64,
+        _dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        inputs_finite(z)?;
+        bar_z[0] = bar_r[0] + 0.5 * bar_outputs[0] / self.capacity;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &f64,
+        _dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut f64,
+    ) -> Result<Receipt, ElementError> {
+        inputs_finite(inputs)?;
+        inputs_finite(z)?;
+        *new = z[0];
+        let mean = (0.5 * old + 0.5 * *new) / self.capacity;
+        let change_j = mean * (*new - old);
+        let scale =
+            self.stored_energy_j(old)?.abs() + self.stored_energy_j(new)?.abs() + change_j.abs();
+        Ok(Receipt::lossless(change_j, roundoff(scale)))
+    }
+}
+
 /// A spring between ports `a` and `b` with force
 /// `stiffness e + cubic e^3` at extension `e` [m]. The state is the extension
 /// from the unloaded length. Each port receives a flow [m/s] and returns the
@@ -1770,6 +1859,93 @@ impl PortTangent for Admittance {
     }
 }
 
+impl StageResidual for Admittance {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        inputs_finite(inputs)
+    }
+
+    fn residual(
+        &self,
+        old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.propose(old, dt_s, inputs, &mut (), outputs, cx)?;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _new: &mut (),
+    ) -> Result<Receipt, ElementError> {
+        inputs_finite(inputs)?;
+        let difference = inputs[0] - inputs[1];
+        let kelvin = temperature(inputs[2])?;
+        let flow = self.conductance * difference;
+        let dissipated_j = dt_s * (flow * difference);
+        Ok(Receipt {
+            stored_change_j: 0.0,
+            dissipated_j,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: dissipated_j / kelvin,
+            energy_tolerance_j: roundoff(
+                dt_s * (flow * inputs[0]).abs() + dt_s * (flow * inputs[1]).abs() + dissipated_j,
+            ),
+            residual: 0.0,
+            tolerance: 0.0,
+        })
+    }
+}
+
 /// Clock and energy account of a prescribed source
 /// ([`Force`], [`FlowSource`], [`Heater`]).
 ///
@@ -2203,6 +2379,85 @@ impl PortTangent for FlowSource {
     ) -> Result<(), ElementError> {
         bar_inputs[0] = 0.0;
         Ok(())
+    }
+}
+
+impl StageResidual for FlowSource {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &SourceAccount,
+        _dt_s: f64,
+        inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        inputs_finite(inputs)
+    }
+
+    fn residual(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        // Reuse the exact mean and optional endpoint signal, discarding the
+        // private candidate: source clocks advance only when the step accepts.
+        let mut candidate = *old;
+        self.propose(old, dt_s, inputs, &mut candidate, outputs, cx)?;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &SourceAccount,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &SourceAccount,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        new: &mut SourceAccount,
+    ) -> Result<Receipt, ElementError> {
+        inputs_finite(inputs)?;
+        let flow = prescribed(&self.flow, old, dt_s)?;
+        let (next, receipt) = source_step(old, dt_s, dt_s * inputs[0] * flow);
+        *new = next;
+        Ok(receipt)
     }
 }
 
@@ -2983,5 +3238,81 @@ impl PortTangent for Gyrator {
         bar_inputs[0] = -self.ratio * bar_outputs[1];
         bar_inputs[1] = self.ratio * bar_outputs[0];
         Ok(())
+    }
+}
+
+impl StageResidual for Gyrator {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        inputs_finite(inputs)
+    }
+
+    fn residual(
+        &self,
+        old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.propose(old, dt_s, inputs, &mut (), outputs, cx)?;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _new: &mut (),
+    ) -> Result<Receipt, ElementError> {
+        inputs_finite(inputs)?;
+        Ok(Receipt::lossless(
+            0.0,
+            roundoff(2.0 * dt_s * (self.ratio * inputs[0] * inputs[1]).abs()),
+        ))
     }
 }

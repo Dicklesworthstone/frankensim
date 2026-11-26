@@ -1,16 +1,18 @@
 //! Direct verification of `StageResidual` on default `fs-system` lumped
-//! elements (`Mass`, `Spring`, `Damper`, `Force`, `HeatCapacity`, `Conductance`,
-//! `Heater`), derivative identities (`jvp_z` FD + `vjp_z` adjoint), hand-derived
-//! steady-state oracles (`x* = F/k`, `T* = T_amb + Q/G`), monolithic parity,
-//! and explicit `MissingTier(StageResidual)` refusal on elements without
-//! `StageResidual` (`Storage`).
+//! elements, their dual common-effort laws and the cross-domain gyrator,
+//! derivative identities (`jvp_z` FD + `vjp_z` adjoint), hand-derived
+//! steady-state oracles (`x* = F/k`, `T* = T_amb + Q/G`, `V* = I/G`),
+//! monolithic parity, and explicit refusal when a component's residual tier
+//! has not been registered.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_ports::PortKind;
+use fs_ports::component::conformance::{Case, check_stage_residual};
 use fs_ports::component::{Component, Proposal, StageResidual};
 use fs_system::elements::{
-    Conductance, Damper, DissipationLaw, ElementError, Force, HeatCapacity, Heater, Mass, Motion,
-    SourceAccount, Spring, Storage, Waveform,
+    Admittance, Conductance, Damper, DissipationLaw, ElementError, FlowSource, Force, Gyrator,
+    HeatCapacity, Heater, Mass, Motion, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
     AnalysisError, AnalysisKind, BlockSolveMode, BlockSolverPolicy, NodeId, RequiredTier,
@@ -697,9 +699,9 @@ fn steady_state_oracles_forced_spring_mass_and_heater_conductance_sink() {
 }
 
 #[test]
-fn missing_tier_stage_residual_refuses_storage_element() {
+fn missing_tier_stage_residual_refuses_unregistered_storage_tier() {
     with_cx(|cx| {
-        // `Storage` intentionally does not implement `StageResidual` after S2-B.
+        // Implementing the trait does not opt a tangent-only registration into it.
         let mut b = SystemBuilder::new();
         let m = b
             .add_with_tangent_and_stage_residual(
@@ -723,7 +725,7 @@ fn missing_tier_stage_residual_refuses_storage_element() {
                 StationaryConfig::default(),
                 cx,
             )
-            .expect_err("Storage must trigger MissingTier(StageResidual)");
+            .expect_err("tangent-only Storage must trigger MissingTier(StageResidual)");
         assert!(matches!(
             err,
             AnalysisError::MissingTier {
@@ -732,5 +734,210 @@ fn missing_tier_stage_residual_refuses_storage_element() {
                 required: RequiredTier::StageResidual,
             } if node == "cap_storage"
         ));
+    });
+}
+
+#[test]
+fn dual_elements_and_gyrator_pass_stage_residual_conformance() {
+    with_cx(|cx| {
+        let dt_s = 0.02;
+        for kind in [
+            PortKind::MechanicalForceVelocity,
+            PortKind::RotationalTorqueAngularVelocity,
+            PortKind::ElectricalVoltageCurrent,
+            PortKind::FluidPressureFlux,
+        ] {
+            let storage = Storage::in_domain(kind, 0.25).unwrap();
+            for flow in [-1.5, 0.0, 2.0] {
+                check_stage_residual(
+                    &storage,
+                    &Case {
+                        state: &0.3,
+                        stale: &4.0,
+                        dt_s,
+                        inputs: &[flow],
+                    },
+                    &[0.3 + dt_s * flow],
+                    1.0e-8,
+                    1.0e-10,
+                    cx,
+                )
+                .unwrap();
+            }
+            check_stage_residual(
+                &Admittance::in_domain(kind, 0.4).unwrap(),
+                &Case {
+                    state: &(),
+                    stale: &(),
+                    dt_s,
+                    inputs: &[7.0, -2.0, 300.0],
+                },
+                &[],
+                1.0e-8,
+                1.0e-10,
+                cx,
+            )
+            .unwrap();
+            for publishing in [false, true] {
+                let source = FlowSource::in_domain(
+                    kind,
+                    Waveform::sine(0.7, 3.0, 0.2, -1.0).unwrap(),
+                );
+                let source = if publishing { source.publishing() } else { source };
+                check_stage_residual(
+                    &source,
+                    &Case {
+                        state: &SourceAccount::starting_at(0.13),
+                        stale: &SourceAccount::starting_at(8.0),
+                        dt_s,
+                        inputs: &[4.0],
+                    },
+                    &[],
+                    1.0e-8,
+                    1.0e-10,
+                    cx,
+                )
+                .unwrap();
+            }
+        }
+        for ratio in [-2.0, 0.5] {
+            check_stage_residual(
+                &Gyrator::new(
+                    PortKind::ElectricalVoltageCurrent,
+                    PortKind::RotationalTorqueAngularVelocity,
+                    ratio,
+                )
+                .unwrap(),
+                &Case {
+                    state: &(),
+                    stale: &(),
+                    dt_s,
+                    inputs: &[3.0, -0.7],
+                },
+                &[],
+                1.0e-8,
+                1.0e-10,
+                cx,
+            )
+            .unwrap();
+        }
+    });
+}
+
+struct ChargeMap(NodeId);
+
+impl StateMap for ChargeMap {
+    fn dim(&self) -> usize {
+        1
+    }
+
+    fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
+        out[0] = *system
+            .state::<f64>(self.0)
+            .ok_or(AnalysisError::Invalid { what: "charge" })?;
+        Ok(())
+    }
+
+    fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
+        system.set_accepted_state(self.0, state[0])?;
+        Ok(())
+    }
+}
+
+#[test]
+fn current_driven_capacitor_uses_monolithic_and_stationary_analysis() {
+    with_cx(|cx| {
+        let kind = PortKind::ElectricalVoltageCurrent;
+        let (capacitance, conductance, current) = (0.04, 0.2, 1.0);
+        let mut builder = SystemBuilder::new();
+        let capacitor = builder
+            .add_with_tangent_and_stage_residual(
+                "capacitor",
+                Storage::in_domain(kind, capacitance).unwrap(),
+                0.02,
+            )
+            .unwrap();
+        let resistor = builder
+            .add_with_tangent_and_stage_residual(
+                "resistor",
+                Admittance::in_domain(kind, conductance).unwrap(),
+                (),
+            )
+            .unwrap();
+        let source = builder
+            .add_with_tangent_and_stage_residual(
+                "current",
+                FlowSource::in_domain(kind, Waveform::constant(-current).unwrap()),
+                SourceAccount::default(),
+            )
+            .unwrap();
+        let (cp, ra, rb, rh, ip) = (
+            builder.port(capacitor, "p").unwrap(),
+            builder.port(resistor, "a").unwrap(),
+            builder.port(resistor, "b").unwrap(),
+            builder.port(resistor, "heat").unwrap(),
+            builder.port(source, "p").unwrap(),
+        );
+        builder.common_effort(cp, &[ra, ip]).unwrap();
+        builder.boundary(rb, Box::new(|_, _, out| out[0] = 0.0)).unwrap();
+        builder
+            .heat_route(
+                rh,
+                &[],
+                Some(fs_system::heat_sink("bath", 300.0).unwrap()),
+                RouteTemperature::Fixed(300.0),
+            )
+            .unwrap();
+        let mut system = builder.seal().unwrap();
+        system.check_analysis_capabilities(AnalysisKind::Stationary).unwrap();
+        assert!(
+            system
+                .execution_plan_for_dt(0.01)
+                .blocks
+                .iter()
+                .any(|block| block.solve_mode == BlockSolveMode::MonolithicNewtonKrylov)
+        );
+
+        // Independent trapezoidal solution of C dV/dt = I - G V, with
+        // the source work and resistor heat integrated at the same midpoint.
+        let dt = 0.01;
+        let mut voltage = 0.02 / capacitance;
+        let (mut supplied, mut heat) = (0.0, 0.0);
+        for _ in 0..32 {
+            let next = ((capacitance - 0.5 * dt * conductance) * voltage + dt * current)
+                / (capacitance + 0.5 * dt * conductance);
+            let mean = 0.5 * (voltage + next);
+            supplied += dt * current * mean;
+            heat += dt * conductance * mean * mean;
+            system.step(dt, cx).unwrap();
+            voltage = next;
+            assert_close(
+                *system.state::<f64>(capacitor).unwrap() / capacitance,
+                voltage,
+                1.0e-10,
+                "current-driven capacitor voltage",
+            );
+        }
+        let account = system.state::<SourceAccount>(source).unwrap();
+        assert_eq!(account.time_s(), system.time_s());
+        assert_close(-account.energy_in_j, supplied, 1.0e-11, "current-source work");
+        assert_close(system.ledger().total_dissipated_j(), heat, 1.0e-11, "resistor heat");
+        assert!(system.ledger().energy_residual_j().abs() < 1.0e-11);
+
+        let charge_before = *system.state::<f64>(capacitor).unwrap();
+        let time_before = system.time_s();
+        let account_before = *account;
+        let solution = system
+            .solve_stationary(&ChargeMap(capacitor), StationaryConfig::default(), cx)
+            .unwrap();
+        assert_close(
+            solution.state[0] / capacitance,
+            current / conductance,
+            1.0e-8,
+            "stationary V = I/G",
+        );
+        assert_eq!(*system.state::<f64>(capacitor).unwrap(), charge_before);
+        assert_eq!(*system.state::<SourceAccount>(source).unwrap(), account_before);
+        assert_eq!(system.time_s(), time_before);
     });
 }

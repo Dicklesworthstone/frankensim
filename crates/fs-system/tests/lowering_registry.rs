@@ -31,10 +31,11 @@ use fs_system::elements::{
     Admittance, Damper, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
-    AcousticAssemblySpec, AcousticMemberSpec, CardStore, FidelityRungKind, FidelitySelectionPolicy,
-    InterfaceKindTag, InterfaceLoweringKey, LoweredAcousticMemberOutput, LoweredInterfaceOutput,
-    LoweredPartOutput, LoweringError, LoweringRegistry, ParameterProvenance, ParameterSource,
-    PartLoweringKey, ProvenanceRecorder, RouteTemperature, SystemBuilder, heat_sink,
+    AcousticAssemblySpec, AcousticMemberSpec, AnalysisKind, BlockSolveMode, BlockSolverPolicy,
+    CardStore, FidelityRungKind, FidelitySelectionPolicy, InterfaceKindTag, InterfaceLoweringKey,
+    LoweredAcousticMemberOutput, LoweredInterfaceOutput, LoweredPartOutput, LoweringError,
+    LoweringRegistry, MonolithicConfig, ParameterProvenance, ParameterSource, PartLoweringKey,
+    ProvenanceRecorder, RouteTemperature, SystemBuilder, heat_sink,
 };
 
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
@@ -1706,12 +1707,77 @@ fn acoustic_assembly_families_lower_through_registry_and_refuse_unknown_family()
         .lower_acoustic_spec(&spec, &cards)
         .expect("acoustic families lower cleanly");
     assert_eq!(lowered.receipt.acoustic_members.len(), 4);
+    lowered
+        .system
+        .check_analysis_capabilities(AnalysisKind::Stationary)
+        .expect("every default acoustic owner offers its stage residual");
+    assert!(
+        lowered
+            .system
+            .block_modes()
+            .contains(&BlockSolveMode::MonolithicNewtonKrylov)
+    );
+    lowered
+        .system
+        .set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(
+            MonolithicConfig::default(),
+        ));
+    let mut reference = registry.lower_acoustic_spec(&spec, &cards).unwrap();
+    reference
+        .system
+        .set_solver_policy(BlockSolverPolicy::InterfaceNewton);
+
+    // Excite the Helmholtz pair: q is cavity integrated flow and u is duct flow.
+    // The independent midpoint equations are q' = -u and L u' = q/C - R u.
+    let cavity = lowered.node_map["body_cavity.compliance"];
+    let duct = lowered.node_map["soundhole_duct.inertance"];
+    let reference_cavity = reference.node_map["body_cavity.compliance"];
+    let reference_duct = reference.node_map["soundhole_duct.inertance"];
+    let compliance = 1.2e-7;
+    let inertance = 18.0;
+    let resistance = 500.0;
+    let initial_q = 1.2e-5;
+    lowered.system.set_accepted_state(cavity, initial_q).unwrap();
+    reference
+        .system
+        .set_accepted_state(reference_cavity, initial_q)
+        .unwrap();
+    let initial_energy = 0.5 * initial_q * initial_q / compliance;
+    let dt = 1.0 / f64::from(spec.sample_rate_hz);
+    let half_dt = 0.5 * dt;
+    let denominator = inertance + half_dt * resistance + half_dt * half_dt / compliance;
+    let mut expected_q = initial_q;
+    let mut expected_u = 0.0;
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
-        for _ in 0..16 {
-            lowered.system.step(1.0 / 48_000.0, cx).unwrap();
+        for _ in 0..32 {
+            let midpoint_u =
+                (inertance * expected_u + half_dt * expected_q / compliance) / denominator;
+            expected_q -= dt * midpoint_u;
+            expected_u = 2.0 * midpoint_u - expected_u;
+
+            let report = lowered.system.step(dt, cx).unwrap();
+            let reference_report = reference.system.step(dt, cx).unwrap();
+            assert_eq!(report.dt_s, dt);
+            assert_eq!(reference_report.dt_s, dt);
+            let q = *lowered.system.state::<f64>(cavity).unwrap();
+            let u = lowered.system.state::<Motion>(duct).unwrap().velocity_m_s;
+            let reference_q = *reference.system.state::<f64>(reference_cavity).unwrap();
+            let reference_u = reference
+                .system
+                .state::<Motion>(reference_duct)
+                .unwrap()
+                .velocity_m_s;
+            assert!((q - expected_q).abs() < 2.0e-13);
+            assert!((u - expected_u).abs() < 2.0e-11);
+            assert!((q - reference_q).abs() < 2.0e-13);
+            assert!((u - reference_u).abs() < 2.0e-11);
+            let stored_energy = 0.5 * q * q / compliance + 0.5 * inertance * u * u;
+            let dissipated_energy = lowered.system.ledger().total_dissipated_j();
+            assert!((stored_energy + dissipated_energy - initial_energy).abs() < 2.0e-12);
         }
     });
+    assert!(lowered.system.ledger().total_dissipated_j() > 0.0);
 
     // 2. Unregistered acoustic family ("reed") refuses by name until registered.
     let mut with_reed = spec.clone();
