@@ -45,9 +45,12 @@ case "${COMMAND}" in
     export PATH="${PATH}:/Users/jemanuel/.local/bin"
     export PYTHONPATH="${REPO_ROOT}/python:${PYTHONPATH:-}"
 
-    # 1. Ensure binary is fresh in target/debug
-    log_json "build_client" "running" "ensuring fs-cli binary is built"
-    if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "${CARGO_TARGET_DIR}/debug/frankensim" ]; then
+    # 1. Pick the binary: the caller's FRANKENSIM_BIN, else a debug build. This
+    #    step builds nothing; with neither, the client runs its own search.
+    log_json "build_client" "running" "selecting the fs-cli binary"
+    if [ -n "${FRANKENSIM_BIN:-}" ]; then
+      :
+    elif [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "${CARGO_TARGET_DIR}/debug/frankensim" ]; then
       export FRANKENSIM_BIN="${CARGO_TARGET_DIR}/debug/frankensim"
     elif [ -f "${REPO_ROOT}/target/debug/frankensim" ]; then
       export FRANKENSIM_BIN="${REPO_ROOT}/target/debug/frankensim"
