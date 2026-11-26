@@ -14,8 +14,9 @@ drifts from what the product does fails those lanes when they run.
 
 FrankenSim is fail-closed by design. `validate` reports every structural
 finding about your project and never guesses. A green validate means the
-file is a well-formed project under the frozen schema (`.fsim` v17, which `validate` prints as `fsim_version`) — not that
-physics has been solved. A solve runs seven durable stages — import-verify,
+file is a well-formed project under the frozen schema (`.fsim` v17, which
+`validate` prints as `fsim_version`) — not that physics has been solved. A
+solve runs seven durable stages — import-verify,
 assign, material-resolve, flow-network, conduction, qoi, report — and every
 number it retains carries an evidence colour and a no-claim. Every quantity
 of interest is **Estimated**. On the worked heatsink (section 4), seven of
@@ -32,9 +33,10 @@ section 6 reads the first of them deliberately.
 ## 1. Materialize the sibling constellation
 
 The workspace path-depends on seven pinned sibling Franken repositories.
-From a fresh checkout, in its root (with no argument, `rustup toolchain
-install` installs the toolchain `rust-toolchain.toml` pins,
-`nightly-2026-07-06`, with rustfmt and clippy):
+From a fresh checkout, in its root (with no argument, a current `rustup
+toolchain install` installs the toolchain `rust-toolchain.toml` pins,
+`nightly-2026-07-06`, with rustfmt and clippy; an older rustup needs that
+name as the argument):
 
 ```bash
 rustup toolchain install
@@ -98,9 +100,9 @@ through `"stage":"report"`, each `"status":"ok"` with its wall-clock
 (`wall_s`); each stage's receipt hash is in the report (section 5). Under
 `cargo run` these lines follow cargo's own output, which first replays the
 workspace's cached compiler warnings (over 300,000 lines on 2026-11-26);
-`2>&1 | grep '^{'` keeps only the JSON lines. Expected on stdout: `"status":"completed"`,
-`"stages_completed":7`, a 64-hex `"run"` id and the run receipt hash. Keep
-the run id:
+`2>&1 | grep '^{'` keeps only the JSON lines. Expected on stdout:
+`"status":"completed"`, `"stages_completed":7`, a 64-hex `"run"` id and the
+run receipt hash. Keep the run id:
 
 ```bash
 RUN="$(cargo run -p fs-cli --bin frankensim -- --json solve \
@@ -117,10 +119,10 @@ What the receipts say about this body (read them; the numbers below are the
 retained values of the reference run, not a promise): the flow network
 certifies an operating point of about 1.15 L/s through the fin channels at
 70 % fan speed; the Hausen developing-flow card is inside its validity
-domain at Re ≈ 1.5 × 10³; the conduction stage closes its energy balance to
-a relative 1e-10; the conduction mesh has 256 vertices (713 tetrahedra) with
-its quality census
-disclosed in the receipt; the temperature maximum is Estimated.
+domain at Re ≈ 1.5 × 10³; the conduction stage closes its energy balance
+within a relative 1e-10; the conduction mesh has 256 vertices (713
+tetrahedra) with its quality census disclosed in the receipt; the
+temperature maximum is Estimated.
 
 ## 5. Export the report and the evidence package
 
@@ -138,18 +140,19 @@ Expected: `<run>.report.html`, `<run>.report.json`, `<run>.field.vtu` and
 `<run>.fspkg` in `${WORK}`. The `.field.vtu` is the published tetrahedral
 mesh with nodal `temperature` (K) and per-cell `region_label`; open it in
 ParaView or VisIt. It is byte-for-byte the artifact the conduction receipt
-names as `field_artifact`; the `report` result on stdout carries `"verdict":"indeterminate"` and
-`"authority":"projection-of-retained-receipts"` and
-`"verification":"sealed-evidence"` (exports re-hash the sealed receipts and
-lineage; only `solve --resume` replays the physics); the package result carries
-`"checker":"pass"`. Open the HTML: its stage-receipt table lists the hash of
-every retained receipt the numbers are projected from (the JSON twin also
-names each QoI's `source_root`), and the uncertainty table prints NO-DATA
-where nothing was measured. For an indeterminate verdict it also states what would decide it:
-the unmeasured terms and how large they would have to be, combined, to fail
-the requirement (24.78 K on this body, all of it discretization, which the
-ladder variant below measures at 1.4 mK). Exporting twice is idempotent; an unknown run refuses without
-writing anything:
+names as `field_artifact`; the `report` result on stdout carries
+`"verdict":"indeterminate"`, `"authority":"projection-of-retained-receipts"`
+and `"verification":"sealed-evidence"` (exports re-hash the sealed receipts
+and lineage; only `solve --resume` replays the physics); the package result
+carries `"checker":"pass"`. Open the HTML: its stage-receipt table lists the
+hash of every retained receipt the numbers are projected from (the JSON twin
+also names each QoI's `source_root`), and the uncertainty table prints
+NO-DATA where nothing was measured. For an indeterminate verdict it also
+states what would decide it: the unmeasured terms and how large they would
+have to be, combined, to fail the requirement (24.78 K on this body, all of
+it discretization, which the ladder variant below measures at 1.4 mK).
+Exporting twice is idempotent; an unknown run refuses without writing
+anything:
 
 ```bash
 cargo run -p fs-cli --bin frankensim -- --json report \
@@ -178,7 +181,7 @@ an observed-order extrapolation — the receipt says which. With all eight
 terms measured (21.4 K combined), the ladder run's verdict is an Estimated
 `satisfied`.
 
-## 6. One-command run, and the two named refusals
+## 6. One-command run, and its named refusals
 
 `run` chains validate → solve → report → package on an imported ledger:
 
@@ -208,9 +211,11 @@ the fix, instead of extrapolating.
 Under Decision Record `ADPT-2026-07`, the Python SDK operates strictly
 out-of-process via structured JSON lines over the certified binary. The SDK
 is not packaged (there is no `pyproject.toml`): run Python from the checkout
-root with `PYTHONPATH=python`. The client runs `FRANKENSIM_BIN` when it is
-set, else the `frankensim` under `target/release` or `target/debug` (or the
-same under `CARGO_TARGET_DIR`), release first, else the one on `PATH`:
+root with `PYTHONPATH=python`. The client runs `FRANKENSIM_BIN` when it
+names an executable file; else, when `CARGO_TARGET_DIR` is set, its
+`release/frankensim` and then `debug/frankensim`; else the same two under
+the nearest `target/` above the SDK's source (normally the checkout's);
+else the one on `PATH`:
 
 ```python
 from frankensim import FrankenSimClient
@@ -221,8 +226,10 @@ print(f"Validation: {val.status}, Project hash: {val.project_hash}")
 ```
 
 You can run optimization studies against a durable ledger from the same client.
-For example, the first invocation below allows one thermal design iteration.
-The second reads the retained study and its accepted iterate from the ledger.
+For example, the first invocation below allows one thermal design iteration,
+so it stops at the budget with a retained partial run. The second resumes
+it: it replays the retained iterate from the ledger and continues under the
+study's own budgets (`:max-iterations 8`), so it prints `completed 8`.
 
 ```python
 from frankensim import ExitCode
