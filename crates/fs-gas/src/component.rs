@@ -792,9 +792,9 @@ impl Component for GasCavity {
 
     const STATE_CHARTER: Option<StateIdentityCharterV2> = Some(StateIdentityCharterV2 {
         owner: "fs-gas::component::GasCavity",
-        state_family: "closed-gas-parcel-state",
-        schema_grammar: "a closed parcel's volume, temperature and pressure on the cavity's reference",
-        codec_grammar: "three words: the bits of the volume, the temperature and the pressure",
+        state_family: "gas-cavity-parcel-state",
+        schema_grammar: "closed cavity: parcel volume, temperature and pressure on the cavity's reference; streaming cavity: version tag, mass, volume, temperature, pressure, fraction basis and N reference species fractions",
+        codec_grammar: "closed: three u64 words (f64 bits of volume, temperature, pressure); streaming: 6+N u64 words (version tag, f64 bits of mass, volume, temperature, pressure, basis code, and N f64 fraction bits)",
         codec_version: 1,
     });
 

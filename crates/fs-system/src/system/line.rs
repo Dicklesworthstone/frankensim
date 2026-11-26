@@ -420,7 +420,9 @@ impl System {
                 continue;
             }
             let local = index - self.input_start[node];
-            if let Some(shorter) = self.tangent_column(node, local, dt_s, &work.group_scale, false, cx)? {
+            if let Some(shorter) =
+                self.tangent_column(node, local, dt_s, &work.group_scale, false, cx)?
+            {
                 return Ok(Some(shorter));
             }
             // A declared tangent's column depends on the inputs, the
@@ -438,14 +440,13 @@ impl System {
         // Singular or not finite: the other components do not say what
         // flow answers an effort, so there is no line. The refusal names
         // the component that needed one.
-        let component = lines[0].node;
-        let no_line = |system: &Self| SystemError::LoadLine {
+        let no_line = |system: &Self, component: usize| SystemError::LoadLine {
             node: system.names[component].clone(),
             reason: "the other components of its block do not determine how the flows at its \
                      ports answer an effort: their Jacobian is singular or not finite",
         };
         if !work.condensed.factor() {
-            return Err(no_line(self));
+            return Err(no_line(self, lines[0].node));
         }
         for line in lines.iter_mut() {
             let width = line.places.len();
@@ -466,7 +467,7 @@ impl System {
                     }
                 }
                 if !work.condensed.solve(&mut work.residual) {
-                    return Err(no_line(self));
+                    return Err(no_line(self, line.node));
                 }
                 for (flow, &(_, _, unknown)) in line.places.iter().enumerate() {
                     line.compliance[flow * width + effort] = if unknown == usize::MAX {
@@ -495,7 +496,6 @@ impl System {
         }
         Ok(None)
     }
-
 
     /// Single-load-line fast path using `work.line_condensed`, optional
     /// Woodbury `LineTear`, and `affine_line` factor/compliance caching at an
@@ -578,8 +578,9 @@ impl System {
             let values = &self.scratch_outputs[..self.node_outputs(node).len()];
             work.found.keep_column(column, values);
             let reading = &work.readers[work.column_readers[column].clone()];
-            for (&(_, offset, slope), &slot) in
-                reading.iter().zip(&work.line_slots[work.line_slot_start[column]..])
+            for (&(_, offset, slope), &slot) in reading
+                .iter()
+                .zip(&work.line_slots[work.line_slot_start[column]..])
             {
                 work.line_condensed
                     .subtract(slot, slope * self.scratch_outputs[offset]);

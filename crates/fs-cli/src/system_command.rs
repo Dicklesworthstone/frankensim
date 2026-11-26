@@ -2129,15 +2129,22 @@ fn step_order(element: &Element) -> Option<u32> {
 fn declared_order_fits(order: f64, elements: &[Element]) -> Result<(), String> {
     for element in elements {
         if let Some(own) = step_order(element).filter(|own| order > f64::from(*own)) {
-            if matches!(
+            let held_control = matches!(
                 element.kind,
                 Kind::AffineSignal
+                    | Kind::SignalLimiter
                     | Kind::SignalSource
                     | Kind::ControlledEffort
                     | Kind::ControlledFlow
                     | Kind::ModulatedRestriction
                     | Kind::Inertance(_)
-            ) {
+            ) || (element.kind == Kind::GasCavity
+                && gas::stream_basis(&element.ports).is_none()
+                && element
+                    .ports
+                    .iter()
+                    .any(|port| port.role() == PortRole::SignalOut));
+            if held_control {
                 return Err(format!(
                     "adaptive.order: {} uses held start-of-step control signals; the supported order is 1, but the scene declares order {order}",
                     element.name,
@@ -6964,6 +6971,94 @@ mod tests {
             unused.is_empty(),
             "no element of the {scenes} scenes in examples/system has kind {unused:?}: \
              add a scene that uses each, so that a test saves and resumes it"
+        );
+    }
+
+    #[test]
+    fn declared_order_fits_names_held_controls_for_limiter_and_published_closed_cavity() {
+        use fs_ports::StableId;
+        use fs_ports::component::{PortRole, PortSpec, StreamBasis};
+        use fs_system::SystemBuilder;
+        use fs_system::elements::{Mass, Motion};
+        use std::num::NonZeroUsize;
+
+        let mut builder = SystemBuilder::new();
+        let rest = Motion {
+            position_m: 0.0,
+            velocity_m_s: 0.0,
+        };
+        let node = builder.add("n", Mass::new(1.0).unwrap(), rest).unwrap();
+        let make = |name: &str, kind: Kind, ports: Vec<PortSpec>| super::Element {
+            name: name.to_owned(),
+            kind,
+            node,
+            ports,
+            point_sampled_command: false,
+            nonlinear_dissipation: false,
+            temperature_k: None,
+            port_temperatures_k: Vec::new(),
+            node_capacity: None,
+            charge_voltage_curve: None,
+            flux_current_curve: None,
+            bodies: Vec::new(),
+            branches: Vec::new(),
+            gas: None,
+            material_sources: Vec::new(),
+            solids: Vec::new(),
+            coordinates: 0,
+            radius_m: None,
+            contact: None,
+            enthalpy: None,
+            modal: None,
+            ohmic: None,
+            laminar: None,
+            battery: None,
+            circuit: None,
+            drive: None,
+        };
+        let sig_out = PortSpec::signal_out(StableId::new("pressure").unwrap(), NonZeroUsize::MIN);
+        let basis = StreamBasis::new(
+            StableId::new("m").unwrap(),
+            StableId::new("d").unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let stream_port =
+            PortSpec::identified_stream(StableId::new("s").unwrap(), PortRole::FlowIn, basis)
+                .unwrap();
+
+        let lim_err = super::declared_order_fits(2.0, &[make("lim", Kind::SignalLimiter, vec![])])
+            .unwrap_err();
+        assert!(
+            lim_err
+                .contains("lim uses held start-of-step control signals; the supported order is 1"),
+            "unexpected limiter message: {lim_err}"
+        );
+
+        let pub_closed = make("cav_pub", Kind::GasCavity, vec![sig_out.clone()]);
+        let pub_err = super::declared_order_fits(2.0, &[pub_closed]).unwrap_err();
+        assert!(
+            pub_err.contains(
+                "cav_pub uses held start-of-step control signals; the supported order is 1"
+            ),
+            "unexpected published closed cavity message: {pub_err}"
+        );
+
+        let streaming_cav = make("cav_open", Kind::GasCavity, vec![stream_port, sig_out]);
+        let open_err = super::declared_order_fits(2.0, &[streaming_cav]).unwrap_err();
+        assert!(
+            open_err.contains("cav_open is a gas_cavity, whose step is of order 1"),
+            "unexpected streaming cavity message: {open_err}"
+        );
+
+        let plain_closed = make("cav_closed", Kind::GasCavity, vec![]);
+        assert!(super::declared_order_fits(2.0, &[plain_closed]).is_ok());
+        let plain_err =
+            super::declared_order_fits(3.0, &[make("cav_closed", Kind::GasCavity, vec![])])
+                .unwrap_err();
+        assert!(
+            plain_err.contains("cav_closed is a gas_cavity, whose step is of order 2"),
+            "unexpected unpublished closed cavity message: {plain_err}"
         );
     }
 }

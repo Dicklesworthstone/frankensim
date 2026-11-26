@@ -1954,3 +1954,25 @@ fn streaming_inventory_codec_and_admission_refuse_foreign_sources_and_bad_words(
     absent[6] = (-0.0_f64).to_bits();
     assert!(catalog.decode_state(&absent).is_none());
 }
+
+#[test]
+fn state_charter_describes_both_closed_and_streaming_codecs() {
+    let charter = GasCavity::STATE_CHARTER.expect("GasCavity declares a state charter");
+    assert_eq!(charter.owner, "fs-gas::component::GasCavity");
+    assert!(
+        charter.schema_grammar.contains("closed") && charter.schema_grammar.contains("streaming"),
+        "schema_grammar must describe both closed and streaming cavities: {}",
+        charter.schema_grammar
+    );
+    assert!(
+        charter.codec_grammar.contains("three") && charter.codec_grammar.contains("6+N"),
+        "codec_grammar must describe both 3-word closed and 6+N-word streaming codecs: {}",
+        charter.codec_grammar
+    );
+    let ref_closed = parcel(0.0, 0.0);
+    let closed = GasCavity::new(ref_closed.clone(), controls()).unwrap();
+    assert_eq!(encoded(&closed, &ref_closed).unwrap().len(), 3);
+    let ref_mix = mixture(0.6, 1.5e5);
+    let open = streaming(ref_mix.clone());
+    assert_eq!(encoded(&open, &ref_mix).unwrap().len(), 6 + 2);
+}

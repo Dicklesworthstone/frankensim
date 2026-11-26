@@ -6848,3 +6848,71 @@ fn affine_line_cache_matches_uncached_bitwise_under_alternating_step_lengths() {
     });
     assert!(saw_stuck && saw_sliding, "expected both stuck and sliding steps");
 }
+
+#[test]
+fn multi_line_solve_failure_names_the_failing_component() {
+    // Two load-line owners in one strongly connected block: the shared Jacobian
+    // factors cleanly (`c * dt / m_b = 1e-3`, largest entry `ratio * dt / m_b =
+    // 1e297 < MAX`) and `slider_a` (`lines[0]`) solves with finite positive
+    // compliance, while `slider_b` (`lines[1]`) overflows during
+    // back-substitution (`ratio^2 * dt / m_b = 1e447 = Inf`). The refusal must
+    // name `slider_b`, not `lines[0]` (`slider_a`).
+    let rest = Motion {
+        position_m: 0.0,
+        velocity_m_s: 0.0,
+    };
+    let mut builder = SystemBuilder::new();
+    let mass_a = builder
+        .add("mass_a", Mass::new(1.0).unwrap(), rest)
+        .unwrap();
+    let mass_b = builder
+        .add("mass_b", Mass::new(1.0e-150).unwrap(), rest)
+        .unwrap();
+    let damper = builder
+        .add("coupler", Damper::new(1.0e-150).unwrap(), ())
+        .unwrap();
+    let slider_a = builder
+        .add_on_line("slider_a", slider(), Slip::default())
+        .unwrap();
+    let slider_b = builder
+        .add_on_line("slider_b", slider(), Slip::default())
+        .unwrap();
+    builder
+        .common_flow(
+            port(&builder, mass_a, "p"),
+            &[port(&builder, slider_a, "a"), port(&builder, damper, "a")],
+        )
+        .unwrap();
+    builder
+        .common_flow_ratios(
+            port(&builder, mass_b, "p"),
+            &[
+                (port(&builder, slider_b, "a"), 1.0e150),
+                (port(&builder, damper, "b"), 1.0),
+            ],
+        )
+        .unwrap();
+    for s in [slider_a, slider_b] {
+        builder
+            .boundary(port(&builder, s, "b"), Box::new(|_, _, v| v[0] = 0.0))
+            .unwrap();
+        builder
+            .boundary(port(&builder, s, "heat"), Box::new(|_, _, v| v[0] = 300.0))
+            .unwrap();
+    }
+    builder
+        .boundary(
+            port(&builder, damper, "heat"),
+            Box::new(|_, _, v| v[0] = 300.0),
+        )
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert_eq!(system.execution_plan().blocks.len(), 1);
+    let refusal = with_cx(|cx| system.step(1.0e-3, cx)).unwrap_err();
+    assert!(
+        matches!(&refusal, SystemError::LoadLine { node, reason }
+            if node == "slider_b" && reason.contains("do not determine")),
+        "expected slider_b LoadLine refusal, got: {refusal}"
+    );
+    assert_eq!(system.steps(), 0);
+}
