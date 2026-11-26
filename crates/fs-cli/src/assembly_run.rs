@@ -25,6 +25,7 @@ use fs_exec::solver::{
     LegacySolverStateV1, codec as snap_codec,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_gas::component::ClosedGasParcel;
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
 use fs_ports::component::PortSpec;
 use fs_qty::Dims;
@@ -233,78 +234,133 @@ impl LegacySolverStateV1 for AssemblyStateEnvelope {
     }
 }
 
+const GAS_VOL_DIMS: Dims = Dims([3, 0, 0, 0, 0, 0]);
+const GAS_TEMP_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
+
+enum StateEntry {
+    Motion(NodeId, String, Option<Dims>),
+    Scalar(NodeId, String, Option<Dims>),
+    Gas(NodeId, String, String),
+}
+
 struct LoweredStateMap {
-    coords: Vec<(NodeId, bool, String, Option<Dims>)>,
+    entries: Vec<StateEntry>,
 }
 impl LoweredStateMap {
     fn from_lowered(lowered: &LoweredSystem) -> Self {
-        let mut coords = Vec::new();
+        let mut entries = Vec::new();
         for (name, &node) in &lowered.node_map {
             let dims = lowered.system.node_state_dimensions(node);
             if lowered.system.state::<Motion>(node).is_some() {
                 // `Motion::position_m` is an output integral absent from port laws;
                 // mapping only `velocity_m_s` keeps the state Jacobian nonsingular
                 // (matching `Mech2Map` / `ThermoMechMap` in `fs-system`).
-                coords.push((node, true, format!("{name}.velocity_m_s"), dims));
+                entries.push(StateEntry::Motion(
+                    node,
+                    format!("{name}.velocity_m_s"),
+                    dims,
+                ));
             } else if lowered.system.state::<f64>(node).is_some() {
-                coords.push((node, false, format!("{name}.state"), dims));
+                entries.push(StateEntry::Scalar(node, format!("{name}.state"), dims));
+            } else if lowered.system.state::<ClosedGasParcel>(node).is_some() {
+                entries.push(StateEntry::Gas(
+                    node,
+                    format!("{name}.volume_m3"),
+                    format!("{name}.temperature_k"),
+                ));
             }
         }
-        Self { coords }
+        Self { entries }
+    }
+    fn slot_meta(&self) -> Vec<(String, Option<Dims>)> {
+        let mut out = Vec::with_capacity(self.dim());
+        for e in &self.entries {
+            match e {
+                StateEntry::Motion(_, l, d) | StateEntry::Scalar(_, l, d) => {
+                    out.push((l.clone(), *d));
+                }
+                StateEntry::Gas(_, lv, lt) => {
+                    out.push((lv.clone(), Some(GAS_VOL_DIMS)));
+                    out.push((lt.clone(), Some(GAS_TEMP_DIMS)));
+                }
+            }
+        }
+        out
     }
     fn dims(&self, i: usize) -> Option<Dims> {
-        self.coords.get(i).and_then(|c| c.3)
+        self.slot_meta().get(i).and_then(|c| c.1)
     }
 }
 impl StateMap for LoweredStateMap {
     fn dim(&self) -> usize {
-        self.coords.len()
+        self.entries
+            .iter()
+            .map(|e| usize::from(matches!(e, StateEntry::Gas(..))) + 1)
+            .sum()
     }
     fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
-        if out.len() != self.coords.len() {
-            return Err(AnalysisError::Invalid {
-                what: "state length mismatch",
-            });
+        let inv = |what| AnalysisError::Invalid { what };
+        if out.len() != self.dim() {
+            return Err(inv("state length mismatch"));
         }
-        for (slot, (node, is_motion, _, _)) in out.iter_mut().zip(&self.coords) {
-            *slot = if *is_motion {
-                system
-                    .state::<Motion>(*node)
-                    .ok_or(AnalysisError::Invalid {
-                        what: "missing Motion",
-                    })?
-                    .velocity_m_s
-            } else {
-                *system.state::<f64>(*node).ok_or(AnalysisError::Invalid {
-                    what: "missing f64",
-                })?
-            };
+        let mut i = 0;
+        for e in &self.entries {
+            match e {
+                StateEntry::Motion(n, ..) => {
+                    let m = system.state::<Motion>(*n).ok_or(inv("missing Motion"))?;
+                    out[i] = m.velocity_m_s;
+                    i += 1;
+                }
+                StateEntry::Scalar(n, ..) => {
+                    out[i] = *system.state::<f64>(*n).ok_or(inv("missing f64"))?;
+                    i += 1;
+                }
+                StateEntry::Gas(n, ..) => {
+                    let g = system
+                        .state::<ClosedGasParcel>(*n)
+                        .ok_or(inv("missing gas"))?;
+                    out[i] = g.volume_m3();
+                    out[i + 1] = g.state().state().temperature;
+                    i += 2;
+                }
+            }
         }
         Ok(())
     }
     fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
-        if state.len() != self.coords.len() {
-            return Err(AnalysisError::Invalid {
-                what: "state length mismatch",
-            });
+        let inv = |what| AnalysisError::Invalid { what };
+        if state.len() != self.dim() {
+            return Err(inv("state length mismatch"));
         }
-        for ((node, is_motion, _, _), &val) in self.coords.iter().zip(state) {
-            if *is_motion {
-                let mut motion = *system
-                    .state::<Motion>(*node)
-                    .ok_or(AnalysisError::Invalid {
-                        what: "missing Motion",
-                    })?;
-                motion.velocity_m_s = val;
-                system.set_accepted_state(*node, motion)?;
-            } else {
-                system.set_accepted_state(*node, val)?;
+        let mut i = 0;
+        for e in &self.entries {
+            match e {
+                StateEntry::Motion(n, ..) => {
+                    let mut m = *system.state::<Motion>(*n).ok_or(inv("missing Motion"))?;
+                    m.velocity_m_s = state[i];
+                    system.set_accepted_state(*n, m)?;
+                    i += 1;
+                }
+                StateEntry::Scalar(n, ..) => {
+                    system.set_accepted_state(*n, state[i])?;
+                    i += 1;
+                }
+                StateEntry::Gas(n, ..) => {
+                    let g = system
+                        .state::<ClosedGasParcel>(*n)
+                        .ok_or(inv("missing gas"))?;
+                    let next = g
+                        .at_volume_temperature(state[i], state[i + 1])
+                        .map_err(|_| inv("gas"))?;
+                    system.set_accepted_state(*n, next)?;
+                    i += 2;
+                }
             }
         }
         Ok(())
     }
     fn labels(&self) -> Vec<String> {
-        self.coords.iter().map(|c| c.2.clone()).collect()
+        self.slot_meta().into_iter().map(|(l, _)| l).collect()
     }
 }
 
@@ -449,6 +505,8 @@ impl AssemblyPipeline<'_> {
                         } else if s.position_m.is_none() {
                             s.position_m = Some(v);
                         }
+                    } else if let Some(g) = sys.state::<ClosedGasParcel>(node) {
+                        s.temperature_k = Some(g.state().state().temperature);
                     }
                 }
                 if let Some(vec) = ents.get_mut(&part.name) {
@@ -660,15 +718,11 @@ impl AssemblyPipeline<'_> {
             AnalysisOutcome::Stationary(s) => {
                 trace.stationary_norm = Some(s.residual_norm);
                 trace.stationary_state = smap
-                    .coords
-                    .iter()
+                    .slot_meta()
+                    .into_iter()
                     .zip(s.state)
-                    .map(|(c, v)| {
-                        (
-                            c.2.clone(),
-                            v,
-                            c.3.and_then(dims_to_unit).unwrap_or("SI").into(),
-                        )
+                    .map(|((label, dims), v)| {
+                        (label, v, dims.and_then(dims_to_unit).unwrap_or("SI").into())
                     })
                     .collect();
                 for part in &self.admitted.draft.input().parts {

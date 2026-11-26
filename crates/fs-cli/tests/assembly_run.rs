@@ -1280,3 +1280,127 @@ fn a_held_relaxation_bushing_with_declared_memory_runs_from_its_fsim() {
         assert!(why.what.contains(named), "{named}: {}", why.what);
     }
 }
+
+fn gas_cubic_modes(alpha: f64, w_iso2: f64, w_ad2: f64) -> (f64, f64) {
+    let f = |x: f64| ((x + alpha) * x + w_ad2) * x + alpha * w_iso2;
+    let df = |x: f64| (3.0 * x + 2.0 * alpha) * x + w_ad2;
+    let (mut lo, mut hi) = (-alpha, 0.0);
+    for _ in 0..80 {
+        let m = 0.5 * (lo + hi);
+        if f(m) > 0.0 {
+            hi = m;
+        } else {
+            lo = m;
+        }
+    }
+    let mut r = 0.5 * (lo + hi);
+    for _ in 0..8 {
+        r -= f(r) / df(r);
+    }
+    let (sig, wn2) = (0.5 * (alpha + r), w_ad2 + r * (alpha + r));
+    ((wn2 - sig * sig).sqrt(), sig / wn2.sqrt())
+}
+
+fn gas_fsim(extra_phys: &str, extra_iface: &str, force_n: f64) -> String {
+    format!(
+        r#"(assembly "gas_piston_test" (version 1) (units "SI") (seed 0x41)
+  (versions (constellation "2026-07") (workspace "test-v1")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 90000Pa)
+  (time-plan :horizon 0.01s :dt 0.0005s :sample-rate 2000Hz)
+  (part "piston" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K :physics (mechanics) :fidelity lumped)
+  (part "gas" :kind cavity :geometry (cylinder 0.15m 0.20m) :material "N2" :query-at (pressure 90000Pa) :physics (fluid{extra_phys}) :fidelity lumped)
+  (interface "face" :kind piston-face :a "piston" :b "gas"){extra_iface}
+  (source "ambient_pressure" :part "piston" :port "mechanics" :history (constant {force_n:.17}N))
+  (probe "gas_temp" :kind field-quantity :target "gas" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 2000Hz)
+  (analysis-options :modal-max 4))"#
+    )
+}
+
+#[test]
+fn gas_piston_fsim_adiabatic_finite_g_and_transient_oracles() {
+    use fs_qty::semantic::{QuantityKind as Qk, SemanticType, ValueForm};
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/assemblies/packs");
+    let raw = |s: &str, p| RawCardPack {
+        kind: CardPackKind::Material,
+        source: s.into(),
+        bytes: std::fs::read(dir.join(p)).unwrap(),
+        expect: None,
+    };
+    let n2 = raw("n2.fsmcdpk", "nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk");
+    let st = raw(
+        "steel.fsmcdpk",
+        "steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk",
+    );
+    let g_wall = 50.0_f64;
+    let card = NormalizedMaterialCardPack::from_bytes(&n2.bytes).unwrap();
+    let packs = CardPackSet::admit(vec![n2, st, thermal_interface_pack(g_wall)]).unwrap();
+    let (r, h, t0, p0) = (0.15_f64, 0.20_f64, 300.0_f64, 90_000.0_f64);
+    let area = std::f64::consts::PI * r * r;
+    let (v0, m_p, f_amb) = (area * h, 7.8, -p0 * area);
+    let qs = |k| fs_qty::QuantitySpec::semantic(SemanticType::new(k, ValueForm::Static));
+    let qp = fs_matdb::QueryPoint::new()
+        .with_quantity("temperature", qs(Qk::AbsoluteTemperature), t0)
+        .unwrap()
+        .with_quantity("pressure", qs(Qk::Pressure), p0)
+        .unwrap();
+    let parcel = fs_gas::component::parcel_from_material_card(card.card(), qp, v0).unwrap();
+    let gs = parcel.state().state();
+    let cv = gs.specific_heat_cp - gs.specific_gas_constant;
+    let w_iso2 = p0 * area * area / (m_p * v0);
+    let w_ad2 = (gs.specific_heat_cp / cv) * w_iso2;
+    let ledger = Ledger::open(":memory:").unwrap();
+    let try_run = |src: &str, m| -> Result<String, String> {
+        let p = AssemblyCancelPlan::default();
+        let (o, _) = run_assembly(&ledger, src.as_bytes(), &packs, m, &mut step_clock(0.1), p)
+            .map_err(|e| e.what)?;
+        assert_eq!(o.status, SolveRunStatus::Completed);
+        Ok(o.run)
+    };
+    let run_one = |src: &str, m| {
+        let id = SolveRunId::parse_hex(&try_run(src, m).unwrap()).unwrap();
+        explain_assembly_run(&ledger, id).unwrap()
+    };
+    let pvals = |json: &Option<String>, key: &str| -> Vec<f64> {
+        let raw = json.as_deref().unwrap();
+        let after = raw.split(&format!("\"name\":\"{key}\"")).nth(1).unwrap();
+        let arr = after.split("\"values\":[").nth(1).unwrap();
+        let vals = arr.split(']').next().unwrap();
+        vals.split(',').map(|s| s.trim().parse().unwrap()).collect()
+    };
+    let ad_src = gas_fsim("", "", f_amb);
+    let ad_m = run_one(&ad_src, AssemblyAnalysisMode::Modal);
+    let ad_f = pvals(&ad_m.probe_series_json, "modal.frequency_hz");
+    let ad_z = pvals(&ad_m.probe_series_json, "modal.damping_ratio");
+    let f_osc = *ad_f.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+    assert!((f_osc - w_ad2.sqrt() / TAU).abs() / (w_ad2.sqrt() / TAU) <= 1e-6);
+    assert!(ad_z[2].abs() <= 1e-6);
+
+    let wall = "\n  (part \"frame\" :kind driven-body :geometry (box 0.1m 0.1m 0.1m) :material \"steel-music-wire-ligo-p1400229\" :query-temp 293.15K :physics (mechanics) :fidelity lumped)\n  (interface \"wall\" :kind thermal-contact :a \"gas\" :b \"frame\" :card \"AISI-304\" :family \"thermal-conductance\")";
+    let th_src = gas_fsim(" thermal", wall, f_amb);
+    let th_m = run_one(&th_src, AssemblyAnalysisMode::Modal);
+    let th_f = pvals(&th_m.probe_series_json, "modal.frequency_hz");
+    let th_z = pvals(&th_m.probe_series_json, "modal.damping_ratio");
+    let (wd_ex, zeta_ex) = gas_cubic_modes(g_wall / (parcel.mass_kg() * cv), w_iso2, w_ad2);
+    let idx = th_f.iter().position(|&v| v > 1.0).unwrap();
+    assert!((th_f[idx] - wd_ex / TAU).abs() / (wd_ex / TAU) <= 1e-6);
+    assert!((th_z[idx] - zeta_ex).abs() / zeta_ex <= 1e-5);
+
+    let tr_src = gas_fsim("", "", f_amb - 500.0);
+    let tr = run_one(&tr_src, AssemblyAnalysisMode::Transient);
+    let temps = pvals(&tr.probe_series_json, "gas_temp");
+    let t_end = *temps.last().unwrap();
+    assert!(temps.len() == 21 && (temps[0] - t0).abs() < 1e-12 && t_end > t0 + 0.01);
+    let res = tr.window_ledger_json.as_deref().unwrap();
+    let rv = res.split("\"energy_residual_j\":").nth(1).unwrap();
+    let rv = rv.split([',', '}']).next().unwrap();
+    assert!(rv.parse::<f64>().unwrap().abs() <= 1e-9);
+
+    let bad = ad_src.replace(
+        ":b \"gas\")",
+        ":b \"gas\" :card \"AISI-304\" :family \"thermal-conductance\")",
+    );
+    let err = try_run(&bad, AssemblyAnalysisMode::Modal).unwrap_err();
+    assert!(err.contains("piston face takes no card"));
+}

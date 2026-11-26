@@ -894,6 +894,7 @@ pub(crate) fn admit_assembly_source(
                     "solid" => DraftPartKind::Solid,
                     "spring-beam" => DraftPartKind::SpringBeam,
                     "driven-body" => DraftPartKind::DrivenBody,
+                    "cavity" => DraftPartKind::Cavity,
                     o => return Err(err(format!("{scope} unsupported kind `{o}`"))),
                 };
                 let mut materials = Vec::new();
@@ -1036,6 +1037,7 @@ pub(crate) fn admit_assembly_source(
                         "gap",
                         "fluid-at",
                         "memory",
+                        "sign",
                     ],
                     &scope,
                 )?;
@@ -1100,6 +1102,10 @@ pub(crate) fn admit_assembly_source(
                 if let Some(n) = kw.get("memory") {
                     state.extend(parse_memory(n, &scope)?);
                 }
+                if let Some(n) = kw.get("sign") {
+                    let sign = QtyAny::dimensionless(as_f64(n, "sign")?);
+                    state.push((ParameterKey::new("sign", Dims::NONE), sign));
+                }
                 let bare = "a temperature source takes no card or state";
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
                     // A heat route is bookkeeping, not a material interface: no card.
@@ -1107,6 +1113,10 @@ pub(crate) fn admit_assembly_source(
                         return Err(err(format!("{scope}: a heat route takes no card")));
                     }
                     "heat-route" => DraftInterfaceKind::HeatRoute { state },
+                    "piston-face" if kw.contains_key("card") || kw.contains_key("family") => {
+                        return Err(err(format!("{scope}: a piston face takes no card")));
+                    }
+                    "piston-face" => DraftInterfaceKind::PistonFace { state },
                     "shear-film" if kw.contains_key("card") || kw.contains_key("family") => {
                         return Err(err(format!("{scope}: a film's one card is its fluid")));
                     }

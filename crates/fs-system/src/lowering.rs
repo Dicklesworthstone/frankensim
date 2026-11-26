@@ -4616,6 +4616,63 @@ pub(crate) fn query_thermal_conductance(
     Ok(g)
 }
 
+fn wire_thermal_ends(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    recorder: &mut ProvenanceRecorder,
+    ports: [PortRef; 2],
+    scope: &str,
+) -> Result<(), LoweringError> {
+    let (cat, root, t_amb) = (
+        &ctx.draft.input().catalog,
+        ctx.draft.input().root,
+        ctx.ambient_temperature_k(),
+    );
+    let resolve = |feat| {
+        if let Some(p) = graph.resolve_entity_port(cat, feat, "thermal") {
+            Ok(Some(p))
+        } else if graph.is_ground_feature(cat, feat, root) {
+            Ok(None)
+        } else {
+            Err(LoweringError::MissingPort {
+                item: scope.to_owned(),
+                entity: feat,
+                port: "thermal".to_owned(),
+            })
+        }
+    };
+    let (pa, pb) = (
+        resolve(ctx.interface.feature_a)?,
+        resolve(ctx.interface.feature_b)?,
+    );
+    if pa.is_none() && pb.is_none() {
+        return Err(LoweringError::Invalid {
+            item: scope.to_owned(),
+            detail: "thermal interface cannot connect two ground features".to_owned(),
+        });
+    }
+    for (target, port) in [(pa, ports[0]), (pb, ports[1])] {
+        if let Some(t) = target {
+            graph.attach_common_effort(t, port, 1.0);
+        } else {
+            recorder.record_declared_field(
+                "ambient_bath_temperature_k",
+                t_amb,
+                TEMPERATURE_DIMS,
+                "environment",
+                "ambient_temperature",
+            );
+            graph.add_heat_route(
+                port,
+                Vec::new(),
+                Some(ambient_heat_sink(scope, t_amb)?),
+                RouteTemperature::Fixed(t_amb),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn lower_thermal_interface(
     ctx: &InterfaceLoweringContext<'_>,
     graph: &mut LoweringGraph,
@@ -4681,33 +4738,15 @@ fn lower_thermal_interface(
         );
     }
 
-    let catalog = &ctx.draft.input().catalog;
-    let port_a_target = graph
-        .resolve_entity_port(catalog, ctx.interface.feature_a, "thermal")
-        .ok_or_else(|| LoweringError::MissingPort {
-            item: scope.clone(),
-            entity: ctx.interface.feature_a,
-            port: "thermal".to_owned(),
-        })?;
-    let port_b_target = graph
-        .resolve_entity_port(catalog, ctx.interface.feature_b, "thermal")
-        .ok_or_else(|| LoweringError::MissingPort {
-            item: scope.clone(),
-            entity: ctx.interface.feature_b,
-            port: "thermal".to_owned(),
-        })?;
-
     let cond = Conductance::new(g_eff).map_err(|source| LoweringError::Element {
-        item: scope,
+        item: scope.clone(),
         source,
     })?;
     let node_name = format!("interface.{}", ctx.interface.name);
     let node =
         graph.add_with_tangent_and_residual(&node_name, Some(ctx.interface.entity), cond, ())?;
-    let a = graph.port(node, "a")?;
-    let b = graph.port(node, "b")?;
-    graph.attach_common_effort(port_a_target, a, 1.0);
-    graph.attach_common_effort(port_b_target, b, 1.0);
+    let ports = [graph.port(node, "a")?, graph.port(node, "b")?];
+    wire_thermal_ends(ctx, graph, &mut recorder, ports, &scope)?;
 
     let (property_receipts, parameter_sources) = recorder.finish();
     Ok(LoweredInterfaceOutput {

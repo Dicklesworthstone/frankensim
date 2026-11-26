@@ -37,6 +37,7 @@ const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
 
 pub(crate) const UNIT_DIMS: &[(&str, Dims)] = &[
     ("m", Dims([1, 0, 0, 0, 0, 0])),
+    ("m^3", Dims([3, 0, 0, 0, 0, 0])),
     ("m/s", Dims([1, 0, -1, 0, 0, 0])),
     ("s", Dims([0, 0, 1, 0, 0, 0])),
     ("K", Dims([0, 0, 0, 1, 0, 0])),
