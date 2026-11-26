@@ -4674,7 +4674,7 @@ fn casual_manifest_finish_statement(
 /// Inline tables, comments, and every string family are tracked explicitly;
 /// malformed delimiter state and every resource cap refuse before semantic
 /// package authority is derived.
-fn casual_manifest_statements(manifest: &str) -> Result<Vec<CasualManifestStatement>, String> {
+fn toml_statements(manifest: &str) -> Result<Vec<CasualManifestStatement>, String> {
     if manifest.len() > CASUAL_MAX_MANIFEST_BYTES {
         return Err(format!(
             "manifest exceeds the {CASUAL_MAX_MANIFEST_BYTES}-byte TOML audit cap"
@@ -4851,6 +4851,22 @@ fn casual_manifest_statements(manifest: &str) -> Result<Vec<CasualManifestStatem
     Ok(statements)
 }
 
+fn casual_manifest_statements(manifest: &str) -> Result<Vec<CasualManifestStatement>, String> {
+    let statements = toml_statements(manifest)?;
+    for statement in &statements {
+        if let CasualManifestStatement::Table {
+            path, array: true, ..
+        } = statement
+            && path
+                .first()
+                .is_some_and(|key| matches!(key.as_str(), "package" | "lib"))
+        {
+            return Err("package/lib must be TOML tables, not arrays of tables".to_string());
+        }
+    }
+    Ok(statements)
+}
+
 fn casual_manifest_string(value: &str) -> Result<String, String> {
     let value = value.trim();
     let Some(delimiter) = value.as_bytes().first().copied() else {
@@ -5014,26 +5030,18 @@ fn casual_manifest_table_path(line: &str) -> Result<Option<Vec<String>>, String>
     if !header.starts_with('[') {
         return Ok(None);
     }
-    let (inner, array) = if header.starts_with("[[") {
+    let inner = if header.starts_with("[[") {
         if !header.ends_with("]]") {
             return Err("unterminated TOML array-table header".to_string());
         }
-        (&header[2..header.len() - 2], true)
+        &header[2..header.len() - 2]
     } else {
         if !header.ends_with(']') {
             return Err("unterminated TOML table header".to_string());
         }
-        (&header[1..header.len() - 1], false)
+        &header[1..header.len() - 1]
     };
-    let path = casual_manifest_key_path(inner)?;
-    if array
-        && path
-            .first()
-            .is_some_and(|key| matches!(key.as_str(), "package" | "lib"))
-    {
-        return Err("package/lib must be TOML tables, not arrays of tables".to_string());
-    }
-    Ok(Some(path))
+    casual_manifest_key_path(inner).map(Some)
 }
 
 fn casual_manifest_assignment(line: &str) -> Result<Option<(Vec<String>, &str)>, String> {
@@ -8117,7 +8125,64 @@ fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
     })
 }
 
+/// Count package tables, including same-version packages from different sources.
+/// Dependency references and unused patches do not represent resolved packages.
+fn verify_runtime_identity(cargo_lock: &str, pinned: &str) -> Result<(), String> {
+    let statements =
+        toml_statements(cargo_lock).map_err(|error| format!("cannot parse Cargo.lock: {error}"))?;
+    let mut versions = Vec::new();
+    for table in
+        statements.chunk_by(|_, next| matches!(next, CasualManifestStatement::Assignment { .. }))
+    {
+        let Some((
+            CasualManifestStatement::Table {
+                path, array: true, ..
+            },
+            fields,
+        )) = table.split_first()
+        else {
+            continue;
+        };
+        if !casual_manifest_key_is(path, &["package"]) {
+            continue;
+        }
+        let field = |name| {
+            fields
+                .iter()
+                .find_map(|field| match field {
+                    CasualManifestStatement::Assignment { key, value, .. }
+                        if casual_manifest_key_is(key, &[name]) =>
+                    {
+                        Some(casual_manifest_string(value))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| format!("Cargo.lock package missing {name}"))?
+        };
+        if field("name")? == "asupersync" {
+            versions.push(field("version")?);
+        }
+    }
+    match versions.as_slice() {
+        [version] if version == pinned => Ok(()),
+        [version] => Err(format!(
+            "Cargo.lock resolves asupersync {version}, constellation.lock pins {pinned}"
+        )),
+        _ => Err(format!(
+            "Cargo.lock must resolve exactly one asupersync package; found {}: {versions:?}",
+            versions.len()
+        )),
+    }
+}
+
 fn verify_constellation_rows(root: &Path, rows: &[LockRow]) -> Result<(), String> {
+    let runtime = rows
+        .iter()
+        .find(|row| row.lib == "asupersync")
+        .ok_or("constellation.lock is missing the asupersync pin")?;
+    let lock = std::fs::read_to_string(root.join("Cargo.lock"))
+        .map_err(|error| format!("Cargo.lock unreadable: {error}"))?;
+    verify_runtime_identity(&lock, &runtime.version)?;
     if rows.len() != CONSTELLATION_REPOS.len() {
         return Err(format!(
             "lock declares {} libraries, expected {}",
@@ -12336,6 +12401,33 @@ path = "src/h\u0069dden.rs"
             },
         ];
         assert!(lock_rows_identity(&duplicate).is_err());
+    }
+
+    #[test]
+    fn cargo_lock_requires_one_asupersync_package_matching_the_pin() {
+        let path = "[[package]]\nname = \"asupersync\"\nversion = \"0.6.2\"\n";
+        let registry =
+            format!("{path}source = \"registry+https://github.com/rust-lang/crates.io-index\"\n");
+        let other = "[[package]]\nname = \"fs-exec\"\nversion = \"0.0.1\"\ndependencies = [\n \"asupersync\",\n]\n";
+        let unused = "[[patch.unused]]\nname = \"asupersync\"\nversion = \"0.5.0\"\n";
+        assert!(verify_runtime_identity(&format!("{other}{path}{unused}"), "0.6.2").is_ok());
+        assert!(
+            verify_runtime_identity(&format!("{other}{unused}"), "0.6.2")
+                .unwrap_err()
+                .contains("found 0")
+        );
+        for second in [registry.clone(), registry.replace("0.6.2", "0.4.11")] {
+            assert!(
+                verify_runtime_identity(&format!("{path}{second}"), "0.6.2")
+                    .unwrap_err()
+                    .contains("found 2")
+            );
+        }
+        assert!(
+            verify_runtime_identity(path, "0.7.0")
+                .unwrap_err()
+                .contains("constellation.lock pins 0.7.0")
+        );
     }
 
     #[test]
