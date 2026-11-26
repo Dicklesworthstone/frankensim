@@ -260,7 +260,7 @@ function compileSettled(renderer: THREE.WebGLRenderer, scene: THREE.Object3D, ca
       else setTimeout(check, 10);
     };
     // Without the extension three counts every program ready at once, and its first draw waits for the link: give the
-    // driver a moment's start first, as three's does.
+    // driver a moment's start first, as three's compileAsync does.
     if (renderer.extensions.has("KHR_parallel_shader_compile")) check();
     else setTimeout(check, 10);
   });

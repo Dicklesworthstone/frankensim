@@ -397,8 +397,8 @@ function plateMaterials(): { plate: THREE.MeshStandardMaterial; led: THREE.MeshB
   const lines = ["MODEL  CR-2D-49S", "SERIAL 26-114870", "115 V  60 Hz  1 PH", "FULL LOAD  6.8 A", "REFRIGERANT  R-290", "CHARGE  150 g", "DESIGN P  HI 2.6 MPa", "          LO 1.0 MPa", "FOR USE BY TRAINED", "PERSONNEL ONLY"];
   lines.forEach((l, i) => x.fillText(l, 20, 66 + i * 18));
   // Tile 1: a control panel's printed graphics: keys, arrows, a bezel (no model shows it yet). The arrows and the power
-  // mark are drawn, not typed: no common font has them, and the browser's first search through the system's fonts for
-  // one costs a phone a frame or more.
+  // mark are drawn, not typed: the page's sans-serif lacks them, and typing the first sent the browser through the
+  // system's fonts for a fallback (about 17 ms on a desktop, in the middle of the hero kitchen's build).
   x.fillStyle = "#1a1c20";
   x.fillRect(256, 0, 256, 256);
   x.strokeStyle = "#8a9099";
