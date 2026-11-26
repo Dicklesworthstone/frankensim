@@ -396,18 +396,39 @@ function plateMaterials(): { plate: THREE.MeshStandardMaterial; led: THREE.MeshB
   x.font = "15px monospace";
   const lines = ["MODEL  CR-2D-49S", "SERIAL 26-114870", "115 V  60 Hz  1 PH", "FULL LOAD  6.8 A", "REFRIGERANT  R-290", "CHARGE  150 g", "DESIGN P  HI 2.6 MPa", "          LO 1.0 MPa", "FOR USE BY TRAINED", "PERSONNEL ONLY"];
   lines.forEach((l, i) => x.fillText(l, 20, 66 + i * 18));
-  // Tile 1: a control panel's printed graphics: keys, arrows, a bezel.
+  // Tile 1: a control panel's printed graphics: keys, arrows, a bezel (no model shows it yet). The arrows and the power
+  // mark are drawn, not typed: no common font has them, and the browser's first search through the system's fonts for
+  // one costs a phone a frame or more.
   x.fillStyle = "#1a1c20";
   x.fillRect(256, 0, 256, 256);
   x.strokeStyle = "#8a9099";
   x.lineWidth = 2;
-  for (let i = 0; i < 4; i++) {
-    x.strokeRect(276 + i * 58, 170, 44, 44);
-    x.fillStyle = "#cfd4da";
-    x.font = "bold 22px sans-serif";
-    x.fillText(["▲", "▼", "SET", "⏻"][i]!, 284 + i * 58 - (i === 2 ? 4 : 0), 200);
-  }
+  for (let i = 0; i < 4; i++) x.strokeRect(276 + i * 58, 170, 44, 44);
   x.strokeRect(270, 24, 228, 120);
+  {
+    x.save();
+    const kc = (i: number) => 298 + i * 58;
+    x.fillStyle = x.strokeStyle = "#cfd4da";
+    for (const [i, dir] of [[0, -1], [1, 1]] as const) {
+      x.beginPath();
+      x.moveTo(kc(i) - 10, 192 - dir * 8.5);
+      x.lineTo(kc(i) + 10, 192 - dir * 8.5);
+      x.lineTo(kc(i), 192 + dir * 8.5);
+      x.closePath();
+      x.fill();
+    }
+    x.font = "bold 22px sans-serif";
+    x.textAlign = "center";
+    x.fillText("SET", kc(2), 200, 38);
+    x.lineWidth = 2.4;
+    x.lineCap = "round";
+    x.beginPath();
+    x.arc(kc(3), 193, 7.5, -Math.PI / 2 + 0.7, -Math.PI / 2 - 0.7 + 2 * Math.PI);
+    x.moveTo(kc(3), 183);
+    x.lineTo(kc(3), 192);
+    x.stroke();
+    x.restore();
+  }
   // Tile 2: the ice machine's front panel graphics.
   x.fillStyle = "#e7e9ec";
   x.fillRect(512, 0, 256, 256);
