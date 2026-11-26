@@ -251,6 +251,122 @@ fn base_scenario(name: &str) -> Scenario {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn step_sources_keep_exact_jumps_and_integrated_force_and_heat() {
+    let mut cards = CardStore::new();
+    let steel_hash = cards.insert_material(steel_card());
+    let adjacent = f64::from_bits(0.5_f64.to_bits() + 1);
+    let gate = CancelGate::new_clock_free();
+
+    // G0/G1: each interval uses the authored constant force and heating power.
+    // A jump at zero is already active; distinct adjacent jumps stay distinct.
+    for (force_switch, heat_switch, expected_times) in [
+        (0.0, 0.0, vec![1.0]),
+        (0.375, 0.625, vec![0.375, 0.625, 1.0]),
+        (0.5, adjacent, vec![0.5, adjacent, 1.0]),
+    ] {
+        let mut catalog = EntityCatalog::new();
+        let root = catalog
+            .declare(EntityDeclaration::assembly("step_sources"))
+            .unwrap();
+        let body = catalog
+            .declare(EntityDeclaration::part(root, "body"))
+            .unwrap();
+        let input = DraftAssemblyInput {
+            name: "step_sources".to_owned(),
+            root,
+            catalog,
+            reference_state: Some(ReferenceState::Unloaded),
+            environment: DraftEnvironment::earth_lab_air(),
+            time_plan: fixed_time_plan(1.0, 1.0),
+            parts: vec![DraftPartDecl {
+                name: "body".to_owned(),
+                entity: body,
+                kind: DraftPartKind::RigidBody,
+                geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
+                    lx: QtyAny::new(0.1, LENGTH),
+                    ly: QtyAny::new(0.05, LENGTH),
+                    lz: QtyAny::new(0.05, LENGTH),
+                }),
+                materials: vec![mat_ref(steel_hash)],
+                physics: BTreeSet::from([PhysicsDomain::Mechanics, PhysicsDomain::Thermal]),
+                fidelity: policy_rungs(vec![FidelityRung::Lumped]),
+                uncertainty: Vec::new(),
+            }],
+            joints: Vec::new(),
+            gear_meshes: Vec::new(),
+            interfaces: Vec::new(),
+            sources: vec![
+                SourceDecl {
+                    name: "force".to_owned(),
+                    target: SourceTarget::Port {
+                        entity: body,
+                        port: "mechanics".to_owned(),
+                    },
+                    history: TimeHistory::Step {
+                        t_switch: QtyAny::new(force_switch, TIME),
+                        before: QtyAny::new(2.0, FORCE),
+                        after: QtyAny::new(6.0, FORCE),
+                    },
+                },
+                SourceDecl {
+                    name: "heater".to_owned(),
+                    target: SourceTarget::Port {
+                        entity: body,
+                        port: "thermal".to_owned(),
+                    },
+                    history: TimeHistory::Step {
+                        t_switch: QtyAny::new(heat_switch, TIME),
+                        before: QtyAny::new(100.0, POWER),
+                        after: QtyAny::new(300.0, POWER),
+                    },
+                },
+            ],
+            controllers: Vec::new(),
+            probes: Vec::new(),
+        };
+        let scenario = base_scenario("step_sources");
+        let draft = DraftAssembly::admit(input, &scenario).unwrap();
+        let initial_temperature = draft.input().environment.base.ambient_temperature.value;
+        let mut lowered = LoweringRegistry::with_kernel_defaults()
+            .lower(&draft, &cards)
+            .unwrap();
+        let mass = lowered.node_map["body.mechanics"];
+        let capacity = lowered.node_map["body.thermal"];
+        let force = lowered.node_map["source.force"];
+        let heater = lowered.node_map["source.heater"];
+
+        with_cx(&gate, |cx| {
+            for end in expected_times {
+                let report = lowered
+                    .system
+                    .step(1.0 - lowered.system.time_s(), cx)
+                    .unwrap();
+                assert_eq!(report.time_s, end, "no ramp or extra event before a jump");
+                let since_force = (end - force_switch).max(0.0);
+                let since_heat = (end - heat_switch).max(0.0);
+                let velocity = (2.0 * end + 4.0 * since_force) / 2.0;
+                let position = (end * end + 2.0 * since_force * since_force) / 2.0;
+                let heat = 100.0 * end + 200.0 * since_heat;
+                let motion = lowered.system.state::<Motion>(mass).unwrap();
+                assert!((motion.velocity_m_s - velocity).abs() < 2.0e-14);
+                assert!((motion.position_m - position).abs() < 2.0e-14);
+                let temperature = *lowered.system.state::<f64>(capacity).unwrap();
+                assert!((temperature - initial_temperature - heat / 1000.0).abs() < 2.0e-13);
+                let force_account = lowered.system.state::<SourceAccount>(force).unwrap();
+                let heat_account = lowered.system.state::<SourceAccount>(heater).unwrap();
+                assert_eq!(force_account.time_s(), end);
+                assert_eq!(heat_account.time_s(), end);
+                assert!((force_account.energy_in_j + velocity * velocity).abs() < 1.0e-12);
+                assert!((heat_account.energy_in_j + heat).abs() < 1.0e-12);
+                assert!(lowered.system.ledger().energy_residual_j().abs() < 1.0e-11);
+            }
+        });
+        assert_eq!(lowered.system.time_s(), 1.0);
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn slice_a_draft_lowers_to_exact_hand_built_graph_match() {
     let mut cards = CardStore::new();
     let steel_hash = cards.insert_material(steel_card());

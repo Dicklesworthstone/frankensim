@@ -3413,17 +3413,15 @@ fn time_history_to_waveform(scope: &str, history: &TimeHistory) -> Result<Wavefo
             before,
             after,
         } => {
-            // Represent a step transition with a razor-narrow 1e-12 s ramp inside
-            // Waveform::table so Force/Heater exact-integration stays C0 and hits
-            // exact knot events at t_switch.
-            let eps = 1.0e-12_f64.max(t_switch.value.abs() * 1.0e-12);
-            let t0 = (t_switch.value - eps).max(0.0);
-            let t1 = if t0 < t_switch.value {
-                t_switch.value
+            // The run starts at zero. A switch at zero has already happened;
+            // otherwise the held waveform preserves the declared jump and lets
+            // the source's ordinary event negotiation end a step at its time.
+            if t_switch.value == 0.0 {
+                Waveform::constant(after.value).map_err(err)
             } else {
-                t_switch.value + eps
-            };
-            Waveform::table(vec![(t0, before.value), (t1, after.value)]).map_err(err)
+                Waveform::held_table(vec![(0.0, before.value), (t_switch.value, after.value)])
+                    .map_err(err)
+            }
         }
     }
 }
