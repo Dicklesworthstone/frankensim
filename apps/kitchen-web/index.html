@@ -1146,7 +1146,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
               <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
               <p class="kicker">
-                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out.
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other.
               </p>
             </div>
             <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -1214,11 +1214,72 @@
               <div>
                 <p>The kitchen has two 10-pan combi ovens, a six-burner range and a worktable with room for three cooks, and a crew of two to four. Each meal is one of the three dishes, 40, 35 and 25% of the order, plus a salad and bread. Each dish is a chain of stages: prep at the table, a pot or pan on the range, a program in an oven, and packing into hotel pans for the van. Work at the table takes a whole cook. A pan on the range takes half a cook, since one cook can mind two, and a risotto or a skillet of tortillas takes all of one. Only two cooks fit at the range, one at each half, so a third has to wait for a place there. An oven takes a cook to load and to unload, nobody while it runs, and one dish to a program.</p>
                 <p>The plan steps from one event to the next. A free cook pans up food just off the heat first, then takes the ready stage with the most work still behind it, at the station they're already at when they can. Each dish starts cooking as early as leaves it at its best when lunch is served at 11:30, and no more than 90 minutes before it has to. The van leaves when the last pan is packed. Making what keeps the day before moves the prep that keeps a day, and all the cooking of the dishes that keep, to the day before; this morning they are only reheated.</p>
-                <p>The limit chart runs each menu at more and more meals, ten at a time, up to the most that leave at 10:30 with nothing past its best. The chart under the kitchen is the plan itself; the cooks act out each stretch of it.</p>
+                <p>The limit chart finds, for each menu, the most meals that leave at 10:30 with nothing past its best: it halves the gap between an order that makes the van and one that doesn't until they are ten meals apart, and an order on screen that makes the van sets it higher. The chart under the kitchen is the plan itself; the cooks act out each stretch of it.</p>
               </div>
               <div>
                 <code class="formula">start ≥ 11:30 − holding time − cooking time<br />van = max(10:30, last pan packed)</code>
                 <p class="model">Model: <code>planMorning</code>. Batch sizes, minutes per portion and holding times are set for a catering commissary.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal cr-fig" id="crowd">
+            <header class="fig-head">
+              <p class="todo">Add cooks until they get in each other's way</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage cr-stage" data-crowd-stage>
+                <canvas data-crowd-canvas tabindex="0" aria-label="A commissary kitchen seen from the front: two combi ovens, two ranges, a braising pan and a steam kettle under one long hood, a prep island across the aisle, reach-ins on the left wall and the pack-out on the right. Up to eight cooks loop between them a pan at a time; anyone standing still because someone is in their way is ringed in red. Drag to look around."></canvas>
+                <div class="wk-hud cr-hud" aria-hidden="true"><b data-cr-hud-name>As built · 8 cooks</b><span data-cr-hud-clock>…</span><em data-cr-hud-wait>…</em></div>
+                <p class="wk-legend cr-legend" aria-hidden="true"><span class="body">Waiting on someone</span><span class="place">Waiting for a free place</span><span class="heat">Where waits piled up</span></p>
+              </div>
+              <div class="lab cr-lab">
+                <div class="lab-view">
+                  <div class="rs-chart cr-chart" data-crowd-chart role="img" aria-label="Pans an hour for one to eight cooks: as built, with the island pulled back, and with nobody ever in anybody's way"></div>
+                  <p class="wk-keys cr-keys" aria-hidden="true"><span class="built">As built, island 42 in from the line</span><span class="moved">Island pulled back to 60 in</span><span class="ghost">Nobody ever in the way</span></p>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>Pans an hour</span><b><i data-cr-pans>…</i></b><small data-cr-pans-s>…</small></div>
+                    <div class="wk-tile"><span>Lost to each other</span><b><i data-cr-lost>…</i></b><small data-cr-lost-s>…</small></div>
+                    <div class="wk-tile"><span>Each cook stands waiting</span><b><i data-cr-wait>…</i></b><small data-cr-wait-s>…</small></div>
+                    <div class="wk-tile"><span>The other island</span><b><i data-cr-other>…</i><em data-cr-other-d hidden></em></b><small data-cr-other-s>…</small></div>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">One person can't walk through another.</p>
+                  <div class="field">
+                    <p class="micro">The island · the hood stays put</p>
+                    <div class="seg fill" role="group" aria-label="The island">
+                      <button type="button" data-cr-key="built" aria-pressed="true">As built, 42 in</button>
+                      <button type="button" data-cr-key="moved" aria-pressed="false">Pulled back, 60 in</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Cooks on the floor</b><output data-cr-crew-val>8 cooks</output></span><input type="range" min="1" max="8" step="1" value="8" data-cr-crew aria-label="Cooks on the floor" /></label>
+                  <div class="status" data-cr-status data-state="warn">Running the crew…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="crowd-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>The kitchen is 9 m by 4.4 m. Along the back wall, under one 24 ft hood, stand two combi ovens, two six-burner ranges, a tilting braising pan and a steam kettle. Across the hot aisle is an island of two 96-inch tables with four prep places on each side. Two reach-ins stand on the left wall, and the pack-out table and carriers on the right. As built, the island is 42 inches from the line. Pulled back, it is 60 inches from the line, and the aisle behind it shrinks from 62 to 44 inches.</p>
+                <p>Each cook works one pan at a time:</p>
+                <ul>
+                  <li>8 seconds at a reach-in;</li>
+                  <li>40 seconds of prep at their own place on the island;</li>
+                  <li>45 seconds of hands-on work at the first free place on the line;</li>
+                  <li>8 seconds to pack it, then back to the reach-ins.</li>
+                </ul>
+                <p>Every walk is planned on the cook's own footsteps. It leaves only when the whole path stays clear of everyone else's body, both while the cook walks and while they stand at the end. A cook who finds the way blocked waits where they are and tries again each second. After two seconds, anyone standing idle in their way steps into the nearest free place.</p>
+                <p>Ghost cooks walk through each other, so they only ever wait for a free reach-in door, line place or pack-out place. Each setting runs three twenty-minute mornings, the cooks starting their first pans 5, 7 and 9 seconds apart, because one morning's loss swings with when the cooks happen to meet. Pans an hour pool the pans packed between minute 4 and minute 20 of all three, and the floor marks every wait in all three. The kitchen on screen plays the middle morning at three times speed.</p>
+              </div>
+              <div>
+                <code class="formula">lost = 1 − pans with bodies ÷ pans as ghosts</code>
+                <p class="model">Model: <code>runCrowd</code>, on the crowd planner that walks the cooks in the kitchen at the top of the page. Seconds per pan are set for a commissary hot line.</p>
               </div>
                 </div>
               </details>

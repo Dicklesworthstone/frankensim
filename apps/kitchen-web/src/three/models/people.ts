@@ -5742,7 +5742,6 @@ export class Routine {
     return this.segs[this.segIndex(tm)]!.type;
   }
 
-  /** Place and pose the person at time t; returns what they are doing. */
   /**
    * Every footstep the routine plans, in time order: where each foot lands, facing which way, and when it lands and
    * lifts (seconds from the start). The feet's places at the start are not steps. For counting the steps a layout
@@ -5754,6 +5753,7 @@ export class Routine {
     return out.sort((a, b) => a.tOn - b.tOn);
   }
 
+  /** Place and pose the person at time t; returns what they are doing. */
   apply(t: number): RoutineState {
     const st = this.staff;
     const B = st.B;
@@ -5926,6 +5926,17 @@ export function routeRoutine(staff: Staff, waypoints: readonly (readonly [number
     steps.push({ kind: "turn", yaw: face(j), upper });
   }
   return new Routine(staff, { x: waypoints[0]![0], z: waypoints[0]![1], yaw: face(0) }, steps, true);
+}
+
+/**
+ * A cohort's body for planning only: the numbers a Routine places feet and times steps by (`Staff.B`) and its
+ * measurements (`Staff.dims`), with no meshes, so routines can be planned off screen or in a worker. A real Staff of
+ * the same cohort plans the very same footsteps. Use only a Routine's planning side with it (rootAt, activityAt,
+ * stepTimes, duration, footfalls), never apply().
+ */
+export function planningBody(cohort: Cohort): Staff {
+  const B = layout(cohort);
+  return { B, dims: B.d } as unknown as Staff;
 }
 
 /** Build a person: chef whites, apron, trousers and shoes on a body built to the cohort's row. */

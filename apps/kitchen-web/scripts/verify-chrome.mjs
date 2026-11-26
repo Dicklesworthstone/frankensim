@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 11 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 12 WebGL canvases render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -165,8 +165,8 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 11 WebGL canvases render non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning"];
+    // 4. Mount all chapters cleanly by scrolling through each and verifying all 12 WebGL canvases render non-blank frames
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -179,6 +179,7 @@ async function main() {
       "[data-floor-canvas]",
       "[data-rush-canvas]",
       "[data-morning-canvas]",
+      "[data-crowd-canvas]",
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -463,6 +464,32 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch5-pivot.png");
       }
 
+      if (sid === "crowd") {
+        // Eight cooks as built must lose more to each other than with the island pulled back; nobody may ever come
+        // within reach of anybody (the planner's least gap), no run may gridlock, and bodies never beat ghosts by more
+        // than a pan or two of rounding.
+        const info = () => page.$eval("[data-crowd-stage]", (el) => el.crowd.info());
+        const want = ["built/8/b", "built/8/g", "moved/8/b", "moved/8/g"];
+        const t0 = Date.now();
+        let got = await info();
+        while (want.some((k) => !got.runs.some((r) => r.k === k)) && Date.now() - t0 < 90000) {
+          await sleep(1000);
+          got = await info();
+        }
+        const run = (k) => got.runs.find((r) => r.k === k);
+        if (want.some((k) => !run(k))) throw new Error(`The crowd runs did not arrive: ${JSON.stringify(got.runs)}`);
+        const lost = (k) => 1 - run(`${k}/8/b`).perHour / run(`${k}/8/g`).perHour;
+        const status = await page.$eval("[data-cr-status]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Crowd, 8 cooks: as built ${run("built/8/b").perHour}/h (ghosts ${run("built/8/g").perHour}), pulled back ${run("moved/8/b").perHour}/h | ${status.slice(0, 90)}`);
+        for (const r of got.runs) {
+          if (r.gridlock) throw new Error(`Crowd run ${r.k} gridlocked`);
+          if (r.minGap !== null && r.minGap < 0) throw new Error(`Crowd run ${r.k}: two bodies overlapped (${r.minGap} m)`);
+        }
+        if (!(lost("built") > lost("moved"))) throw new Error(`Pulling the island back did not cut the loss: ${JSON.stringify(got.runs)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-crowd.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-crowd.png");
+      }
+
       if (sid === "morning") {
         // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
         // must say which, and the worker must post every menu's limit, cooked today and ahead.
@@ -489,9 +516,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 11 WebGL canvases render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 12 WebGL canvases render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -504,13 +531,14 @@ async function main() {
         "[data-floor-canvas]",
         "[data-rush-canvas]",
         "[data-morning-canvas]",
+        "[data-crowd-canvas]",
       ];
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 11 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 12 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -548,7 +576,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 11/11 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 12/12 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

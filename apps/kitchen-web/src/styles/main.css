@@ -3276,3 +3276,96 @@ button.wk-dish[aria-pressed="true"] {
     font-size: 0.7rem;
   }
 }
+
+/* How many cooks fit (chapter 07, second figure): rings on whoever waits, the pans-an-hour chart. */
+.cr-stage {
+  aspect-ratio: 16 / 8;
+  margin-bottom: 1.6rem;
+}
+.cr-hud span {
+  min-width: 8.5em;
+}
+.cr-legend :is(.body, .place)::before {
+  box-sizing: border-box;
+  width: 0.62rem;
+  height: 0.62rem;
+  border: 2px solid var(--k);
+  border-radius: 50%;
+  background: none;
+}
+.cr-legend .body {
+  --k: #ef4444;
+}
+.cr-legend .place {
+  --k: #fbbf24;
+}
+.cr-legend .heat::before {
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffe3ea 0%, #ff7fa3 45%, rgb(255 92 138 / 0) 72%);
+}
+.cr-keys {
+  margin: 0.6rem 0 1rem;
+}
+.cr-keys span::before {
+  width: 1.1rem;
+  height: 0;
+  border-top: 2px solid var(--k);
+  border-radius: 0;
+  background: none;
+  vertical-align: 0.22em;
+}
+.cr-keys .built {
+  --k: #f59e0b;
+}
+.cr-keys .moved {
+  --k: #7dd3fc;
+}
+.cr-keys .ghost::before {
+  border-top: 2px dashed rgb(255 255 255 / 0.5);
+}
+.cr-svg .run {
+  fill: none;
+  stroke-width: 1.6;
+  opacity: 0.7;
+}
+.cr-svg .run.on {
+  stroke-width: 2.6;
+  opacity: 1;
+}
+.cr-svg .ghost {
+  fill: none;
+  stroke: rgb(255 255 255 / 0.45);
+  stroke-width: 1.4;
+  stroke-dasharray: 5 4;
+}
+.cr-svg .sel {
+  stroke: rgb(255 255 255 / 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.cr-svg .xl {
+  text-anchor: end;
+}
+@media (max-width: 599px) {
+  .cr-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .cr-hud {
+    top: 0.55rem;
+    left: 0.55rem;
+    right: auto;
+    max-width: calc(100% - 1.1rem);
+    flex-wrap: wrap;
+    row-gap: 0.35rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 10px;
+    background: rgb(14 11 8 / 0.78);
+  }
+  .cr-hud b {
+    font-size: 1.05rem;
+  }
+  .cr-hud span {
+    min-width: 0;
+    font-size: 0.85rem;
+  }
+}
