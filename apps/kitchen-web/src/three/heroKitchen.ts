@@ -4601,6 +4601,19 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     for (const L of K.hoodLights) L.intensity = 2.2;
   }
 
+  /** The panel's fixtures · staff · draws line, and the status line over the room: written only when they change. */
+  function syncMeta(): void {
+    if (outMeta) {
+      const draws = kitchen ? `${lastDraws} draws` : "loading";
+      const t = `${kitchen ? kitchen.fixtures.length : currentSpec.fixtures} fixtures · ${crew ? crew.agents.length : currentSpec.staffCount} staff · ${draws}`;
+      if (outMeta.textContent !== t) outMeta.textContent = t;
+    }
+    if (statusBase && statusEl) {
+      const t = `${statusBase} · ${lastDraws} draw calls`;
+      if (statusEl.textContent !== t) statusEl.textContent = t;
+    }
+  }
+
   function syncTelemetryUI(): void {
     metrics = computeKitchenTelemetry(currentSpec, ordersPerHr, electrificationPct, ambientC);
     const m = metrics;
@@ -4610,10 +4623,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     if (outKw) outKw.textContent = `${m.thermalKw.toFixed(1)} kW`;
     if (outCapture) outCapture.textContent = `${m.hoodCapturePct.toFixed(1)}%`;
     if (outAisle) outAisle.textContent = `${m.minAisleIn.toFixed(0)}" · ${m.minAisleM.toFixed(2)}m`;
-    if (outMeta) {
-      const draws = kitchen ? `${lastDraws} draws` : "loading";
-      outMeta.textContent = `${kitchen ? kitchen.fixtures.length : currentSpec.fixtures} fixtures · ${crew ? crew.agents.length : currentSpec.staffCount} staff · ${draws}`;
-    }
+    syncMeta();
     if (barGas) barGas.style.flexGrow = String(Math.max(1, m.gasSharePct));
     if (barElec) barElec.style.flexGrow = String(Math.max(1, m.elecSharePct));
     if (barHvac) barHvac.style.flexGrow = String(Math.max(1, m.hvacSharePct));
@@ -4689,11 +4699,14 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     scene.add(crew.group, crew.lines);
     presets = framePresets(K, crew, spec);
     simT = 0;
-    // A detailed body swapped in brings its own shaders: compile them before the next draw.
+    // The room's and its cooks' triangles, for the status line.
+    const trisLine = () => `${spec.shortName} · ${Math.round(K.tris + (crew?.tris() ?? 0)).toLocaleString()} tris`;
+    // A detailed body swapped in brings its own shaders, compiled before the next draw, and its own triangle count.
     for (const a of crew.agents)
       void a.st.ready.then(() => {
         applyOverlays();
         void gate.refresh(scene);
+        if (seq === loadSeq && statusBase) statusBase = trisLine();
       });
     // Light the room: the key over its middle, its shadow covering it.
     const span = Math.max(K.W, K.D) * 0.62;
@@ -4721,10 +4734,9 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     if (seq !== loadSeq) return;
     renderer.render(scene, camera);
     lastDraws = renderer.info.render.calls;
-    // The draw-call count is refreshed every 60 frames from then on (it changes with the view, and counts the shadow
-    // pass), so the line shows the frame on screen rather than this first one.
-    statusBase = `${spec.shortName} · ${Math.round(K.tris + (crew?.tris() ?? 0)).toLocaleString()} tris`;
-    if (statusEl) statusEl.textContent = `${statusBase} · ${lastDraws} draw calls`;
+    // Both lines' draw-call counts are refreshed every 60 frames from then on (it changes with the view, and counts the
+    // shadow pass), so they show the frame on screen rather than this first one.
+    statusBase = trisLine();
     syncTelemetryUI();
     stageEl.dataset.live = "1";
   }
@@ -4882,7 +4894,7 @@ export function mountHeroKitchen(root: HTMLElement): HeroController {
     cpuSum += cpu;
     cpuMax = Math.max(cpuMax, cpu);
     if (++frames >= 60) {
-      if (statusBase && statusEl) statusEl.textContent = `${statusBase} · ${lastDraws} draw calls`;
+      syncMeta();
       perf.cpu = cpuSum / frames;
       perf.cpuMax = cpuMax;
       cpuSum = 0;
