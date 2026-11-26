@@ -67,6 +67,52 @@ callers constructing their graphs explicitly. Regression coverage uses the
 lowering source tests and the real mechanical, thermal and electrical graphs in
 `tests/lowering_registry.rs`.
 
+## Owner groups and owner constructors (bead `frankensim-rc-1109-root-3gc12.11.2`)
+
+`LoweringRegistry::register_group` adds a named group. Before any per-item
+constructor runs, each group's selector picks parts, interfaces and sources of
+the draft, and its constructor lowers each selection whole. Selected items skip
+their per-item constructors, and their receipts name the group. Registering a
+name again replaces that group in its place. An item two groups select is
+refused, naming both groups.
+
+With `slices`, `lowering::owners::register_owner_defaults` adds three groups.
+They lower into the physics owners' own Components through those owners' public
+constructors:
+
+- `owners::mbd`: rigid bodies joined by `viscous-bushing` interfaces lower to
+  one fs-mbd `ViscousNetwork`.
+- `owners::thermal`: thermal solids whose material card names a registered
+  caloric law lower to the cells of one fs-thermal `ThermalTimeline`. A
+  `thermal-boundary` interface from a cell's face to a face of a stationary
+  `DrivenBody` frame is the cell's exchange with the ambient.
+- Loss routes: a `loss-route` interface from a face that exactly one bushing
+  joins to a cell's face carries its declared fraction of that bushing's
+  heat. The rest goes to a sink named `unallocated`.
+
+Interface sides are surfaces or regions, so each of these joins faces. Owner
+groups lower before any part, so the frame is recognised by its declared
+kind, not by the kernel's ground mark.
+
+The groups override no kernel default, so a draft naming none of these
+families or laws lowers as before. A body's pose and motion come from the
+part's declared initial state (`DraftPartDecl.initial`), and a body without one
+is refused. A cell's temperature comes from the initial state, or the ambient
+when none is declared. fs-cli lowers every assembly through the kernel
+defaults plus these groups.
+
+fs-couple's `rigid_damping_heat` target keeps the hand-built graph as the
+oracle and lowers the same pairing declared as a draft. The lowered network,
+cells and routes match that graph bit for bit in every step size, body state,
+cell temperature and ledger account. The lowered ledger closes to 1e-12 of the
+dissipated energy. The bodies' mass properties are held to the boxes' own.
+The beds carry the fixture's reservoir, which exchanges nothing, so a nonzero
+exchange is not compared. Replacing any one group with an empty one is refused
+by name. Only the constant source is declared: the fixture's
+contact and its 4 W event at 0.35 s are thermal events a draft cannot
+declare, so both sides of the compare leave them out. Fixture values; not a
+seed-dataset authority.
+
 ## Live passive constitutive laws for scalar dissipation
 
 A Damper can follow an `Arc<dyn DissipationLaw>` through `Damper::following`.
@@ -1611,10 +1657,10 @@ None. The crate denies `unsafe_code`.
   whose curve is not odd: reversed, its motion follows `-I(-flux)`, which is
   another law.
 
-`slices` (off by default) adds fs-mbd and fs-thermal as dependencies and
+`slices` (off by default) adds fs-mbd and fs-thermal as dependencies. It
 enables the owner slice tests, which compose real physics owners on the
-kernel. The library itself uses neither. Without the feature the crate and its
-tests build only fs-ports and fs-exec.
+kernel, and `lowering::owners`, the only library code that uses either crate.
+Without the feature the crate and its tests build only fs-ports and fs-exec.
 
 `modal-slices` (off by default) adds fs-nlmodal as a dependency for the owner
 slices of its linear modal structure and its joint loaded basis, apart from

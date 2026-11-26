@@ -81,12 +81,21 @@ const ASSEMBLY_SCHEMA: PipelineSchema = PipelineSchema {
     terminal_fallback_stage: "report",
 };
 
+/// The registry every assembly lowers through: the kernel defaults, then the
+/// owner groups (viscous networks, the thermal timeline, loss routes), which
+/// lower only drafts that name their card families or caloric laws.
+fn lowering_registry() -> LoweringRegistry {
+    let mut registry = LoweringRegistry::with_kernel_defaults();
+    fs_system::lowering::owners::register_owner_defaults(&mut registry);
+    registry
+}
+
 /// Ordered six-stage assembly workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssemblyStage {
     /// Parse, Five Explicits, card admission, and `DraftAssembly::admit`.
     Admit,
-    /// Lower via `LoweringRegistry::with_kernel_defaults` with receipt verification.
+    /// Lower via `lowering_registry` with receipt verification.
     Lower,
     /// Seal static `ExecutionPlan` and `CausalizationAudit`.
     Plan,
@@ -643,7 +652,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                 })
             }
             AssemblyStage::Lower => {
-                let lowered = LoweringRegistry::with_kernel_defaults()
+                let lowered = lowering_registry()
                     .lower(&self.admitted.draft, &self.admitted.card_store)
                     .map_err(|e| {
                         staged_refusal(
@@ -1158,7 +1167,7 @@ impl ResumeAttestor for AssemblyResumeAttestor {
                     .ok_or_else(|| resume_identity("bad lowering hash"))?;
                     ctx.lowering_hash = Some(lh);
                     if state.completed.len() < 4 {
-                        let lowered = LoweringRegistry::with_kernel_defaults()
+                        let lowered = lowering_registry()
                             .lower(&admitted.draft, &admitted.card_store)
                             .map_err(|e| resume_identity(format!("re-lowering failed: {e}")))?;
                         if lowered.receipt.receipt_hash != lh {

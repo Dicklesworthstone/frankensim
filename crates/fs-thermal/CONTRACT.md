@@ -310,6 +310,13 @@ its future births. The original borrowed law identities and lifetimes are
 unchanged; laws remain subject to the existing immutability contract. This
 single-threaded storage introduces no new thread-safety guarantee.
 
+`DepositionSimulation::new_shared` builds the same simulation on laws it keeps
+alive itself (`Rc<dyn ThermalLaw>`), so the simulation is `'static`. A lowering
+can then own its timeline as a Component without leaking the laws. Borrowed
+and shared laws go through one handle and step through the same code.
+fs-system's `thermal_timeline_slice` suite runs on both forms
+(`FS_THERMAL_SHARED_LAWS`).
+
 The focused regression follows explicit split/replay trajectories through a
 birth, contact and boundary change, cancels after candidate work, retries from
 the original state and accepts an implicit enthalpy endpoint. It checks input

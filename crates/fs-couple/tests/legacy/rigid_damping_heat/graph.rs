@@ -42,6 +42,10 @@ use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_system::{Ledger, NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 
+// The same pairing declared as a draft and lowered by the owner constructors.
+#[path = "lowering.rs"]
+mod lowering;
+
 pub(crate) fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = ArenaPool::new(ArenaConfig::default());
     pool.scope(|arena| {

@@ -53,6 +53,11 @@ use crate::{
     System, SystemBuilder, heat_sink,
 };
 
+/// Owner constructors: thin adapters over the physics owners' public
+/// Components, registered by [`owners::register_owner_defaults`].
+#[cfg(feature = "slices")]
+pub mod owners;
+
 /// Schema identifier for serialized [`LoweringReceipt`] payloads stored in
 /// `fs-ledger`.
 pub const LOWERING_RECEIPT_SCHEMA: &str = "frankensim.lowering_receipt.v1";
