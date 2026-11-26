@@ -52,8 +52,11 @@ ASM_DIR="examples/assemblies"
 STEEL_PACK="$ASM_DIR/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
 ALUM_PACK="$ASM_DIR/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk"
 ATKINS_PACK="examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk"
+SENS_PACK="$ASM_DIR/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
+PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
+FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
-           "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK"; do
+           "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
 done
 
@@ -65,7 +68,7 @@ else
   command -v git >/dev/null 2>&1 || die 'git is required unless --prebuilt-binary is supplied'
   git ls-files --error-unmatch Cargo.toml Cargo.lock "$ASM_DIR/forced_oscillator.fsim" \
     "$ASM_DIR/two_body_conduction.fsim" "$ASM_DIR/thermo_mech_slider.fsim" \
-    "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" >/dev/null 2>&1 \
+    "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}" >/dev/null 2>&1 \
     || die 'required sources or gallery files are untracked; commit or pass --prebuilt-binary'
   if [[ -n "$(git status --porcelain --untracked-files=all -- Cargo.toml Cargo.lock crates "$ASM_DIR" "$ATKINS_PACK")" ]]; then
     die 'dirty or untracked inputs in Cargo.toml, Cargo.lock, crates/, or gallery; pass --prebuilt-binary'
@@ -106,6 +109,7 @@ run_case fo_harmonic "$ASM_DIR/forced_oscillator.fsim" --materials "$STEEL_PACK"
 run_case fo_stationary "$ASM_DIR/forced_oscillator.fsim" --materials "$STEEL_PACK" --analysis stationary
 run_case two_body "$ASM_DIR/two_body_conduction.fsim" --materials "$ALUM_PACK" --interfaces "$ATKINS_PACK"
 run_case slider "$ASM_DIR/thermo_mech_slider.fsim" --materials "$STEEL_PACK"
+run_case film "$ASM_DIR/shear_film_pair.fsim" --materials "$SENS_PACK" --materials "$PG50_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -134,7 +138,7 @@ expect_refusal missing_area 4 "requires positive :area" --json run "$NO_AREA" "$
 # Independent closed-form Python oracles + summary receipt emission
 python3 - "$ARTIFACT_DIR" "$SOURCE_IDENTITY" "$RUNNER_SHA256" "$JSONL" "$RECEIPT" \
   "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" "$ASM_DIR/thermo_mech_slider.fsim" \
-  "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" <<'PY'
+  "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}" <<'PY'
 import hashlib, json, math, pathlib, sys
 art, src_id, runner_sha, jsonl_p, rcpt_p = sys.argv[1:6]
 inputs = sys.argv[6:]
@@ -224,6 +228,15 @@ ra = ld("replay_audit.json"); sr = ld("slider.run.json"); sres = ld("slider_resu
 assert ra["status"] == "clean" and ra["clean"] is True and ra["compared"] == 7 and not ra["deterministic_mismatches"], ra
 assert sres["run"] == sr["run"] and sres["status"] == "completed" and sres["stages_completed"] == 6 and e_sl["plan_hash"] == sr["plan_hash"], sres
 
+# 6. Shear-film pair (Al discs r=0.05 m, h=0.01 m, +-10 rad/s about the shared axis; PG50 mu=3.10 mPa*s, gap 0.1 mm)
+e_sf = ld("film.explain.json"); wl = e_sf["window_ledger"]; tot = wl["totals"]; Qf = tot["dissipated_j"]
+nodes = {n["name"]: n for n in wl["nodes"]}
+Iz = 2700.0 * math.pi * 0.05**2 * 0.01 * 0.05**2 / 2.0; ct = 0.0031 * (math.pi * 0.05**2)**2 / (2.0 * math.pi) / 1e-4
+sf_q = abs(Qf / (0.5 * (Iz / 2.0) * 20.0**2 * (1.0 - math.exp(-4.0 * ct * wl["duration_s"] / Iz))) - 1.0)
+sf_acc = max(abs(nodes["thermal-timeline"]["stored_change_j"] - 0.9 * Qf), abs(tot["sink_heat_j"] - 0.1 * Qf),
+             abs(nodes["viscous-network"]["stored_change_j"] + Qf), wres(e_sf), abs(tot["numerical_loss_j"])) / Qf
+assert wl["duration_s"] == 1.0 and tot["boundary_energy_in_j"] == 0.0 and sf_q <= 1e-12 and sf_acc <= 1e-12, (sf_q, sf_acc, tot)
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -237,6 +250,8 @@ receipt = {
       "errors": {"hot_temp_k": tb_eh, "cold_temp_k": tb_ec, "enthalpy_j": tb_en, "energy_residual_j": wres(e_tb)}},
     "thermo_mech_slider": {"run": sr["run"], "verdict": bv_sl,
       "errors": {"pos_m": sl_ex, "vel_m_s": sl_ev, "midpoint_total_energy_j": sl_etot, "midpoint_thermal_energy_j": sl_eth, "thermocouple_lag_k": sl_tc, "energy_residual_j": wres(e_sl)}},
+    "shear_film_pair": {"run": ld("film.run.json")["run"],
+      "errors": {"free_pair_dissipated_rel": sf_q, "ledger_accounts_rel": sf_acc, "energy_residual_j": wres(e_sf)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area"]},
 }

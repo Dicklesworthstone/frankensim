@@ -1,0 +1,36 @@
+(assembly "shear_film_pair"
+  (version 1) (units "SI") (seed 0xa)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 1s :dt 0.01s :sample-rate 100Hz)
+  (part "lower" :kind rigid-body :geometry (cylinder 0.05m 0.01m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1.0 0.0 0.0 0.0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 10rad/s)))
+  (part "upper" :kind rigid-body :geometry (cylinder 0.05m 0.01m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0.0101m) :orientation (1.0 0.0 0.0 0.0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s -10rad/s)))
+  (part "lower_cell" :kind solid :geometry (box 0.02m 0.02m 0.02m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1.0 0.0 0.0 0.0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)
+              :temperature 293.15K))
+  (part "upper_cell" :kind solid :geometry (box 0.02m 0.02m 0.02m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1.0 0.0 0.0 0.0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)
+              :temperature 293.15K))
+  (interface "film" :kind shear-film :a "lower" :b "upper"
+    :fluid "dowfrost-pg50" :gap 0.0001m :area 0.007853981633974483m^2
+    :fluid-at (temperature 313.15K propylene-glycol-volume-fraction 0.5 source-formulation-dowfrost 1
+               phase-liquid 1 source-pressure-known 0 volume-reference-temperature-known 0))
+  (interface "lower_route" :kind heat-route :a "lower" :b "lower_cell" :fraction 0.7)
+  (interface "upper_route" :kind heat-route :a "upper" :b "upper_cell" :fraction 0.2)
+)

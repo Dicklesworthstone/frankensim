@@ -854,6 +854,20 @@ fn bind_material_state(
             return Err(refuse("models_require_model_source", detail));
         }
     };
+    // One row per bound model, so the build's own receipt says what went into the card.
+    let mut bound = Vec::new();
+    if let Some(pack) = &models {
+        for model in pack.models() {
+            let (law, source) = (&model.law.0, pack.pack_id());
+            let detail = format!(
+                "bound law {law:?} v{} of model source {source:?} to card {:?} {:?} {:?} r{}",
+                model.law_version, state.chemistry, state.phase, state.process, state.revision,
+            );
+            let (subject, source_hash) = (format!("model:{law}"), Some(pack.source_artifact()));
+            let row = Decision::admit(subject, "bound_model_source", detail, source_hash);
+            bound.push(row);
+        }
+    }
     let card = match models {
         None => NormalizedMaterialCardPack::new(state.clone(), claims),
         Some(pack) => NormalizedMaterialCardPack::new_with_models(state.clone(), claims, pack),
@@ -873,6 +887,7 @@ fn bind_material_state(
         ),
         Some(source_hash),
     ));
+    decisions.extend(bound);
     for decision in &mut decisions {
         decision.pack_hash = Some(pack_hash);
     }
@@ -8980,6 +8995,15 @@ mod tests {
         };
         let law = (model.law.0.as_str(), model.validity.bound("T"));
         assert_eq!(law, ("sensible-heat", Some((288.15, 298.15))));
+        let source = compile_manifest(&models).unwrap().pack.source_artifact();
+        let rows: Vec<_> = bound
+            .decisions
+            .iter()
+            .filter(|row| row.reason_code == "bound_model_source")
+            .map(|row| (row.subject.as_str(), row.source_hash, row.pack_hash))
+            .collect();
+        let card = Some(bound.pack.content_hash());
+        assert_eq!(rows, [("model:sensible-heat", Some(source), card)]);
         assert_eq!(bind(&material).unwrap_err(), "models_require_model_source");
     }
 
