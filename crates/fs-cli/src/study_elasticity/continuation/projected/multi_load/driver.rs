@@ -117,6 +117,13 @@ pub(super) fn drive_goal_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None, final_dwr: None };
+    if prior.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && let Some(retained) = find_completed_2d_run(spec, ledger, evidence.producer)?
+    {
+        return Ok(retained);
+    }
     let mut report = OptimizeReport::default();
     let mut consumed = 0.0;
     let mut predecessor = prior.map(|old| old.hash);
@@ -162,8 +169,8 @@ pub(super) fn drive_goal_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: O
         };
         mesh::validate_terminal(history, policy, status, settings(spec, spec.steps).level)?;
         goal::validate_terminal(history, policy, status, settings(spec, spec.steps).level)?;
-        consumed = old.value.f64_field("consumed_wall_s").filter(|value| value.is_finite() && *value >= 0.0)
-            .ok_or_else(|| malformed("invalid retained multi-load wall charge"))?;
+        consumed = resolve_study_wall_s(ledger, &old.hash, &old.value)
+            .map_err(|msg| malformed(&msg))?;
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
         // These are sealed, read-only terminals. Do not rerun physics or consume
         // recovery work merely to return an already completed/exhausted receipt.

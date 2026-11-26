@@ -164,17 +164,64 @@ fn legacy_loaded_prefix_is_verified_once_then_uses_direct_continuation() {
 
 #[test]
 fn resume_does_not_reset_an_exhausted_lifetime_wall_budget() {
-    let spec = spec();
+    let mut spec = spec();
     let ledger = Ledger::open(":memory:").unwrap();
     let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
-    let mut loaded = load(&ledger, &first.pointer).unwrap();
-    set(&mut loaded.value, "consumed_wall_s", JsonValue::Number {
-        value: spec.wall_s, raw: spec.wall_s.to_string(),
-    });
+    let loaded = load(&ledger, &first.pointer).unwrap();
+    assert!(loaded.value.get("consumed_wall_s").is_none());
+    spec.wall_s = resolve_study_wall_s(&ledger, &loaded.hash, &loaded.value).unwrap();
     let error = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap_err();
     assert_eq!(error.exit, exit::BUDGET);
     assert!(error.message.contains(&first.pointer));
     assert_eq!(integer(&load(&ledger, &first.pointer).unwrap().value, "iterations_completed").unwrap(), 1);
+}
+
+#[test]
+fn same_ledger_rerun_is_idempotent_and_missing_metric_refuses_resume() {
+    let spec = spec();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let first = drive(&spec, &ledger, None, &gate(), None).unwrap();
+    let ops_after = ledger.table_count("ops").unwrap();
+    let second = drive_observed(&spec, &ledger, None, &gate(), None, |_, stage| {
+        panic!("same-ledger rerun must not re-run physics: {stage:?}")
+    })
+    .unwrap();
+    assert_eq!(
+        (second.pointer, second.receipt),
+        (first.pointer.clone(), first.receipt)
+    );
+    assert_eq!(ledger.table_count("ops").unwrap(), ops_after);
+
+    let saved = load(&ledger, &first.pointer).unwrap();
+    let prod_op = ledger.artifact_output_seal(&saved.hash).unwrap().unwrap();
+    let row = ledger.op(prod_op).unwrap().unwrap();
+    let tampered = Ledger::open(":memory:").unwrap();
+    let op = tampered
+        .begin_op(
+            row.session.as_deref(),
+            &row.ir,
+            &FiveExplicits {
+                seed: &row.seed,
+                versions: &row.versions,
+                budget: &row.budget,
+                capability: &row.capability,
+            },
+            STUDY_OP_START_T,
+        )
+        .unwrap();
+    for edge in ledger.op_artifact_edges_bounded(prod_op, 64).unwrap().edges {
+        let info = ledger.artifact_info(&edge.artifact).unwrap().unwrap();
+        let bytes = ledger.get_artifact(&edge.artifact).unwrap().unwrap();
+        tampered.put_artifact(&info.kind, &bytes, None).unwrap();
+        tampered.link(op, &edge.artifact, edge.role).unwrap();
+    }
+    tampered.seal_artifact_output(&saved.hash, op).unwrap();
+    tampered
+        .finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)
+        .unwrap();
+    let loaded = load(&tampered, &first.pointer).unwrap();
+    let err = drive(&spec, &tampered, None, &gate(), Some(&loaded)).unwrap_err();
+    assert!(err.message.contains("lacks retained"), "{}", err.message);
 }
 
 #[test]

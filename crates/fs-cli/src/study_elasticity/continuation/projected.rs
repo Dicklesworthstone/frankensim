@@ -297,6 +297,13 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None, final_dwr: None };
+    if prior.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && let Some(retained) = find_completed_2d_run(spec, ledger, evidence.producer)?
+    {
+        return Ok(retained);
+    }
     let mut predecessor = prior.map(|old| old.hash);
     let mut last = None;
     let mut consumed = 0.0;
@@ -327,8 +334,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             _ => return Err(malformed("unknown constrained study terminal")),
         };
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
-        consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| malformed("invalid retained wall charge"))?;
+        consumed = resolve_study_wall_s(ledger, &old.hash, &old.value)
+            .map_err(|msg| malformed(&msg))?;
         if let Some(check) = &retained.mesh {
             if check.baseline.rungs[0].level != settings(spec, spec.steps).level
                 || (status == "completed" && check.outcome != "accepted")

@@ -242,13 +242,13 @@ fn interrupted_final_dwr_retries_only_assessment_of_the_finished_feasible_endpoi
         assert_eq!(report.rows.len(), if stalled { 0 } else { 1 });
         assert_eq!(history.optimizer_terminal, Some(terminal));
         assert!((history.current().volume - 0.75).abs() <= 1e-4);
-        let charged = json(&interrupted).f64_field("consumed_wall_s").unwrap();
+        let old = load(&ledger, &interrupted.pointer).unwrap();
+        let charged = resolve_study_wall_s(&ledger, &old.hash, &old.value).unwrap();
         let pending = document(&linked(&ledger, &json(&interrupted),
             "report_json", "study-report-json").unwrap()).unwrap();
         assert_eq!(pending.path(&["goal_error_assessment", "status"]).and_then(JsonValue::as_str),
             Some("pending"));
 
-        let old = load(&ledger, &interrupted.pointer).unwrap();
         let resumed = drive_observed(&spec, &ledger, None, &gate(), Some(&old), |stage| {
             assert!(matches!(stage, VolumeStage::Assessment(_)),
                 "final assessment recovery must not re-project, restore physics or search: {stage:?}");
@@ -261,10 +261,10 @@ fn interrupted_final_dwr_retries_only_assessment_of_the_finished_feasible_endpoi
         let receipt = json(&resumed);
         assert_eq!(receipt.path(&["continuation", "updates_this_invocation"])
             .and_then(JsonValue::as_f64), Some(0.0));
-        assert!(receipt.f64_field("consumed_wall_s").unwrap() >= charged);
         assert_eq!(receipt.path(&["continuation", "goal_error_assessment", "snapshot"])
             .and_then(JsonValue::as_str), Some(format!("{:#018x}", history.current().snapshot).as_str()));
         let old = load(&ledger, &resumed.pointer).unwrap();
+        assert!(resolve_study_wall_s(&ledger, &old.hash, &old.value).unwrap() >= charged);
         let reused = drive_observed(&spec, &ledger, None, &gate(), Some(&old),
             |stage| panic!("completed assessment must be reused without {stage:?}")).unwrap();
         assert_eq!(reused.receipt, resumed.receipt);

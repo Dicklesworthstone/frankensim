@@ -257,6 +257,13 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None, final_dwr: None };
+    if prior.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && let Some(retained) = find_completed_2d_run(spec, ledger, evidence.producer)?
+    {
+        return Ok(retained);
+    }
     let mut predecessor = prior.map(|loaded| loaded.hash);
     let mut retained_wall = 0.0;
     let mut last = None;
@@ -266,9 +273,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             if loaded.value.str_field("study_id") != Some(spec.id.to_hex().as_str()) {
                 return Err(malformed("retained study identity changed"));
             }
-            retained_wall = loaded.value.f64_field("consumed_wall_s")
-                .filter(|v| v.is_finite() && *v >= 0.0)
-                .ok_or_else(|| malformed("invalid retained wall charge"))?;
+            retained_wall = resolve_study_wall_s(ledger, &loaded.hash, &loaded.value)
+                .map_err(|msg| malformed(&msg))?;
             let design = document(&linked(ledger, &loaded.value, "design", "study-design")?)?;
             let iterations = document(&linked(ledger, &loaded.value, "iterations", "study-iterations")?)?;
             let retained = decode(spec, &loaded.value, &design, &iterations)?;

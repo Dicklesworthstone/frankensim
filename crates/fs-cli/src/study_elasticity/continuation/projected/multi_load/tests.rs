@@ -183,16 +183,20 @@ fn final_weighted_dwr_resumes_only_assessment_of_complete_or_zero_update_endpoin
         let interrupted_json = json(&interrupted);
         assert_eq!(integer(&interrupted_json, "iterations_completed").unwrap(), if stalled { 0 } else { 1 });
         assert_eq!(history(&interrupted_json).str_field("optimizer_terminal"), Some(terminal));
-        let charged = interrupted_json.f64_field("consumed_wall_s").unwrap();
+        let old = load(&ledger, &interrupted.pointer).unwrap();
+        let charged = resolve_study_wall_s(&ledger, &old.hash, &old.value).unwrap();
         let pending = document(&linked(&ledger, &interrupted_json, "report_json", "study-report-json").unwrap()).unwrap();
         assert_eq!(pending.path(&["goal_error_assessment", "status"]).and_then(JsonValue::as_str), Some("pending"));
         assert_eq!(pending.path(&["goal_error_assessment", "max_solves_per_attempt"]).and_then(JsonValue::as_f64), Some(4.0));
-        let old = load(&ledger, &interrupted.pointer).unwrap();
         let resumed = driver::drive_assessment_observed(&spec, &ledger, None, &gate(), Some(&old),
             |stage| panic!("assessment retry must not restart optimization: {stage:?}"), |_| {}).unwrap();
         assert_eq!(resumed.status, terminal);
         let receipt = json(&resumed);
-        assert!(receipt.f64_field("consumed_wall_s").unwrap() >= charged);
+        let resumed_loaded = load(&ledger, &resumed.pointer).unwrap();
+        assert!(
+            resolve_study_wall_s(&ledger, &resumed_loaded.hash, &resumed_loaded.value).unwrap()
+                >= charged
+        );
         assert_eq!(history(&receipt), history(&interrupted_json), "no study/recovery work refunded or spent");
         assert_eq!(integer(history(&receipt), "recovery_solves_used").unwrap(), 0);
         for (key, kind) in [("design", "study-design"), ("iterations", "study-iterations")] {

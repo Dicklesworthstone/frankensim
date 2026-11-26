@@ -19,11 +19,14 @@ use fs_package::{EvidencePackage, Provenance};
 use fs_project::{ConsequenceClass, DecisionGate};
 use fs_topols::{Cantilever, GridSdf, OptimizeReport, OptimizeSettings, optimize_compliance};
 
+use super::{
+    STUDY_OP_END_T, STUDY_OP_START_T, STUDY_RUN_RECEIPT_SCHEMA, record_study_wall_s,
+    resolve_study_wall_s, retained_study_receipts,
+};
 use crate::json_read::JsonValue;
 use crate::{
     CommandOutput, Diagnostic, MAX_PROJECT_BYTES, OutputMode, exit, push_json_string, refusal,
 };
-use super::STUDY_RUN_RECEIPT_SCHEMA;
 
 #[path = "study_elasticity/continuation.rs"]
 mod continuation;
@@ -796,9 +799,42 @@ fn persist(
         hash_bytes(include_bytes!("../../../constellation.lock")).to_hex()
     );
     let budget_json = format!(
-        "{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{},\"consumed_wall_s\":{wall_s}}}",
+        "{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{}}}",
         spec.wall_s, spec.memory_bytes, spec.max_iterations
     );
+    let artifacts = [
+        ("iterations", "study-iterations", rows.as_bytes()),
+        ("design", "study-design", design.as_bytes()),
+        ("report_html", "study-report-html", html.as_bytes()),
+        ("report_json", "study-report-json", summary.as_bytes()),
+        ("package", "study-package", package_json.as_bytes()),
+    ];
+    let source_hash = hash_bytes(spec.canonical.as_bytes());
+    let mut refs = String::new();
+    for (name, _, bytes) in artifacts {
+        let _ = write!(refs, ",{name:?}:\"{}\"", hash_bytes(bytes).to_hex());
+    }
+    let previous_json = predecessor.map_or("null".to_string(), |hash| quoted(&hash.to_hex()));
+    let receipt = format!(
+        "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{count},\"target_iterations\":{},\"trace_hash\":\"{}\",\"predecessor\":{previous_json},\"continuation\":{continuation}{refs}}}",
+        spec.id.to_hex(),
+        source_hash.to_hex(),
+        spec.steps,
+        trace.to_hex()
+    );
+    let receipt_hash = hash_bytes(receipt.as_bytes());
+    if wall_s.is_finite() && wall_s >= 0.0 && ledger.artifact_output_seal(&receipt_hash)?.is_some()
+    {
+        let pointer = format!("study-{}", receipt_hash.to_hex());
+        let loaded = load(ledger, &pointer)?;
+        resolve_study_wall_s(ledger, &loaded.hash, &loaded.value)
+            .map_err(|msg| fail("cli-study-elasticity-receipt", msg))?;
+        return Ok(Outcome {
+            pointer,
+            receipt: loaded.bytes,
+            status,
+        });
+    }
     let seed = spec.base.seeds.as_ref().expect("seed").root.to_le_bytes();
     ledger.begin()?;
     let result = (|| -> Result<Outcome> {
@@ -811,39 +847,24 @@ fn persist(
                 budget: &budget_json,
                 capability: "{\"ops\":[\"optimization.marquee-topopt\",\"geometry.sdf\",\"physics.cutfem\"]}",
             },
-            0,
+            STUDY_OP_START_T,
         )?;
         if let Some(previous) = predecessor {
             ledger.link(op, &previous, EdgeRole::In)?;
         }
         let source = ledger.put_artifact("study-source", spec.canonical.as_bytes(), None)?;
         ledger.link(op, &source.hash, EdgeRole::In)?;
-        let mut refs = String::new();
-        for (name, kind, bytes) in [
-            ("iterations", "study-iterations", rows.as_bytes()),
-            ("design", "study-design", design.as_bytes()),
-            ("report_html", "study-report-html", html.as_bytes()),
-            ("report_json", "study-report-json", summary.as_bytes()),
-            ("package", "study-package", package_json.as_bytes()),
-        ] {
+        for (_, kind, bytes) in artifacts {
             let artifact = ledger.put_artifact(kind, bytes, None)?;
             ledger.link(op, &artifact.hash, EdgeRole::Out)?;
-            let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
-        let previous_json = predecessor.map_or("null".to_string(), |hash| quoted(&hash.to_hex()));
-        let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{count},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{wall_s},\"predecessor\":{previous_json},\"continuation\":{continuation}{refs}}}",
-            spec.id.to_hex(),
-            source.hash.to_hex(),
-            spec.steps,
-            trace.to_hex()
-        );
         let artifact = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
         ledger.link(op, &artifact.hash, EdgeRole::Out)?;
         if ledger.artifact_output_seal(&artifact.hash)?.is_none() {
             ledger.seal_artifact_output(&artifact.hash, op)?;
         }
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
+        record_study_wall_s(ledger, op, wall_s)?;
+        ledger.finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)?;
         Ok(Outcome {
             pointer: format!("study-{}", artifact.hash.to_hex()),
             receipt,
@@ -978,6 +999,45 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         artifact(ledger, linked_hash, kind)?;
     }
     Ok(Loaded { hash, value, bytes: text })
+}
+
+fn find_completed_2d_run(
+    spec: &ElasticitySpec,
+    ledger: &Ledger,
+    producer: ContentHash,
+) -> Result<Option<Outcome>> {
+    let expected_producer = producer.to_hex();
+    for hash in retained_study_receipts(ledger, spec.id, RECEIPT_KIND)? {
+        let pointer = format!("study-{}", hash.to_hex());
+        let Ok(loaded) = load(ledger, &pointer) else {
+            continue;
+        };
+        let status = match loaded.value.str_field("status") {
+            Some("completed") => "completed",
+            Some("constraint-unmet") => "constraint-unmet",
+            Some("no-feasible-descent") => "no-feasible-descent",
+            Some("mesh-unresolved") => "mesh-unresolved",
+            _ => continue,
+        };
+        if resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).is_err()
+            || loaded.value.str_field("driver") != Some(DRIVER)
+            || loaded
+                .value
+                .path(&["continuation", "producer"])
+                .and_then(JsonValue::as_str)
+                != Some(expected_producer.as_str())
+            || (matches!(status, "completed" | "constraint-unmet")
+                && integer(&loaded.value, "iterations_completed").ok() != Some(spec.steps))
+        {
+            continue;
+        }
+        return Ok(Some(Outcome {
+            pointer,
+            receipt: loaded.bytes,
+            status,
+        }));
+    }
+    Ok(None)
 }
 
 fn run_prefix(spec: &ElasticitySpec, count: usize) -> Result<(GridSdf, OptimizeReport)> {

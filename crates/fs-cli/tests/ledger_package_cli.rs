@@ -380,6 +380,7 @@ fn assert_study_replay_clean_and_idempotent(
     fsim: &Path,
     dir: &Path,
     tag: &str,
+    expected_exit: u8,
     expected_ops: Option<usize>,
 ) {
     let (da, db) = (
@@ -391,9 +392,9 @@ fn assert_study_replay_clean_and_idempotent(
         da.to_str().unwrap(),
         db.to_str().unwrap(),
     );
-    let (ja, _) = run_bin(&["--json", "study", f_s, a_s], exit::SUCCESS);
+    let (ja, _) = run_bin(&["--json", "study", f_s, a_s], expected_exit);
     std::thread::sleep(std::time::Duration::from_millis(25));
-    let (jb, _) = run_bin(&["--json", "study", f_s, b_s], exit::SUCCESS);
+    let (jb, _) = run_bin(&["--json", "study", f_s, b_s], expected_exit);
     let run_id = jstr(&ja, "run_id");
     assert_eq!(run_id, jstr(&jb, "run_id"), "{tag}: study-<hash> drifted");
     assert!(
@@ -424,7 +425,7 @@ fn assert_study_replay_clean_and_idempotent(
     );
     drop(la);
     // Option (a): same-ledger rerun re-attests and returns identical run_id with 0 new ops.
-    let (jr, _) = run_bin(&["--json", "study", f_s, a_s], exit::SUCCESS);
+    let (jr, _) = run_bin(&["--json", "study", f_s, a_s], expected_exit);
     assert_eq!(jstr(&jr, "run_id"), run_id);
     assert_eq!(
         Ledger::open(a_s).unwrap().table_count("ops").unwrap(),
@@ -444,7 +445,18 @@ fn binary_thermal_and_uncertainty_studies_replay_cleanly_and_rerun_idempotently(
         .replace(":mesh-level 4", ":mesh-level 3");
     let thermal_fsim = dir.join("thermal-short.fsim");
     std::fs::write(&thermal_fsim, thermal_src).unwrap();
-    assert_study_replay_clean_and_idempotent(&thermal_fsim, &dir, "th", Some(3));
+    assert_study_replay_clean_and_idempotent(&thermal_fsim, &dir, "th", exit::SUCCESS, Some(3));
+
+    let el_src = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fsim"))
+        .unwrap()
+        .replace(":mesh-level 5", ":mesh-level 2")
+        .replace(":max-iterations 32", ":max-iterations 2")
+        .replace(":steps 32", ":steps 2")
+        .replace(":move-cells 0.35", ":move-cells 0.05")
+        .replace(":nucleation-period 4", ":nucleation-period 0");
+    let el_fsim = dir.join("elasticity-short.fsim");
+    std::fs::write(&el_fsim, el_src).unwrap();
+    assert_study_replay_clean_and_idempotent(&el_fsim, &dir, "el", exit::BUDGET, Some(4));
 
     let ref_dir = root.join("data/reference-project");
     for name in ["cooling-reference.fsim", "plate.stl", "aa6061.fsmcdpk"] {
@@ -457,7 +469,7 @@ fn binary_thermal_and_uncertainty_studies_replay_cleanly_and_rerun_idempotently(
         .replace("../../data/reference-project/", "");
     let uq_fsim = dir.join("uq-short.fsim");
     std::fs::write(&uq_fsim, uq_src).unwrap();
-    assert_study_replay_clean_and_idempotent(&uq_fsim, &dir, "uq", None);
+    assert_study_replay_clean_and_idempotent(&uq_fsim, &dir, "uq", exit::SUCCESS, None);
 }
 
 #[test]

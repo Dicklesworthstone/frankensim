@@ -35,8 +35,8 @@ fn interrupted_then_resumed(stop: impl Fn(CheckpointStage) -> bool) {
     assert_eq!(linked(&ledger, &cancelled.value, "iterations", "study-iterations").unwrap(), rows);
     assert_eq!(cancelled.value.path(&["continuation", "updates_this_invocation"])
         .and_then(JsonValue::as_f64), Some(0.0));
-    assert!(cancelled.value.f64_field("consumed_wall_s").unwrap()
-        >= prefix.value.f64_field("consumed_wall_s").unwrap());
+    let wall = |l: &Loaded| resolve_study_wall_s(&ledger, &l.hash, &l.value).unwrap();
+    assert!(cancelled.value.get("consumed_wall_s").is_none() && wall(&cancelled) >= wall(&prefix));
 
     let resumed = drive(&spec, &ledger, None, &CancelGate::new_clock_free(), Some(&cancelled)).unwrap();
     assert_eq!(resumed.status, "constraint-unmet");

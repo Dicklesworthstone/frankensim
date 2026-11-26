@@ -2379,35 +2379,13 @@ fn frankenscript_json_twin_is_the_same_program() {
     );
 }
 
-/// Remove the values of `keys` (string or number) from a JSON line so two
-/// receipts can be compared modulo their volatile fields.
-fn without_volatile(record: &str, keys: &[&str]) -> String {
-    let mut out = record.trim().to_string();
-    for key in keys {
-        let needle = format!("\"{key}\":");
-        while let Some(start) = out.find(&needle) {
-            let value = start + needle.len();
-            let end = if out[value..].starts_with('"') {
-                value + 1 + out[value + 1..].find('"').expect("closed string") + 1
-            } else {
-                value
-                    + out[value..]
-                        .find([',', '}'])
-                        .expect("number is followed by a delimiter")
-            };
-            out.replace_range(start..end, &format!("\"{key}#\":0"));
-        }
-    }
-    out
-}
-
 #[test]
 fn g1_frankenscript_study_program_matches_the_study_verb() {
     // Journey B through a program: `study.run` binds the canonical study
     // driver. On the reduced marquee fixture (as in study_checkpoint_cli) the
-    // program's step result equals `frankensim study` on the same file in
-    // every receipt field except wall seconds, the ledger predecessor and the
-    // run id that chains through them.
+    // program's step result equals `frankensim study` on the same file
+    // bit-for-bit across two separate ledgers (including `predecessor`, `run`,
+    // and `run_id`, with `consumed_wall_s` moved into atomic ledger metrics).
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fixture = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fsim"))
         .expect("tracked marquee study is readable");
@@ -2452,11 +2430,11 @@ fn g1_frankenscript_study_program_matches_the_study_verb() {
     ]));
     assert_eq!(executed.exit_code, direct.exit_code, "{}", executed.stderr);
     assert!(executed.stdout.contains("\"verb\":\"study.run\""));
-    let volatile = ["consumed_wall_s", "predecessor", "run", "run_id"];
-    let step = without_volatile(&direct.stdout, &volatile);
+    let step = direct.stdout.trim();
     assert!(step.contains("\"study_id\":"), "{step}");
+    assert!(!step.contains("\"consumed_wall_s\""), "{step}");
     assert!(
-        without_volatile(&executed.stdout, &volatile).contains(&step),
+        executed.stdout.contains(step),
         "program step differs from the study verb:\n{}\n{}",
         executed.stdout,
         direct.stdout
