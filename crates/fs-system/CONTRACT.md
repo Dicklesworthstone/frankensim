@@ -99,7 +99,15 @@ constructors:
   branch `k`, a diagonal stiffness `stiffness_<k>_x` .. `_rz` (factor
   `L = sqrt(K)`) and `relaxation_time_<k>`. The memory has no default: the
   interface's state declares each branch's elastic displacement
-  `displacement_<k>_x` .. `_rz`, held as `a = L x`.
+  `displacement_<k>_x` .. `_rz`, held as `a = L x`. The card may state a
+  temperature shift `a_T` (fs-material's): `shift_reference_temperature`,
+  `shift_lowest_temperature`, `shift_highest_temperature` and one model,
+  `activation_energy` (J/mol) or `wlf_c1` and `wlf_c2`. Its Kelvin viscosity
+  and branch times are then `a_T` times the card's, at the temperature of
+  the cell its one `TemperatureSource` names, as that cell is at the start
+  of each step (lagged feedback). A partial or two-model shift, a shift on a
+  `viscous-bushing` card and a network of shifted and unshifted bushings are
+  refused by name.
 - `owners::thermal`: thermal solids whose material card names a registered
   caloric law lower to the cells of one fs-thermal `ThermalTimeline`. The
   card picks the path: a model-bearing card on a thermal-only `Solid` moves
@@ -131,6 +139,9 @@ constructors:
   interface) from a part that exactly one bushing joins to a cell carries its
   declared fraction of that bushing's heat. The rest goes to a sink named
   `unallocated`. Its receipt's `card_hash` is null, its family `heat-route`.
+  A card-less `TemperatureSource` from such a part to a cell gives that
+  bushing's shift the cell's published temperature, whatever share of the
+  heat the cell takes; its family is `temperature-source`.
 
 Interface sides are surfaces or regions, so each of these joins faces; a
 route's bushing is found by part, since a `.fsim` gives each interface its own

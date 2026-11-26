@@ -25,11 +25,21 @@
 //! interface's state declares its elastic displacement `displacement_<k>_x`
 //! .. `displacement_<k>_rz` (m, rad), held as `a = L x`. A relaxation network
 //! prepares at most `max_work_units` dense multiply-adds per step.
+//!
+//! A relaxation bushing's card may state fs-material's temperature shift
+//! `a_T`: `shift_reference_temperature`, `shift_lowest_temperature`,
+//! `shift_highest_temperature` (K) and `activation_energy` (J/mol) or `wlf_c1`
+//! and `wlf_c2` (1, K). It scales the Kelvin viscosity and branch times at the
+//! start-of-step temperature of the cell its one `TemperatureSource` names. A
+//! network's relaxation bushings are all shifted or none.
 
 use core::f64::consts::PI;
+use std::rc::Rc;
 
+use fs_blake3::DomainHasher;
+use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 use fs_mbd::component::network::ViscousNetwork;
-use fs_mbd::component::relaxation::{RelaxationNetwork, RelaxationState};
+use fs_mbd::component::relaxation::{RelaxationNetwork, RelaxationState, ShiftLaw};
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
@@ -69,8 +79,24 @@ use crate::{NodeId, RouteTemperature, System};
 pub const GROUP: &str = "owners.mbd.viscous-network";
 const NETWORK: &str = "viscous-network";
 const RELAXATION: &str = "relaxation-network";
-/// Each connector's branches and their memory amplitudes [sqrt(J)].
-type Memory = Vec<(Vec<SpatialRelaxationBranch>, Vec<[f64; 6]>)>;
+/// A connector's branches, their memory amplitudes [sqrt(J)] and its card's
+/// temperature shift, if it states one.
+type Bank = (
+    Vec<SpatialRelaxationBranch>,
+    Vec<[f64; 6]>,
+    Option<TemperatureShift>,
+);
+/// Each connector's bank.
+type Memory = Vec<Bank>;
+/// A temperature shift's band: its reference, lowest and highest [K].
+const SHIFT_BAND: [&str; 3] = [
+    "shift_reference_temperature",
+    "shift_lowest_temperature",
+    "shift_highest_temperature",
+];
+/// A shift's model keys: Arrhenius, then WLF.
+const SHIFT_MODEL: [&str; 3] = ["activation_energy", "wlf_c1", "wlf_c2"];
+const MOLAR_ENERGY: Dims = Dims([2, 1, -2, 0, 0, -1]);
 const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
 const VISCOSITY: Dims = Dims([-1, 1, -1, 0, 0, 0]);
 const POLAR_MOMENT: Dims = Dims([4, 0, 0, 0, 0, 0]);
@@ -211,21 +237,46 @@ pub(crate) fn lower(
         let force = graph.port(node, &format!("force{body}"))?;
         graph.bind_zero_boundary(force);
     }
+    bushing_ports(ctx, graph, node)?;
+    Ok(out)
+}
+
+/// Each bushing's ports on its entity: `heat`, whose heat goes to
+/// `unallocated` when no loss route takes it, and, in a shifted network,
+/// `temperature`, which exactly one temperature source drives.
+fn bushing_ports(
+    ctx: &GroupLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    node: NodeId,
+) -> Result<(), LoweringError> {
+    let input = ctx.draft.input();
     let ambient_k = input.environment.base.ambient_temperature.value;
     for (link, &index) in ctx.selection.interfaces.iter().enumerate() {
         let bushing = input.interfaces[index].entity;
         let heat = graph.port(node, &format!("heat{link}"))?;
         graph.expose_port(bushing, "heat", heat);
-        let routed = input.interfaces.iter().any(|route| {
-            route_state(route).is_some()
-                && route_bushing(input, ctx.cards, route).is_some_and(|b| b.entity == bushing)
-        });
-        if !routed {
+        let from = |route: &&DraftInterfaceDecl| {
+            route_bushing(input, ctx.cards, route).is_some_and(|b| b.entity == bushing)
+        };
+        let (sources, routes): (Vec<_>, Vec<_>) = input
+            .interfaces
+            .iter()
+            .filter(from)
+            .partition(|iface| iface.kind == DraftInterfaceKind::TemperatureSource);
+        if !routes.iter().any(|route| route_state(route).is_some()) {
             let sink = Some(unallocated(ambient_k)?);
             graph.add_heat_route(heat, Vec::new(), sink, RouteTemperature::SinkEquivalent);
         }
+        let Ok(signal) = graph.port(node, &format!("temperature{link}")) else {
+            continue;
+        };
+        if sources.len() != 1 {
+            let it = Scoped::new("interface", &input.interfaces[index].name);
+            return Err(it.invalid("a shifted bushing reads exactly one `TemperatureSource`"));
+        }
+        graph.expose_port(bushing, "temperature", signal);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The network as one node, named for its first body, with each body's
@@ -265,7 +316,7 @@ fn add_network(
         maximum_live_bytes,
         maximum_preparation_terms: maximum_pair_relaxations as u64,
     };
-    let maximum_branches = memory.iter().map(|(branches, _)| branches.len()).sum();
+    let maximum_branches = memory.iter().map(|(branches, ..)| branches.len()).sum();
     let limits = RelaxationNetworkLimits {
         source,
         maximum_branches,
@@ -274,13 +325,25 @@ fn add_network(
         source: controls.source,
         limits,
     };
+    let mut shifts = Vec::new();
     let links = links.into_iter().zip(memory);
     let (links, memory) = links
-        .map(|(viscous, (branches, memory))| (RelaxationNetworkLink { viscous, branches }, memory))
+        .map(|(viscous, (branches, memory, shift))| {
+            shifts.push(shift);
+            (RelaxationNetworkLink { viscous, branches }, memory)
+        })
         .unzip();
+    let fail =
+        |err: &dyn core::fmt::Debug| Scoped::new("network", RELAXATION).invalid(format!("{err:?}"));
     let network = RelaxationNetwork::new(properties, links, gravity, controls);
-    let network =
-        network.map_err(|err| Scoped::new("network", RELAXATION).invalid(format!("{err:?}")))?;
+    let mut network = network.map_err(|err| fail(&err))?;
+    if shifts.iter().any(Option::is_some) {
+        let all: Option<Vec<TemperatureShift>> = shifts.into_iter().collect();
+        let mixed = "a network's relaxation bushings are all shifted or none";
+        let all = all.ok_or_else(|| Scoped::new("network", RELAXATION).invalid(mixed))?;
+        let law = Rc::new(CardShift(all));
+        network = network.shifted(law).map_err(|err| fail(&err))?;
+    }
     let state = RelaxationState {
         bodies: states,
         memory,
@@ -305,6 +368,18 @@ fn with_memory(ctx: &GroupLoweringContext<'_>) -> Result<bool, LoweringError> {
         family_entry(ctx.cards, iface, RELAXATION_BUSHING_FAMILY).is_some()
     };
     let (memory, none): (Vec<_>, Vec<_>) = bushings.partition(has);
+    let shifted = |iface: &&&DraftInterfaceDecl| {
+        let card = family_entry(ctx.cards, iface, VISCOUS_BUSHING_FAMILY);
+        let keys = SHIFT_BAND.into_iter().chain(SHIFT_MODEL);
+        card.is_some_and(|(entry, _)| {
+            keys.clone()
+                .any(|key| !entry.card.claims_for(key).is_empty())
+        })
+    };
+    if let Some(iface) = none.iter().find(shifted) {
+        let it = Scoped::new("interface", &iface.name);
+        return Err(it.invalid("a temperature shift needs a `relaxation-bushing` card"));
+    }
     if memory.is_empty() || none.is_empty() {
         return Ok(!memory.is_empty());
     }
@@ -323,19 +398,19 @@ fn with_memory(ctx: &GroupLoweringContext<'_>) -> Result<bool, LoweringError> {
     )))
 }
 
-/// A relaxation bushing's branches and their memory, from its card and its
-/// interface's state (see the module's notes).
+/// A relaxation bushing's branches, their memory and its shift, from its card
+/// and its interface's state (see the module's notes).
 fn branches(
     ctx: &GroupLoweringContext<'_>,
     it: &mut Scoped,
     (card, state): (&InterfaceCardEntry, State<'_>),
-) -> Result<(Vec<SpatialRelaxationBranch>, Vec<[f64; 6]>), LoweringError> {
+) -> Result<Bank, LoweringError> {
     let (mut branches, mut memory) = (Vec::new(), Vec::new());
     loop {
         let k = branches.len();
         let time = format!("relaxation_time_{k}");
         if card.card.claims_for(&time).is_empty() {
-            return Ok((branches, memory));
+            return Ok((branches, memory, shift(ctx, it, (card, state))?));
         }
         let tau = it.interface(ctx, (card, state), &time, TIME_DIMS)?;
         let (mut rows, mut x) = ([[0.0; 6]; 6], [0.0; 6]);
@@ -357,6 +432,76 @@ fn branches(
         let a = branch.elastic_memory(x);
         memory.push(a.map_err(|err| it.invalid(format!("branch {k} memory: {err:?}")))?);
         branches.push(branch);
+    }
+}
+
+/// A card's temperature shift (see the module's notes): none without its
+/// keys; some of them without the rest, or both models, are refused.
+fn shift(
+    ctx: &GroupLoweringContext<'_>,
+    it: &mut Scoped,
+    card: (&InterfaceCardEntry, State<'_>),
+) -> Result<Option<TemperatureShift>, LoweringError> {
+    let has = |key: &str| !card.0.card.claims_for(key).is_empty();
+    let [arrhenius, c1, c2] = SHIFT_MODEL.map(has);
+    if !arrhenius && !c1 && !c2 && !SHIFT_BAND.into_iter().any(has) {
+        return Ok(None);
+    }
+    if arrhenius == (c1 || c2) {
+        let models = "`activation_energy`, or `wlf_c1` and `wlf_c2`";
+        return Err(it.invalid(format!("a temperature shift has one model: {models}")));
+    }
+    let model = if arrhenius {
+        let activation_energy_j_mol = it.interface(ctx, card, SHIFT_MODEL[0], MOLAR_ENERGY)?;
+        TemperatureShiftModel::Arrhenius {
+            activation_energy_j_mol,
+        }
+    } else {
+        let c1 = it.interface(ctx, card, SHIFT_MODEL[1], Dims::NONE)?;
+        let c2_k = it.interface(ctx, card, SHIFT_MODEL[2], TEMPERATURE_DIMS)?;
+        TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k }
+    };
+    let mut band = [0.0; 3];
+    for (value, key) in band.iter_mut().zip(SHIFT_BAND) {
+        *value = it.interface(ctx, card, key, TEMPERATURE_DIMS)?;
+    }
+    let shift = TemperatureShift::new(model, band[0], [band[1], band[2]]);
+    shift
+        .map(Some)
+        .map_err(|err| it.invalid(format!("temperature shift: {err}")))
+}
+
+/// The cards' temperature shifts, one per connector, as the network's shift
+/// law, each evaluated by fs-material. Its identity binds every complete
+/// calibration: model, parameters, reference and band.
+#[derive(Debug)]
+struct CardShift(Vec<TemperatureShift>);
+
+impl ShiftLaw for CardShift {
+    fn factor(&self, connector: usize, temperature_k: f64) -> Result<f64, String> {
+        let state = self.0[connector].evaluate(temperature_k);
+        state
+            .map(|state| state.factor())
+            .map_err(|err| err.to_string())
+    }
+
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        let mut identity = DomainHasher::new("org.frankensim.fs-system.owners.shift.v1");
+        for shift in &self.0 {
+            // A tag, then the model's parameters, then the band.
+            let model = match shift.model() {
+                TemperatureShiftModel::Arrhenius {
+                    activation_energy_j_mol: e,
+                } => [0.0, e, 0.0],
+                TemperatureShiftModel::WilliamsLandelFerry { c1, c2_k } => [1.0, c1, c2_k],
+            };
+            let [lowest, highest] = shift.validity_k();
+            let band = [shift.reference_temperature_k(), lowest, highest];
+            for value in model.into_iter().chain(band) {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        Some(*identity.finalize().as_bytes())
     }
 }
 

@@ -8,7 +8,9 @@
 //!   caloric law lower to the cells of one `fs_thermal` `ThermalTimeline`.
 //! - Loss routes: a card-less `HeatRoute` interface from a part that one
 //!   bushing joins to a cell carries its declared `fraction` of that
-//!   bushing's heat; the rest goes to a sink named `unallocated`.
+//!   bushing's heat; the rest goes to a sink named `unallocated`. A card-less
+//!   `TemperatureSource` from such a part to a cell gives that bushing's
+//!   temperature shift the cell's temperature at the start of each step.
 //!
 //! [`register_owner_defaults`] adds the three groups and overrides no kernel
 //! default: a draft that names none of these families or laws lowers as
@@ -312,14 +314,17 @@ fn select_loss_routes(
 ) -> Result<Vec<GroupSelection>, LoweringError> {
     let mut selection = GroupSelection::default();
     let routes = draft.input().interfaces.iter().enumerate();
-    let routes = routes.filter_map(|(index, iface)| route_state(iface).map(|_| index));
+    let source = |iface: &DraftInterfaceDecl| iface.kind == DraftInterfaceKind::TemperatureSource;
+    let routes = routes.filter(|(_, iface)| route_state(iface).is_some() || source(iface));
+    let routes = routes.map(|(index, _)| index);
     selection.interfaces = routes.collect();
     let found = !selection.interfaces.is_empty();
     Ok(found.then_some(selection).into_iter().collect())
 }
 
 /// One heat route per bushing, in the order of its first loss route: the
-/// declared fractions to the cells, the rest to `unallocated` at ambient.
+/// declared fractions to the cells, the rest to `unallocated` at ambient; and
+/// each temperature source's signal.
 fn lower_loss_routes(
     ctx: &GroupLoweringContext<'_>,
     graph: &mut LoweringGraph,
@@ -332,6 +337,11 @@ fn lower_loss_routes(
         let mut it = Scoped::new("interface", &iface.name);
         let bushing = route_bushing(input, ctx.cards, iface)
             .ok_or_else(|| it.invalid("feature_a must be on a part exactly one bushing joins"))?;
+        if iface.kind == DraftInterfaceKind::TemperatureSource {
+            connect_temperature(ctx, graph, (&mut it, iface, bushing))?;
+            out.interfaces.push(it.interface_output(None));
+            continue;
+        }
         let source = graph.entity_port(bushing.entity, "heat");
         let source =
             source.ok_or_else(|| it.invalid("its bushing must be a lowered viscous bushing"))?;
@@ -364,4 +374,34 @@ fn lower_loss_routes(
         graph.add_heat_route(source, sinks, sink, RouteTemperature::SinkEquivalent);
     }
     Ok(out)
+}
+
+/// A temperature source's cell's published temperature as the signal its
+/// bushing's shift reads, guessed at first as the cell's initial temperature
+/// (the ambient when it declares none), which is recorded.
+fn connect_temperature(
+    ctx: &GroupLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    (it, iface, bushing): (&mut Scoped, &DraftInterfaceDecl, &DraftInterfaceDecl),
+) -> Result<(), LoweringError> {
+    let input = ctx.draft.input();
+    let law = graph.entity_port(bushing.entity, "temperature");
+    let law = law.ok_or_else(|| it.invalid("its bushing's card states no temperature shift"))?;
+    let cell = graph.resolve_entity_port(&input.catalog, iface.feature_b, "temperature");
+    let cell =
+        cell.ok_or_else(|| it.invalid("feature_b must be a cell of the thermal timeline"))?;
+    graph.builder_mut().signal(cell, law)?;
+    let part = owning_part(input, iface.feature_b).map(|part| &input.parts[part]);
+    let start = part.and_then(|part| Some((part, part.initial.as_ref()?.temperature?)));
+    let start = if let Some((part, temperature)) = start {
+        let item = format!("part:{}", part.name);
+        it.declare_on(&item, "initial.temperature", temperature);
+        temperature
+    } else {
+        let ambient = input.environment.base.ambient_temperature;
+        it.declare_on("environment", "base.ambient_temperature", ambient);
+        ambient
+    };
+    graph.set_initial_guess(law, vec![start.value]);
+    Ok(())
 }

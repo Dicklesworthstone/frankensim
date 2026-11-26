@@ -489,7 +489,7 @@ pub struct ThirdBodyDecl {
 }
 
 /// Card-bound interface laws across mechanical, thermal, electrical, and power-port boundaries,
-/// and card-less heat routes and shear films.
+/// and card-less heat routes, shear films and temperature sources.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftInterfaceKind {
     /// Typed power-conjugate port schema.
@@ -543,6 +543,10 @@ pub enum DraftInterfaceKind {
         /// Explicit film state (the wetted `area`).
         state: Vec<(ParameterKey, QtyAny)>,
     },
+    /// A signal, not a material interface, so no card: the temperature of the
+    /// cell at `feature_b` sets the temperature-dependent law of the interface
+    /// that the part owning `feature_a` carries.
+    TemperatureSource,
 }
 
 /// Interface binding two surface/region features through a card-backed law.
@@ -1914,6 +1918,7 @@ impl DraftAssembly {
                     check_third_body(third_body, &scope)?;
                     check_params(state, &format!("{scope}.state"))?;
                 }
+                DraftInterfaceKind::TemperatureSource => {}
             }
         }
 

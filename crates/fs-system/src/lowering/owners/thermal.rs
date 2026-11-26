@@ -17,7 +17,8 @@
 //! A constant source on its [`HEAT_SOURCE_PORT`] is its applied
 //! heat. The timeline steps at most the time plan's step, checks energy to
 //! the cells' shared absolute tolerance, and sends boundary heat through its
-//! `environment` port to a sink of that name.
+//! `environment` port to a sink of that name. A cell a `TemperatureSource`
+//! names publishes its temperature at the start of each step as a signal.
 //!
 //! Under an implicit scheme it steps on fs-thermal's implicit conduction
 //! graph, on each law's implicit form (the crate's CONTRACT.md has the rules).
@@ -452,6 +453,8 @@ fn lower(
         scheme != TimeScheme::Explicit || !boundaries.is_empty() || !sources.is_empty();
     let implicit = (implicit, conductive);
     let timeline = timeline(&simulation, &implicit, environment, config, work, scheme)?;
+    let timeline = timeline.publishing(published(ctx));
+    let timeline = timeline.map_err(|err| fail(&err))?;
     let start = timeline.start(&simulation).map_err(|err| fail(&err))?;
     let node = graph.add(TIMELINE, Some(first.entity), timeline, start)?;
     for (cell, &index) in ctx.selection.parts.iter().enumerate() {
@@ -459,9 +462,7 @@ fn lower(
         if cell > 0 {
             graph.entity_nodes.entry(entity).or_default().push(node);
         }
-        let port = graph.port(node, &format!("cell{cell}"))?;
-        graph.expose_port(entity, "heat", port);
-        observe_cell(graph, node, entity, cell);
+        expose_cell(graph, (node, entity, cell))?;
     }
     if environment {
         let port = graph.port(node, "environment")?;
@@ -519,6 +520,33 @@ fn timeline(
     };
     let graph = graph.map_err(|err| fail(&err))?;
     ThermalTimeline::implicit(ids, graph, controls, scheme).map_err(|err| fail(&err))
+}
+
+/// The cells the draft's temperature sources name, in cell order.
+fn published(ctx: &GroupLoweringContext<'_>) -> Vec<CellId> {
+    let input = ctx.draft.input();
+    let sources = input.interfaces.iter();
+    let sources = sources.filter(|iface| iface.kind == DraftInterfaceKind::TemperatureSource);
+    let cells = sources.filter_map(|iface| slot(input, &ctx.selection.parts, iface.feature_b));
+    let mut cells: Vec<CellId> = cells.map(|cell| CellId(cell as u64)).collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+/// Exposes cell `cell` on its `entity`: its heat port as `heat`, its published
+/// temperature, if it is, as `temperature`, and its reader for probes.
+fn expose_cell(
+    graph: &mut LoweringGraph,
+    (node, entity, cell): (NodeId, EntityId, usize),
+) -> Result<(), LoweringError> {
+    let port = graph.port(node, &format!("cell{cell}"))?;
+    graph.expose_port(entity, "heat", port);
+    if let Ok(port) = graph.port(node, &format!("temperature{cell}")) {
+        graph.expose_port(entity, "temperature", port);
+    }
+    observe_cell(graph, node, entity, cell);
+    Ok(())
 }
 
 /// Registers cell `cell`'s reader for probes: its temperature, from its slot in

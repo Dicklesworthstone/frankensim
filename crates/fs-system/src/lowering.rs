@@ -67,6 +67,8 @@ pub const LOWERING_RECEIPT_SCHEMA: &str = "frankensim.lowering_receipt.v1";
 pub const HEAT_ROUTE_FAMILY: &str = "heat-route";
 /// Dispatch family of a card-less [`DraftInterfaceKind::ShearFilm`].
 pub const SHEAR_FILM_FAMILY: &str = "shear-film";
+/// Dispatch family of a card-less [`DraftInterfaceKind::TemperatureSource`].
+pub const TEMPERATURE_SOURCE_FAMILY: &str = "temperature-source";
 
 /// BLAKE3 domain for parametric geometry fingerprints minted during lowering.
 pub const LOWERING_GEOMETRY_HASH_DOMAIN: &str = "org.frankensim.fs-system.lowering.geometry.v1";
@@ -252,6 +254,8 @@ pub enum InterfaceKindTag {
     ElectricalContact,
     /// Card-less heat route.
     HeatRoute,
+    /// Card-less temperature source.
+    TemperatureSource,
 }
 
 impl InterfaceKindTag {
@@ -265,6 +269,7 @@ impl InterfaceKindTag {
             Self::ThermalContact => "thermal_contact",
             Self::ElectricalContact => "electrical_contact",
             Self::HeatRoute => "heat_route",
+            Self::TemperatureSource => "temperature_source",
         }
     }
 }
@@ -280,6 +285,7 @@ impl From<&DraftInterfaceKind> for InterfaceKindTag {
             DraftInterfaceKind::ThermalContact { .. } => Self::ThermalContact,
             DraftInterfaceKind::ElectricalContact { .. } => Self::ElectricalContact,
             DraftInterfaceKind::HeatRoute { .. } => Self::HeatRoute,
+            DraftInterfaceKind::TemperatureSource => Self::TemperatureSource,
         }
     }
 }
@@ -2394,7 +2400,8 @@ pub enum ResolvedInterfaceCard<'a> {
     System(&'a InterfaceCardEntry),
     /// Power-port schema card entry.
     PowerPort(&'a PowerPortSchemaCard),
-    /// No card: a [`DraftInterfaceKind::HeatRoute`] or [`DraftInterfaceKind::ShearFilm`].
+    /// No card: a [`DraftInterfaceKind::HeatRoute`], [`DraftInterfaceKind::ShearFilm`] or
+    /// [`DraftInterfaceKind::TemperatureSource`].
     None,
 }
 
@@ -3184,6 +3191,12 @@ impl LoweringRegistry {
                         SHEAR_FILM_FAMILY.to_owned(),
                         ResolvedInterfaceCard::None,
                         Some(third_body.material_card),
+                    ),
+                    DraftInterfaceKind::TemperatureSource => (
+                        None,
+                        TEMPERATURE_SOURCE_FAMILY.to_owned(),
+                        ResolvedInterfaceCard::None,
+                        None,
                     ),
                 };
             let key = InterfaceLoweringKey::new(kind_tag, card_family.clone());

@@ -370,7 +370,8 @@ fn lower_corner(
             | DraftInterfaceKind::ElectricalContact { law_card, .. } => law_card,
             DraftInterfaceKind::PowerPort { .. }
             | DraftInterfaceKind::HeatRoute { .. }
-            | DraftInterfaceKind::ShearFilm { .. } => continue,
+            | DraftInterfaceKind::ShearFilm { .. }
+            | DraftInterfaceKind::TemperatureSource => continue,
         };
         let old = *lc;
         if let Some(&h) = remap.get(&(old, true)) {
