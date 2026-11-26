@@ -128,12 +128,27 @@ export function paintTexels(w: number, h: number, f: (x: number, y: number, o: F
  */
 export function normalTexels(h: Float32Array, w: number, hh: number, k: number, wrap: boolean): Uint8ClampedArray {
   const d = new Uint8ClampedArray(w * hh * 4);
+  normalInto(d, h, w, hh, k, wrap, null);
+  return d;
+}
+
+/**
+ * Redo the pixels of `d`, normalTexels(h, w, hh, k, wrap) of an earlier `h`, where `redo` is set: after `h` changed
+ * at some texels, each pixel that reads one of them (its four neighbours, or itself at a clamped edge). `d` is then
+ * normalTexels of the new `h`, byte for byte.
+ */
+export function patchNormalTexels(d: Uint8ClampedArray, h: Float32Array, w: number, hh: number, k: number, wrap: boolean, redo: Uint8Array): void {
+  normalInto(d, h, w, hh, k, wrap, redo);
+}
+
+function normalInto(d: Uint8ClampedArray, h: Float32Array, w: number, hh: number, k: number, wrap: boolean, redo: Uint8Array | null): void {
   const at = (i: number, j: number) => {
     if (wrap) return h[((j + hh) % hh) * w + ((i + w) % w)];
     return h[clamp(j, 0, hh - 1) * w + clamp(i, 0, w - 1)];
   };
   for (let j = 0; j < hh; j++)
     for (let i = 0; i < w; i++) {
+      if (redo !== null && redo[j * w + i] === 0) continue;
       const dx = (at(i + 1, j) - at(i - 1, j)) * k;
       const dy = (at(i, j - 1) - at(i, j + 1)) * k;
       const l = Math.hypot(dx, dy, 1);
@@ -143,7 +158,6 @@ export function normalTexels(h: Float32Array, w: number, hh: number, k: number, 
       d[o + 2] = (0.5 + 0.5 / l) * 255;
       d[o + 3] = 255;
     }
-  return d;
 }
 
 /** Grey RGBA pixels (roughness, clearcoat) from values 0..1. */

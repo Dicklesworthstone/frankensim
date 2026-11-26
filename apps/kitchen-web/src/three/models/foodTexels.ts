@@ -2,9 +2,10 @@
  * The pixel layers of the procedural textures that cost most to paint: the pan foods' (smallwares' panFoods), the
  * chef's knife's steels (knifeMats) and the wine label's paper (labelMat). They are arithmetic on seeded noise and
  * nothing else, so a worker (foodTexels.worker.ts) makes them while the page loads, and the builders only copy them
- * into canvases. Made here or in the worker, the arrays are the same.
+ * into canvases. Made here or in the worker, the arrays are the same. The label's ink is drawn on a canvas, with
+ * fonts, so labelInk turns it into roughness and relief on the main thread, over the worker's paper.
  */
-import { apnoise, clamp01, fbm, greyTexels, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, TAU } from "./texels";
+import { apnoise, clamp, clamp01, fbm, greyTexels, lerp, noise2, normalTexels, paintTexels, patchNormalTexels, rng, smooth, tfbm, TAU } from "./texels";
 
 /** The braised meat's tile, in texels a side. */
 export const MEAT_TW = 512;
@@ -132,10 +133,14 @@ export function knifeTexels(): KnifeTexels {
   return { blade, bladeRough: greyTexels(bR, BW, BH), bevel };
 }
 
-/** The label's paper before any ink: its RGBA pixels and its relief, LABEL_TW a side. */
+/** The relief of the label's normal map, per texel (normalTexels' `k`). */
+export const LABEL_RELIEF_K = 0.5;
+
+/** The label's paper before any ink: its RGBA pixels, its relief and that relief's normal map, LABEL_TW a side. */
 export interface LabelPaper {
   paper: Uint8ClampedArray;
   height: Float32Array;
+  normal: Uint8ClampedArray;
 }
 
 export function labelPaper(): LabelPaper {
@@ -158,12 +163,61 @@ export function labelPaper(): LabelPaper {
       paper[k * 4 + 2] = 204 + v * 1.1;
       paper[k * 4 + 3] = 255;
     }
-  return { paper, height: hP };
+  return { paper, height: hP, normal: normalTexels(hP, W, W, LABEL_RELIEF_K, false) };
+}
+
+/** The inked label's roughness and normal maps, RGBA, LABEL_TW a side. */
+export interface LabelInk {
+  rough: Uint8ClampedArray;
+  normal: Uint8ClampedArray;
+}
+
+/**
+ * The label's roughness and normal maps from its printed pixels `ink` (RGBA, the paper with the ink drawn over it):
+ * the ink a touch glossier than the paper, and pressed into it. Takes `t`'s relief and normal map and changes both
+ * (the caller owns them): the normal map is redone only round the ink, the rest is the bare paper's.
+ */
+export function labelInk(ink: Uint8ClampedArray, t: LabelPaper): LabelInk {
+  const W = LABEL_TW;
+  const N = W * W;
+  const { height: hP, normal } = t;
+  // A texel's ink is a function of r + g + b alone (0..765): the grey of its roughness, and how far it is pressed in.
+  const grey = new Uint32Array(766);
+  const press = new Float64Array(766);
+  const px = new Uint8ClampedArray(4);
+  const px32 = new Uint32Array(px.buffer);
+  for (let s = 0; s <= 765; s++) {
+    const inked = smooth(0.72, 0.45, s / 765);
+    // Roughness 0.88 bare to 0.55 inked, held as a float32 texel and greyed as greyTexels does.
+    px[0] = px[1] = px[2] = clamp(Math.fround(lerp(0.88, 0.55, inked)) * 255, 0, 255);
+    px[3] = 255;
+    grey[s] = px32[0];
+    press[s] = 1.2 * inked;
+  }
+  const rough = new Uint8ClampedArray(N * 4);
+  const rough32 = new Uint32Array(rough.buffer);
+  // The texels whose normal reads a pressed one: its four neighbours, and itself (it reads itself at the edges).
+  const redo = new Uint8Array(N);
+  for (let k = 0; k < N; k++) {
+    const s = ink[k * 4] + ink[k * 4 + 1] + ink[k * 4 + 2];
+    rough32[k] = grey[s];
+    const p = press[s];
+    if (p === 0) continue;
+    hP[k] -= p;
+    const i = k % W;
+    redo[k] = 1;
+    if (i > 0) redo[k - 1] = 1;
+    if (i < W - 1) redo[k + 1] = 1;
+    if (k >= W) redo[k - W] = 1;
+    if (k < N - W) redo[k + W] = 1;
+  }
+  patchNormalTexels(normal, hP, W, W, LABEL_RELIEF_K, false, redo);
+  return { rough, normal };
 }
 
 /** The layers' buffers, to hand from a worker without a copy. */
 export const panFoodBuffers = (t: PanFoodTexels): ArrayBuffer[] => [t.sauce, t.meat, t.meatNormal, t.meatRough, t.veg, t.soup].map((a) => a.buffer as ArrayBuffer);
-export const labelPaperBuffers = (t: LabelPaper): ArrayBuffer[] => [t.paper.buffer as ArrayBuffer, t.height.buffer as ArrayBuffer];
+export const labelPaperBuffers = (t: LabelPaper): ArrayBuffer[] => [t.paper.buffer as ArrayBuffer, t.height.buffer as ArrayBuffer, t.normal.buffer as ArrayBuffer];
 export const knifeBuffers = (t: KnifeTexels): ArrayBuffer[] => [t.blade, t.bladeRough, t.bevel].map((a) => a.buffer as ArrayBuffer);
 
 // Layers made ahead by the worker, each for the one builder that paints from it (its material is made once a page).

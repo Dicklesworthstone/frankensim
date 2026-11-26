@@ -35,7 +35,7 @@ import { register, type Builder, type Hooks } from "./index";
 import { palette } from "./materials";
 import { bar, cyl, lathe, plate, rbox, torus, ball, turnJoint, Shop, type V3, type Built } from "./shop";
 import { PI, TAU, adiff, clamp, clamp01, fbm, greyTexels, lattice, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, type P2 } from "./texels";
-import { KNIFE_BH, KNIFE_BW, KNIFE_EH, KNIFE_EW, LABEL_TW, MEAT_TW, knifeTexelsFor, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
+import { KNIFE_BH, KNIFE_BW, KNIFE_EH, KNIFE_EW, LABEL_TW, MEAT_TW, knifeTexelsFor, labelInk, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
 import { Ribeye, STEAK_SIDE_Q, steakOutline, steakTissueFor } from "./steakTissue";
 import * as bt from "./bouleTexels";
 
@@ -4022,9 +4022,10 @@ let labelCache: THREE.MeshStandardMaterial | null = null;
 function labelMat(): THREE.MeshStandardMaterial {
   if (labelCache) return labelCache;
   const W = LABEL_TW;
-  // The laid paper and its relief (foodTexels.ts), most likely made by a worker already; the ink goes over both.
-  const { paper, height: hP } = labelPaperFor();
-  const c = pixelCanvas(W, W, paper);
+  // The laid paper, its relief and the relief's normal map (foodTexels.ts), most likely made by a worker already; the
+  // ink goes over all three.
+  const paper = labelPaperFor();
+  const c = pixelCanvas(W, W, paper.paper);
   const x = c.getContext("2d", { willReadFrequently: true })!;
   const claret = "rgb(96, 22, 34)";
   const ink = "rgb(34, 26, 24)";
@@ -4142,16 +4143,9 @@ function labelMat(): THREE.MeshStandardMaterial {
   x.textAlign = "right";
   x.fillText("13.5% vol", W - 118, 920);
   x.textAlign = "center";
-  // Ink: a touch glossier than the paper, and pressed in.
-  const ink8 = x.getImageData(0, 0, W, W).data;
-  const rough = new Float32Array(W * W);
-  for (let k = 0; k < W * W; k++) {
-    const lum = (ink8[k * 4] + ink8[k * 4 + 1] + ink8[k * 4 + 2]) / 765;
-    const inked = smooth(0.72, 0.45, lum);
-    rough[k] = lerp(0.88, 0.55, inked);
-    hP[k] -= 1.2 * inked;
-  }
-  labelCache = std({ color: 0xffffff, metalness: 0, roughness: 1, map: canvasTex(c, true), roughnessMap: greyTex(rough, W, W, false), normalMap: normalTex(hP, W, W, 0.5, false), normalScale: new THREE.Vector2(0.6, 0.6) }, "own");
+  // Ink: a touch glossier than the paper, and pressed in (foodTexels' labelInk).
+  const { rough, normal } = labelInk(x.getImageData(0, 0, W, W).data, paper);
+  labelCache = std({ color: 0xffffff, metalness: 0, roughness: 1, map: canvasTex(c, true), roughnessMap: canvasTex(pixelCanvas(W, W, rough), false), normalMap: canvasTex(pixelCanvas(W, W, normal), false), normalScale: new THREE.Vector2(0.6, 0.6) }, "own");
   return labelCache;
 }
 
