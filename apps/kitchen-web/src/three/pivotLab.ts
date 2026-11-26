@@ -1,7 +1,7 @@
 /**
  * Every step at the station (chapter 05, second figure). From the burner to the plate should be a pivot, not a
  * pivot, step, step, drop. Two stations side by side, the same cook and the same plate at each: on the left the
- * plating table as built, across a 54-inch aisle and along it; on the right where you move it, straight behind across a
+ * plating table as built, across a 60-inch aisle and along it; on the right where you move it, straight behind across a
  * 36-inch aisle or beside the range. Each cook sautes, turns to the table, plates and goes back, on a routine the gait
  * planner turns into footsteps (Routine); the figure counts those footsteps, lays them on the floor, and adds them up
  * over a service and a year.
@@ -88,12 +88,15 @@ function layoutFor(c: number, move: PivotMove | "built"): Layout {
   };
 }
 
-/** How the cook gets from one place to the next: a turn on the spot, a turn and a short step, or a walk and a turn. */
+/** How the cook gets from one place to the next: a turn on the spot, a turn and a short step, or a turn, a walk and a
+ * turn. The walk's first turn, to face its way, is its own step (the walk would turn on the spot there itself), so its
+ * footfalls count as a pivot's. */
 function moveSteps(a: Spot, b: Spot): RoutineStep[] {
   const d = Math.hypot(b.x - a.x, b.z - a.z);
   if (d < 0.02) return [{ kind: "turn", yaw: b.yaw }];
   if (d < 0.45) return [{ kind: "turn", yaw: b.yaw }, { kind: "shuffle", to: [b.x, b.z] }];
   return [
+    { kind: "turn", yaw: Math.atan2(b.x - a.x, b.z - a.z) },
     { kind: "walk", path: [[b.x, b.z]], speed: 1.0 },
     { kind: "turn", yaw: b.yaw },
   ];
@@ -400,7 +403,8 @@ export function mountPivotLab(root: HTMLElement): void {
     const km = ((a.metres - b.metres) * plates * SERVICES_A_YEAR) / 1000;
     setTile(tiles.year, `${num(km)} km`, `less walking, ${SERVICES_A_YEAR} services`, null);
     if (statusEl) {
-      const how = b.steps === 0 ? "a pivot and back, no steps" : `a pivot and ${b.steps === 1 ? "a step" : `${b.steps} steps`}`;
+      const pivots = b.pivots === 1 ? "a pivot" : `${b.pivots} pivots`;
+      const how = b.steps === 0 ? `${pivots} and no steps` : `${pivots} and ${b.steps === 1 ? "a step" : `${b.steps} steps`}`;
       statusEl.textContent = `Moved ${move === "beside" ? "beside the range" : "straight behind"}, plating is ${how}: ${a.steps - b.steps} steps a plate fewer than as built, ${num((a.steps - b.steps) * plates)} steps and ${num(minA - minB)} minutes on the move in a service of ${num(plates)} plates, ${num(km)} km a year.`;
       statusEl.dataset.state = "ok";
     }

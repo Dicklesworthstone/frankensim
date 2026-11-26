@@ -202,7 +202,7 @@ export interface Burn {
   t0: number;
   t1: number;
 }
-/** An oven's load: loading from t0 to t1, its program to t2, unloading to t3. */
+/** An oven's load: loading from t0 to t1, its program to t2, waiting shut for free hands to tu, unloading to t3. */
 export interface Load {
   oven: number;
   batches: number[];
@@ -212,6 +212,7 @@ export interface Load {
   t0: number;
   t1: number;
   t2: number;
+  tu: number;
   t3: number;
 }
 export interface BatchOut {
@@ -471,7 +472,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     const per = st.perPan ?? 0;
     const tl = pans * per;
     const ov = ovens[o]!;
-    const load: Load = { oven: o, batches: group.map((x) => x.id), slot: b.slot, verb: st.verb, pans, t0: t, t1: t + tl, t2: t + tl + st.min, t3: t + tl + st.min };
+    const load: Load = { oven: o, batches: group.map((x) => x.id), slot: b.slot, verb: st.verb, pans, t0: t, t1: t + tl, t2: t + tl + st.min, tu: t + tl + st.min, t3: t + tl + st.min };
     loads.push(load);
     ov.phase = "load";
     ov.load = load;
@@ -505,6 +506,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     if (c < 0) return false;
     const load = ov.load!;
     const tl = load.pans * (ov.stage!.perPan ?? 0);
+    load.tu = t;
     ov.phase = "unload";
     spare[c] = 0;
     where[c] = { at: "oven", col: where[c]!.col, spot: o };
@@ -639,13 +641,17 @@ function settle(s: MorningSettings, fresh: boolean, from: readonly number[] | nu
 /**
  * The morning for these settings: each dish cooked just in time for the van, moved earlier where that is late, but
  * never so early that it is past its best at lunch. When that misses the van, the same without the limit says what
- * making the van would cost.
+ * making the van would cost; when that misses it too, everything started at 6:00. A plan that makes the van that way
+ * with nothing past its best is the plan.
  */
 export function planMorning(s: MorningSettings): Morning {
   const plan = settle(s, true);
   if (plan.late <= 0.5) return plan;
-  const rush = settle(s, false, plan.shift);
-  return { ...plan, onTimePastBest: rush.late <= 0.5 ? rush.pastBest : null };
+  let rush = settle(s, false, plan.shift);
+  if (rush.late > 0.5) rush = schedule(s, new Array<number>(SLOTS.length + 1).fill(SERVE), false);
+  if (rush.late > 0.5) return { ...plan, onTimePastBest: null };
+  if (rush.pastBest === 0) return rush;
+  return { ...plan, onTimePastBest: rush.pastBest };
 }
 
 /** Whether a morning makes the van with everything still at its best at lunch. */

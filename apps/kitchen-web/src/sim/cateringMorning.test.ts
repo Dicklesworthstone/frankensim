@@ -54,7 +54,9 @@ describe("cateringMorning", () => {
       for (let o = 0; o < OVENS; o++) expect(peak(m.loads.filter((l) => l.oven === o).map((l) => ({ t0: l.t0, t1: l.t3, w: 1 })))).toBeLessThanOrEqual(1);
       for (const l of m.loads) {
         expect(l.pans).toBeLessThanOrEqual(10);
-        expect(l.t0 <= l.t1 && l.t1 <= l.t2 && l.t2 <= l.t3).toBe(true);
+        expect(l.t0 <= l.t1 && l.t1 <= l.t2 && l.t2 <= l.tu && l.tu <= l.t3).toBe(true);
+        // Unloading starts when a cook does: the load's unload job runs from tu to t3.
+        expect(m.jobs.some((j) => j.kind === "unload" && j.spot === l.oven && Math.abs(j.t0 - l.tu) < 1e-6 && Math.abs(j.t1 - l.t3) < 1e-6)).toBe(true);
       }
       const table = m.jobs.filter((j) => j.at === "table");
       expect(peak(table.map((j) => ({ t0: j.t0, t1: j.t1, w: 1 })))).toBeLessThanOrEqual(TABLE_SPOTS);
@@ -88,8 +90,20 @@ describe("cateringMorning", () => {
       const m = run(s);
       if (m.late <= 0.5) expect(m.pastBest).toBe(0);
       expect(m.depart).toBeGreaterThanOrEqual(DOOR);
-      if (m.onTimePastBest !== null && m.late > 0.5) expect(m.onTimePastBest).toBeGreaterThanOrEqual(0);
+      // A late plan's cost of making the van is never nothing: a way to make it with nothing past its best is the plan.
+      if (m.onTimePastBest !== null && m.late > 0.5) {
+        expect(m.onTimePastBest).toBeGreaterThan(0);
+        expect(m.onTimePastBest).toBeLessThanOrEqual(s.meals);
+      }
     }
+  });
+
+  test("a morning that only makes the van started at 6:00 still says what that costs", () => {
+    // Two cooks, the written menu: moving starts earlier by the lateness never gets there, starting at 6:00 does.
+    const m = planMorning({ meals: 500, cooks: 2, menu: 0, ahead: false });
+    expect(m.late).toBeGreaterThan(30);
+    expect(m.onTimePastBest).not.toBeNull();
+    expect(m.onTimePastBest!).toBeGreaterThan(0);
   });
 
   test("the same settings give the same morning", () => {

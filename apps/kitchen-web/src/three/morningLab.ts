@@ -12,7 +12,7 @@
  * The chart is the plan itself, minute for minute: each cook's hands, each burner, each oven and each table place.
  */
 import * as THREE from "three";
-import { BURNERS, DOOR, MENUS, OVENS, SERVE, SLOTS, TABLE_SPOTS, clockOf, menuDishes, planMorning, type Crew, type Job, type Morning, type MorningSettings } from "../sim/cateringMorning";
+import { BURNERS, DOOR, MENUS, OVENS, SERVE, SLOTS, TABLE_SPOTS, clockOf, madeIt, menuDishes, planMorning, type Crew, type Job, type Morning, type MorningSettings } from "../sim/cateringMorning";
 import type { LimitAsk, LimitScore } from "../sim/morningLimits.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { makeTool, type ToolKind } from "./heroKitchen";
@@ -593,20 +593,23 @@ export function mountMorningLab(root: HTMLElement): void {
     svg += `<rect class="lane" x="${X0}" y="${tableY}" width="${X1 - X0}" height="${TABLE_SPOTS * SPOT_H}"/><text class="ya" x="${X0 - 6}" y="${tableY + (TABLE_SPOTS * SPOT_H) / 2 + 3.5}">Table</text>`;
     // Cooks' hands: whole-hand work fills the lane; pans minded stack in halves.
     for (let c = 0; c < n; c++) {
-      const jobs = m.jobs.filter((j) => j.cook === c);
+      const jobs = m.jobs.filter((j) => j.cook === c).sort((a, b) => a.t0 - b.t0);
+      // When each half of the lane is free again: the lower half for a pan minded, the upper for a second beside it.
+      const halfFree = [-Infinity, -Infinity];
       for (const j of jobs) {
         if (j.hands >= 1 - 1e-9) svg += r(j.t0, j.t1, cookY(c), COOK_H, SLOT_COLOR[j.slot]!, j.kind === "prep" ? 0.6 : 0.95);
         else {
-          // The lower half for the first pan minded, the upper for a second at the same time.
-          const second = jobs.some((o) => o !== j && o.hands < 1 - 1e-9 && o.t0 < j.t0 - 1e-6 && o.t1 > j.t0 + 1e-6);
-          svg += r(j.t0, j.t1, cookY(c) + (second ? 0 : COOK_H / 2), COOK_H / 2 - 0.5, SLOT_COLOR[j.slot]!, 0.85);
+          const half = halfFree[0]! <= j.t0 + 1e-6 ? 0 : 1;
+          halfFree[half] = j.t1;
+          svg += r(j.t0, j.t1, cookY(c) + (half ? 0 : COOK_H / 2), COOK_H / 2 - 0.5, SLOT_COLOR[j.slot]!, 0.85);
         }
       }
     }
     for (const b of m.burns) svg += r(b.t0, b.t1, rangeY + b.burner * BURN_H + 0.5, BURN_H - 1, SLOT_COLOR[b.slot]!, 0.9);
     for (const l of m.loads) {
       const y = ovenY + l.oven * (OVEN_H + 3);
-      svg += r(l.t0, l.t1, y, OVEN_H, SLOT_COLOR[l.slot]!, 1) + r(l.t1, l.t2, y + 2, OVEN_H - 4, SLOT_COLOR[l.slot]!, 0.55) + r(l.t2, l.t3, y, OVEN_H, SLOT_COLOR[l.slot]!, 1);
+      // Loading, the program, done and shut until a cook is free (fainter), unloading.
+      svg += r(l.t0, l.t1, y, OVEN_H, SLOT_COLOR[l.slot]!, 1) + r(l.t1, l.t2, y + 2, OVEN_H - 4, SLOT_COLOR[l.slot]!, 0.55) + r(l.t2, l.tu, y + 4, OVEN_H - 8, SLOT_COLOR[l.slot]!, 0.3) + r(l.tu, l.t3, y, OVEN_H, SLOT_COLOR[l.slot]!, 1);
       const w = xOf(l.t2) - xOf(l.t1);
       if (w > 46) svg += `<text class="lbl" x="${((xOf(l.t1) + xOf(l.t2)) / 2).toFixed(1)}" y="${y + OVEN_H / 2 + 3.5}">${l.verb} · ${l.pans} pans</text>`;
     }
@@ -652,10 +655,22 @@ export function mountMorningLab(root: HTMLElement): void {
       const last = Math.max(...m.batches.map((b) => b.packed));
       text = `Everything is packed by ${clockOf(last)} and the van leaves at 10:30, every dish at its best at lunch.`;
     } else {
-      const lateDish = dishes[m.lastPacked.slice(0, 3).indexOf(Math.max(...m.lastPacked.slice(0, 3)))]!;
-      text = `The van leaves at ${clockOf(m.depart)}, ${fmtLate(m.late).toLowerCase()}, waiting on the ${lateDish.name.toLowerCase()}: ${station} ${m.bottleneck === "hands" ? "are" : "is"} full to the end${m.bottleneck === "range" && settings.cooks > 2 ? ", and only two cooks fit at it" : ""}.`;
+      // The place packed last, the sides among them.
+      const lateDish = dishes[m.lastPacked.indexOf(Math.max(...m.lastPacked))]!;
+      const busy = Math.round(100 * m.use[m.bottleneck]);
+      text = `The van leaves at ${clockOf(m.depart)}, ${fmtLate(m.late).toLowerCase()}, waiting on the ${lateDish.name.toLowerCase()}: ${station} ${m.bottleneck === "hands" ? "are" : "is"} busy ${busy}% of the 90 minutes before it leaves${m.bottleneck === "range" && settings.cooks > 2 ? ", and only two cooks fit at it" : ""}.`;
       if (m.onTimePastBest !== null && m.onTimePastBest > 0) text += ` Started early enough for 10:30, ${m.onTimePastBest.toLocaleString("en-US")} portions would be past their best by lunch.`;
-      const swap = SLOTS.findIndex((s, k) => !(settings.menu & (1 << k)) && s.swap);
+      // The one swap that gets the van away soonest, when one gets it away sooner.
+      let swap = -1;
+      let soonest = m.depart - 0.5;
+      SLOTS.forEach((_, k) => {
+        if (settings.menu & (1 << k)) return;
+        const depart = runFor({ ...settings, menu: settings.menu | (1 << k) }).depart;
+        if (depart < soonest) {
+          soonest = depart;
+          swap = k;
+        }
+      });
       if (swap >= 0) text += ` Try ${SLOTS[swap]!.swap.name.toLowerCase()}.`;
     }
     statusEl.textContent = text;
@@ -716,8 +731,18 @@ export function mountMorningLab(root: HTMLElement): void {
     const wrap = ladderEl?.closest<HTMLElement>(".rs-map-wrap");
     if (wrap) wrap.hidden = true;
   };
+  /**
+   * A menu's limit: the worker's search, raised to the order on screen when that order makes the van. The search
+   * halves the gap between an order that makes it and one that doesn't, and the plan is not always easier with fewer
+   * meals, so it can stop short of an order that works.
+   */
+  const limitOf = (menu: number, ahead: boolean): number | undefined => {
+    const v = limits.get(lkey(menu, ahead));
+    if (v === undefined) return v;
+    return menu === settings.menu && ahead === settings.ahead && madeIt(morning) && settings.meals > v ? settings.meals : v;
+  };
   function renderLimitTile(): void {
-    const v = limits.get(lkey(settings.menu, settings.ahead));
+    const v = limitOf(settings.menu, settings.ahead);
     const t = tiles.limit;
     if (t.v) t.v.textContent = v === undefined ? "…" : v.toLocaleString("en-US");
     if (t.sub) t.sub.textContent = v === undefined ? "working it out" : v >= settings.meals ? `${(v - settings.meals).toLocaleString("en-US")} to spare` : `${(settings.meals - v).toLocaleString("en-US")} too many`;
@@ -751,8 +776,8 @@ export function mountMorningLab(root: HTMLElement): void {
     for (const v of [0, nice / 2, nice]) svg += `<line class="g v" x1="${X(v)}" x2="${X(v)}" y1="${T}" y2="${T + MENUS * rowH}"/><text class="xa" x="${X(v)}" y="${T + MENUS * rowH + 14}">${v.toLocaleString("en-US")}</text>`;
     order.forEach((menu, row) => {
       const y = T + row * rowH;
-      const today = limits.get(lkey(menu, false));
-      const ahead = limits.get(lkey(menu, true));
+      const today = limitOf(menu, false);
+      const ahead = limitOf(menu, true);
       const cur = menu === settings.menu;
       svg += `<g class="row${cur ? " on" : ""}" data-menu="${menu}"><rect class="hit" x="0" y="${y}" width="${W}" height="${rowH}"/>`;
       svg += stack ? `<text class="ml st" x="${L}" y="${y + 11}">${menuLabel(menu)}</text>` : `<text class="ml" x="${L - 8}" y="${y + rowH / 2 + 4}">${menuLabel(menu)}</text>`;
@@ -769,10 +794,10 @@ export function mountMorningLab(root: HTMLElement): void {
     if (ladderNote) {
       if (limits.size < 2 * MENUS) ladderNote.textContent = `Finding the limit for menu ${Math.min(2 * MENUS, limits.size + 1)} of ${2 * MENUS}…`;
       else {
-        const best = order.reduce((a, b) => ((limits.get(lkey(b, false)) ?? 0) > (limits.get(lkey(a, false)) ?? 0) ? b : a), 0);
-        const bt = limits.get(lkey(best, false)) ?? 0;
-        const ba = limits.get(lkey(best, true)) ?? 0;
-        const w0 = limits.get(lkey(0, false)) ?? 0;
+        const best = order.reduce((a, b) => ((limitOf(b, false) ?? 0) > (limitOf(a, false) ?? 0) ? b : a), 0);
+        const bt = limitOf(best, false) ?? 0;
+        const ba = limitOf(best, true) ?? 0;
+        const w0 = limitOf(0, false) ?? 0;
         ladderNote.textContent = `With ${settings.cooks} cooks, the menu as written gets ${w0.toLocaleString("en-US")} meals out by 10:30 at their best; ${menuLabel(best).toLowerCase()} gets ${bt.toLocaleString("en-US")}, and ${ba.toLocaleString("en-US")} with what keeps cooked the day before. Pick a row to plan that menu.`;
       }
     }
@@ -923,7 +948,7 @@ export function mountMorningLab(root: HTMLElement): void {
     // Ovens: the door open to load and unload, the program running between.
     for (let o = 0; o < OVENS; o++) {
       const l = morning.loads.find((x) => x.oven === o && x.t0 <= t && x.t3 > t);
-      const open = l && (t < l.t1 || t >= l.t2) ? 1 : 0;
+      const open = l && (t < l.t1 || t >= l.tu) ? 1 : 0;
       const run = l && t >= l.t1 && t < l.t2 ? 1 : 0;
       door[o]! += (open - door[o]!) * Math.min(1, dt * 4);
       heat[o]! += (run - heat[o]!) * Math.min(1, dt * 2);
