@@ -55,8 +55,9 @@ ATKINS_PACK="examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk"
 SENS_PACK="$ASM_DIR/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
 PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
 SRM_PACK="$ASM_DIR/packs/eps-nist-srm1453-2013.fsmcdpk"
+N2_PACK="$ASM_DIR/packs/nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk"
 FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK"
-  "$ASM_DIR/two_mass_chain.fsim")
+  "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -121,6 +122,13 @@ TMC_HALF="$ARTIFACT_DIR/two_mass_chain_half_dt.fsim"
 sed 's/:dt 0.001s/:dt 0.0005s/' "$ASM_DIR/two_mass_chain.fsim" > "$TMC_HALF"
 grep -q ":dt 0.0005s" "$TMC_HALF" || die "half-step copy of two_mass_chain.fsim has no :dt 0.0005s"
 run_case tmc_half "$TMC_HALF" --materials "$STEEL_PACK"
+# Gas piston (adiabatic Ruchardt modal, equilibrium transient, and +500 N compression transient)
+run_case gp_modal "$ASM_DIR/gas_piston.fsim" --materials "$STEEL_PACK" --materials "$N2_PACK" --analysis modal
+run_case gp_transient "$ASM_DIR/gas_piston.fsim" --materials "$STEEL_PACK" --materials "$N2_PACK"
+GP_COMP="$ARTIFACT_DIR/gas_piston_comp.fsim"
+sed 's/-6361.725123519331N/-6861.725123519331N/' "$ASM_DIR/gas_piston.fsim" > "$GP_COMP"
+grep -q -- "-6861.725123519331N" "$GP_COMP" || die "compression copy of gas_piston.fsim missing shifted load"
+run_case gp_comp "$GP_COMP" --materials "$STEEL_PACK" --materials "$N2_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -328,6 +336,48 @@ tm_ratio = (tm_full[0] / tm_half[0], tm_full[1] / tm_half[1])
 assert tm_full[2] == 1001 and tm_half[2] == 2001 and max(tm_full[:2]) <= 5e-6 and all(3.9 <= r <= 4.1 for r in tm_ratio), (tm_full, tm_half, tm_ratio)
 assert wres(e_tt) <= 1e-12 and wres(e_th) <= 1e-12, (wres(e_tt), wres(e_th))
 
+# 9. Gas piston (N2 NASA-9 McBride 2002 + Lemmon 2004, r=0.15 m, h=0.20 m, T0=300 K, p0=90 kPa; steel 0.1 m cube m=7.8 kg)
+gp_r, gp_h, gp_t0, gp_p0, gp_mp = 0.15, 0.20, 300.0, 90000.0, 7800.0 * 0.1**3
+gp_A, gp_V0 = math.pi * gp_r**2, math.pi * gp_r**2 * gp_h
+# Exact NASA-9 N2 (200..1000 K, McBride 2002) cp/R and molar mass 0.0280134 kg/mol:
+gp_R = 8.31446261815324 / 0.0280134
+gp_cp_R = lambda T: (22103.71497 * T**-2 - 381.846182 * T**-1 + 6.08273836
+                     - 8.53091441e-3 * T + 1.384646189e-5 * T**2
+                     - 9.62579362e-9 * T**3 + 2.519705809e-12 * T**4)
+gp_cv0 = (gp_cp_R(gp_t0) - 1.0) * gp_R; gp_gam = gp_cp_R(gp_t0) / (gp_cp_R(gp_t0) - 1.0)
+gp_wiso2 = gp_p0 * gp_A**2 / (gp_mp * gp_V0); gp_wad2 = gp_gam * gp_wiso2
+gp_fad = math.sqrt(gp_wad2) / (2.0 * math.pi)
+e_gpm, e_gpt, e_gpc = ld("gp_modal.explain.json"), ld("gp_transient.explain.json"), ld("gp_comp.explain.json")
+pgpm, pgpt, pgpc = probes(e_gpm), probes(e_gpt), probes(e_gpc)
+gp_ad_idx = next(i for i, f in enumerate(pgpm["modal.frequency_hz"]) if f > 1.0)
+gp_fad_rel = abs(pgpm["modal.frequency_hz"][gp_ad_idx] - gp_fad) / gp_fad
+gp_z_ad = abs(pgpm["modal.damping_ratio"][gp_ad_idx])
+assert gp_fad_rel <= 1e-6 and gp_z_ad <= 1e-6, (gp_fad_rel, gp_z_ad, pgpm)
+bv_gpm = check_budget(e_gpm, "ruchardt_freq", roundoff_measured=False)
+bv_gpt = check_budget(e_gpt, "gas_temp_max", roundoff_measured=False)
+bv_gpc = check_budget(e_gpc, "gas_temp_max", roundoff_measured=False)
+gp_eq_v = max(abs(v) for v in pgpt["piston_vel"]); gp_eq_t = max(abs(t - gp_t0) for t in pgpt["gas_temp"])
+assert gp_eq_v <= 1e-11 and gp_eq_t <= 1e-11 and wres(e_gpt) <= 1e-12, (gp_eq_v, gp_eq_t, wres(e_gpt))
+# Independent RK4 adiabatic ideal-gas ODE for +500 N compression step (dt_rk4 = 1e-5 s)
+gp_st = [0.0, 0.0, gp_V0, gp_t0]; gp_fext = -gp_p0 * gp_A - 500.0
+gp_mg = gp_p0 * gp_V0 / (gp_R * gp_t0)
+def gp_rhs(y):
+  p = gp_mg * gp_R * y[3] / y[2]; cv = (gp_cp_R(y[3]) - 1.0) * gp_R
+  return [y[1], (p * gp_A + gp_fext) / gp_mp, gp_A * y[1], -(p * gp_A * y[1]) / (gp_mg * cv)]
+gp_rk = [gp_st[:]]
+for _ in range(40):
+  for _ in range(50):
+    h4 = 1e-5; k1 = gp_rhs(gp_st)
+    k2 = gp_rhs([a + 0.5*h4*b for a, b in zip(gp_st, k1)])
+    k3 = gp_rhs([a + 0.5*h4*b for a, b in zip(gp_st, k2)])
+    k4 = gp_rhs([a + h4*b for a, b in zip(gp_st, k3)])
+    gp_st = [a + h4*(b1 + 2*b2 + 2*b3 + b4)/6.0 for a, b1, b2, b3, b4 in zip(gp_st, k1, k2, k3, k4)]
+  gp_rk.append(gp_st[:])
+gp_comp_x = max(abs(a - b[0]) for a, b in zip(pgpc["piston_pos"], gp_rk))
+gp_comp_v = max(abs(a - b[1]) for a, b in zip(pgpc["piston_vel"], gp_rk))
+gp_comp_t = max(abs(a - b[3]) for a, b in zip(pgpc["gas_temp"], gp_rk))
+assert len(pgpc["gas_temp"]) == 41 and gp_comp_x <= 5e-6 and gp_comp_v <= 1e-4 and gp_comp_t <= 2e-3 and wres(e_gpc) <= 1e-9, (gp_comp_x, gp_comp_v, gp_comp_t, wres(e_gpc))
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -351,6 +401,10 @@ receipt = {
     "two_mass_chain": {"runs": {m: ld(f"tmc_{m}.run.json")["run"] for m in ("modal", "stationary", "transient", "half")}, "added_as_file_only": True,
       "errors": {"modal_max": tm_err_modal, "stationary_max": tm_err_stat, "transient_x_m": max(tm_full[:2]), "half_step_x_m": max(tm_half[:2]),
                  "half_step_error_ratio": list(tm_ratio), "energy_residual_j": wres(e_tt)}},
+    "gas_piston": {"runs": {m: ld(f"gp_{m}.run.json")["run"] for m in ("modal", "transient", "comp")},
+      "mode_verdicts": {"modal": bv_gpm, "transient": bv_gpt, "comp": bv_gpc},
+      "errors": {"ruchardt_freq_rel": gp_fad_rel, "adiabatic_zeta": gp_z_ad, "equilibrium_v_m_s": gp_eq_v, "equilibrium_t_k": gp_eq_t,
+                 "comp_pos_m": gp_comp_x, "comp_vel_m_s": gp_comp_v, "comp_temp_k": gp_comp_t, "comp_energy_residual_j": wres(e_gpc)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx"]},
 }

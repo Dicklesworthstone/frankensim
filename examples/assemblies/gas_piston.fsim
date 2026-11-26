@@ -1,0 +1,25 @@
+(assembly "gas_piston"
+  (version 1) (units "SI") (seed 0x42)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 90000Pa)
+  (time-plan :horizon 0.02s :dt 0.0005s :sample-rate 2000Hz)
+  (part "piston" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (part "gas" :kind cavity :geometry (cylinder 0.15m 0.20m)
+    :material "N2" :query-at (pressure 90000Pa)
+    :physics (fluid) :fidelity lumped)
+  (interface "face" :kind piston-face :a "piston" :b "gas")
+  ; explicit exterior pressure force (-p0 * pi * r^2); no hidden ambient force is added by the kernel
+  (source "ambient_pressure" :part "piston" :port "mechanics" :history (constant -6361.725123519331N))
+  (probe "piston_pos" :kind field-quantity :target "piston" :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 2000Hz)
+  (probe "piston_vel" :kind field-quantity :target "piston" :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 2000Hz)
+  (probe "gas_temp" :kind field-quantity :target "gas" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 2000Hz)
+  (analysis-options :modal-max 4)
+  ; declared limits (illustrative) on modal adiabatic Ruchardt frequency and transient gas temperature
+  (requirement "ruchardt_freq" :analysis modal :probe "modal.frequency_hz" :stat max :relation at-least :limit 11.5Hz)
+  (requirement "gas_temp_max" :analysis transient :probe "gas_temp" :stat max :relation at-most :limit 310K)
+)
