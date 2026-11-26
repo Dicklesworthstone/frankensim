@@ -85,6 +85,8 @@ committed sources.
   model-form, and measurement terms) and all gallery verdicts are `indeterminate`
   (`Estimate`-only). `shear_film_pair.fsim` is the exception: it declares no
   requirement, and its four probes read the parts' slots in their owner nodes.
+  An `(envelope ...)` clause declares any of the geometry, boundary, model-form
+  or measurement terms; no gallery file declares one yet.
 - **Heatsink-as-assembly (gallery item 6):** `examples/heatsink-fan/heatsink-fan.fsim`
   is not yet expressible as a `.fsim` assembly because it requires STL geometry
   ingestion, non-lumped CHT/conduction fidelity, and 3-D field QoIs beyond the
