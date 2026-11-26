@@ -95,6 +95,20 @@ impl KillRegistry {
         )
     }
 
+    /// [`KillRegistry::register`] with a clock-free gate
+    /// ([`CancelGate::new_clock_free`]): registering never reads a platform
+    /// time source, which traps on `wasm32-unknown-unknown`. Kills behave the
+    /// same; the gate reports no request timestamp, so no reclaim latency is
+    /// measured for it. An id already registered keeps its existing gate.
+    #[must_use]
+    pub fn register_clock_free(&self, id: CandidateId) -> Arc<CancelGate> {
+        Arc::clone(
+            self.lock()
+                .entry(id)
+                .or_insert_with(|| Arc::new(CancelGate::new_clock_free())),
+        )
+    }
+
     /// Kill a candidate: request cancellation on its gate. Idempotent.
     /// Returns false for unknown ids (a structured non-event, not an
     /// error — the candidate may already be finished and released).
@@ -169,6 +183,31 @@ mod tests {
         assert!(!reg.kill(7), "released candidates are unknown");
         // The Arc'd gate outlives the registry entry (in-flight holders).
         assert!(gate.is_requested());
+    }
+
+    #[test]
+    fn clock_free_registration_kills_without_a_timestamp() {
+        let reg = KillRegistry::new();
+        let gate = reg.register_clock_free(3);
+        assert!(Arc::ptr_eq(&gate, &reg.register_clock_free(3)));
+        assert!(
+            Arc::ptr_eq(&gate, &reg.register(3)),
+            "a registered id keeps its gate"
+        );
+        assert!(
+            Arc::ptr_eq(&gate, &reg.registered_gate(3).expect("registered")),
+            "races admit the clock-free gate"
+        );
+        assert_eq!(gate.latency_now_ns(), None, "never reads a clock");
+        assert!(!gate.is_requested());
+        reg.kill_registered(3).expect("wired candidates kill");
+        assert!(gate.is_requested());
+        assert_eq!(gate.latency_now_ns(), None);
+        let ordinary = reg.register(4);
+        assert!(
+            ordinary.latency_now_ns().is_some(),
+            "register keeps the monotonic gate"
+        );
     }
 
     #[test]

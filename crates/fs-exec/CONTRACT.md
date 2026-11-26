@@ -242,7 +242,10 @@ fs-blake3, fs-substrate, fs-obs.
   elimination, ascending order), `registered_gate` (fetch without silently
   creating), `kill_registered` (structured missing-gate error), `release`.
   Everything a candidate evaluates — pool runs, races, drives — shares its
-  explicitly registered gate.
+  explicitly registered gate. `register_clock_free` registers a
+  `CancelGate::new_clock_free()` gate instead, for registries built where
+  reading a platform time source traps (`wasm32-unknown-unknown`): kills are
+  the same, and the gate yields no reclaim-latency sample.
 - `InvocationResources` and its six unit newtypes (`WorkUnits`, `PollUnits`,
   `CostUnits`, `EvaluationUnits`, `MemoryBytes`, `OutputBytes`) form a
   dimension-preserving affine capacity vector. `InvocationAdmitter::admit`

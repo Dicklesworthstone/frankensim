@@ -21,7 +21,9 @@
 //! reached while `fs_truss::GroundStructure::try_grid` builds its `fnx` graph
 //! reads a platform time source, which compiles but TRAPS at runtime on
 //! `wasm32-unknown-unknown`); the trap-free racing path
-//! (`fs_race::race_field` over an empty `KillRegistry`) never reads a clock.
+//! (`fs_race::race_field` over gates from `KillRegistry::register_clock_free`)
+//! never reads a clock; `KillRegistry::register` would read `Instant::now()`
+//! per candidate and trap.
 //!
 //! Determinism: no clocks, no entropy RNG. All stochastic paths are
 //! counter-based Philox keyed by seed / logical identity.
@@ -233,7 +235,7 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
     let scale = 1.5 / spread.max(1e-9);
     let kills = KillRegistry::new();
     for candidate in 0..ns {
-        let _ = kills.register(candidate as u64);
+        let _ = kills.register_clock_free(candidate as u64);
     }
     let mut loss = |i: usize, t: u64| {
         let mut h = ((i as u64) << 32) ^ t ^ u64::from(seed);
@@ -1964,6 +1966,15 @@ fn frame_size_and_snap(
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
+/// Kanai–Tajimi spectral intensity of the browser ensemble. The story's fiber
+/// hinge admits drift up to about 0.98 % of the story height (fs-solid's
+/// concrete compression domain); past it the checked history refuses, and one
+/// refused member sends the whole flagship to [`frame_nan_body`]. At the former
+/// 0.01, 39 of seed 90210's 48 members crossed that edge. Through all five
+/// stages, over seed 90210 and 120 seeds spread across 1..=99999: 0.002 left
+/// 48 seeds refused, 0.001 one, and this value none.
+const FRAME_KT_S0: f64 = 7.0e-4;
+
 /// Build the seismic ensemble (Kanai–Tajimi), sized for interactivity.
 fn frame_ensemble(seed: u32, members: u32, duration: f64, dt: f64) -> StochasticEnsemble {
     StochasticEnsemble {
@@ -1973,7 +1984,7 @@ fn frame_ensemble(seed: u32, members: u32, duration: f64, dt: f64) -> Stochastic
         duration: QtyAny::new(duration, TIME),
         dt: QtyAny::new(dt, TIME),
         model: SpectrumModel::KanaiTajimi {
-            s0: 0.01,
+            s0: FRAME_KT_S0,
             omega_g: QtyAny::new(12.5, RATE),
             zeta_g: 0.6,
         },
@@ -2338,7 +2349,9 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     out
 }
 
-/// A minimal, non-trapping frame body used only if the ensemble is malformed.
+/// A minimal, non-trapping frame body returned when any stage refuses: a
+/// malformed ensemble, or a checked history that leaves the hinge's admitted
+/// domain or fails to converge.
 fn frame_nan_body(seed: u32) -> Vec<f64> {
     let mut out = vec![2.0, 2.0, f64::from(seed)];
     out.extend(std::iter::repeat_n(f64::NAN, 9));

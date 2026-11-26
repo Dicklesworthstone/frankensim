@@ -235,8 +235,10 @@ a deterministic `fs-exec::Cx` and poll cancellation through their cold proof
 stages. That scoped context uses `CancelGate::new_clock_free`, so constructing
 it never reads the unsupported `wasm32-unknown-unknown` platform time source;
 its private sentinel request marker is omitted from timestamp accessors and
-latency reports. The browser surface does not yet expose an external
-cancellation handle.
+latency reports. The ORNITHOID e-race registers its candidates with
+`KillRegistry::register_clock_free` for the same reason; `register` reads
+`Instant::now()` per candidate, which traps in the browser. The browser surface
+does not yet expose an external cancellation handle.
 
 ## Unsafe boundary
 
