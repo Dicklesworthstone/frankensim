@@ -762,7 +762,9 @@ export function mountMorningLab(root: HTMLElement): void {
       if (shown !== undefined) svg += `<text class="v" x="${X(Math.max(shown, settings.ahead && ahead !== undefined ? ahead : 0)) + 5}" y="${y + barY + barH / 2 + 4}">${shown.toLocaleString("en-US")}</text>`;
       svg += `</g>`;
     });
-    svg += `<line class="order" x1="${X(settings.meals)}" x2="${X(settings.meals)}" y1="${T - 4}" y2="${T + MENUS * rowH + 2}"/>`;
+    // This order's line: down the whole chart, or on a phone through each row's bar only, clear of the names.
+    if (stack) for (let row = 0; row < MENUS; row++) svg += `<line class="order" x1="${X(settings.meals)}" x2="${X(settings.meals)}" y1="${T + row * rowH + barY - 2}" y2="${T + row * rowH + barY + barH + 2}"/>`;
+    else svg += `<line class="order" x1="${X(settings.meals)}" x2="${X(settings.meals)}" y1="${T - 4}" y2="${T + MENUS * rowH + 2}"/>`;
     ladderEl.innerHTML = svg + "</svg>";
     if (ladderNote) {
       if (limits.size < 2 * MENUS) ladderNote.textContent = `Finding the limit for menu ${Math.min(2 * MENUS, limits.size + 1)} of ${2 * MENUS}…`;
