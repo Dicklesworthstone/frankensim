@@ -464,7 +464,9 @@ per-schema compatibility and deprecation rules, is
 | Euler structural checker and local evidence-reference assessment protocol | `fs-euler-disc-e2e` | 1 | no predecessor; the receipt decoder and complete canonical assessment-log reader refuse mismatches, while other bytes are identity preimages |
 | Scenario IR | `fs-scenario` | 2 | migrates, with a receipt |
 | Assembly Description sidecar | `fs-scenario` | 1 | no predecessor yet; other versions refuse |
-| FSMATPK material pack family | `fs-matdb` | 1 | no predecessor yet |
+| Typed-path gesture schedules with frozen v1 aliases | `fs-scenario` | 2 | v1 artifacts decode with their original hashes |
+| Assembly-bound Performance sidecar | `fs-scenario` | 1 | no predecessor yet |
+| FSMATPK material pack family | `fs-matdb` | 8 | prior versions decode byte-identically |
 | Design-ledger schema | `fs-ledger` | 20 | migrates in place, history intact |
 | Source manifest + SPDX projection | `xtask` | `frankensim-source-manifest-v1` | no predecessor yet |
 | Capability-maturity registry | `xtask` | `frankensim-capability-maturity-v1` | no predecessor yet |
