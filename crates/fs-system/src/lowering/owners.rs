@@ -5,9 +5,9 @@
 //!   interfaces lower to one `fs_mbd` `ViscousNetwork`.
 //! - [`thermal`]: thermal solids whose material card names a registered
 //!   caloric law lower to the cells of one `fs_thermal` `ThermalTimeline`.
-//! - Loss routes: a [`LOSS_ROUTE_FAMILY`] interface from a face one bushing
-//!   joins to a cell's face carries its declared `fraction` of that bushing's
-//!   heat; the rest goes to a sink named `unallocated`.
+//! - Loss routes: a card-less `HeatRoute` interface from a part that one
+//!   bushing joins to a cell carries its declared `fraction` of that
+//!   bushing's heat; the rest goes to a sink named `unallocated`.
 //!
 //! [`register_owner_defaults`] adds the three groups and overrides no kernel
 //! default: a draft that names none of these families or laws lowers as
@@ -40,10 +40,6 @@ pub const VISCOUS_BUSHING_FAMILY: &str = "viscous-bushing";
 /// `ThermalContact` interface between a cell's face and a face of a
 /// stationary `DrivenBody` frame).
 pub const THERMAL_BOUNDARY_FAMILY: &str = "thermal-boundary";
-/// Card family of a route carrying a declared `fraction` of a bushing's
-/// heat to a cell (a `ThermalContact` interface from a face that exactly one
-/// bushing joins to the cell's face). Its card carries no value.
-pub const LOSS_ROUTE_FAMILY: &str = "loss-route";
 /// Group name of the loss routes.
 pub const LOSS_ROUTES: &str = "owners.loss-routes";
 
@@ -240,15 +236,25 @@ pub(crate) fn family_entry<'a>(
     Some((entry, state.as_slice()))
 }
 
+/// The state of `iface` when it is a heat route.
+pub(crate) fn route_state(iface: &DraftInterfaceDecl) -> Option<State<'_>> {
+    match &iface.kind {
+        DraftInterfaceKind::HeatRoute { state } => Some(state.as_slice()),
+        _ => None,
+    }
+}
+
 /// The bushing a loss route draws from: the one viscous bushing that joins
-/// the route's `feature_a` face.
+/// the part owning the route's `feature_a`.
 pub(crate) fn route_bushing<'a>(
     input: &'a DraftAssemblyInput,
     cards: &CardStore,
     route: &DraftInterfaceDecl,
 ) -> Option<&'a DraftInterfaceDecl> {
+    let part = owning_part(input, route.feature_a)?;
+    let on_part = |end| owning_part(input, end) == Some(part);
     let mut joined = input.interfaces.iter().filter(|b| {
-        (b.feature_a == route.feature_a || b.feature_b == route.feature_a)
+        (on_part(b.feature_a) || on_part(b.feature_b))
             && family_entry(cards, b, VISCOUS_BUSHING_FAMILY).is_some()
     });
     let bushing = joined.next()?;
@@ -277,9 +283,12 @@ pub(crate) fn unallocated(ambient_k: f64) -> Result<HeatSink, LoweringError> {
 #[allow(clippy::unnecessary_wraps)] // Signature required by GroupSelector.
 fn select_loss_routes(
     draft: &DraftAssembly,
-    cards: &CardStore,
+    _cards: &CardStore,
 ) -> Result<Vec<GroupSelection>, LoweringError> {
-    let selection = of_family(draft, cards, LOSS_ROUTE_FAMILY);
+    let mut selection = GroupSelection::default();
+    let routes = draft.input().interfaces.iter().enumerate();
+    let routes = routes.filter_map(|(index, iface)| route_state(iface).map(|_| index));
+    selection.interfaces = routes.collect();
     let found = !selection.interfaces.is_empty();
     Ok(found.then_some(selection).into_iter().collect())
 }
@@ -297,15 +306,15 @@ fn lower_loss_routes(
         let iface = &input.interfaces[index];
         let mut it = Scoped::new("interface", &iface.name);
         let bushing = route_bushing(input, ctx.cards, iface)
-            .ok_or_else(|| it.invalid("feature_a must be a face of exactly one viscous bushing"))?;
+            .ok_or_else(|| it.invalid("feature_a must be on a part exactly one bushing joins"))?;
         let source = graph.entity_port(bushing.entity, "heat");
         let source =
             source.ok_or_else(|| it.invalid("its bushing must be a lowered viscous bushing"))?;
         let receiver = graph.resolve_entity_port(&input.catalog, iface.feature_b, "heat");
         let receiver = receiver
             .ok_or_else(|| it.invalid("feature_b must be a cell of the thermal timeline"))?;
-        let state = family_entry(ctx.cards, iface, LOSS_ROUTE_FAMILY).map_or(&[][..], |(_, s)| s);
-        let fraction = state
+        let fraction = route_state(iface)
+            .unwrap_or_default()
             .iter()
             .find(|(key, _)| key.name == "fraction")
             .map(|(_, q)| *q);

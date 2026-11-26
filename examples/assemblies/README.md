@@ -24,7 +24,7 @@ masked under a single material label.
 
 ## Reproducing the Tracked Card Packs
 
-Both material packs under `examples/assemblies/packs/` are built deterministically
+The material packs under `examples/assemblies/packs/` are built deterministically
 from `data/matdb/seed-v1/` via `xtask matdb-pack`:
 
 ```bash
@@ -37,7 +37,17 @@ cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/aluminum-pure-thermal-nbs-c447/manifest.tsv \
   --material-state "aluminum-pure-nbs-c447" "solid" "elemental aluminum, NBS C447 Table 67" 0 \
   --out examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/aluminum-pure-thermal-nbs-c447/manifest.tsv \
+  --material-state "aluminum-pure-nbs-c447" "solid" "elemental aluminum, NBS C447 Table 67, sensible-heat law" 0 \
+  --models data/matdb/seed-v1/aluminum-pure-sensible-heat-nbs-c447/manifest.tsv \
+  --out examples/assemblies/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk
 ```
+
+The third pack has the second one's claims plus the `sensible-heat` model, so
+its thermal-only solids lower to the owners' thermal timeline; the two-body file
+keeps the second pack and its lumped lowering.
 
 The thermal contact interface pack is reused in place from
 `examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk`

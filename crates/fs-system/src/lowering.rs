@@ -62,6 +62,9 @@ pub mod owners;
 /// `fs-ledger`.
 pub const LOWERING_RECEIPT_SCHEMA: &str = "frankensim.lowering_receipt.v1";
 
+/// Dispatch family of a card-less [`DraftInterfaceKind::HeatRoute`].
+pub const HEAT_ROUTE_FAMILY: &str = "heat-route";
+
 /// BLAKE3 domain for parametric geometry fingerprints minted during lowering.
 pub const LOWERING_GEOMETRY_HASH_DOMAIN: &str = "org.frankensim.fs-system.lowering.geometry.v1";
 
@@ -243,6 +246,8 @@ pub enum InterfaceKindTag {
     ThermalContact,
     /// Electrical contact interface.
     ElectricalContact,
+    /// Card-less heat route.
+    HeatRoute,
 }
 
 impl InterfaceKindTag {
@@ -255,6 +260,7 @@ impl InterfaceKindTag {
             Self::Glue => "glue",
             Self::ThermalContact => "thermal_contact",
             Self::ElectricalContact => "electrical_contact",
+            Self::HeatRoute => "heat_route",
         }
     }
 }
@@ -267,6 +273,7 @@ impl From<&DraftInterfaceKind> for InterfaceKindTag {
             DraftInterfaceKind::Glue { .. } => Self::Glue,
             DraftInterfaceKind::ThermalContact { .. } => Self::ThermalContact,
             DraftInterfaceKind::ElectricalContact { .. } => Self::ElectricalContact,
+            DraftInterfaceKind::HeatRoute { .. } => Self::HeatRoute,
         }
     }
 }
@@ -661,8 +668,8 @@ pub struct InterfaceLoweringReceipt {
     pub entity: EntityId,
     /// Interface class tag.
     pub kind: InterfaceKindTag,
-    /// Resolved law/schema card hash.
-    pub card_hash: ContentHash,
+    /// Resolved law/schema card hash (`None` for a card-less heat route).
+    pub card_hash: Option<ContentHash>,
     /// Card family dispatched to the constructor.
     pub card_family: String,
     /// Optional third-body material card hash.
@@ -945,7 +952,10 @@ fn push_json_interfaces(out: &mut String, interfaces: &[InterfaceLoweringReceipt
         out.push_str(",\"kind\":");
         push_json_str(out, iface.kind.as_str());
         out.push_str(",\"card_hash\":");
-        push_json_str(out, &iface.card_hash.to_hex());
+        match iface.card_hash {
+            Some(h) => push_json_str(out, &h.to_hex()),
+            None => out.push_str("null"),
+        }
         out.push_str(",\"card_family\":");
         push_json_str(out, &iface.card_family);
         out.push_str(",\"third_body_card\":");
@@ -2345,6 +2355,8 @@ pub enum ResolvedInterfaceCard<'a> {
     System(&'a InterfaceCardEntry),
     /// Power-port schema card entry.
     PowerPort(&'a PowerPortSchemaCard),
+    /// No card: a [`DraftInterfaceKind::HeatRoute`].
+    None,
 }
 
 /// Context passed to a registered [`InterfaceConstructor`].
@@ -2353,8 +2365,8 @@ pub struct InterfaceLoweringContext<'a> {
     pub draft: &'a DraftAssembly,
     /// Interface declaration being lowered.
     pub interface: &'a DraftInterfaceDecl,
-    /// Resolved card hash.
-    pub card_hash: ContentHash,
+    /// Resolved card hash (`None` for a card-less heat route).
+    pub card_hash: Option<ContentHash>,
     /// Resolved card entry.
     pub card: ResolvedInterfaceCard<'a>,
     /// Card store (for third-body lookups).
@@ -3047,7 +3059,7 @@ impl LoweringRegistry {
                             }
                         })?;
                         (
-                            *schema,
+                            Some(*schema),
                             card.family.clone(),
                             ResolvedInterfaceCard::PowerPort(card),
                             None,
@@ -3076,7 +3088,7 @@ impl LoweringRegistry {
                             }
                         })?;
                         (
-                            *law_card,
+                            Some(*law_card),
                             entry.family.clone(),
                             ResolvedInterfaceCard::System(entry),
                             third_body.as_ref().map(|tb| tb.material_card),
@@ -3091,12 +3103,18 @@ impl LoweringRegistry {
                             }
                         })?;
                         (
-                            *law_card,
+                            Some(*law_card),
                             entry.family.clone(),
                             ResolvedInterfaceCard::System(entry),
                             None,
                         )
                     }
+                    DraftInterfaceKind::HeatRoute { .. } => (
+                        None,
+                        HEAT_ROUTE_FAMILY.to_owned(),
+                        ResolvedInterfaceCard::None,
+                        None,
+                    ),
                 };
             let key = InterfaceLoweringKey::new(kind_tag, card_family.clone());
             let ctor = self.interfaces.get(&key).ok_or_else(|| {

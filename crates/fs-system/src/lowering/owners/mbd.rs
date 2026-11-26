@@ -28,8 +28,8 @@ use fs_scenario::assembly::draft::{
 };
 
 use super::{
-    LOSS_ROUTE_FAMILY, Scoped, VISCOUS_BUSHING_FAMILY, family_entry, of_family, owning_part,
-    route_bushing, slot, unallocated,
+    Scoped, VISCOUS_BUSHING_FAMILY, family_entry, of_family, owning_part, route_bushing,
+    route_state, slot, unallocated,
 };
 use crate::RouteTemperature;
 use crate::lowering::{
@@ -168,7 +168,7 @@ pub(crate) fn lower(
         let heat = graph.port(node, &format!("heat{link}"))?;
         graph.expose_port(bushing, "heat", heat);
         let routed = input.interfaces.iter().any(|route| {
-            family_entry(ctx.cards, route, LOSS_ROUTE_FAMILY).is_some()
+            route_state(route).is_some()
                 && route_bushing(input, ctx.cards, route).is_some_and(|b| b.entity == bushing)
         });
         if !routed {

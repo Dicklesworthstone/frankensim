@@ -83,16 +83,22 @@ constructors:
 - `owners::mbd`: rigid bodies joined by `viscous-bushing` interfaces lower to
   one fs-mbd `ViscousNetwork`.
 - `owners::thermal`: thermal solids whose material card names a registered
-  caloric law lower to the cells of one fs-thermal `ThermalTimeline`. A
+  caloric law lower to the cells of one fs-thermal `ThermalTimeline`. The
+  card picks the path: a model-bearing card on a thermal-only `Solid` moves
+  that part from the kernel's lumped lowering to the timeline. A
   `thermal-boundary` interface from a cell's face to a face of a stationary
-  `DrivenBody` frame is the cell's exchange with the ambient.
-- Loss routes: a `loss-route` interface from a face that exactly one bushing
-  joins to a cell's face carries its declared fraction of that bushing's
-  heat. The rest goes to a sink named `unallocated`.
+  `DrivenBody` frame is the cell's exchange with the ambient. A cell outside
+  the product law's `T` band is refused at lowering or stops the run; nothing
+  clamps.
+- Loss routes: a card-less `HeatRoute` interface (bookkeeping, not a material
+  interface) from a part that exactly one bushing joins to a cell carries its
+  declared fraction of that bushing's heat. The rest goes to a sink named
+  `unallocated`. Its receipt's `card_hash` is null, its family `heat-route`.
 
-Interface sides are surfaces or regions, so each of these joins faces. Owner
-groups lower before any part, so the frame is recognised by its declared
-kind, not by the kernel's ground mark.
+Interface sides are surfaces or regions, so each of these joins faces; a
+route's bushing is found by part, since a `.fsim` gives each interface its own
+faces. Owner groups lower before any part, so the frame is recognised by its
+declared kind, not by the kernel's ground mark.
 
 The groups override no kernel default, so a draft naming none of these
 families or laws lowers as before. A body's pose and motion come from the

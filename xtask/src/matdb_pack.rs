@@ -700,25 +700,23 @@ struct ComponentMeta {
 
 /// Compile a strict source manifest twice and publish one verified new artifact.
 pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String> {
-    let (manifest_path, output_path, material_state, source_inputs_path) = match parse_cli(root, args) {
+    let (manifest_path, output_path, material_state, source_inputs_path, models_path) = match parse_cli(root, args) {
         Ok(paths) => paths,
         Err(error) => {
             print_refusal_decisions(&error, Some(cli_input_hash(args)));
             return Err(error.to_string());
         }
     };
-    let mut first = match compile_manifest(&manifest_path)
-        .and_then(|output| bind_material_state(output, material_state.as_ref()))
-    {
+    let bind =
+        |output| bind_material_state(output, material_state.as_ref(), models_path.as_deref());
+    let mut first = match compile_manifest(&manifest_path).and_then(bind) {
         Ok(output) => output,
         Err(error) => {
             print_refusal_decisions(&error, error.input_hash);
             return Err(error.to_string());
         }
     };
-    let second = match compile_manifest(&manifest_path)
-        .and_then(|output| bind_material_state(output, material_state.as_ref()))
-    {
+    let second = match compile_manifest(&manifest_path).and_then(bind) {
         Ok(output) => output,
         Err(error) => {
             print_refusal_decisions(&error, error.input_hash);
@@ -816,9 +814,11 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
 }
 
 /// Opt-in transport envelope; the source compiler and its claims stay unchanged.
+/// `models` names a constitutive-v1 source manifest whose models the card carries.
 fn bind_material_state(
     output: CompileOutput,
     state: Option<&MaterialStateId>,
+    models: Option<&Path>,
 ) -> Result<CompileOutput, CompileError> {
     let Some(state) = state else {
         return Ok(output);
@@ -842,8 +842,23 @@ fn bind_material_state(
             "--material-state accepts material property packs; interface, model and species artifacts require their original envelopes".to_string(),
         ));
     };
-    let card = NormalizedMaterialCardPack::new(state.clone(), claims)
-        .map_err(|error| refuse("invalid_material_state", error.to_string()))?;
+    let models = match models
+        .map(compile_manifest)
+        .transpose()?
+        .map(|output| output.pack)
+    {
+        None => None,
+        Some(CompiledPack::Model(pack)) => Some(pack),
+        Some(_) => {
+            let detail = "--models names a constitutive-v1 model source manifest".to_string();
+            return Err(refuse("models_require_model_source", detail));
+        }
+    };
+    let card = match models {
+        None => NormalizedMaterialCardPack::new(state.clone(), claims),
+        Some(pack) => NormalizedMaterialCardPack::new_with_models(state.clone(), claims, pack),
+    }
+    .map_err(|error| refuse("invalid_material_state", error.to_string()))?;
     let pack = CompiledPack::MaterialCard(card);
     let bytes = pack.to_bytes();
     let pack_hash = pack.content_hash();
@@ -869,14 +884,21 @@ fn bind_material_state(
     })
 }
 
-fn parse_cli(
-    root: &Path,
-    args: &[String],
-) -> Result<(PathBuf, PathBuf, Option<MaterialStateId>, Option<PathBuf>), CompileError> {
+/// Manifest, output, material state, source-input export and model manifest.
+type CliPaths = (
+    PathBuf,
+    PathBuf,
+    Option<MaterialStateId>,
+    Option<PathBuf>,
+    Option<PathBuf>,
+);
+
+fn parse_cli(root: &Path, args: &[String]) -> Result<CliPaths, CompileError> {
     let mut manifest = None;
     let mut output = None;
     let mut material_state = None;
     let mut source_inputs = None;
+    let mut models = None;
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
@@ -939,11 +961,12 @@ fn parse_cli(
             "--manifest" => &mut manifest,
             "--out" => &mut output,
             "--source-inputs" => &mut source_inputs,
+            "--models" => &mut models,
             _ => {
                 return Err(CompileError::new(
                     "invalid_cli",
                     "arguments",
-                    format!("unknown option {option:?}; expected --manifest, --out, --material-state, or --source-inputs"),
+                    format!("unknown option {option:?}; expected --manifest, --out, --material-state, --source-inputs, or --models"),
                 ));
             }
         };
@@ -977,7 +1000,14 @@ fn parse_cli(
         return Err(CompileError::new("invalid_cli", "arguments",
             "source-input export, manifest and pack output paths must differ"));
     }
-    Ok((manifest, output, material_state, source_inputs))
+    if models.is_some() && material_state.is_none() {
+        return Err(CompileError::new(
+            "invalid_cli",
+            "arguments",
+            "--models binds models to a named card and requires --material-state",
+        ));
+    }
+    Ok((manifest, output, material_state, source_inputs, models))
 }
 
 /// Exact editable UTF-8 inputs for the existing portable experiment boundary.
@@ -8891,7 +8921,7 @@ mod tests {
         assert!(!inputs.contains(&directory.display().to_string()));
         let state = MaterialStateId { chemistry: "authored-composite".into(),
             phase: "solid".into(), process: "original-specimen".into(), revision: 0 };
-        let card = bind_material_state(compiled, Some(&state)).expect("explicit identity");
+        let card = bind_material_state(compiled, Some(&state), None).expect("explicit identity");
         assert_eq!(source_inputs_json(&manifest_path, card.pack.source_artifact()).unwrap(), inputs);
         // A later edit cannot be exported as the input of an earlier compiled pack.
         fs::write(directory.join("source.tsv"), source_text + "\n").expect("source edit");
@@ -8905,7 +8935,9 @@ mod tests {
         let root = Path::new("/original-project");
         let args = ["--manifest", "manifest.tsv", "--out", "new.pack",
             "--source-inputs", "original-inputs.json"].map(str::to_string);
-        let (manifest, pack, state, inputs) = parse_cli(root, &args).expect("distinct paths");
+        let (manifest, pack, state, inputs, models) =
+            parse_cli(root, &args).expect("distinct paths");
+        assert!(models.is_none());
         assert_eq!(manifest, root.join("manifest.tsv"));
         assert_eq!(pack, root.join("new.pack"));
         assert!(state.is_none());
@@ -8918,6 +8950,37 @@ mod tests {
         let mut duplicate = args.to_vec();
         duplicate.extend(["--source-inputs".to_string(), "other.json".to_string()]);
         assert_eq!(parse_cli(root, &duplicate).unwrap_err().code, "invalid_cli");
+    }
+
+    #[test]
+    fn models_option_binds_a_compiled_model_source_to_the_named_card() {
+        let (material, _) = write_fixture(&manifest(MATERIAL_PROFILE, true), SOURCE);
+        let model_source = "frankensim.constitutive-source.v1\n\
+            model\tm\tsensible-heat\t1\t1\tzero\tbounded\n\
+            parameter\tm\tdatum_temperature\t293.15\tK\n\
+            validity\tm\tT\t288.15\t298.15\tK\n";
+        let (models, _) = write_fixture(&manifest(constitutive::PROFILE, true), model_source);
+        let state = MaterialStateId {
+            chemistry: "fixture-alloy-x".into(),
+            phase: "solid".into(),
+            process: "as-sourced".into(),
+            revision: 0,
+        };
+        let bind = |names: &Path| {
+            let material = compile_manifest(&material).unwrap();
+            let bound = bind_material_state(material, Some(&state), Some(names));
+            bound.map_err(|error| error.code)
+        };
+        let bound = bind(&models).expect("a model source binds");
+        let CompiledPack::MaterialCard(card) = &bound.pack else {
+            panic!("expected a card")
+        };
+        let [model] = card.card().models() else {
+            panic!("expected one model")
+        };
+        let law = (model.law.0.as_str(), model.validity.bound("T"));
+        assert_eq!(law, ("sensible-heat", Some((288.15, 298.15))));
+        assert_eq!(bind(&material).unwrap_err(), "models_require_model_source");
     }
 
     #[test]

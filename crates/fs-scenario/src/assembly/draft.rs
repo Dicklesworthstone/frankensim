@@ -488,7 +488,8 @@ pub struct ThirdBodyDecl {
     pub query_point: Vec<(ParameterKey, QtyAny)>,
 }
 
-/// Card-bound interface laws across mechanical, thermal, electrical, and power-port boundaries.
+/// Card-bound interface laws across mechanical, thermal, electrical, and power-port boundaries,
+/// and card-less heat routes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftInterfaceKind {
     /// Typed power-conjugate port schema.
@@ -526,6 +527,12 @@ pub enum DraftInterfaceKind {
         /// Optional oxide / contact-film third body.
         third_body: Option<ThirdBodyDecl>,
         /// Explicit interface state variables (e.g. film thickness, contact force).
+        state: Vec<(ParameterKey, QtyAny)>,
+    },
+    /// Heat bookkeeping, not a material interface, so no card: a declared
+    /// share of the heat dissipated at `feature_a` delivered to `feature_b`.
+    HeatRoute {
+        /// Explicit route state (e.g. the dimensionless `fraction`).
         state: Vec<(ParameterKey, QtyAny)>,
     },
 }
@@ -1875,6 +1882,9 @@ impl DraftAssembly {
                     if let Some(tb) = third_body {
                         check_third_body(tb, &scope)?;
                     }
+                    check_params(state, &format!("{scope}.state"))?;
+                }
+                DraftInterfaceKind::HeatRoute { state } => {
                     check_params(state, &format!("{scope}.state"))?;
                 }
             }

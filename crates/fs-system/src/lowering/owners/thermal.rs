@@ -2,8 +2,11 @@
 //! lowered to the cells of one `fs_thermal` `ThermalTimeline`.
 //!
 //! A part is a cell when it is a `Solid` with only thermal physics and a
-//! model on its first material card names a law [`CaloricLaws`] knows. A
-//! cell is a box, born at the start: its mass is density times volume, its
+//! model on its first material card names a law [`CaloricLaws`] knows: the
+//! card, not the kernel's lumped default, picks the path. A cell outside the
+//! product law's `T` band is refused at lowering, or mid-run by the law
+//! (`MaterialDomain`); nothing clamps.
+//! A cell is a box, born at the start: its mass is density times volume, its
 //! centreline the box's x extent at its declared pose, its specific energy
 //! the law's at its declared temperature (or the ambient). A
 //! `thermal-boundary` interface from the cell's face to a face of a
@@ -127,16 +130,19 @@ impl CaloricLaws {
 }
 
 /// A constant specific heat `c` [J/(kg K)] from a datum `t0` [K]:
-/// `e = c (T - t0)`.
+/// `e = c (T - t0)`, within the model's `band` [K] when it has one.
 struct SensibleHeat {
     c_j_kg_k: f64,
     datum_k: f64,
+    band: Option<(f64, f64)>,
 }
 
 impl ThermalLaw for SensibleHeat {
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         let temperature_k = self.datum_k + specific_h_j_kg / self.c_j_kg_k;
-        if !(temperature_k.is_finite() && temperature_k > 0.0) {
+        let within = |(lo, hi): (f64, f64)| (lo..=hi).contains(&temperature_k);
+        let banded = self.band.is_none_or(within);
+        if !(temperature_k.is_finite() && temperature_k > 0.0 && banded) {
             return Err(DepositionError::MaterialDomain);
         }
         Ok(temperature_k)
@@ -157,7 +163,8 @@ impl ThermalLaw for SensibleHeat {
 }
 
 /// The product law: the card's `specific_heat_capacity`, from the model's
-/// `datum_temperature`.
+/// `datum_temperature`, within its `T` validity band (receipted as
+/// `validity.T.lower` and `validity.T.upper`) when it has one.
 fn sensible_heat(
     request: &CaloricRequest<'_>,
     r: &mut ProvenanceRecorder,
@@ -182,9 +189,29 @@ fn sensible_heat(
         parameter: "datum_temperature",
     };
     r.record_model_parameter("datum_temperature", datum.value, datum.dims, reference);
+    let band = model.validity.bound("T");
+    if let Some((lo, hi)) = band {
+        let mut bound = reference;
+        for (parameter, value) in [("validity.T.lower", lo), ("validity.T.upper", hi)] {
+            bound.parameter = parameter;
+            r.record_model_parameter(parameter, value, TEMPERATURE_DIMS, bound);
+        }
+        if !(lo..=hi).contains(&request.temperature_k) {
+            let t = request.temperature_k;
+            let detail = format!("initial {t} K is outside the law's band [{lo}, {hi}] K");
+            return Err(LoweringError::Invalid {
+                item: item.to_owned(),
+                detail,
+            });
+        }
+    }
     let (c_j_kg_k, datum_k) = (c.value, datum.value);
     Ok(CaloricCell {
-        law: Rc::new(SensibleHeat { c_j_kg_k, datum_k }),
+        law: Rc::new(SensibleHeat {
+            c_j_kg_k,
+            datum_k,
+            band,
+        }),
         specific_energy_j_kg: c_j_kg_k * (request.temperature_k - datum_k),
     })
 }
@@ -503,6 +530,7 @@ mod tests {
         let law = SensibleHeat {
             c_j_kg_k: 500.0,
             datum_k: 0.0,
+            band: None,
         };
         assert_eq!(
             law.temperature_k(500.0 * 300.0).unwrap().to_bits(),

@@ -29,12 +29,13 @@ use fs_scenario::assembly::draft::{
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
+use fs_system::lowering::HEAT_ROUTE_FAMILY;
 use fs_system::lowering::owners::thermal::{
     self, CaloricCell, CaloricLaws, CaloricRequest, HEAT_SOURCE_PORT, SENSIBLE_HEAT_LAW,
 };
 use fs_system::lowering::owners::{
-    LOSS_ROUTE_FAMILY, LOSS_ROUTES, THERMAL_BOUNDARY_FAMILY, VISCOUS_BUSHING_FAMILY, mbd,
-    register_owner_defaults, register_owners,
+    LOSS_ROUTES, THERMAL_BOUNDARY_FAMILY, VISCOUS_BUSHING_FAMILY, mbd, register_owner_defaults,
+    register_owners,
 };
 use fs_system::{
     CardStore, ConstitutiveModelRef, LoweredSystem, LoweringError, LoweringRegistry,
@@ -368,19 +369,11 @@ fn pairing(cell_cards: [MaterialCard; 2], source_w: f64) -> (DraftAssembly, Card
         };
         interfaces.push(contact(bed, kind));
     }
-    let route_card = cards
-        .insert_interface(LOSS_ROUTE_FAMILY, interface_card(LOSS_ROUTE_FAMILY, &[]))
-        .unwrap();
     let fractions = routes();
     for (route, (b, c)) in losses.into_iter().zip(route_ends) {
         let fraction = QtyAny::dimensionless(fractions[b][&CellId(c as u64)]);
         let state = vec![(ParameterKey::new("fraction", Dims::NONE), fraction)];
-        let kind = DraftInterfaceKind::ThermalContact {
-            law_card: route_card,
-            third_body: None,
-            state,
-        };
-        interfaces.push(contact(route, kind));
+        interfaces.push(contact(route, DraftInterfaceKind::HeatRoute { state }));
     }
 
     let mut environment = DraftEnvironment::earth_lab_air();
@@ -590,6 +583,36 @@ fn cells_on_the_product_law_lower_with_their_card_receipts() {
 }
 
 #[test]
+fn the_product_laws_band_refuses_a_cell_outside_it_and_never_clamps() {
+    // The cells start at the 300 K ambient.
+    let lower = |lo: f64, hi: f64| {
+        let datum = [("datum_temperature", 0.0, TEMPERATURE)];
+        let mut law = model(SENSIBLE_HEAT_LAW, &datum);
+        law.validity = ValidityDomain::unconstrained().with("T", lo, hi);
+        let c = ("specific_heat_capacity", 500.0, SPECIFIC_HEAT);
+        let card = || material(&[("density", 2.0, DENSITY), c], vec![law.clone()]);
+        let (draft, cards) = pairing([card(), card()], 2.0);
+        let mut registry = LoweringRegistry::with_kernel_defaults();
+        register_owner_defaults(&mut registry);
+        registry.lower(&draft, &cards)
+    };
+    let refusal = lower(301.0, 310.0).err().unwrap().to_string();
+    assert!(refusal.contains("outside the law's band"), "{refusal}");
+    let mut lowered = lower(290.0, 300.000_1).unwrap();
+    let sources = lowered.receipt.components[4].parameter_sources.iter();
+    let band = sources.filter(|p| p.parameter.starts_with("validity.T."));
+    let band: Vec<f64> = band.map(|p| p.value).collect();
+    assert_eq!(band, [290.0, 300.000_1]);
+    // 1 J into 1000 J/K by 0.5 s takes cell 0 past the band's top: the law
+    // refuses the step, and no temperature is clamped to the band.
+    let gate = CancelGate::new_clock_free();
+    let refused = with_cx(&gate, |cx| {
+        (0..1000).find_map(|_| lowered.system.step(0.5 - lowered.system.time_s(), cx).err())
+    });
+    assert!(refused.is_some() && lowered.system.time_s() < 0.5);
+}
+
+#[test]
 fn each_owner_group_deleted_refuses_by_what_it_lowered() {
     let (draft, cards) = pairing(fixture_cards(static_laws()), 2.0);
     let deleted = [
@@ -598,7 +621,7 @@ fn each_owner_group_deleted_refuses_by_what_it_lowered() {
             thermal::GROUP,
             "feature_b must be a cell of the thermal timeline",
         ),
-        (LOSS_ROUTES, "loss-route"),
+        (LOSS_ROUTES, "heat-route"),
     ];
     for (group, needle) in deleted {
         let mut registry = LoweringRegistry::with_kernel_defaults();
@@ -617,7 +640,7 @@ fn each_owner_group_deleted_refuses_by_what_it_lowered() {
             };
             assert_eq!(
                 (interface.as_str(), card_family.as_str()),
-                ("route00", LOSS_ROUTE_FAMILY)
+                ("route00", HEAT_ROUTE_FAMILY)
             );
         }
     }

@@ -749,6 +749,7 @@ pub(crate) fn admit_assembly_source(
                         "area",
                         "normal-pressure",
                         "thickness",
+                        "fraction",
                     ],
                     &scope,
                 )?;
@@ -772,16 +773,17 @@ pub(crate) fn admit_assembly_source(
                     ))
                     .map_err(|e| err(format!("{scope}: {e}")))?;
                 entity_names.insert(entity, iname.clone());
-                let card = resolve_card(
-                    packs,
-                    CardPackKind::Interface,
-                    as_str(req(&kw, "card", &scope)?, "card")?,
-                    &scope,
-                )?;
-                families.insert(
-                    card,
-                    as_str(req(&kw, "family", &scope)?, "family")?.to_string(),
-                );
+                let mut card = || -> Result<ContentHash, SolveRefusal> {
+                    let card = resolve_card(
+                        packs,
+                        CardPackKind::Interface,
+                        as_str(req(&kw, "card", &scope)?, "card")?,
+                        &scope,
+                    )?;
+                    let family = as_str(req(&kw, "family", &scope)?, "family")?;
+                    families.insert(card, family.to_string());
+                    Ok(card)
+                };
                 let mut state = Vec::new();
                 for (flag, key, dims) in [
                     ("area", "area", AREA),
@@ -792,18 +794,27 @@ pub(crate) fn admit_assembly_source(
                         state.push((ParameterKey::new(key, dims), as_qty_d(n, dims, flag)?));
                     }
                 }
+                if let Some(n) = kw.get("fraction") {
+                    let fraction = QtyAny::dimensionless(as_f64(n, "fraction")?);
+                    state.push((ParameterKey::new("fraction", Dims::NONE), fraction));
+                }
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
+                    // A heat route is bookkeeping, not a material interface: no card.
+                    "heat-route" if kw.contains_key("card") || kw.contains_key("family") => {
+                        return Err(err(format!("{scope}: a heat route takes no card")));
+                    }
+                    "heat-route" => DraftInterfaceKind::HeatRoute { state },
                     "thermal-contact" => DraftInterfaceKind::ThermalContact {
-                        law_card: card,
+                        law_card: card()?,
                         third_body: None,
                         state,
                     },
                     "mechanical-contact" => DraftInterfaceKind::MechanicalContact {
-                        law_card: card,
+                        law_card: card()?,
                         third_body: None,
                         state,
                     },
-                    "glue" => DraftInterfaceKind::Glue { law_card: card },
+                    "glue" => DraftInterfaceKind::Glue { law_card: card()? },
                     o => return Err(err(format!("{scope} unsupported kind `{o}`"))),
                 };
                 interfaces.push(DraftInterfaceDecl {
@@ -1133,5 +1144,24 @@ mod tests {
             };
             assert!(e.what.contains(needle), "`{}` missing `{needle}`", e.what);
         }
+    }
+
+    #[test]
+    fn heat_route_takes_a_fraction_and_no_card() {
+        // `admit` wraps its text in the rotor's part form; this closes it.
+        let route = |extra: &str| {
+            admit(&format!(
+                ") (part \"cell\" :kind solid :geometry (box 0.1m 0.1m 0.1m) \
+                 :physics (thermal) :fidelity lumped) (interface \"route\" :kind heat-route \
+                 :a \"rotor\" :b \"cell\" :fraction 0.7{extra}"
+            ))
+        };
+        let a = route("").expect("a heat route admits without a card");
+        let key = ParameterKey::new("fraction", Dims::NONE);
+        let state = vec![(key, QtyAny::dimensionless(0.7))];
+        let kind = &a.draft.input().interfaces[0].kind;
+        assert_eq!(kind, &DraftInterfaceKind::HeatRoute { state });
+        let r = route(" :card \"x\" :family \"y\"").err().unwrap();
+        assert!(r.what.contains("a heat route takes no card"), "{}", r.what);
     }
 }
