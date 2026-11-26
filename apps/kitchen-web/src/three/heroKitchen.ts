@@ -1016,7 +1016,7 @@ const LOOKAHEAD = 2.5;
 /** Planning time allowed each frame, ms. */
 const PLAN_BUDGET_MS = 4;
 
-type ToolKind = "skillet" | "knife" | "ladle" | "brush" | "spoon";
+export type ToolKind = "skillet" | "knife" | "ladle" | "brush" | "spoon";
 /** Work at a station; `flip`: steaks turned on a charbroiler with tongs; `sala`: a salamander's grid pulled out to look. */
 type TaskKind = "saute" | "stir" | "chop" | "plate" | "scrub" | "fry" | "flip" | "sala";
 const WORK_OF: Record<TaskKind, WorkKind> = { saute: "saute", stir: "stir", chop: "chop", plate: "plate", scrub: "stir", fry: "stand", flip: "stand", sala: "stand" };
@@ -1143,7 +1143,7 @@ function knifeHolder(ext: { w: number; d: number; h: number }): THREE.Matrix4 {
 }
 
 /** The tools people hold, built in their grip frame (handle along +z towards the working end, +y its top). */
-function makeTool(kind: ToolKind, knife?: THREE.Object3D, knifeExt?: { w: number; d: number; h: number }): THREE.Object3D {
+export function makeTool(kind: ToolKind, knife?: THREE.Object3D, knifeExt?: { w: number; d: number; h: number }): THREE.Object3D {
   const p = palette();
   const grip = new THREE.Group();
   grip.name = `tool-${kind}`;

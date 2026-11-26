@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 9 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 10 WebGL canvases render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -165,8 +165,8 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 9 WebGL canvases render non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush"];
+    // 4. Mount all chapters cleanly by scrolling through each and verifying all 10 WebGL canvases render non-blank frames
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush", "morning"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -177,6 +177,7 @@ async function main() {
       "[data-week-canvas]",
       "[data-floor-canvas]",
       "[data-rush-canvas]",
+      "[data-morning-canvas]",
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -440,11 +441,36 @@ async function main() {
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-rush.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-rush.png");
       }
+
+      if (sid === "morning") {
+        // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
+        // must say which, and the worker must post every menu's limit, cooked today and ahead.
+        const status = () => page.$eval("[data-mo-status]", (el) => el.textContent || "");
+        await page.click('[data-mo-crew="3"]');
+        await page.click('[data-mo-ahead="no"]');
+        await page.click('[data-mo-preset="written"]');
+        await sleep(300);
+        const written = await status();
+        await page.click('[data-mo-preset="swapped"]');
+        await sleep(300);
+        const swapped = await status();
+        console.log(`[verify-chrome] Morning: as written | ${written.slice(0, 70)} || every swap | ${swapped.slice(0, 70)}`);
+        if (!/late/.test(written) || !/leaves at 10:30/.test(swapped)) {
+          throw new Error(`The morning presets did not tell late from on time: ${written} / ${swapped}`);
+        }
+        await page.waitForFunction(() => document.querySelectorAll("[data-morning-ladder] .row .today").length >= 8, { timeout: 90000 });
+        const note = await page.$eval("[data-morning-ladder-note]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Morning limits: ${note.slice(0, 110)}`);
+        if (!/\d/.test(note)) throw new Error(`The morning limit note has no numbers: ${note}`);
+        await page.click('[data-mo-preset="written"]');
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-morning.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-morning.png");
+      }
     }
 
-    // 5. Verify ALL 9 WebGL canvases render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 10 WebGL canvases render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "week", "floor", "rush", "morning"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -455,13 +481,14 @@ async function main() {
         "[data-week-canvas]",
         "[data-floor-canvas]",
         "[data-rush-canvas]",
+        "[data-morning-canvas]",
       ];
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 9 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 10 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -499,7 +526,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 9/9 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 10/10 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

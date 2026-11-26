@@ -77,6 +77,7 @@
           <a href="#cold" data-spy="cold" style="--chapter: #5ec8f2"><span class="joint" aria-hidden="true"></span>Cold chain</a>
           <a href="#brigade" data-spy="brigade" style="--chapter: #e0905f"><span class="joint" aria-hidden="true"></span>Crew</a>
           <a href="#week" data-spy="week" style="--chapter: #86d39b"><span class="joint" aria-hidden="true"></span>Week</a>
+          <a href="#morning" data-spy="morning" style="--chapter: #fbbf24"><span class="joint" aria-hidden="true"></span>Morning</a>
           <a href="#fleet" data-spy="fleet" style="--chapter: #f59e0b"><span class="joint" aria-hidden="true"></span>Kitchens</a>
           <a href="#architecture" data-spy="architecture" style="--chapter: #9fb3c8"><span class="joint" aria-hidden="true"></span>Engine</a>
         </nav>
@@ -1085,12 +1086,100 @@
         </div>
       </section>
 
+      <section class="sec" id="morning" aria-labelledby="morning-title" style="--chapter: #fbbf24">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <div>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
+              <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
+              <p class="kicker">
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out.
+              </p>
+            </div>
+            <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
+          </div>
+
+          <figure class="fig reveal mo-fig">
+            <header class="fig-head">
+              <p class="todo">Swap a dish, then raise the order until the van runs late</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage mo-stage" data-morning-stage>
+                <canvas data-morning-canvas tabindex="0" aria-label="A catering kitchen's hot side seen across its worktable: two combi ovens and a six-burner range, a worktable with three cutting boards, and insulated carriers stacking up by the door as the morning's pans are packed. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud mo-hud" aria-hidden="true"><b data-mo-hud-clock>6:00</b><span data-mo-hud-pans>…</span><em data-mo-hud-note>…</em></div>
+                <p class="wk-legend rs-legend mo-legend" aria-hidden="true"><span class="lit">Lit burner: a batch cooking</span><span class="door">Oven door open: loading or unloading</span><span class="unit">1 carrier = 6 hot pans</span></p>
+              </div>
+              <div class="lab mo-lab">
+                <div class="lab-view">
+                  <div class="rs-chart mo-chart" data-morning-chart role="img" aria-label="The morning's plan from 6:00: each cook's hands, the six burners, the two ovens and the table's three places, with the van at 10:30"></div>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>The van leaves</span><b><i data-mo-van>…</i><em data-mo-van-d hidden></em></b><small data-mo-van-sub>…</small></div>
+                    <div class="wk-tile"><span>To leave at 10:30</span><b><i data-mo-cost>…</i></b><small data-mo-cost-sub>…</small></div>
+                    <div class="wk-tile"><span>Cooks' hands busy</span><b><i data-mo-hands>…</i><em data-mo-hands-d hidden></em></b><small data-mo-hands-sub>…</small></div>
+                    <div class="wk-tile"><span>Most meals by 10:30</span><b><i data-mo-limit>…</i></b><small data-mo-limit-sub>…</small></div>
+                  </div>
+                  <div class="rs-map-wrap">
+                    <p class="rs-map-head"><b>Where each menu runs out</b><span class="wk-keys rs-map-keys mo-ladder-keys"><span class="today">Cooked this morning</span><span class="ahead">With what keeps made the day before</span><span class="order">This order</span></span></p>
+                    <div class="mo-ladder-box" data-morning-ladder role="img" aria-label="For each of the eight menus, the most meals this crew gets onto the 10:30 van with every dish at its best at lunch, cooked this morning and with what keeps made the day before"></div>
+                    <p class="rs-map-note" data-morning-ladder-note></p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <div class="seg fill" role="group" aria-label="Menu">
+                    <button type="button" data-mo-preset="written" aria-pressed="true">As written</button>
+                    <button type="button" data-mo-preset="swapped" aria-pressed="false">Every swap</button>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish holds · press to swap</p>
+                    <ul class="wk-menu" data-mo-menu></ul>
+                  </div>
+                  <label class="range"><span><b>Meals on the van</b><output data-mo-meals-val>700 meals</output></span><input type="range" min="200" max="1400" step="50" value="700" data-mo-meals aria-label="Meals on the van" /></label>
+                  <div class="field">
+                    <p class="micro">The crew</p>
+                    <div class="seg fill" role="group" aria-label="Cooks">
+                      <button type="button" data-mo-crew="2" aria-pressed="false">2 cooks</button>
+                      <button type="button" data-mo-crew="3" aria-pressed="true">3 cooks</button>
+                      <button type="button" data-mo-crew="4" aria-pressed="false">4 cooks</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The day before</p>
+                    <div class="seg fill" role="group" aria-label="The day before">
+                      <button type="button" data-mo-ahead="no" aria-pressed="true">All this morning</button>
+                      <button type="button" data-mo-ahead="yes" aria-pressed="false">Make what keeps</button>
+                    </div>
+                  </div>
+                  <div class="status" data-mo-status data-state="warn">Planning the morning…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="morning-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>The kitchen has two 10-pan combi ovens, a six-burner range and a worktable with room for three cooks, and a crew of two to four. Each meal is one of the three dishes, 40, 35 and 25% of the order, plus a salad and bread. Each dish is a chain of stages: prep at the table, a pot or pan on the range, a program in an oven, and packing into hotel pans for the van. Work at the table takes a whole cook. A pan on the range takes half a cook, since one cook can mind two, and a risotto or a skillet of tortillas takes all of one. Only two cooks fit at the range, one at each half, so a third has to wait for a place there. An oven takes a cook to load and to unload, nobody while it runs, and one dish to a program.</p>
+                <p>The plan steps from one event to the next. A free cook pans up food just off the heat first, then takes the ready stage with the most work still behind it, at the station they're already at when they can. Each dish starts cooking as early as leaves it at its best when lunch is served at 11:30, and no more than 90 minutes before it has to. The van leaves when the last pan is packed. Making what keeps the day before moves the prep that keeps a day, and all the cooking of the dishes that keep, to the day before; this morning they are only reheated.</p>
+                <p>The limit chart runs each menu at more and more meals, ten at a time, up to the most that leave at 10:30 with nothing past its best. The chart under the kitchen is the plan itself; the cooks act out each stretch of it.</p>
+              </div>
+              <div>
+                <code class="formula">start ≥ 11:30 − holding time − cooking time<br />van = max(10:30, last pan packed)</code>
+                <p class="model">Model: <code>planMorning</code>. Batch sizes, minutes per portion and holding times are set for a catering commissary.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
       <!-- ============================ 07 ALL FIVE KITCHENS ============================ -->
       <section class="sec" id="fleet" aria-labelledby="fleet-title" style="--chapter: #f59e0b">
         <div class="wrap">
           <div class="sec-head reveal">
             <div>
-              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>All five kitchens</p>
+              <p class="kick"><span class="joint on" aria-hidden="true"></span><b>08</b><i></i>All five kitchens</p>
               <h2 class="d3" id="fleet-title">Five kitchens, <em class="g">side by side</em>.</h2>
               <p class="kicker">
                 Run every kitchen through the same model. Switch them all to induction, or to a 38 °C summer day, and compare the power, the exhaust, the cooling and the heat at the line.

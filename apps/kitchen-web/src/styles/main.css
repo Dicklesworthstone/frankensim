@@ -3036,3 +3036,163 @@ button.wk-dish[aria-pressed="true"] {
     display: none;
   }
 }
+
+/* The morning (chapter 07): the plan's lanes, the limit ladder. */
+.mo-stage {
+  aspect-ratio: 16 / 9;
+  margin-bottom: 1.6rem;
+}
+.mo-hud span {
+  min-width: 11em;
+}
+.mo-hud b[data-kind="late"] {
+  color: #fecdd3;
+}
+.mo-hud em[data-kind="late"] {
+  color: #fecdd3;
+  background: rgb(251 113 133 / 0.22);
+}
+.mo-legend .lit {
+  --k: #ff9b3d;
+}
+.mo-legend .door {
+  --k: #c9d3dc;
+}
+.mo-lab .lab-view {
+  gap: 1rem;
+}
+.mo-svg .lane {
+  fill: rgb(255 255 255 / 0.035);
+}
+.mo-svg .late {
+  fill: rgb(251 113 133 / 0.1);
+}
+.mo-svg .van {
+  stroke: #fff;
+  stroke-width: 1.4;
+  stroke-dasharray: 4 3;
+}
+.mo-svg .van.late {
+  stroke: var(--bad);
+}
+.mo-svg .vanl {
+  fill: var(--text);
+}
+.mo-svg .vanl.r {
+  text-anchor: end;
+}
+.mo-svg .vanl.late {
+  fill: #fda4af;
+}
+.mo-svg .lbl {
+  text-anchor: middle;
+  font-size: 9.5px;
+  fill: rgb(10 9 8 / 0.85);
+  font-weight: 600;
+}
+.mo-keys span {
+  --k: transparent;
+}
+.mo-keys span[style]::before {
+  background: var(--k);
+}
+.mo-keys .half::before {
+  height: 0.28rem;
+  background: var(--muted);
+  vertical-align: 0.06em;
+}
+.mo-dish {
+  border-left: 3px solid var(--dish);
+}
+.mo-dish em {
+  min-width: 9.5em;
+  text-align: center;
+}
+.mo-ladder-keys .today {
+  --k: var(--chapter);
+}
+.mo-ladder-keys .ahead {
+  --k: color-mix(in srgb, var(--chapter) 32%, transparent);
+}
+.mo-ladder-keys .order::before {
+  width: 0;
+  height: 0.8rem;
+  border-left: 1.5px dashed #fff;
+  border-radius: 0;
+  background: none;
+}
+.mo-ladder-box svg {
+  display: block;
+}
+.mo-ladder .row {
+  cursor: pointer;
+}
+.mo-ladder .hit {
+  fill: transparent;
+}
+.mo-ladder .row:hover .hit {
+  fill: rgb(255 255 255 / 0.04);
+}
+.mo-ladder .row.on .hit {
+  fill: color-mix(in srgb, var(--chapter) 10%, transparent);
+}
+.mo-ladder .ml {
+  text-anchor: end;
+  fill: var(--soft);
+  font-family: var(--sans);
+  font-size: 11.5px;
+}
+.mo-ladder .ml.st {
+  text-anchor: start;
+}
+.mo-ladder .row.on .ml {
+  fill: #fff;
+  font-weight: 600;
+}
+.mo-ladder .today {
+  fill: var(--chapter);
+}
+.mo-ladder .ahead {
+  fill: color-mix(in srgb, var(--chapter) 32%, transparent);
+}
+.mo-ladder .v {
+  fill: var(--text);
+}
+.mo-ladder .order {
+  stroke: #fff;
+  stroke-width: 1.4;
+  stroke-dasharray: 4 3;
+}
+@media (max-width: 599px) {
+  .mo-stage {
+    aspect-ratio: 4 / 3;
+  }
+  .mo-hud {
+    top: 0.55rem;
+    left: 0.55rem;
+    right: auto;
+    max-width: calc(100% - 1.1rem);
+    flex-wrap: wrap;
+    row-gap: 0.35rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 10px;
+    background: rgb(14 11 8 / 0.78);
+  }
+  .mo-hud b {
+    font-size: 1.1rem;
+  }
+  .mo-hud span {
+    min-width: 0;
+    font-size: 0.78rem;
+  }
+  .mo-hud em {
+    white-space: nowrap;
+  }
+  .mo-hud em[data-kind="late"] {
+    background: rgb(159 18 57 / 0.75);
+  }
+  .mo-legend .door,
+  .mo-legend .unit {
+    display: none;
+  }
+}
