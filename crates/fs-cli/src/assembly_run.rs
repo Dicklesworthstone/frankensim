@@ -43,7 +43,8 @@ use crate::stage_driver::{
     DurableStageSession, PipelineSchema, ResumeAttestor, RetainedSideArtifact, SessionExplicits,
     StageDescriptor, StageExecution, StagePipeline, StageSessionView,
     derive_pipeline_capability_token, derive_run_id_bytes, discover_and_attest_resume,
-    envelope_provenance, staged_refusal, validate_checkpoint_prefix_for, validate_state_shape_for,
+    envelope_provenance, resolve_stage_consumption, staged_refusal, validate_checkpoint_prefix_for,
+    validate_state_shape_for,
 };
 
 /// Wire version of the assembly stage driver.
@@ -1006,7 +1007,7 @@ impl ResumeAttestor for AssemblyResumeAttestor {
         &mut self,
         ledger: &Ledger,
         run: SolveRunId,
-        state: SolveDriverState,
+        mut state: SolveDriverState,
         state_artifact: ContentHash,
         discovery_op: i64,
         work: EvidenceWork<'_>,
@@ -1056,7 +1057,7 @@ impl ResumeAttestor for AssemblyResumeAttestor {
             .map_err(|e| resume_identity(format!("pack set invalid: {}", e.what)))?;
         let admitted = admit_assembly_source(&src_bytes, &packs)?;
 
-        let (mut ctx, mut prev) = (AssemblyCtx::default(), None);
+        let (mut ctx, mut prev, mut resolved_consumption) = (AssemblyCtx::default(), None, None);
         for (idx, done) in state.completed.iter().enumerate() {
             let n = ledger
                 .op_artifact_edges_bounded(done.op_id, 64)
@@ -1079,6 +1080,14 @@ impl ResumeAttestor for AssemblyResumeAttestor {
             .ok_or_else(|| resume_identity("missing checkpoint"))?;
             let cp = self.decode_state(ledger, run, cp_h, work)?;
             validate_checkpoint_prefix_for(&cp, &state, idx, prev.as_ref(), ASSEMBLY_SCHEMA.cores)?;
+            let stage_consumption = resolve_stage_consumption(
+                ledger,
+                done.op_id,
+                done.ordinal,
+                &cp,
+                resolved_consumption,
+                ASSEMBLY_SCHEMA.cores,
+            )?;
             if idx + 1 == state.completed.len()
                 && (discovery_op != done.op_id || cp_h != state_artifact)
             {
@@ -1172,6 +1181,11 @@ impl ResumeAttestor for AssemblyResumeAttestor {
                 AssemblyStage::Admit | AssemblyStage::Report => {}
             }
             prev = Some(cp);
+            resolved_consumption = Some(stage_consumption);
+        }
+        if let Some((consumed_core_s, consumed_wall_s)) = resolved_consumption {
+            state.consumed_core_s = consumed_core_s;
+            state.consumed_wall_s = consumed_wall_s;
         }
         Ok(VerifiedAssemblyResume {
             state,

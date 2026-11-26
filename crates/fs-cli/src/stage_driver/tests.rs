@@ -260,7 +260,7 @@ impl ResumeAttestor for DemoAttestor {
         &mut self,
         ledger: &Ledger,
         run: SolveRunId,
-        state: SolveDriverState,
+        mut state: SolveDriverState,
         artifact: ContentHash,
         discovery_op: i64,
         work: EvidenceWork<'_>,
@@ -272,6 +272,7 @@ impl ResumeAttestor for DemoAttestor {
         let src = ledger.get_artifact(&src_h).unwrap().unwrap();
         let mut ctx = DemoCtx::default();
         let mut prev = None;
+        let mut resolved_consumption = None;
         for (idx, done) in state.completed.iter().enumerate() {
             let edges = ledger
                 .op_artifact_edges_bounded(done.op_id, 64)
@@ -285,6 +286,14 @@ impl ResumeAttestor for DemoAttestor {
                 find_edge(ledger, done.op_id, EdgeRole::Out, self.0.stage_state_kind).unwrap();
             let cp = self.decode_state(ledger, run, cp_h, work)?;
             validate_checkpoint_prefix_for(&cp, &state, idx, prev.as_ref(), self.0.cores)?;
+            let stage_consumption = resolve_stage_consumption(
+                ledger,
+                done.op_id,
+                done.ordinal,
+                &cp,
+                resolved_consumption,
+                self.0.cores,
+            )?;
             if idx == 0 {
                 ctx.parsed = Some(std::str::from_utf8(&src).unwrap().trim().parse().unwrap());
             } else if idx == 1 {
@@ -295,6 +304,11 @@ impl ResumeAttestor for DemoAttestor {
                 assert_eq!((discovery_op, cp_h), (done.op_id, artifact));
             }
             prev = Some(cp);
+            resolved_consumption = Some(stage_consumption);
+        }
+        if let Some((consumed_core_s, consumed_wall_s)) = resolved_consumption {
+            state.consumed_core_s = consumed_core_s;
+            state.consumed_wall_s = consumed_wall_s;
         }
         Ok(DemoVerified {
             state,
@@ -555,4 +569,114 @@ fn capability_declaration_gap_and_discovery_ambiguity_or_version_refuse() {
     let ek = err_demo(&lk, src, &mut bad_clk, DemoPipe::new(src), None);
     assert_eq!(ek.code, "cli-solve-budget");
     assert_err_op(&lk, ek.recorded_op);
+}
+
+fn copy_stage(
+    src: &Ledger,
+    dst: &Ledger,
+    op_id: i64,
+    ord: u32,
+    metrics: Option<(f64, f64)>,
+    cp_override: Option<Vec<u8>>,
+) {
+    let row = src.op(op_id).unwrap().unwrap();
+    let fx = FiveExplicits {
+        seed: &row.seed,
+        versions: &row.versions,
+        budget: &row.budget,
+        capability: &row.capability,
+    };
+    let op = dst
+        .begin_op(row.session.as_deref(), &row.ir, &fx, row.t_start)
+        .unwrap();
+    assert_eq!(op, op_id);
+    let edges = src.op_artifact_edges_bounded(op_id, 64).unwrap().edges;
+    for edge in &edges {
+        let kind = src.artifact_info(&edge.artifact).unwrap().unwrap().kind;
+        let bytes = match (&cp_override, kind == DEMO_SCHEMA.stage_state_kind) {
+            (Some(ov), true) => ov.clone(),
+            _ => src.get_artifact(&edge.artifact).unwrap().unwrap(),
+        };
+        let put = dst.put_artifact(&kind, &bytes, None).unwrap();
+        dst.link(op, &put.hash, edge.role).unwrap();
+    }
+    dst.seal_op_artifact_edges(op, edges.len()).unwrap();
+    let t_end = stage_end_t(ord);
+    if let Some((c, w)) = metrics {
+        dst.record_metric(op, t_end, DRIVER_CONSUMED_CORE_S_METRIC, c)
+            .unwrap();
+        dst.record_metric(op, t_end, DRIVER_CONSUMED_WALL_S_METRIC, w)
+            .unwrap();
+    }
+    dst.finish_op(op, OpOutcome::Ok, None, t_end).unwrap();
+}
+
+#[test]
+fn consumption_metrics_replay_clean_and_tamper_or_legacy_enforced() {
+    let src = b"11".as_slice();
+    let (src_h, run) = demo_id(src);
+    let (la, lb) = (mem(), mem());
+    let (oa, _) = run_demo(
+        &la,
+        src,
+        10.0,
+        &mut step_clock(0.25),
+        DemoPipe::new(src),
+        None,
+    );
+    let (ob, _) = run_demo(
+        &lb,
+        src,
+        10.0,
+        &mut step_clock(1.75),
+        DemoPipe::new(src),
+        None,
+    );
+    assert_eq!(oa.unwrap().run_receipt, ob.unwrap().run_receipt);
+    let v = la.replay_verdict(MAIN_BRANCH, &lb, MAIN_BRANCH).unwrap();
+    assert!(v.is_replay_clean() && v.compared == 4, "{v:?}");
+
+    // Tamper 1: missing consumption metrics on deterministic 0.0 checkpoint refuses.
+    let l1 = mem();
+    copy_stage(&la, &l1, 1, 0, None, None);
+    let e1 = attest(&l1, run, &DEMO_SCHEMA).err().unwrap();
+    assert!(e1.code == "cli-solve-resume-identity" && e1.what.contains("lacks retained budget"));
+
+    // Tamper 2: regressing consumption metrics across stages refuses.
+    let l2 = mem();
+    copy_stage(&la, &l2, 1, 0, Some((0.5, 0.5)), None);
+    copy_stage(&la, &l2, 2, 1, Some((0.25, 0.25)), None);
+    let e2 = attest(&l2, run, &DEMO_SCHEMA).err().unwrap();
+    assert!(e2.code == "cli-solve-resume-identity" && e2.what.contains("regresses"));
+
+    // Tamper 3: single-core core_s != wall_s mismatch refuses.
+    let l3 = mem();
+    copy_stage(&la, &l3, 1, 0, Some((0.5, 0.4)), None);
+    assert_eq!(
+        attest(&l3, run, &DEMO_SCHEMA).err().unwrap().code,
+        "cli-solve-resume-identity"
+    );
+
+    // Legacy v1 checkpoint with positive sealed consumption and no metrics restores.
+    let l4 = mem();
+    let rc_h = find_edge(&la, 1, EdgeRole::Out, DEMO_SCHEMA.stage_receipt_kind).unwrap();
+    let legacy = SolveDriverState {
+        run: *run.as_bytes(),
+        project: *src_h.as_bytes(),
+        consumed_core_s: 0.75,
+        consumed_wall_s: 0.75,
+        completed: vec![CompletedStage {
+            ordinal: 0,
+            op_id: 1,
+            receipt: rc_h,
+        }],
+    };
+    let sealed =
+        LegacySnapshotV1Adapter::<DemoState>::seal(&DemoState(legacy), envelope_provenance(run));
+    copy_stage(&la, &l4, 1, 0, None, Some(sealed));
+    let ok = attest(&l4, run, &DEMO_SCHEMA).expect("legacy restores");
+    assert!(
+        (ok.state.consumed_wall_s - 0.75).abs() < 1e-12
+            && (ok.state.consumed_core_s - 0.75).abs() < 1e-12
+    );
 }

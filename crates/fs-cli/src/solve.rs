@@ -86,7 +86,7 @@ use crate::stage_driver::{
     StageDescriptor, StageExecution, StagePipeline, StageSessionView,
     derive_pipeline_capability_token, derive_run_id_bytes, discover_and_attest_resume,
     envelope_provenance, format_run_receipt_json, format_stage_ir, ledger_refusal,
-    validate_checkpoint_prefix_for, validate_state_shape_for,
+    resolve_stage_consumption, validate_checkpoint_prefix_for, validate_state_shape_for,
 };
 
 mod input_propagation;
@@ -1299,8 +1299,10 @@ pub struct CompletedStage {
 }
 
 /// Driver state sealed into the legacy v1 snapshot envelope after each
-/// completed stage. Contains no wall-clock timestamps: consumption totals
-/// are budget accounting, not identity.
+/// completed stage. Sealed checkpoints zero `consumed_core_s` and
+/// `consumed_wall_s` so identical runs produce identical artifact hashes; live
+/// consumption is persisted atomically in ledger `metrics` and restored into
+/// these fields during resume attestation.
 ///
 /// Codec validity is not resume authority. Callers may construct and seal
 /// this public state, but [`resume_solve`] treats every decoded field as
@@ -2702,11 +2704,10 @@ fn run_solve_inner<'a>(
         .map_err(|_| cancelled_fresh_refusal(run, None))?;
     // Identical inputs name the same run. When that run already completed
     // every stage, driving it again would retain a second complete chain
-    // (its driver state differs in wall seconds) and every export would
-    // then refuse on two competing checkpoints. Re-attest the sealed history
-    // instead and return it: same identity, same receipt, nothing written.
-    // Any other discovery outcome (no run, a partial or refused one) drives
-    // fresh, as before.
+    // (with newer op ids) and every export would then refuse on two competing
+    // checkpoints. Re-attest the sealed history instead and return it: same
+    // identity, same receipt, nothing written. Any other discovery outcome
+    // (no run, a partial or refused one) drives fresh, as before.
     if let Ok(retained) = load_latest_state(ledger, run, work, ResumeProof::SealedEvidence)
         && retained.state.completed.len() >= SolveStage::ALL.len()
     {
@@ -9249,7 +9250,7 @@ fn sealed_conduction_outputs(
 fn validate_resume_candidate(
     ledger: &Ledger,
     run: SolveRunId,
-    state: SolveDriverState,
+    mut state: SolveDriverState,
     state_artifact: ContentHash,
     discovery_op: i64,
     work: EvidenceWork<'_>,
@@ -9322,6 +9323,7 @@ fn validate_resume_candidate(
     let mut recovered_cards: Option<CardPackSet> = None;
     let mut predecessor_state = None;
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
+    let mut resolved_consumption: Option<(f64, f64)> = None;
     let mut last_expected_edges = Vec::new();
     let mut sealed_solution: Option<ContentHash> = None;
     for (index, completed) in state.completed.iter().enumerate() {
@@ -9418,6 +9420,14 @@ fn validate_resume_candidate(
         let checkpoint_hash = checkpoint_outputs[0];
         let checkpoint = decode_driver_state(ledger, run, checkpoint_hash, work)?;
         validate_checkpoint_prefix(&checkpoint, &state, index, predecessor_checkpoint.as_ref())?;
+        let stage_consumption = resolve_stage_consumption(
+            ledger,
+            completed.op_id,
+            completed.ordinal,
+            &checkpoint,
+            resolved_consumption,
+            SOLVE_CORES,
+        )?;
 
         if let Some(predecessor) = predecessor_state {
             let has_predecessor =
@@ -10174,6 +10184,11 @@ fn validate_resume_candidate(
         }
         predecessor_state = Some(checkpoint_hash);
         predecessor_checkpoint = Some(checkpoint);
+        resolved_consumption = Some(stage_consumption);
+    }
+    if let Some((consumed_core_s, consumed_wall_s)) = resolved_consumption {
+        state.consumed_core_s = consumed_core_s;
+        state.consumed_wall_s = consumed_wall_s;
     }
 
     let cards = recovered_cards.ok_or_else(|| {

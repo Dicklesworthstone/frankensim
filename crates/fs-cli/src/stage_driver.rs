@@ -36,6 +36,31 @@ mod tests;
 /// Warn when consumed wall budget crosses these fractions of the grant.
 pub(crate) const BUDGET_WARN_FRACTIONS: [f64; 2] = [0.5, 0.9];
 
+/// Logical begin/end timestamps of the terminal operation (carries no other metrics).
+pub(crate) const TERMINAL_OP_START_T: i64 = 100;
+pub(crate) const TERMINAL_OP_END_T: i64 = 101;
+/// Reserved metric keys for cumulative core/wall seconds outside checkpoint bytes.
+pub(crate) const DRIVER_CONSUMED_CORE_S_METRIC: &str = "driver.consumed_core_s";
+pub(crate) const DRIVER_CONSUMED_WALL_S_METRIC: &str = "driver.consumed_wall_s";
+
+/// Odd finish timestamp and driver-metric `t` slot (`ordinal * 2 + 1`) for `ordinal`.
+/// Stage ops reserve `[ordinal * 2, ordinal * 2 + 1]`; existing pipeline metrics
+/// (`lowering.*` at `t = 2`, `plan.*` at `t = 4`, `window.*` at `t = 6`) occupy
+/// even `t_start` slots, keeping `driver.consumed_*` disjoint in both `t` and key.
+pub(crate) fn stage_end_t(ordinal: u32) -> i64 {
+    i64::from(ordinal) * 2 + 1
+}
+
+fn record_driver_consumption(
+    ledger: &Ledger,
+    op: i64,
+    t: i64,
+    state: &SolveDriverState,
+) -> Result<(), LedgerError> {
+    ledger.record_metric(op, t, DRIVER_CONSUMED_CORE_S_METRIC, state.consumed_core_s)?;
+    ledger.record_metric(op, t, DRIVER_CONSUMED_WALL_S_METRIC, state.consumed_wall_s)
+}
+
 /// Side artifact produced by a stage and retained as an `Out` edge beside the
 /// stage receipt, with its precomputed content hash checked on persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,6 +663,8 @@ impl<'a> DurableStageSession<'a> {
             )?;
             self.ledger.link(op, &receipt.hash, EdgeRole::Out)?;
             let mut sealed_state = state_before.clone();
+            // Zero consumption inside sealed bytes; wall/core live in atomic metrics below.
+            (sealed_state.consumed_core_s, sealed_state.consumed_wall_s) = (0.0, 0.0);
             sealed_state.completed.push(CompletedStage {
                 ordinal,
                 op_id: op,
@@ -659,8 +686,9 @@ impl<'a> DurableStageSession<'a> {
                 });
             }
             self.ledger.seal_op_artifact_edges(op, edges.edges.len())?;
-            self.ledger
-                .finish_op(op, OpOutcome::Ok, None, i64::from(ordinal) * 2 + 1)?;
+            let t_end = stage_end_t(ordinal);
+            record_driver_consumption(self.ledger, op, t_end, state_before)?;
+            self.ledger.finish_op(op, OpOutcome::Ok, None, t_end)?;
             Ok((op, receipt.hash, state_artifact.hash))
         })();
         finish_ledger_transaction(self.ledger, result)
@@ -707,7 +735,7 @@ impl<'a> DurableStageSession<'a> {
                     budget: &self.budget_json,
                     capability: &self.capability_json,
                 },
-                100,
+                TERMINAL_OP_START_T,
             )?;
             let receipt = self.ledger.put_artifact(
                 self.schema.run_receipt_kind,
@@ -715,7 +743,9 @@ impl<'a> DurableStageSession<'a> {
                 None,
             )?;
             self.ledger.link(op, &receipt.hash, EdgeRole::Out)?;
-            self.ledger.finish_op(op, OpOutcome::Ok, None, 101)?;
+            record_driver_consumption(self.ledger, op, TERMINAL_OP_END_T, state)?;
+            self.ledger
+                .finish_op(op, OpOutcome::Ok, None, TERMINAL_OP_END_T)?;
             Ok(receipt.hash)
         })();
         finish_ledger_transaction(self.ledger, result)
@@ -1058,7 +1088,7 @@ pub(crate) fn stage_discovery_rejection_for<S: StageDescriptor>(
         ));
     }
     if row.t_start != i64::from(stage.ordinal()) * 2
-        || row.t_end != Some(i64::from(stage.ordinal()) * 2 + 1)
+        || row.t_end != Some(stage_end_t(stage.ordinal()))
     {
         return Err(format!(
             "stage `{}` timing slots do not match its ordinal",
@@ -1184,6 +1214,82 @@ pub(crate) fn validate_checkpoint_prefix_for(
     Ok(())
 }
 
+/// Resolve and verify one attested stage's `(core_s, wall_s)` consumption from
+/// atomic `metrics` rows (required when sealed consumption is `0.0`) or legacy
+/// v1 sealed fields. Refuses duplicate, mistimed, partial, missing, conflicting,
+/// invalid, or regressing consumption.
+#[allow(clippy::float_cmp)]
+pub(crate) fn resolve_stage_consumption(
+    ledger: &Ledger,
+    op_id: i64,
+    ordinal: u32,
+    checkpoint: &SolveDriverState,
+    predecessor: Option<(f64, f64)>,
+    cores: u64,
+) -> Result<(f64, f64), SolveRefusal> {
+    let expected_t = stage_end_t(ordinal);
+    let metrics = ledger.metrics_for_op(op_id).map_err(|error| {
+        resume_ledger("reading retained stage consumption metrics failed", error)
+    })?;
+    let (mut core_m, mut wall_m) = (None, None);
+    for (t, name, value) in metrics {
+        let slot = if name == DRIVER_CONSUMED_CORE_S_METRIC {
+            &mut core_m
+        } else if name == DRIVER_CONSUMED_WALL_S_METRIC {
+            &mut wall_m
+        } else {
+            continue;
+        };
+        if t != expected_t || slot.replace(value).is_some() {
+            return Err(resume_identity(format!(
+                "stage {ordinal} op {op_id} has duplicate or mistimed `{name}` metric"
+            )));
+        }
+    }
+    let sealed_nonzero = checkpoint.consumed_core_s != 0.0 || checkpoint.consumed_wall_s != 0.0;
+    let (core_s, wall_s) = match (core_m, wall_m) {
+        (Some(c), Some(w)) => {
+            if sealed_nonzero
+                && (c != checkpoint.consumed_core_s || w != checkpoint.consumed_wall_s)
+            {
+                return Err(resume_identity(format!(
+                    "stage {ordinal} op {op_id} consumption metrics conflict with sealed state"
+                )));
+            }
+            (c, w)
+        }
+        (None, None) if sealed_nonzero => (checkpoint.consumed_core_s, checkpoint.consumed_wall_s),
+        (None, None) => {
+            return Err(resume_identity(format!(
+                "stage {ordinal} op {op_id} lacks retained budget consumption metrics"
+            )));
+        }
+        _ => {
+            return Err(resume_identity(format!(
+                "stage {ordinal} op {op_id} has incomplete budget consumption metrics"
+            )));
+        }
+    };
+    if !core_s.is_finite()
+        || core_s < 0.0
+        || !wall_s.is_finite()
+        || wall_s < 0.0
+        || (cores == 1 && core_s != wall_s)
+    {
+        return Err(resume_identity(format!(
+            "stage {ordinal} op {op_id} carries invalid budget consumption"
+        )));
+    }
+    if let Some((pc, pw)) = predecessor
+        && (core_s < pc || wall_s < pw)
+    {
+        return Err(resume_identity(format!(
+            "stage {ordinal} op {op_id} consumption regresses from its predecessor"
+        )));
+    }
+    Ok((core_s, wall_s))
+}
+
 pub(crate) fn derive_run_id_bytes(
     domain: &str,
     input_hash: ContentHash,
@@ -1289,13 +1395,11 @@ pub(crate) fn format_run_receipt_json<S: StageDescriptor>(
         );
     }
     format!(
-        "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"status\":{}{detail},\"stages\":[{stages_json}],\"consumed_wall_s\":{},\"consumed_core_s\":{},\"no_claim\":\"stage receipts carry their own authority; this record is run bookkeeping\"}}",
+        "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"status\":{}{detail},\"stages\":[{stages_json}],\"no_claim\":\"stage receipts carry their own authority; this record is run bookkeeping\"}}",
         json_string(run_receipt_schema),
         json_string(&run.to_hex()),
         json_string(&input_hash.to_hex()),
         json_string(status_name),
-        state.consumed_wall_s,
-        state.consumed_core_s,
     )
 }
 

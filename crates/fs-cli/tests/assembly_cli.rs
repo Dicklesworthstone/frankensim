@@ -547,3 +547,79 @@ fn binary_structured_refusals_use_existing_exit_codes() {
     assert_eq!(e5.status.code(), Some(i32::from(exit::USAGE)));
     assert!(s(&e5.stderr).contains("cli-run-analysis-project"));
 }
+
+#[test]
+fn binary_assembly_run_two_ledgers_pass_replay_audit_cleanly() {
+    let dir = scratch_dir("assembly_replay");
+    let steel = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
+    let sp = dir.join("slider.fsim");
+    std::fs::write(&sp, SLIDER_FSIM).unwrap();
+    let (db_a, db_b) = (dir.join("asm_a.db"), dir.join("asm_b.db"));
+    for (idx, db) in [&db_a, &db_b].into_iter().enumerate() {
+        if idx == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let out = bin_run(&[
+            "--json",
+            "run",
+            sp.to_str().unwrap(),
+            db.to_str().unwrap(),
+            "--materials",
+            steel.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(i32::from(exit::SUCCESS)),
+            "{}",
+            s(&out.stderr)
+        );
+        assert!(s(&out.stdout).contains("\"status\":\"completed\""));
+    }
+    let audit = bin_run(&[
+        "--json",
+        "replay-audit",
+        db_a.to_str().unwrap(),
+        db_b.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        audit.status.code(),
+        Some(i32::from(exit::SUCCESS)),
+        "{}",
+        s(&audit.stderr)
+    );
+    let aj = s(&audit.stdout);
+    for needle in [
+        "\"status\":\"clean\"",
+        "\"clean\":true",
+        "\"compared\":7",
+        "\"deterministic_mismatches\":[]",
+        "\"structure_mismatch\":null",
+    ] {
+        assert!(aj.contains(needle), "missing {needle}: {aj}");
+    }
+    let ledger = Ledger::open(db_a.to_str().unwrap()).unwrap();
+    let ops = ledger.visible_op_ids(fs_ledger::MAIN_BRANCH, None).unwrap();
+    assert_eq!(ops.len(), 7);
+    for (idx, &op) in ops[0..6].iter().enumerate() {
+        let t_end = i64::try_from(idx).unwrap() * 2 + 1;
+        let m = ledger.metrics_for_op(op).unwrap();
+        assert!(
+            m.iter()
+                .any(|(t, n, _)| *t == t_end && n == "driver.consumed_wall_s")
+                && m.iter()
+                    .any(|(t, n, _)| *t == t_end && n == "driver.consumed_core_s")
+        );
+        assert!(
+            m.iter()
+                .all(|(t, n, _)| n.starts_with("driver.") || *t != t_end)
+        );
+    }
+    let tm = ledger.metrics_for_op(ops[6]).unwrap();
+    assert!(
+        tm.iter()
+            .any(|(t, n, _)| *t == 101 && n == "driver.consumed_wall_s")
+            && tm
+                .iter()
+                .any(|(t, n, _)| *t == 101 && n == "driver.consumed_core_s")
+    );
+}

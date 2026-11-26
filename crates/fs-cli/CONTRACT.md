@@ -4239,11 +4239,15 @@ Stage checkpoints use the fs-exec **legacy v1** snapshot envelope
 deliberately: the v2 envelope's expectation token is in-process-only and its
 post-restart authorized resume path is explicitly unfinished (fs-exec
 CONTRACT), while the v1 `LegacySnapshotExpectationV1` is reconstructible from
-durable fields alone. The sealed driver state (run, project hash, consumption
-totals, completed stages) is retained as a `solve-stage-state` artifact; its
-ledger content hash and `open_expected` admission prove only bounded codec
-integrity. Public `SolveDriverState`/`CompletedStage` construction and a valid
-legacy envelope grant no resume authority.
+durable fields alone. Sealed `solve-stage-state`/`assembly-stage-state`
+checkpoints zero consumption fields and terminal run receipts omit them so
+identical `solve` and `run` executions produce bit-identical hashes under
+`Ledger::replay_verdict`; cumulative wall/core consumption lives atomically in
+`metrics` (`driver.consumed_core_s`, `driver.consumed_wall_s` at
+`t = ordinal * 2 + 1` per stage and `t = 101` on terminal). This holds for
+`solve` and `run` (`stage_driver`) only; study drivers are out of scope. The
+checkpoint hash and `open_expected` prove only bounded codec integrity; public
+`SolveDriverState`/`CompletedStage` construction grants no resume authority.
 
 Before opening a governor or publishing progress, resume collects every
 retained driver state of the run (bounded checkpoint decode plus shape
@@ -5242,10 +5246,18 @@ the diagnostic identity the binding layer already defines.
   the unique longest fully re-attested retained prefix; a malformed candidate
   cannot lend authority to its decoded fields, and equally long valid
   competitors refuse as ambiguous.
-- The slice-1 single-core driver records finite nonnegative consumption with
-  `consumed_core_s == consumed_wall_s` in every checkpoint. A non-finite or
-  backward fresh clock refuses before a checkpoint or lineage seal is
-  published.
+- The single-core `solve` and `run` stage driver records finite nonnegative
+  cumulative consumption with `consumed_core_s == consumed_wall_s` atomically in
+  ledger `metrics` (`driver.consumed_core_s`, `driver.consumed_wall_s` at
+  `t = ordinal * 2 + 1` per stage op and `t = 101` on the terminal op) while
+  keeping sealed stage checkpoints (`consumed_core_s = 0.0`,
+  `consumed_wall_s = 0.0`) and terminal run receipts free of wall-clock fields.
+  Identical `solve` and `run` executions therefore reproduce bit-identical
+  checkpoint and terminal receipt hashes under `Ledger::replay_verdict`. This
+  invariant covers `solve` and `run` (the shared `stage_driver` pipelines) only;
+  study drivers (`study_thermal`, `study_elasticity`, `study_uncertainty`) are
+  outside this scope. A non-finite or backward fresh clock refuses before a
+  checkpoint or lineage seal is published.
 - A pre-cancelled solve publishes nothing; cancellation between stages leaves
   the completed prefix durable and resumable with bit-identical stage
   evidence relative to an uninterrupted run. Cancellation during fresh or
@@ -5253,9 +5265,13 @@ the diagnostic identity the binding layer already defines.
   refusal operation, stage receipt, checkpoint, seal, progress line, or
   terminal-success publication. A zero-stage prefix recommends a fresh retry;
   `--resume` guidance is emitted only after at least one durable stage exists.
-- Budget continuity survives resume: recorded consumption is re-charged
-  before any new stage runs, and a resume that would already be exhausted
-  refuses rather than resetting the meter.
+- Budget continuity survives resume: recorded consumption metrics are
+  re-attested monotonically across the completed prefix (missing or regressing
+  driver consumption metrics on deterministic checkpoints refuse with
+  `cli-solve-resume-identity`; legacy v1 checkpoints with positive sealed
+  consumption remain readable) and re-charged before any new stage runs, so a
+  resume that would already be exhausted refuses with `cli-solve-resume-budget`
+  rather than resetting the meter.
 - Import accepts exactly one source for every exact project geometry row and
   no extras; declaration order, not insertion order, determines retained rows.
 - Raw bytes must reproduce the project row's FNV source hook and exact

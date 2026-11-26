@@ -308,6 +308,75 @@ fn binary_replay_audit_clean_mismatch_branch_diff_and_no_file_creation() {
 }
 
 #[test]
+fn binary_solve_two_ledgers_pass_replay_audit_cleanly() {
+    let dir = scratch_dir("solve_replay");
+    let (db_a, db_b) = (dir.join("solve_a.db"), dir.join("solve_b.db"));
+    let ref_dir = repo_root().join("data/reference-project");
+    let (fsim, pack) = (
+        ref_dir.join("cooling-reference.fsim"),
+        ref_dir.join("aa6061.fsmcdpk"),
+    );
+    for (idx, db) in [&db_a, &db_b].into_iter().enumerate() {
+        import_ref_plate(db);
+        if idx == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let args = [
+            "--json",
+            "solve",
+            fsim.to_str().unwrap(),
+            db.to_str().unwrap(),
+            "--materials",
+            pack.to_str().unwrap(),
+        ];
+        assert!(
+            run_bin(&args, exit::SUCCESS)
+                .0
+                .contains("\"status\":\"completed\"")
+        );
+    }
+    let (aj, _) = run_bin(
+        &[
+            "--json",
+            "replay-audit",
+            db_a.to_str().unwrap(),
+            db_b.to_str().unwrap(),
+        ],
+        exit::SUCCESS,
+    );
+    for needle in [
+        "\"status\":\"clean\"",
+        "\"clean\":true",
+        "\"compared\":9",
+        "\"deterministic_mismatches\":[]",
+        "\"structure_mismatch\":null",
+    ] {
+        assert!(aj.contains(needle), "missing {needle}: {aj}");
+    }
+    let ledger = Ledger::open(db_a.to_str().unwrap()).unwrap();
+    let ops = ledger.visible_op_ids(MAIN_BRANCH, None).unwrap();
+    assert_eq!(ops.len(), 9);
+    for (idx, &op) in ops[1..8].iter().enumerate() {
+        let t_end = i64::try_from(idx).unwrap() * 2 + 1;
+        let m = ledger.metrics_for_op(op).unwrap();
+        assert!(
+            m.iter()
+                .any(|(t, n, _)| *t == t_end && n == "driver.consumed_wall_s")
+                && m.iter()
+                    .any(|(t, n, _)| *t == t_end && n == "driver.consumed_core_s")
+        );
+    }
+    let tm = ledger.metrics_for_op(ops[8]).unwrap();
+    assert!(
+        tm.iter()
+            .any(|(t, n, _)| *t == 101 && n == "driver.consumed_wall_s")
+            && tm
+                .iter()
+                .any(|(t, n, _)| *t == 101 && n == "driver.consumed_core_s")
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn binary_package_coverage_all_four_standards_default_unchanged_and_study_refused() {
     let root = repo_root();
