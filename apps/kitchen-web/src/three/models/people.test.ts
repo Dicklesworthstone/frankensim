@@ -29,6 +29,17 @@ function reference(g: THREE.BufferGeometry): number {
   return a2 > 0 ? Math.sqrt(a3 / a2) : 1;
 }
 
+/** `g` with its positions stored as the cooks' files store them: normalised signed 16-bit integers, interleaved. */
+function quantizedPositions(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const pos = g.getAttribute("position");
+  const q = new Int16Array(pos.count * 4);
+  for (let i = 0; i < pos.count; i++)
+    for (let c = 0; c < 3; c++) q[i * 4 + c] = Math.round(THREE.MathUtils.clamp(pos.getComponent(i, c), -1, 1) * 32767);
+  const out = g.clone();
+  out.setAttribute("position", new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(q, 4), 3, 0, true));
+  return out;
+}
+
 /** `g` with its UVs stored as a glTF file may store them: normalised 16-bit integers, interleaved. */
 function quantizedUvs(g: THREE.BufferGeometry): THREE.BufferGeometry {
   const uv = g.getAttribute("uv");
@@ -53,7 +64,7 @@ describe("metresPerUv", () => {
     ];
     for (const [name, g] of shapes) {
       g.applyMatrix4(new THREE.Matrix4().makeScale(1.3, 0.7, 2.1));
-      for (const [kind, x] of [["float", g], ["quantized", quantizedUvs(g)]] as const) {
+      for (const [kind, x] of [["float", g], ["quantized UVs", quantizedUvs(g)], ["quantized positions and UVs", quantizedUvs(quantizedPositions(g))]] as const) {
         const want = reference(x);
         const got = metresPerUv(x);
         expect(Object.is(got, want), `${name} ${kind}: ${got} vs ${want}`).toBe(true);

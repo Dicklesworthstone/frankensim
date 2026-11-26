@@ -42,9 +42,9 @@ const normalM = new THREE.Matrix3();
 
 /**
  * An attribute's first `size` components, item after item, as three.js's getX/getY/getZ/getW give them. A plain
- * array is returned as it is; anything else (interleaved, normalised integers) is copied out with three.js's
- * arithmetic: a normalised integer over its type's largest value, no lower than -1 when signed. Half floats go
- * through three.js's accessors.
+ * array is returned as it is, the attribute's own, so read it and do not write to it; anything else (interleaved,
+ * normalised integers) is copied out with three.js's arithmetic: a normalised integer over its type's largest value,
+ * no lower than -1 when signed. Half floats go through three.js's accessors.
  */
 export function attributeValues(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, size: number): ArrayLike<number> {
   const inter = (a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute === true;
