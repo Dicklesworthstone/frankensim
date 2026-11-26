@@ -258,6 +258,9 @@ fn binary_runs_three_assemblies_explains_and_resumes_interrupted_run() {
             && ej1.contains("frankensim.window_ledger.v1")
     );
     assert!(ej1.contains("\"causalization_audit\":{"));
+    let ps = "\"probe_series\":{\"schema\":\"frankensim.cli.assembly-probe-series.v1\"";
+    assert!(ej1.contains(ps) && ej1.contains("\"name\":\"slider_temp\""));
+    assert!(s(&bin_run(&["explain", run1, lstr]).stdout).contains("probe_series_present=true"));
 
     // 2. Real-binary `run --resume` completes an interrupted run on disk.
     let partial_p = dir.join("partial.db");
@@ -622,4 +625,32 @@ fn binary_assembly_run_two_ledgers_pass_replay_audit_cleanly() {
                 .iter()
                 .any(|(t, n, _)| *t == 101 && n == "driver.consumed_core_s")
     );
+}
+
+#[test]
+fn binary_lowers_atkins_contact_resistance_and_refuses_missing_area() {
+    let dir = scratch_dir("atkins_tcr");
+    let st = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
+    let atk = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk");
+    let old = ":card \"AISI-304\" :family \"thermal-conductance\" :area 0.0025m^2";
+    let base = ":card \"6061-T6 aluminum alloy\" :family \"thermal-contact-resistance\"";
+    let tpl = TWO_BODY_FSIM.replace("\"AA6061\"", "\"AISI-304\"");
+    let (m, ic) = (st.to_str().unwrap(), atk.to_str().unwrap());
+    let go = |tag: &str, extra: &str| {
+        let f = dir.join(format!("{tag}.fsim"));
+        let d = dir.join(format!("{tag}.db"));
+        std::fs::write(&f, tpl.replace(old, &format!("{base} {extra}"))).unwrap();
+        let mut a = vec!["--json", "run", f.to_str().unwrap(), d.to_str().unwrap()];
+        a.extend(["--materials", m, "--interfaces", ic]);
+        (bin_run(&a), d)
+    };
+    let (r, db1) = go("ok", ":area 0.0025m^2 :normal-pressure 313000Pa");
+    assert_eq!(r.status.code(), Some(i32::from(exit::SUCCESS)));
+    let id = jstr(&s(&r.stdout), "run").to_owned();
+    let ej = s(&bin_run(&["--json", "explain", &id, db1.to_str().unwrap()]).stdout);
+    assert!(ej.contains("area-specific-thermal-contact-resistance") && ej.contains("7.909890527"));
+    let (r2, _) = go("bad", ":normal-pressure 313000Pa");
+    assert_eq!(r2.status.code(), Some(i32::from(exit::REFUSED)));
+    assert!(s(&r2.stderr).contains("requires positive :area"));
 }

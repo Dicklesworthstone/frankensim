@@ -195,6 +195,8 @@ pub struct AssemblyExplanation {
     pub causalization_audit_json: Option<String>,
     /// Window energy ledger JSON, when transient `run` completed.
     pub window_ledger_json: Option<String>,
+    /// Canonical evaluated probe series JSON, when `probe` completed.
+    pub probe_series_json: Option<String>,
     /// Completed stages `(name, op_id, receipt_hash)`.
     pub stages: Vec<(String, i64, String)>,
 }
@@ -1401,7 +1403,8 @@ pub fn explain_assembly_run(
         mut plan_json,
         mut causalization_audit_json,
         mut window_ledger_json,
-    ) = (None, None, None, None);
+        mut probe_series_json,
+    ) = (None, None, None, None, None);
     let mut stages = Vec::with_capacity(v.state.completed.len());
     for done in &v.state.completed {
         let stage = AssemblyStage::from_ordinal(done.ordinal)
@@ -1446,6 +1449,11 @@ pub fn explain_assembly_run(
                     window_ledger_json = Some(read_utf8(ledger, &h)?);
                 }
             }
+            AssemblyStage::Probe => {
+                if let Some(h) = find_edge(ledger, done.op_id, EdgeRole::Out, PROBE_SERIES_KIND)? {
+                    probe_series_json = Some(read_utf8(ledger, &h)?);
+                }
+            }
             _ => {}
         }
     }
@@ -1459,6 +1467,7 @@ pub fn explain_assembly_run(
         plan_json,
         causalization_audit_json,
         window_ledger_json,
+        probe_series_json,
         stages,
     })
 }

@@ -467,7 +467,7 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
             }
             let _ = write!(
                 out,
-                ",\"lowering_receipt\":{},\"execution_plan\":{},\"causalization_audit\":{},\"window_ledger\":{},\"stages\":[",
+                ",\"lowering_receipt\":{},\"execution_plan\":{},\"causalization_audit\":{},\"window_ledger\":{},\"probe_series\":{},\"stages\":[",
                 exp.lowering_receipt_json
                     .as_deref()
                     .map_or("null", str::trim),
@@ -476,6 +476,7 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
                     .as_deref()
                     .map_or("null", str::trim),
                 exp.window_ledger_json.as_deref().map_or("null", str::trim),
+                exp.probe_series_json.as_deref().map_or("null", str::trim),
             );
             for (i, (stage, op_id, receipt)) in exp.stages.iter().enumerate() {
                 if i > 0 {
@@ -502,11 +503,12 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
             }
             let _ = writeln!(
                 out,
-                "lowering_receipt_present={}\nexecution_plan_present={}\ncausalization_audit_present={}\nwindow_ledger_present={}",
+                "lowering_receipt_present={}\nexecution_plan_present={}\ncausalization_audit_present={}\nwindow_ledger_present={}\nprobe_series_present={}",
                 exp.lowering_receipt_json.is_some(),
                 exp.plan_json.is_some(),
                 exp.causalization_audit_json.is_some(),
                 exp.window_ledger_json.is_some(),
+                exp.probe_series_json.is_some(),
             );
             for (stage, op_id, receipt) in &exp.stages {
                 let _ = writeln!(out, "stage={stage} op_id={op_id} receipt={receipt}");

@@ -25,6 +25,7 @@ const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const FREQUENCY: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
 
 /// Admitted assembly document, Five Explicits, and resolved card store.
@@ -648,7 +649,16 @@ pub(crate) fn admit_assembly_source(
                 let scope = format!("interface `{iname}`");
                 let kw = kwargs(
                     &items[2..],
-                    &["kind", "a", "b", "card", "family", "area"],
+                    &[
+                        "kind",
+                        "a",
+                        "b",
+                        "card",
+                        "family",
+                        "area",
+                        "normal-pressure",
+                        "thickness",
+                    ],
                     &scope,
                 )?;
                 let ea = *by_name
@@ -681,12 +691,16 @@ pub(crate) fn admit_assembly_source(
                     card,
                     as_str(req(&kw, "family", &scope)?, "family")?.to_string(),
                 );
-                let state = kw
-                    .get("area")
-                    .map(|n| Ok((ParameterKey::new("area", AREA), as_qty_d(n, AREA, "area")?)))
-                    .transpose()?
-                    .into_iter()
-                    .collect();
+                let mut state = Vec::new();
+                for (flag, key, dims) in [
+                    ("area", "area", AREA),
+                    ("normal-pressure", "normal_pressure", PRESSURE),
+                    ("thickness", "thickness", LENGTH),
+                ] {
+                    if let Some(n) = kw.get(flag) {
+                        state.push((ParameterKey::new(key, dims), as_qty_d(n, dims, flag)?));
+                    }
+                }
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
                     "thermal-contact" => DraftInterfaceKind::ThermalContact {
                         law_card: card,

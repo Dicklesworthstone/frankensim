@@ -29,12 +29,13 @@ use std::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_matdb::{
-    InterfaceSystemCard, MatDbError, MaterialCard, PropertySample, PropertyUsageReceipt,
+    ClaimSet, InterfaceSystemCard, MatDbError, MaterialCard, PropertySample, PropertyUsageReceipt,
     Provenance, QueryPoint, SelectionPolicy,
 };
 use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole};
-use fs_qty::Dims;
+use fs_qty::semantic::{QuantityKind::AbsoluteTemperature as AbsTemp, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec};
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
     DraftPartKind, FidelityRung, GearMeshDecl, JointDecl, JointKind, PhysicsDomain, PrimitiveShape,
@@ -76,6 +77,8 @@ const DAMPING_DIMS: Dims = Dims([0, 1, -1, 0, 0, 0]);
 const TORSIONAL_DAMPING_DIMS: Dims = Dims([2, 1, -1, 0, 0, 0]);
 const HEAT_CAPACITY_DIMS: Dims = Dims([2, 1, -2, -1, 0, 0]);
 const CONDUCTANCE_DIMS: Dims = Dims([2, 1, -3, -1, 0, 0]);
+const AREA_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
+const CONTACT_RESISTANCE_DIMS: Dims = Dims([0, -1, 3, 1, 0, 0]);
 const TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
@@ -2002,6 +2005,7 @@ impl ProvenanceRecorder {
             &mat_ref.query_point,
             env.ambient_temp_k,
             env.ambient_pressure_pa,
+            (card.claims(), property),
         )?;
         let answer = card
             .claims()
@@ -2035,6 +2039,7 @@ impl ProvenanceRecorder {
             query_state,
             env.ambient_temp_k,
             env.ambient_pressure_pa,
+            (entry.card.claims(), property),
         )?;
         let answer = entry
             .card
@@ -2075,6 +2080,7 @@ impl ProvenanceRecorder {
             &third_body.query_point,
             env.ambient_temp_k,
             env.ambient_pressure_pa,
+            (card.claims(), property),
         )?;
         let answer = card
             .claims()
@@ -2190,7 +2196,14 @@ fn build_query_point(
     declared: &[(fs_scenario::assembly::ParameterKey, fs_qty::QtyAny)],
     ambient_temp_k: f64,
     ambient_pressure_pa: f64,
+    (claims, property): (&ClaimSet, &str),
 ) -> Result<QueryPoint, LoweringError> {
+    let abs_t = QuantitySpec::semantic(SemanticType::new(AbsTemp, ValueForm::Static));
+    let list = claims.claims_for(property);
+    let typed_t = !list.is_empty()
+        && list
+            .iter()
+            .all(|(_, c)| c.validity.axis_quantities().get("T") == Some(&abs_t));
     let mut point = QueryPoint::new();
     let mut has_temp = false;
     let mut has_pressure = false;
@@ -2201,20 +2214,26 @@ fn build_query_point(
         if k.name == "P" {
             has_pressure = true;
         }
-        point = point
-            .with(&k.name, q.value)
-            .map_err(|source| LoweringError::MatDb {
-                item: item_scope.to_owned(),
-                source: Box::new(source),
-            })?;
+        point = if typed_t && k.name == "T" && q.dims == TEMPERATURE_DIMS {
+            point.with_quantity("T", abs_t, q.value)
+        } else {
+            point.with(&k.name, q.value)
+        }
+        .map_err(|source| LoweringError::MatDb {
+            item: item_scope.to_owned(),
+            source: Box::new(source),
+        })?;
     }
     if !has_temp && ambient_temp_k.is_finite() {
-        point = point
-            .with("T", ambient_temp_k)
-            .map_err(|source| LoweringError::MatDb {
-                item: item_scope.to_owned(),
-                source: Box::new(source),
-            })?;
+        point = if typed_t {
+            point.with_quantity("T", abs_t, ambient_temp_k)
+        } else {
+            point.with("T", ambient_temp_k)
+        }
+        .map_err(|source| LoweringError::MatDb {
+            item: item_scope.to_owned(),
+            source: Box::new(source),
+        })?;
     }
     if !has_pressure && ambient_pressure_pa.is_finite() {
         point = point
@@ -3549,9 +3568,14 @@ pub fn register_kernel_defaults(registry: &mut LoweringRegistry) {
     registry.register_gear_mesh("involute-gear-mesh", lower_involute_gear_mesh);
 
     // 7. Card-bound interfaces.
+    let tc = InterfaceKindTag::ThermalContact;
     registry.register_interface(
-        InterfaceLoweringKey::new(InterfaceKindTag::ThermalContact, "thermal-conductance"),
-        lower_thermal_conductance_interface,
+        InterfaceLoweringKey::new(tc, "thermal-conductance"),
+        |c, g| lower_thermal_interface(c, g, false),
+    );
+    registry.register_interface(
+        InterfaceLoweringKey::new(tc, "thermal-contact-resistance"),
+        |c, g| lower_thermal_interface(c, g, true),
     );
     registry.register_interface(
         InterfaceLoweringKey::new(InterfaceKindTag::MechanicalContact, "viscous-damper"),
@@ -4167,9 +4191,47 @@ fn lower_involute_gear_mesh(
     })
 }
 
-fn lower_thermal_conductance_interface(
+fn query_thermal_conductance(
+    scope: &str,
+    ctx: &InterfaceLoweringContext<'_>,
+    entry: &InterfaceCardEntry,
+    state: &[(fs_scenario::assembly::ParameterKey, fs_qty::QtyAny)],
+    resistance_law: bool,
+) -> Result<(f64, ProvenanceRecorder), LoweringError> {
+    let mut rec = ProvenanceRecorder::default();
+    let inv = |d: &str| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d.to_owned(),
+    };
+    let (area, prop) = if resistance_law {
+        let a = state
+            .iter()
+            .find(|(k, _)| k.name == "area")
+            .filter(|(_, q)| q.dims == AREA_DIMS && q.value.is_finite() && q.value > 0.0)
+            .ok_or_else(|| inv("thermal-contact-resistance requires positive :area [m^2]"))?;
+        (Some(a.1.value), "area-specific-thermal-contact-resistance")
+    } else {
+        (None, "thermal_conductance")
+    };
+    let s = rec
+        .query_interface_property(scope, entry, state, prop, prop, ctx.query_env())?
+        .0;
+    let Some(a) = area else {
+        return Ok((s.value, rec));
+    };
+    let g = a / s.value;
+    if s.dims != CONTACT_RESISTANCE_DIMS || s.value <= 0.0 || !g.is_finite() {
+        return Err(inv("contact resistance must be positive [m^2*K/W]"));
+    }
+    rec.record_declared_field("area", a, AREA_DIMS, scope, "state.area");
+    rec.record_declared_field("thermal_conductance", g, CONDUCTANCE_DIMS, scope, "A/R''");
+    Ok((g, rec))
+}
+
+fn lower_thermal_interface(
     ctx: &InterfaceLoweringContext<'_>,
     graph: &mut LoweringGraph,
+    resistance_law: bool,
 ) -> Result<LoweredInterfaceOutput, LoweringError> {
     let scope = format!("interface:{}", ctx.interface.name);
     let ResolvedInterfaceCard::System(entry) = ctx.card else {
@@ -4184,16 +4246,8 @@ fn lower_thermal_conductance_interface(
         } => (state.as_slice(), third_body.as_ref()),
         _ => (&[][..], None),
     };
-    let mut recorder = ProvenanceRecorder::default();
-    let (g_sample, _) = recorder.query_interface_property(
-        &scope,
-        entry,
-        state,
-        "thermal_conductance",
-        "thermal_conductance",
-        ctx.query_env(),
-    )?;
-    let mut g_eff = g_sample.value;
+    let (mut g_eff, mut recorder) =
+        query_thermal_conductance(&scope, ctx, entry, state, resistance_law)?;
     if let Some(tb) = third_body {
         // Optional third-body TIM contributes series thermal resistance when
         // thermal_conductivity is present on the third-body card.

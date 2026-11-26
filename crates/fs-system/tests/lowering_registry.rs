@@ -1836,3 +1836,42 @@ fn acoustic_assembly_families_lower_through_registry_and_refuse_unknown_family()
         .expect("reed family lowers once registered");
     assert_eq!(lowered_reed.receipt.acoustic_members.len(), 5);
 }
+
+#[test]
+fn typed_t_axis_matches_absolute_temperature_keeps_legacy_and_refuses_mismatch() {
+    use fs_matdb::{MatDbError::AxisQuantityMismatch, SelectionPolicy::SingleClaimOnly};
+    use fs_qty::semantic::{QuantityKind as Qk, SemanticType, ValueForm::Static};
+    let env = fs_system::MatDbQueryEnv {
+        ambient_temp_k: 293.15,
+        ambient_pressure_pa: 101_325.0,
+        policy: SingleClaimOnly,
+    };
+    let run = |validity: ValidityDomain, explicit_t: bool| {
+        let (mut claims, mut cards) = (ClaimSet::new(), CardStore::new());
+        let c = PropertyClaim {
+            validity,
+            ..scalar_claim("density", 7800.0, DENSITY, "typed-t")
+        };
+        claims.insert_claim(c).unwrap();
+        let card = MaterialCard::assemble(steel_card().id().clone(), claims, vec![]).unwrap();
+        let mut mr = mat_ref(cards.insert_material(card));
+        if explicit_t {
+            let k = ParameterKey::new("T", TEMPERATURE);
+            mr.query_point.push((k, QtyAny::new(293.15, TEMPERATURE)));
+        }
+        let mut r = ProvenanceRecorder::default();
+        r.query_material_property("part:m", &cards, &mr, "density", "density", env)
+    };
+    let tv = |k| {
+        let q = fs_qty::QuantitySpec::semantic(SemanticType::new(k, Static));
+        ValidityDomain::unconstrained().with_quantity("T", q, 293.15, 293.15)
+    };
+    assert!(run(tv(Qk::AbsoluteTemperature), false).is_ok());
+    assert!(run(tv(Qk::AbsoluteTemperature), true).is_ok());
+    let leg = ValidityDomain::unconstrained().with("T", 293.15, 293.15);
+    assert!(run(leg, false).is_ok());
+    assert!(matches!(
+        run(tv(Qk::TemperatureDifference), true),
+        Err(LoweringError::MatDb { source, .. }) if matches!(*source, AxisQuantityMismatch { .. })
+    ));
+}
