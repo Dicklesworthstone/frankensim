@@ -70,19 +70,27 @@ impl ShiftLaw for ModuleShift {
     }
 }
 
+/// How the connector follows cell 0's temperature.
+#[derive(Clone)]
+enum Follows {
+    /// Its kinetics, by this calibration.
+    Shift(TemperatureShift),
+    /// Its damping, by this law.
+    Damping(std::rc::Rc<dyn fs_mbd::component::network::DampingLaw>),
+}
+
 /// The fixture's pair as a graph with `timeline` (heat ports on cells 0 and
 /// 1, and the environment port). With `held` the connector has an actuator
 /// holding that force [N] along the first body's x axis; without, it has
-/// none. With `shift` the connector's kinetics follow that calibration at
-/// cell 0's temperature, which the timeline must publish. Returns the
-/// system, the network and the cells.
+/// none. With `follows` the connector follows cell 0's temperature, which
+/// the timeline must publish. Returns the system, the network and the cells.
 fn memory_graph(
     fixture: &MemoryPair,
     mechanical: RelaxationNetworkMotionControls,
     timeline: ThermalTimeline<'static>,
     heat: &DepositionSimulation<'static>,
     held: Option<f64>,
-    shift: Option<TemperatureShift>,
+    follows: Option<Follows>,
 ) -> (System, NodeId, NodeId) {
     let mut network = RelaxationNetwork::new(
         fixture.bodies.properties[..2].to_vec(),
@@ -97,10 +105,13 @@ fn memory_graph(
     if held.is_some() {
         network = network.driven(0, DriveFrame::MaterialFirst).unwrap();
     }
-    let follows = shift.is_some();
-    if let Some(shift) = shift {
-        network = network.shifted(std::rc::Rc::new(ModuleShift(vec![shift]))).unwrap();
+    let (follows, how) = (follows.is_some(), follows);
+    network = match how {
+        Some(Follows::Shift(shift)) => network.shifted(std::rc::Rc::new(ModuleShift(vec![shift]))),
+        Some(Follows::Damping(law)) => network.temperature_dependent(law),
+        None => Ok(network),
     }
+    .unwrap();
     let start = RelaxationState {
         bodies: fixture.bodies.states[..2].to_vec(),
         memory: fixture.memory.to_vec(),
@@ -449,7 +460,7 @@ fn the_declared_graph_reproduces_the_memory_candidates_with_calibrated_kinetics(
         timeline,
         &heat,
         Some(0.7),
-        Some(shifts[0]),
+        Some(Follows::Shift(shifts[0])),
     );
     let (intervals, shortenings) = run_counting(&mut system, 0.5);
     assert_eq!(candidate.report().thermal.substeps, intervals.len());
@@ -501,7 +512,7 @@ fn the_declared_graph_reproduces_the_memory_candidates_with_calibrated_kinetics(
             timeline,
             &heat,
             Some(0.7),
-            Some(shifts[0]),
+            Some(Follows::Shift(shifts[0])),
         );
         let (intervals, shortenings) = run_counting(&mut system, 0.5);
         let case = format!("{scheme:?}");

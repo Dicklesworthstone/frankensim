@@ -17,9 +17,10 @@ use core::f64::consts::PI;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterfaceSystemCard, InterpolationPolicy,
-    LawId, LawParameter, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
-    Provenance, SurfaceSpec, SystemContext, UncertaintyModel,
+    ClaimId, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterfaceSystemCard,
+    InterpolationPolicy, LawId, LawParameter, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, SurfaceSpec, SystemContext,
+    UncertaintyModel,
 };
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
@@ -119,6 +120,10 @@ fn material(values: &[(&str, f64, Dims)], models: Vec<ConstitutiveModelCard>) ->
 }
 
 pub(crate) fn interface_card(family: &str, values: &[(&str, f64, Dims)]) -> InterfaceSystemCard {
+    card_of(family, claims(values))
+}
+
+fn card_of(family: &str, claims: ClaimSet) -> InterfaceSystemCard {
     let surface = |side: &str| SurfaceSpec {
         material: state(side),
         texture_frame: side.to_owned(),
@@ -130,14 +135,121 @@ pub(crate) fn interface_card(family: &str, values: &[(&str, f64, Dims)]) -> Inte
         environment: fixture(),
         history: fixture(),
     };
-    InterfaceSystemCard::assemble(
-        surface("a"),
-        surface("b"),
-        context,
-        claims(values),
-        Vec::new(),
-    )
-    .unwrap()
+    InterfaceSystemCard::assemble(surface("a"), surface("b"), context, claims, Vec::new()).unwrap()
+}
+
+/// `name` as a curve over `T`, `LinearInside`, through `knots` [K, `dims`] and
+/// valid to 310 K: fs-matdb checks validity before the knots, so a temperature
+/// past the last knot refuses as `OutsideKnotSpan`.
+pub(crate) fn curve(name: &str, dims: Dims, knots: Vec<(f64, f64)>) -> PropertyClaim {
+    let validity = ValidityDomain::unconstrained().with("T", knots[0].0, 310.0);
+    let (abscissa, abscissa_dims) = ("T".to_owned(), TEMPERATURE);
+    PropertyClaim {
+        key: PropertyKey::new(name, dims),
+        value: PropertyValue::Curve {
+            abscissa,
+            abscissa_dims,
+            knots,
+            dims,
+        },
+        validity,
+        uncertainty: UncertaintyModel::HalfWidth {
+            half_width: 1e-6,
+            confidence: 0.95,
+        },
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: Vec::new(),
+        provenance: provenance(name),
+    }
+}
+
+/// `ModuleLaw`'s damping as a curve: `c` [N s/m] at 300 K to 7 `c` at 303 K.
+pub(crate) fn module_curve(c: f64) -> PropertyClaim {
+    curve("damping_x", DAMPING, vec![(300.0, c), (303.0, 7.0 * c)])
+}
+
+/// The test's law: connector `c`'s `damping_x` curve claim, pinned, from
+/// fs-matdb at its temperature; the reference's other entries and scales.
+#[derive(Debug)]
+pub(crate) struct CurveLaw(Vec<(ClaimSet, ClaimId)>);
+
+impl CurveLaw {
+    pub(crate) fn new(curves: impl IntoIterator<Item = PropertyClaim>) -> Rc<Self> {
+        let pinned = curves.into_iter().map(|claim| {
+            let mut set = ClaimSet::new();
+            let id = set.insert_claim(claim).unwrap();
+            (set, id)
+        });
+        Rc::new(Self(pinned.collect()))
+    }
+}
+
+impl DampingLaw for CurveLaw {
+    fn at_temperature(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        let (claims, claim) = &self.0[connector];
+        let at = QueryPoint::new().with("T", temperature_k).unwrap();
+        let answer = claims.query_pinned("damping_x", &at, *claim);
+        let answer = answer.map_err(|err| format!("{err:?}"))?;
+        let mut native = *reference.native_coefficients();
+        native[0][0] = answer.evidence.value.value;
+        let form = PassiveBushingMatrix::try_new(native, reference.coordinate_scales());
+        form.map_err(|err| format!("{err:?}"))
+    }
+}
+
+/// `pair` with interface `index`'s claim of `curve`'s name replaced by `curve`,
+/// on a new card of its family.
+pub(crate) fn curved(
+    (draft, mut cards): (DraftAssembly, CardStore),
+    index: usize,
+    curve: PropertyClaim,
+) -> (DraftAssembly, CardStore) {
+    let mut input = draft.input().clone();
+    let DraftInterfaceKind::MechanicalContact { law_card, .. } = &mut input.interfaces[index].kind
+    else {
+        panic!("interface {index} is a mechanical contact");
+    };
+    let entry = cards.interface(law_card).unwrap();
+    let mut claims = ClaimSet::new();
+    for (_, claim) in entry.card.claims().claims_ordered() {
+        if claim.key.name() != curve.key.name() {
+            claims.insert_claim(claim.clone()).unwrap();
+        }
+    }
+    claims.insert_claim(curve).unwrap();
+    let family = entry.family.clone();
+    let card = card_of(&family, claims);
+    *law_card = cards.insert_interface(&family, card).unwrap();
+    (admit(input), cards)
+}
+
+/// `pair` with a `TemperatureSource` named `source<n>` on the faces of the
+/// `n`th of `routes` (interface indices).
+pub(crate) fn sourced(
+    (draft, cards): (DraftAssembly, CardStore),
+    routes: &[usize],
+) -> (DraftAssembly, CardStore) {
+    let mut input = draft.input().clone();
+    for (n, &route) in routes.iter().enumerate() {
+        let mut source = input.interfaces[route].clone();
+        let pair = InterfacePair::ordered(source.feature_a, source.feature_b);
+        source.name = format!("source{n}");
+        let declared = EntityDeclaration::interface(input.root, &source.name, pair);
+        source.entity = input.catalog.declare(declared).unwrap();
+        source.kind = DraftInterfaceKind::TemperatureSource;
+        input.interfaces.push(source);
+    }
+    (admit(input), cards)
+}
+
+pub(crate) fn admit(input: DraftAssemblyInput) -> DraftAssembly {
+    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+    DraftAssembly::admit(input, &scenario).unwrap()
 }
 
 /// The fixture's two laws on cards: law ids by storage basis, `a` and `b`
@@ -430,8 +542,7 @@ pub(crate) fn under(draft: &DraftAssembly, scheme: TimeScheme, drop_beds: bool) 
     if drop_beds {
         input.interfaces.retain(|i| !i.name.starts_with("bed"));
     }
-    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
-    DraftAssembly::admit(input, &scenario).unwrap()
+    admit(input)
 }
 
 /// The first `N` parts' mass properties as the lowering recorded them.
@@ -461,9 +572,32 @@ pub(crate) fn temperature_bits(system: &System, node: NodeId) -> [u64; 2] {
 
 #[test]
 fn the_lowered_draft_steps_with_the_declared_graph_bit_for_bit() {
+    steps_with_the_graph(false);
+}
+
+#[test]
+fn bushings_on_damping_curves_step_with_the_declared_graph_on_their_law_bit_for_bit() {
+    steps_with_the_graph(true);
+}
+
+/// The pairing against `graph()`. With `curves`, bushing `b`'s damping is
+/// `module_curve` of its own and follows cell `b`, against `graph()` with
+/// `CurveLaw` on the same claims.
+fn steps_with_the_graph(curves: bool) {
     let laws = static_laws();
     for source_w in [0.0, 2.0] {
-        let (draft, cards) = pairing(fixture_cards(laws), source_w);
+        let mut pair = pairing(fixture_cards(laws), source_w);
+        let mut law = None::<Rc<dyn DampingLaw>>;
+        if curves {
+            let claims = [0.7, 1.1].map(module_curve);
+            for (bushing, claim) in claims.iter().enumerate() {
+                pair = curved(pair, bushing, claim.clone());
+            }
+            // On route00's faces and route11's.
+            pair = sourced(pair, &[4, 7]);
+            law = Some(CurveLaw::new(claims));
+        }
+        let (draft, cards) = pair;
         let mut bodies = Bodies::new([0.7, 1.1]);
         bodies.properties = lowered_mass(&lower(&draft, &cards));
         // The oracle takes these from the receipts, so hold them to the box:
@@ -484,7 +618,7 @@ fn the_lowered_draft_steps_with_the_declared_graph_bit_for_bit() {
             .0;
         for target_s in [0.5, 0.45] {
             let case = format!("{source_w} W to {target_s} s");
-            let (mut oracle, network, cells) = graph(&bodies, &routes(), &heat);
+            let (mut oracle, network, cells) = graph(&bodies, &routes(), &heat, law.clone());
             let mut lowered = lower(&draft, &cards);
             let nodes = [
                 lowered.node_map["viscous-network"],
@@ -547,6 +681,38 @@ fn the_lowered_draft_steps_with_the_declared_graph_bit_for_bit() {
                 "{case}: the ledger closes: {residual:e} J"
             );
         }
+    }
+}
+
+#[test]
+fn the_test_law_on_module_curves_is_the_module_law_to_two_ulp() {
+    let module = ModuleLaw {
+        beta_per_k: 2.0,
+        maximum_k: 303.0,
+    };
+    let scales = BushingCoordinateScales {
+        translation_m: 1.0,
+        rotation_rad: 1.0,
+    };
+    let points = 30_001;
+    for c in [0.4, 0.7, 1.1] {
+        let mut native = [[0.0; 6]; 6];
+        native[0][0] = c;
+        let reference = PassiveBushingMatrix::try_new(native, scales).unwrap();
+        let law = CurveLaw::new([module_curve(c)]);
+        let (mut differ, mut worst) = (0, 0);
+        for i in 0..points {
+            let t = 300.0 + 3.0 * f64::from(i) / f64::from(points - 1);
+            let forms = [
+                law.at_temperature(0, &reference, t),
+                module.at_temperature(0, &reference, t),
+            ];
+            let [a, b] = forms.map(|form| form.unwrap().native_coefficients()[0][0].to_bits());
+            differ += usize::from(a != b);
+            worst = worst.max(a.abs_diff(b));
+        }
+        eprintln!("{c} N s/m: {differ} of {points} temperatures differ, by at most {worst} ulp");
+        assert!(worst <= 2, "{c} N s/m: {worst} ulp");
     }
 }
 

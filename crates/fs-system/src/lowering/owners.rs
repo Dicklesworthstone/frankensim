@@ -16,7 +16,7 @@
 //! default: a draft that names none of these families or laws lowers as
 //! before.
 
-use fs_matdb::PropertySample;
+use fs_matdb::{PropertySample, PropertyUsageReceipt};
 use fs_mbd::{Pose, UnitQuaternion, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
@@ -152,13 +152,25 @@ impl Scoped {
     pub(crate) fn interface(
         &mut self,
         ctx: &GroupLoweringContext<'_>,
-        (entry, state): (&InterfaceCardEntry, State<'_>),
+        card: (&InterfaceCardEntry, State<'_>),
         name: &str,
         dims: Dims,
     ) -> Result<f64, LoweringError> {
+        self.interface_receipt(ctx, card, name, dims)
+            .map(|(value, _)| value)
+    }
+
+    /// [`Self::interface`], and the receipt of the claim it selected.
+    pub(crate) fn interface_receipt(
+        &mut self,
+        ctx: &GroupLoweringContext<'_>,
+        (entry, state): (&InterfaceCardEntry, State<'_>),
+        name: &str,
+        dims: Dims,
+    ) -> Result<(f64, PropertyUsageReceipt), LoweringError> {
         let (r, env) = (&mut self.r, query_env(ctx));
-        let (q, _) = r.query_interface_property(&self.item, entry, state, name, name, env)?;
-        self.checked(name, &q, dims)
+        let (q, receipt) = r.query_interface_property(&self.item, entry, state, name, name, env)?;
+        Ok((self.checked(name, &q, dims)?, receipt))
     }
 
     /// Property `name` of a third body's card at its query point, recorded.
@@ -379,8 +391,8 @@ fn lower_loss_routes(
 }
 
 /// A temperature source's cell's published temperature as the signal its
-/// bushing's shift reads, guessed at first as the cell's initial temperature
-/// (the ambient when it declares none), which is recorded.
+/// bushing's shift or damping curves read, guessed at first as the cell's
+/// initial temperature (the ambient when it declares none), which is recorded.
 fn connect_temperature(
     ctx: &GroupLoweringContext<'_>,
     graph: &mut LoweringGraph,
@@ -388,7 +400,8 @@ fn connect_temperature(
 ) -> Result<(), LoweringError> {
     let input = ctx.draft.input();
     let law = graph.entity_port(bushing.entity, "temperature");
-    let law = law.ok_or_else(|| it.invalid("its bushing's card states no temperature shift"))?;
+    let none = "its bushing's card states no temperature shift or damping curve";
+    let law = law.ok_or_else(|| it.invalid(none))?;
     let cell = graph.resolve_entity_port(&input.catalog, iface.feature_b, "temperature");
     let cell =
         cell.ok_or_else(|| it.invalid("feature_b must be a cell of the thermal timeline"))?;

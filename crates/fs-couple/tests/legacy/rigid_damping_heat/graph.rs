@@ -68,23 +68,31 @@ fn static_laws() -> &'static [Caloric; 2] {
 
 /// The graph of the pairing: every connector's heat routed to the two cells
 /// by its authored fractions, the rest to a sink named `unallocated`; the
-/// timeline's own boundary heat to a sink named `environment`. Returns the
-/// system and its two nodes, the network and the cells.
+/// timeline's own boundary heat to a sink named `environment`. With `law`,
+/// connector `c`'s damping follows it at cell `c`'s published temperature.
+/// Returns the system and its two nodes, the network and the cells.
 fn graph(
     bodies: &Bodies,
     routes: &[BTreeMap<CellId, f64>; 2],
     heat: &DepositionSimulation<'static>,
+    law: Option<std::rc::Rc<dyn DampingLaw>>,
 ) -> (System, NodeId, NodeId) {
-    let network = ViscousNetwork::new(
-        bodies.properties.to_vec(),
-        bodies.links.to_vec(),
-        bodies.gravity,
-        config().mechanical,
-    )
+    let (properties, links) = (bodies.properties.to_vec(), bodies.links.to_vec());
+    let (gravity, mechanical, follows) = (bodies.gravity, config().mechanical, law.is_some());
+    let network = match law {
+        Some(law) => {
+            ViscousNetwork::temperature_dependent(properties, links, gravity, mechanical, law)
+        }
+        None => ViscousNetwork::new(properties, links, gravity, mechanical),
+    }
     .unwrap();
     // The fixtures' cells sit on a bed (of zero conductance), so the
     // timeline declares the port its boundary heat leaves by.
-    let timeline = ThermalTimeline::new(vec![CellId(0), CellId(1)], true, config().thermal).unwrap();
+    let cells = vec![CellId(0), CellId(1)];
+    let mut timeline = ThermalTimeline::new(cells.clone(), true, config().thermal).unwrap();
+    if follows {
+        timeline = timeline.publishing(cells).unwrap();
+    }
     let start = timeline.start(heat).unwrap();
     let mut builder = SystemBuilder::new();
     let moving = builder.add("network", network, bodies.states.to_vec()).unwrap();
@@ -120,10 +128,20 @@ fn graph(
             RouteTemperature::Fixed(300.0),
         )
         .unwrap();
+    let temperature = |c| format!("temperature{c}");
+    for c in (0..routes.len()).filter(|_| follows) {
+        let published = builder.port(cells, &temperature(c)).unwrap();
+        let read = builder.port(moving, &temperature(c)).unwrap();
+        builder.signal(published, read).unwrap();
+    }
     let mut system = builder.seal().unwrap();
     for connector in 0..routes.len() {
         let heat_port = system.port(moving, &format!("heat{connector}")).unwrap();
         assert!(system.guess(heat_port, &[300.0]));
+        if follows {
+            let read = system.port(moving, &temperature(connector)).unwrap();
+            assert!(system.guess(read, &[300.0]));
+        }
     }
     (system, moving, cells)
 }
@@ -184,7 +202,7 @@ fn the_declared_graph_reproduces_the_explicit_candidate() {
         .unwrap();
         let report = candidate.report();
 
-        let (mut system, moving, cells) = graph(&bodies, &routes, &heat);
+        let (mut system, moving, cells) = graph(&bodies, &routes, &heat, None);
         let intervals = run(&mut system, target_s);
         let case = format!("events {events}, target {target_s}");
 

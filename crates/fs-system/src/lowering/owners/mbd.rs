@@ -33,6 +33,12 @@
 //! start-of-step temperature of the cell its one `TemperatureSource` names. A
 //! network's relaxation bushings are all shifted or none.
 //!
+//! Either bushing's `damping_<axis>` may instead be a `Curve` over `T`,
+//! `LinearInside`: at a step, fs-matdb evaluates the claim the lowering
+//! selected at that cell's temperature, from the lowering's query point, and
+//! a temperature outside its knots refuses the step. A network's bushings
+//! all follow temperature or none, one way: a shift or damping curves.
+//!
 //! A relaxation bushing may hold a force and couple on its second body, in
 //! its first body's axes: a constant source on each component it holds, the
 //! bushing's ports `drive_x`, `drive_y`, `drive_z` (N) and `couple_x`,
@@ -43,8 +49,11 @@ use core::f64::consts::PI;
 use std::rc::Rc;
 
 use fs_blake3::DomainHasher;
+use fs_matdb::{
+    ClaimId, ClaimSet, InterpolationPolicy, PropertyUsageReceipt, PropertyValue, QueryPoint,
+};
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
-use fs_mbd::component::network::ViscousNetwork;
+use fs_mbd::component::network::{DampingLaw, ViscousNetwork};
 use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState, ShiftLaw};
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
@@ -99,6 +108,8 @@ type Memory = Vec<Bank>;
 /// A connector's held force and couple in its first body's axes, or `None`
 /// when it holds nothing.
 type Held = Option<[f64; 6]>;
+/// The network's damping law, when its bushings follow temperature.
+type Law = Option<Rc<dyn DampingLaw>>;
 /// A temperature shift's band: its reference, lowest and highest [K].
 const SHIFT_BAND: [&str; 3] = [
     "shift_reference_temperature",
@@ -211,11 +222,11 @@ pub(crate) fn lower(
         properties.push(mass);
         out.parts.push(it.part(label));
     }
-    let (mut links, mut bank) = (Vec::new(), Vec::new());
+    let (mut links, mut bank, mut following) = (Vec::new(), Vec::new(), Vec::new());
     for &index in &ctx.selection.interfaces {
         let iface = &input.interfaces[index];
         let mut it = Scoped::new("interface", &iface.name);
-        let mut coefficients = [[0.0; 6]; 6];
+        let (mut coefficients, mut curves) = ([[0.0; 6]; 6], Vec::new());
         if let DraftInterfaceKind::ShearFilm { third_body, state } = &iface.kind {
             film(ctx, &mut it, (third_body, state), &mut coefficients)?;
         } else {
@@ -223,12 +234,15 @@ pub(crate) fn lower(
             let card = family_entry(ctx.cards, iface, family);
             let card = card.ok_or_else(|| it.invalid(format!("not a {family} interface")))?;
             for (axis, (name, dims)) in DAMPING.into_iter().enumerate() {
-                coefficients[axis][axis] = it.interface(ctx, card, name, dims)?;
+                let (value, receipt) = it.interface_receipt(ctx, card, name, dims)?;
+                coefficients[axis][axis] = value;
+                curves.extend(curve(&it, card.0, (axis, name), &receipt)?);
             }
             if memory {
                 bank.push(branches(ctx, &mut it, card)?);
             }
         }
+        following.push(curves);
         // The card's coefficients are SI, so the coordinates are SI units.
         let scales = BushingCoordinateScales {
             translation_m: 1.0,
@@ -256,7 +270,8 @@ pub(crate) fn lower(
     let entities: Vec<EntityId> = parts.iter().map(|&p| input.parts[p].entity).collect();
     let held: &[_] = &holds(ctx, memory, &mut out)?;
     let (bodies, bank) = ((properties, states), (links, memory.then_some(bank), held));
-    let node = add_network(graph, &entities, bodies, bank, (gravity, controls))?;
+    let law = damping(following, label)?;
+    let node = add_network(graph, &entities, bodies, bank, (gravity, controls, law))?;
     for &entity in &entities[1..] {
         graph.entity_nodes.entry(entity).or_default().push(node);
     }
@@ -321,8 +336,8 @@ fn holds(
 }
 
 /// Each bushing's ports on its entity: `heat`, whose heat goes to
-/// `unallocated` when no loss route takes it, and, in a shifted network,
-/// `temperature`, which exactly one temperature source drives. A connector
+/// `unallocated` when no loss route takes it, and, in a network that follows
+/// temperature, `temperature`, which exactly one temperature source drives. A connector
 /// that holds a wrench holds it on its `drive<e>` and `couple<e>`.
 fn bushing_ports(
     ctx: &GroupLoweringContext<'_>,
@@ -359,7 +374,8 @@ fn bushing_ports(
         };
         if sources.len() != 1 {
             let it = Scoped::new("interface", &input.interfaces[index].name);
-            return Err(it.invalid("a shifted bushing reads exactly one `TemperatureSource`"));
+            let one = "a bushing that follows temperature reads exactly one `TemperatureSource`";
+            return Err(it.invalid(one));
         }
         graph.expose_port(bushing, "temperature", signal);
     }
@@ -370,16 +386,22 @@ fn bushing_ports(
 /// reader: a `RelaxationNetwork` when the links have memory, else a
 /// `ViscousNetwork`. A relaxation network's live bytes are the viscous one's,
 /// and its preparation terms what the viscous one has as pair relaxations.
+/// With `law`, its damping follows temperature.
 fn add_network(
     graph: &mut LoweringGraph,
     entities: &[EntityId],
     (properties, states): (Vec<MassProperties>, Vec<RigidBodyState>),
     (links, memory, held): (Vec<ViscousNetworkLink>, Option<Memory>, &[Held]),
-    (gravity, controls): (Gravity, ViscousNetworkMotionControls),
+    (gravity, controls, law): (Gravity, ViscousNetworkMotionControls, Law),
 ) -> Result<NodeId, LoweringError> {
     let masses = properties.clone();
     let Some(memory) = memory else {
-        let network = ViscousNetwork::new(properties, links, gravity, controls);
+        let network = match law {
+            Some(law) => {
+                ViscousNetwork::temperature_dependent(properties, links, gravity, controls, law)
+            }
+            None => ViscousNetwork::new(properties, links, gravity, controls),
+        };
         let network =
             network.map_err(|err| Scoped::new("network", NETWORK).invalid(format!("{err:?}")))?;
         let node = graph.add(NETWORK, Some(entities[0]), network, states)?;
@@ -427,6 +449,15 @@ fn add_network(
     for connector in (0..held.len()).filter(|&link| held[link].is_some()) {
         let driven = network.driven(connector, DriveFrame::MaterialFirst);
         network = driven.map_err(|err| fail(&err))?;
+    }
+    if let Some(law) = law {
+        if shifts.iter().any(Option::is_some) {
+            let one = "a network follows temperature one way: a shift or damping curves";
+            return Err(Scoped::new("network", RELAXATION).invalid(one));
+        }
+        network = network
+            .temperature_dependent(law)
+            .map_err(|err| fail(&err))?;
     }
     if shifts.iter().any(Option::is_some) {
         let all: Option<Vec<TemperatureShift>> = shifts.into_iter().collect();
@@ -503,10 +534,12 @@ fn branches(
         if card.card.claims_for(&time).is_empty() {
             return Ok((branches, memory, shift(ctx, it, (card, state))?));
         }
+        fixed(it, card, &time)?;
         let tau = it.interface(ctx, (card, state), &time, TIME_DIMS)?;
         let (mut rows, mut x) = ([[0.0; 6]; 6], [0.0; 6]);
         for (axis, (suffix, stiffness, length)) in BRANCH.into_iter().enumerate() {
             let name = format!("stiffness_{k}_{suffix}");
+            fixed(it, card, &name)?;
             rows[axis][axis] = it.interface(ctx, (card, state), &name, stiffness)?.sqrt();
             let key = format!("displacement_{k}_{suffix}");
             let declared = state
@@ -524,6 +557,19 @@ fn branches(
         memory.push(a.map_err(|err| it.invalid(format!("branch {k} memory: {err:?}")))?);
         branches.push(branch);
     }
+}
+
+/// Refuses branch key `name` as a curve: a branch follows temperature by a
+/// shift, not by its own curve.
+fn fixed(it: &Scoped, card: &InterfaceCardEntry, name: &str) -> Result<(), LoweringError> {
+    let curve = |(_, claim): &(ClaimId, &fs_matdb::PropertyClaim)| {
+        matches!(claim.value, PropertyValue::Curve { .. })
+    };
+    if card.card.claims_for(name).iter().any(curve) {
+        let why = format!("`{name}` is a curve: a branch follows temperature by a shift");
+        return Err(it.invalid(why));
+    }
+    Ok(())
 }
 
 /// A card's temperature shift (see the module's notes): none without its
@@ -590,6 +636,113 @@ impl ShiftLaw for CardShift {
             let band = [shift.reference_temperature_k(), lowest, highest];
             for value in model.into_iter().chain(band) {
                 identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        Some(*identity.finalize().as_bytes())
+    }
+}
+
+/// A bushing's damping axis that follows temperature: the claim the lowering
+/// selected, with the point it was queried at.
+#[derive(Debug)]
+struct CurveAxis {
+    axis: usize,
+    name: &'static str,
+    claims: ClaimSet,
+    claim: ClaimId,
+    point: QueryPoint,
+}
+
+/// Damping axis `name` as a curve its bushing follows, when the claim its
+/// `receipt` selected is a curve: over `T` and `LinearInside`, or refused.
+fn curve(
+    it: &Scoped,
+    entry: &InterfaceCardEntry,
+    (axis, name): (usize, &'static str),
+    receipt: &PropertyUsageReceipt,
+) -> Result<Option<CurveAxis>, LoweringError> {
+    let claims = entry.card.claims_for(name);
+    let selected = claims.iter().find(|(id, _)| *id == receipt.selected);
+    let Some((_, claim)) = selected else {
+        return Ok(None);
+    };
+    let PropertyValue::Curve { abscissa, .. } = &claim.value else {
+        return Ok(None);
+    };
+    if abscissa != "T" || claim.interpolation != InterpolationPolicy::LinearInside {
+        let why = format!("`{name}` follows temperature as a curve over `T`, `LinearInside`");
+        return Err(it.invalid(why));
+    }
+    let mut point = QueryPoint::new();
+    for (key, value) in &receipt.query_point {
+        point = match receipt.axis_quantities.get(key) {
+            Some(&quantity) => point.with_quantity(key, quantity, *value),
+            None => point.with(key, *value),
+        }
+        .map_err(|err| it.invalid(format!("`{name}`: {err}")))?;
+    }
+    let (claims, claim) = (entry.card.claims().clone(), receipt.selected);
+    Ok(Some(CurveAxis {
+        axis,
+        name,
+        claims,
+        claim,
+        point,
+    }))
+}
+
+/// The bushings' damping curves as the network's law: every bushing has one
+/// or none does.
+fn damping(following: Vec<Vec<CurveAxis>>, label: &str) -> Result<Law, LoweringError> {
+    if following.iter().all(Vec::is_empty) {
+        return Ok(None);
+    }
+    if following.iter().any(Vec::is_empty) {
+        let mixed = "a network's bushings all follow temperature or none";
+        return Err(Scoped::new("network", label).invalid(mixed));
+    }
+    Ok(Some(Rc::new(CardDamping(following))))
+}
+
+/// Each connector's damping curves as the network's damping law, each
+/// evaluated by fs-matdb at a step's temperature; its other axes keep the
+/// reference form's entries. Its identity binds each pinned claim, its axis
+/// and the rest of its query point.
+#[derive(Debug)]
+struct CardDamping(Vec<Vec<CurveAxis>>);
+
+impl DampingLaw for CardDamping {
+    fn at_temperature(
+        &self,
+        connector: usize,
+        reference: &PassiveBushingMatrix,
+        temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        let mut coefficients = *reference.native_coefficients();
+        for curve in &self.0[connector] {
+            let point = curve.point.clone().with("T", temperature_k);
+            let answer =
+                point.and_then(|at| curve.claims.query_pinned(curve.name, &at, curve.claim));
+            let answer = answer.map_err(|err| format!("`{}`: {err:?}", curve.name))?;
+            coefficients[curve.axis][curve.axis] = answer.evidence.value.value;
+        }
+        let form = PassiveBushingMatrix::try_new(coefficients, reference.coordinate_scales());
+        form.map_err(|err| format!("not passive: {err:?}"))
+    }
+
+    fn checkpoint_identity(&self) -> Option<[u8; 32]> {
+        let mut identity = DomainHasher::new("org.frankensim.fs-system.owners.damping.v1");
+        for (connector, curves) in self.0.iter().enumerate() {
+            for curve in curves {
+                for index in [connector, curve.axis, curve.point.axes().len()] {
+                    identity.update(&(index as u64).to_le_bytes());
+                }
+                identity.update(curve.claim.0.as_bytes());
+                for (axis, value) in curve.point.axes().iter().filter(|(axis, _)| *axis != "T") {
+                    identity.update(&(axis.len() as u64).to_le_bytes());
+                    identity.update(axis.as_bytes());
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
             }
         }
         Some(*identity.finalize().as_bytes())

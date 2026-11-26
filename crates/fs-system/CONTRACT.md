@@ -108,7 +108,13 @@ constructors:
   the cell its one `TemperatureSource` names, as that cell is at the start
   of each step (lagged feedback). A partial or two-model shift, a shift on a
   `viscous-bushing` card and a network of shifted and unshifted bushings are
-  refused by name. A relaxation bushing may hold a force and couple on its
+  refused by name. Either family's `damping_<axis>` may instead be a `Curve`
+  over `T`, `LinearInside`: at each step fs-matdb evaluates the claim the
+  lowering selected, at its query point and that cell's temperature, and a
+  temperature outside its knots refuses the step (`OutsideKnotSpan`). A
+  network's bushings follow curves all or none and never with a shift; a
+  curve off `T` or not `LinearInside`, and a branch's stiffness or time as a
+  curve, are refused by name. A relaxation bushing may hold a force and couple on its
   second body, in its first body's axes (`DriveFrame::MaterialFirst`): one
   constant source on each held component, the bushing's ports `drive_x` ..
   `drive_z` (N) and `couple_x` .. `couple_z` (N m), any other component 0.
@@ -147,8 +153,8 @@ constructors:
   declared fraction of that bushing's heat. The rest goes to a sink named
   `unallocated`. Its receipt's `card_hash` is null, its family `heat-route`.
   A card-less `TemperatureSource` from such a part to a cell gives that
-  bushing's shift the cell's published temperature, whatever share of the
-  heat the cell takes; its family is `temperature-source`.
+  bushing's shift or curves the cell's published temperature, whatever share
+  of the heat the cell takes; its family is `temperature-source`.
 
 Interface sides are surfaces or regions, so each of these joins faces; a
 route's bushing is found by part, since a `.fsim` gives each interface its own

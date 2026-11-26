@@ -9,15 +9,17 @@
 //! cell 0 as its `TemperatureSource`, against `memory_graph` with that shift
 //! on cell 0's published temperature. With bushing0 holding 0.7 N or -0.7 N
 //! on x (a constant source on its `drive_x`), against `memory_graph` with
-//! that held force.
+//! that held force. With bushing0's damping on `module_curve(0.4)` instead,
+//! against `memory_graph` with the test's `CurveLaw` on that claim.
 
 use super::*;
 use crate::graph::lowering::{
-    fixture_cards, fixture_laws, interface_card, lower, lowered_mass, observe, pairing,
-    temperature_bits, under,
+    CurveLaw, admit, curve, curved, fixture_cards, fixture_laws, interface_card, lower,
+    lowered_mass, module_curve, observe, pairing, sourced, temperature_bits, under,
 };
 use crate::graph::with_cx;
 use fs_exec::CancelGate;
+use fs_matdb::{InterpolationPolicy, PropertyValue};
 use fs_material::visco::temperature::TemperatureShiftModel;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::ParameterKey;
@@ -25,7 +27,6 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftInterfaceKind, SourceDecl, SourceTarget, TimeHistory,
     TimeScheme,
 };
-use fs_scenario::{EntityDeclaration, InterfacePair, Scenario};
 use fs_system::lowering::Observed;
 use fs_system::lowering::owners::{
     RELAXATION_BUSHING_FAMILY, VISCOUS_BUSHING_FAMILY, register_owners,
@@ -132,11 +133,6 @@ fn on_card(
     };
 }
 
-fn admit(input: DraftAssemblyInput) -> DraftAssembly {
-    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
-    DraftAssembly::admit(input, &scenario).unwrap()
-}
-
 /// The memory pair: `with_relaxation` without bodies 2 and 3, bushing1 and
 /// its routes, and with bushing0's routes at the fixture's 0.7 and 0.2, and
 /// `sources` temperature sources from bushing0's part to cell 0 on route00's faces.
@@ -158,16 +154,7 @@ fn memory_pair(
         )];
         route.kind = DraftInterfaceKind::HeatRoute { state };
     }
-    for n in 0..sources {
-        let mut source = input.interfaces[3].clone();
-        let pair = InterfacePair::ordered(source.feature_a, source.feature_b);
-        source.name = format!("source{n}");
-        let declared = EntityDeclaration::interface(input.root, &source.name, pair);
-        source.entity = input.catalog.declare(declared).unwrap();
-        source.kind = DraftInterfaceKind::TemperatureSource;
-        input.interfaces.push(source);
-    }
-    (admit(input), cards)
+    sourced((admit(input), cards), &vec![3; sources])
 }
 
 /// `pair` with bushing0 holding each `(port, history)` as a source.
@@ -201,7 +188,15 @@ fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
 
 #[test]
 fn a_shifted_memory_draft_follows_its_cell_as_the_shifted_memory_graph_bit_for_bit() {
-    steps_with_the_memory_graph(Some(arrhenius(300.0, 360.0)), None);
+    steps_with_the_memory_graph(Some(&Follows::Shift(arrhenius(300.0, 360.0))), None);
+}
+
+#[test]
+fn a_memory_draft_on_a_damping_curve_steps_with_the_memory_graph_on_its_law_bit_for_bit() {
+    let law = Follows::Damping(CurveLaw::new([module_curve(0.4)]));
+    for held in [None, Some(0.7)] {
+        steps_with_the_memory_graph(Some(&law), held);
+    }
 }
 
 #[test]
@@ -210,16 +205,36 @@ fn a_held_memory_draft_steps_with_the_driven_memory_graph_bit_for_bit() {
     for force in [0.7, -0.7] {
         steps_with_the_memory_graph(None, Some(force));
     }
-    steps_with_the_memory_graph(Some(arrhenius(300.0, 360.0)), Some(0.7));
+    steps_with_the_memory_graph(Some(&Follows::Shift(arrhenius(300.0, 360.0))), Some(0.7));
 }
 
-/// The memory pair, with `shift` on its card and cell 0 as its temperature
-/// source and bushing0 holding `held` [N] on x, against `memory_graph` with
-/// that shift, cell 0 published and that held force.
-fn steps_with_the_memory_graph(shift: Option<TemperatureShift>, held: Option<f64>) {
-    let keys = shift.as_ref().map(shift_keys).unwrap_or_default();
-    let sources = usize::from(shift.is_some());
-    let pair = memory_pair(displacement(DISPLACEMENT_M), &keys, sources);
+/// The memory pair following cell 0 as its temperature source by `follows`:
+/// a shift's keys on its card, or bushing0's damping on `module_curve(0.4)`,
+/// the claim the law must read.
+fn following(follows: Option<&Follows>) -> (DraftAssembly, CardStore) {
+    let pair = |keys: &[_]| memory_pair(displacement(DISPLACEMENT_M), keys, 1);
+    match follows {
+        None => memory_pair(displacement(DISPLACEMENT_M), &[], 0),
+        Some(Follows::Shift(shift)) => pair(&shift_keys(shift)),
+        Some(Follows::Damping(_)) => curved(pair(&[]), 0, module_curve(0.4)),
+    }
+}
+
+impl Follows {
+    /// The kinetics' or the damping's factor at `kelvin` (for the curve,
+    /// `ModuleLaw`'s, which it is to 2 ulp).
+    fn factor(&self, kelvin: f64) -> f64 {
+        match self {
+            Self::Shift(shift) => shift.evaluate(kelvin).unwrap().factor(),
+            Self::Damping(_) => 1.0 + 2.0 * (kelvin - 300.0),
+        }
+    }
+}
+
+/// `following(follows)` with bushing0 holding `held` [N] on x, against
+/// `memory_graph` following by `follows`, cell 0 published and that force.
+fn steps_with_the_memory_graph(follows: Option<&Follows>, held: Option<f64>) {
+    let pair = following(follows);
     let force = held.map(|f| ("drive_x", TimeHistory::Constant(QtyAny::new(f, FORCE))));
     let (draft, cards) = holding(pair, force.as_slice());
     // The oracle takes the bodies' mass properties from the receipts, as 1b's.
@@ -238,10 +253,11 @@ fn steps_with_the_memory_graph(shift: Option<TemperatureShift>, held: Option<f64
         let case = format!("{scheme:?} to {target_s} s, held {held:?}");
         let draft = under(&draft, scheme, scheme != TimeScheme::Explicit);
         let (mut timeline, heat) = oracle_timeline(laws, scheme);
-        if shift.is_some() {
+        if follows.is_some() {
             timeline = timeline.publishing(vec![CellId(0)]).unwrap();
         }
-        let graph = memory_graph(&fixture, controls.mechanical, timeline, &heat, held, shift);
+        let follow = follows.cloned();
+        let graph = memory_graph(&fixture, controls.mechanical, timeline, &heat, held, follow);
         let (mut oracle, network, cells) = graph;
         let mut lowered = lower(&draft, &cards);
         let nodes = ["relaxation-network", "thermal-timeline"].map(|name| lowered.node_map[name]);
@@ -305,11 +321,11 @@ fn steps_with_the_memory_graph(shift: Option<TemperatureShift>, held: Option<f64
             residual.abs() <= 1e-12 * dissipated,
             "{case}: {residual:e} J"
         );
-        // The kinetics moved: the factor at cell 0's last temperature.
-        if let Some(shift) = shift {
+        // The kinetics or the damping moved: the factor at cell 0's last temperature.
+        if let Some(follows) = follows {
             let kelvin = f64::from_bits(temperature_bits(system, nodes[1])[0]);
-            let factor = shift.evaluate(kelvin).unwrap().factor();
-            eprintln!("{case}: the shift factor is {factor} at cell 0's {kelvin} K");
+            let factor = follows.factor(kelvin);
+            eprintln!("{case}: the factor is {factor} at cell 0's {kelvin} K");
             assert!(
                 (factor - 1.0).abs() >= 0.05,
                 "{case}: factor {factor} at {kelvin} K"
@@ -400,13 +416,14 @@ fn a_shift_without_all_its_keys_one_model_or_one_source_refuses() {
     let keys = shift_keys(&arrhenius(300.0, 360.0));
     let wlf = [("wlf_c1", 8.86, Dims::NONE), ("wlf_c2", 101.6, KELVIN)];
     let both = [keys.as_slice(), &wlf].concat();
-    let one = "a shifted bushing reads exactly one `TemperatureSource`";
+    let one = "a bushing that follows temperature reads exactly one `TemperatureSource`";
+    let no_law = "its bushing's card states no temperature shift or damping curve";
     for (shift, sources, named) in [
         (&keys[..3], 1, "shift_highest_temperature"),
         (&both[..], 1, "a temperature shift has one model"),
         (&keys[..], 0, one),
         (&keys[..], 2, one),
-        (&[][..], 1, "its bushing's card states no temperature shift"),
+        (&[][..], 1, no_law),
     ] {
         let why = refusal(memory_pair(displacement(DISPLACEMENT_M), shift, sources));
         assert!(why.contains(named), "{sources} sources: {why}");
@@ -493,4 +510,106 @@ fn a_branch_without_its_memory_or_beside_a_viscous_bushing_refuses() {
     ] {
         assert!(why.contains(named), "{why}");
     }
+}
+
+#[test]
+fn a_damping_curve_off_t_on_a_branch_beside_a_shift_or_a_fixed_bushing_refuses() {
+    let keys = shift_keys(&arrhenius(300.0, 360.0));
+    let shape = "`damping_x` follows temperature as a curve over `T`, `LinearInside`";
+    let mut tabulated = module_curve(0.4);
+    tabulated.interpolation = InterpolationPolicy::TabulatedOnly;
+    let mut over_p = module_curve(0.4);
+    over_p.value = PropertyValue::Curve {
+        abscissa: "P".to_owned(),
+        abscissa_dims: Dims([-1, 1, -2, 0, 0, 0]),
+        knots: vec![(0.0, 0.4), (1e6, 0.4)],
+        dims: DAMPING,
+    };
+    let flat = |name, dims, c| curve(name, dims, vec![(300.0, c), (303.0, c)]);
+    let branch = |name| format!("`{name}` is a curve: a branch follows temperature by a shift");
+    let none: &[_] = &[];
+    let one = "a bushing that follows temperature reads exactly one `TemperatureSource`";
+    let way = "a network follows temperature one way: a shift or damping curves";
+    for (claim, shift, sources, named) in [
+        (tabulated, none, 1, shape.to_owned()),
+        (over_p, none, 1, shape.to_owned()),
+        (
+            flat("stiffness_0_x", STIFFNESS, 1.69),
+            none,
+            0,
+            branch("stiffness_0_x"),
+        ),
+        (
+            flat("relaxation_time_0", TIME, 0.2),
+            none,
+            0,
+            branch("relaxation_time_0"),
+        ),
+        (module_curve(0.4), &keys, 1, way.to_owned()),
+        (module_curve(0.4), none, 0, one.to_owned()),
+        (module_curve(0.4), none, 2, one.to_owned()),
+    ] {
+        let pair = memory_pair(displacement(DISPLACEMENT_M), shift, sources);
+        let why = refusal(curved(pair, 0, claim));
+        assert!(why.contains(&named), "{sources} sources: {why}");
+    }
+    // 1b's pairing, bushing0's damping on a curve and bushing1's not.
+    let pair = curved(pairing(fixture_cards(&laws()), 0.0), 0, module_curve(0.7));
+    let why = refusal(sourced(pair, &[4]));
+    let mixed = "a network's bushings all follow temperature or none";
+    assert!(why.contains(mixed), "{why}");
+}
+
+#[test]
+fn a_cell_past_its_damping_curves_last_knot_refuses_the_step_by_name() {
+    // The knots end at 300.01 K, which cell 0 passes in the run.
+    let knots = vec![(300.0, 0.4), (300.01, 0.4)];
+    let pair = memory_pair(displacement(DISPLACEMENT_M), &[], 1);
+    let (draft, cards) = curved(pair, 0, curve("damping_x", DAMPING, knots));
+    let system = &mut lower(&draft, &cards).system;
+    let gate = CancelGate::new_clock_free();
+    let why = with_cx(&gate, |cx| {
+        loop {
+            assert!(system.time_s() < 0.5, "the run passed 300.01 K unrefused");
+            if let Err(err) = system.step(0.5 - system.time_s(), cx) {
+                break err.to_string();
+            }
+        }
+    });
+    eprintln!("the step refuses: {why}");
+    assert!(why.contains("`damping_x`: OutsideKnotSpan"), "{why}");
+}
+
+#[test]
+fn a_following_network_resumes_from_a_checkpoint_as_the_plain_run() {
+    let pair = memory_pair(displacement(DISPLACEMENT_M), &[], 1);
+    let (draft, cards) = curved(pair, 0, module_curve(0.4));
+    let mut lowered = lower(&draft, &cards);
+    let nodes = ["relaxation-network", "thermal-timeline"].map(|name| lowered.node_map[name]);
+    let system = &mut lowered.system;
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        // Two steps in: cell 0 is above 300 K, so the damping has moved.
+        for _ in 0..2 {
+            system.step(0.5 - system.time_s(), cx).unwrap();
+        }
+        let saved = system.checkpoint().unwrap();
+        let run = |system: &mut System| {
+            let mut seen = Vec::new();
+            while system.time_s() < 0.5 {
+                let dt = system.step(0.5 - system.time_s(), cx).unwrap().dt_s;
+                let state = system.state::<RelaxationState>(nodes[0]).cloned();
+                seen.push((dt.to_bits(), state, temperature_bits(system, nodes[1])));
+            }
+            (seen, format!("{:?}", system.ledger()))
+        };
+        let plain = run(system);
+        assert!(
+            plain.0.len() >= 2,
+            "{} steps after the checkpoint",
+            plain.0.len()
+        );
+        system.restore(&saved).unwrap();
+        assert_eq!(run(system), plain);
+    });
 }
