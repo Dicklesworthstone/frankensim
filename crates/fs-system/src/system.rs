@@ -517,7 +517,8 @@ impl std::error::Error for CheckpointError {}
 /// A reusable in-memory checkpoint of one sealed [`System`].
 ///
 /// It retains accepted component states, interface values and warm starts,
-/// the compensated clock, step count, complete ledger and solve configuration.
+/// last-step receipts and interface allowances, the compensated clock, step
+/// count, complete ledger and solve configuration.
 /// It can be inspected after its system is dropped, but can be restored only
 /// into the same system that created it. It contains no candidate trial state.
 ///
@@ -530,6 +531,8 @@ pub struct Checkpoint {
     accepted: Vec<Box<dyn Any>>,
     inputs: Vec<f64>,
     outputs: Vec<f64>,
+    allowance: Vec<f64>,
+    receipts: Vec<Receipt>,
     time: Sum,
     steps: u64,
     ledger: Ledger,
@@ -2929,6 +2932,8 @@ impl System {
             accepted: self.clone_states(&self.accepted)?,
             inputs: self.accepted_inputs.clone(),
             outputs: self.accepted_outputs.clone(),
+            allowance: self.accepted_allowance.clone(),
+            receipts: self.accepted_receipts.clone(),
             time: self.time,
             steps: self.steps,
             ledger: self.ledger.clone(),
@@ -2953,13 +2958,16 @@ impl System {
         let accepted = self.clone_states(&checkpoint.accepted)?;
         let inputs = checkpoint.inputs.clone();
         let outputs = checkpoint.outputs.clone();
+        let allowance = checkpoint.allowance.clone();
+        let receipts = checkpoint.receipts.clone();
         let ledger = checkpoint.ledger.clone();
         let controller = checkpoint.controller.clone();
 
         self.accepted = accepted;
         self.accepted_inputs = inputs;
         self.accepted_outputs = outputs;
-        self.accepted_allowance.fill(0.0);
+        self.accepted_allowance = allowance;
+        self.accepted_receipts = receipts;
         self.inputs.copy_from_slice(&self.accepted_inputs);
         self.outputs.copy_from_slice(&self.accepted_outputs);
         self.time = checkpoint.time;
@@ -3365,8 +3373,8 @@ impl System {
     /// with a load line also the rounding of the largest wire of its kind
     /// in the block, or for a flow on the line the rounding of the
     /// difference it is. Never the solve's relative tolerance. Zero for an
-    /// input that no block solved for, and after [`Self::restore`] until a
-    /// step is taken: a checkpoint does not carry it.
+    /// input that no block solved for. [`Self::restore`] retains the values
+    /// belonging to the checkpoint's last accepted step.
     #[must_use]
     pub fn last_allowance(&self, port: PortRef) -> &[f64] {
         &self.accepted_allowance[self.input_range(port)]

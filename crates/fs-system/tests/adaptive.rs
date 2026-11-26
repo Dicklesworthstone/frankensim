@@ -183,7 +183,8 @@ struct Observed {
     motion_bits: [u64; 2],
     spring_bits: u64,
     source: SourceAccount,
-    wires: Vec<(Vec<u64>, Vec<u64>)>,
+    wires: Vec<(Vec<u64>, Vec<u64>, Vec<u64>)>,
+    receipts: Vec<Receipt>,
     ledger: Ledger,
     config: SolveConfig,
 }
@@ -201,11 +202,25 @@ fn observe(system: &System, device: &Device) -> Observed {
             .iter()
             .map(|&port| {
                 (
-                    system.last_input(port).iter().map(|x| x.to_bits()).collect(),
-                    system.last_output(port).iter().map(|x| x.to_bits()).collect(),
+                    system
+                        .last_input(port)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect(),
+                    system
+                        .last_output(port)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect(),
+                    system
+                        .last_allowance(port)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect(),
                 )
             })
             .collect(),
+        receipts: system.last_receipts().to_vec(),
         ledger: system.ledger().clone(),
         config: system.checkpoint().unwrap().config(),
     }

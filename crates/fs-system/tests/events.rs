@@ -110,6 +110,7 @@ struct Observed {
     motion: [f64; 2],
     spring: Option<f64>,
     wires: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>,
+    receipts: Vec<Receipt>,
     ledger: Ledger,
     config: SolveConfig,
 }
@@ -134,6 +135,7 @@ fn observe(system: &System, device: &Device) -> Observed {
                 )
             })
             .collect(),
+        receipts: system.last_receipts().to_vec(),
         ledger: system.ledger().clone(),
         config: system.checkpoint().unwrap().config(),
     }
@@ -275,8 +277,8 @@ fn invalid_guards_exhausted_bisections_and_cancellation_restore_complete_entry_s
         with_cx(&gate, |cx| {
             let (mut system, device) = oscillator();
             system.step(0.01, cx).unwrap();
-            // A loop gives a nonzero last-step allowance; public restore alone
-            // would clear it, so it must be preserved by the event transaction.
+            // A loop gives nonzero last-step allowances; these and the receipts
+            // must rewind with the accepted state after discarded event trials.
             assert!(
                 device
                     .ports

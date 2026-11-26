@@ -199,7 +199,8 @@ struct Observed {
     source: SourceAccount,
     source_energy_bits: u64,
     accepted_sizes: Vec<u64>,
-    wires: Vec<(Vec<u64>, Vec<u64>)>,
+    wires: Vec<(Vec<u64>, Vec<u64>, Vec<u64>)>,
+    receipts: Vec<Receipt>,
     ledger: Ledger,
 }
 
@@ -230,9 +231,15 @@ fn observe(system: &System, device: &Device) -> Observed {
                         .iter()
                         .map(|v| v.to_bits())
                         .collect(),
+                    system
+                        .last_allowance(port)
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect(),
                 )
             })
             .collect(),
+        receipts: system.last_receipts().to_vec(),
         ledger: system.ledger().clone(),
     }
 }
@@ -290,6 +297,13 @@ fn a_driven_dissipative_device_replays_every_step_from_one_reusable_checkpoint()
             > 0.0
     );
     assert!(before.ledger.sinks[0].heat_j.value() > 0.0);
+    assert!(before.receipts[device.damper.index()].dissipated_j > 0.0);
+    assert!(
+        device
+            .ports
+            .iter()
+            .any(|&port| system.last_allowance(port).iter().any(|&value| value > 0.0))
+    );
 
     let expected = run(&mut system, &device, 73, 257);
     assert_eq!(

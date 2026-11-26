@@ -2275,6 +2275,7 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
     });
     let (net, at_slider) = (system.port(mass, "p").unwrap(), system.port(rubbing, "a").unwrap());
     let at_rest = system.checkpoint().unwrap();
+    let at_rest_allowance = system.last_allowance(at_slider).to_vec();
     let settled_n = system.last_input(net)[0];
     let held_n = system.last_output(at_slider)[0].abs();
     assert!((held_n - push).abs() <= 1.0e-12 * push && settled_n.abs() <= 1.0e-12 * push);
@@ -2335,14 +2336,14 @@ fn a_held_mass_is_taken_under_any_push_and_a_planted_flow_is_still_refused() {
     assert_eq!(system.steps(), 3);
     // A quarter of it is taken, with no update. Of that step, the two
     // terms are what the solve told the audit for the wire, read back;
-    // a restore forgets it.
+    // restoring recovers the allowance of the preceding accepted step.
     let report = planted(&mut system, leaving(0.25)).unwrap();
     assert_eq!(report.iterations, 0);
     assert_eq!(system.steps(), 4);
     let told = system.last_allowance(at_slider)[0];
     assert!(within(told, published + wire), "{told} against {published} and {wire}");
     system.restore(&at_rest).unwrap();
-    assert_eq!(system.last_allowance(at_slider), [0.0]);
+    assert_eq!(system.last_allowance(at_slider), at_rest_allowance);
 
     // At the solve's ordinary tolerance the plant never reaches the audit:
     // the force that was refused a hundred times over is corrected in one

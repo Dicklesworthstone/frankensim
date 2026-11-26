@@ -131,9 +131,9 @@ step at the crossing-side endpoint once its duration bracket is within
 `EventConfig::time_tolerance_s`, or at a sampled exact zero. Its report
 includes the bracket and guard values, retained `StepReport`, and trial count.
 Discarded trials contribute no accepted steps or ledger rows. The state,
-compensated clock, warm starts, port values, configuration and ledger are
-restored together; this driver also retains the last-step allowances omitted
-by the public checkpoint. Cancellation, nonfinite guards, owner refusals,
+compensated clock, warm starts, port values, configuration, ledger, last-step
+receipts and interface allowances are restored together through the public
+checkpoint. Cancellation, nonfinite guards, owner refusals,
 spent bisections and unresolvable brackets restore the complete entry state.
 
 An exact zero on entry returns `AtStart` without advancing, independently of
@@ -376,8 +376,8 @@ physics owners below fs-couple can be composed without it.
   the interface audit it had left in each input of the port, in the
   input's unit: rounding and the configured absolute tolerance, never the
   relative one (for a block with a load line see "The load line"). A
-  checkpoint does not carry it: after `restore` it is zero until a step is
-  taken.
+  checkpoint retains it together with `last_receipts`, so both describe the
+  restored last accepted step rather than a discarded trial.
 - `System::step_adaptive(dt_max, config, metric, cx) -> AdaptiveReport`:
   error-controlled stepping of the same coupled graph. From one checkpoint,
   compare one coarse step to two equal half steps at the same end time. The
@@ -400,8 +400,9 @@ physics owners below fs-couple can be composed without it.
   increments, so a large past account cannot hide a new error. External
   side effects of boundary, metric or component calls cannot be rolled back.
 - `System::checkpoint() -> Result<Checkpoint, CheckpointError>` captures
-  accepted typed states, interface warm starts and outputs, the exact
-  compensated clock, step count, complete ledger and solve configuration.
+  accepted typed states, interface warm starts and outputs, last-step receipts
+  and interface allowances, the exact compensated clock, step count, complete
+  ledger and solve configuration.
   Mass and entropy accounts, coverage counts and both words of every account
   are part of that ledger and rewind with the other accepted accounts.
   `restore(&checkpoint)` atomically rewinds the originating sealed system;

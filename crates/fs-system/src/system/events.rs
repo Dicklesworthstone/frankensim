@@ -352,26 +352,21 @@ impl EventSetError {
     }
 }
 
-/// A trial's accepted state and its last-step diagnostic, which the public
-/// checkpoint intentionally omits. Retaining both avoids re-solving an
-/// already audited endpoint merely to recover its interface allowances.
+/// A trial's accepted state and last-step diagnostics. Retaining the
+/// checkpoint avoids re-solving an already audited endpoint.
 struct Retained {
     checkpoint: Checkpoint,
-    allowance: Vec<f64>,
 }
 
 impl Retained {
     fn capture(system: &System) -> Result<Self, CheckpointError> {
         Ok(Self {
             checkpoint: system.checkpoint()?,
-            allowance: system.accepted_allowance.clone(),
         })
     }
 
     fn restore(&self, system: &mut System) -> Result<(), CheckpointError> {
-        system.restore(&self.checkpoint)?;
-        system.accepted_allowance.copy_from_slice(&self.allowance);
-        Ok(())
+        system.restore(&self.checkpoint)
     }
 }
 
