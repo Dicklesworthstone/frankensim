@@ -19,8 +19,8 @@ mkdir -p "${ARTIFACT_DIR}"
 
 BINARY="${FRANKENSIM_BIN:-}"
 if [ -z "${BINARY}" ]; then
-  if [ -f "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
-    BINARY="/Volumes/USB_NVME/cargo-target/debug/frankensim"
+  if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "${CARGO_TARGET_DIR}/debug/frankensim" ]; then
+    BINARY="${CARGO_TARGET_DIR}/debug/frankensim"
   elif [ -f "${REPO_ROOT}/target/debug/frankensim" ]; then
     BINARY="${REPO_ROOT}/target/debug/frankensim"
   elif command -v frankensim >/dev/null 2>&1; then

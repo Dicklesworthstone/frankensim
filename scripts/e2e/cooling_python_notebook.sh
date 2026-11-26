@@ -47,8 +47,8 @@ case "${COMMAND}" in
 
     # 1. Ensure binary is fresh in target/debug
     log_json "build_client" "running" "ensuring fs-cli binary is built"
-    if [ -f "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
-      export FRANKENSIM_BIN="/Volumes/USB_NVME/cargo-target/debug/frankensim"
+    if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "${CARGO_TARGET_DIR}/debug/frankensim" ]; then
+      export FRANKENSIM_BIN="${CARGO_TARGET_DIR}/debug/frankensim"
     elif [ -f "${REPO_ROOT}/target/debug/frankensim" ]; then
       export FRANKENSIM_BIN="${REPO_ROOT}/target/debug/frankensim"
     fi

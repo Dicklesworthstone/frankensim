@@ -14,8 +14,8 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/target/cooling-report}"
 BINARY="${FRANKENSIM_BIN:-}"
 
 if [ -z "${BINARY}" ]; then
-  if [ -x "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
-    BINARY="/Volumes/USB_NVME/cargo-target/debug/frankensim"
+  if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "${CARGO_TARGET_DIR}/debug/frankensim" ]; then
+    BINARY="${CARGO_TARGET_DIR}/debug/frankensim"
   elif [ -x "${REPO_ROOT}/target/debug/frankensim" ]; then
     BINARY="${REPO_ROOT}/target/debug/frankensim"
   elif command -v frankensim >/dev/null 2>&1; then

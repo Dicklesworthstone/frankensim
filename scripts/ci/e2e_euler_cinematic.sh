@@ -491,8 +491,8 @@ case "$MODE" in
     STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$REPO_ROOT/.e2e-out/cine-$RUN_PROFILE-$STAMP-$$"
     case "$OUTPUT_DIR" in
-      "$REPO_ROOT"/*|"${TMPDIR:-/tmp}"*|/private/tmp/*|/tmp/*|/Volumes/USB_NVME/*) : ;;
-      *) die "$EXIT_USAGE" "--output-dir must stay inside repo/TMP/USB scratch" ;;
+      "$REPO_ROOT"/*|"${TMPDIR:-/tmp}"*|/private/tmp/*|/tmp/*) : ;;
+      *) die "$EXIT_USAGE" "--output-dir must stay inside repo/TMP scratch" ;;
     esac
     [ -e "$OUTPUT_DIR" ] && die "$EXIT_USAGE" "output dir exists (no reuse): $OUTPUT_DIR"
     BIN="$(fixture_binary)"

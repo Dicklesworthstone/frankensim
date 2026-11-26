@@ -82,8 +82,6 @@ class FrankenSimClient:
             for cand in [
                 parent / "target" / "release" / "frankensim",
                 parent / "target" / "debug" / "frankensim",
-                Path("/Volumes/USB_NVME/cargo-target/release/frankensim"),
-                Path("/Volumes/USB_NVME/cargo-target/debug/frankensim"),
             ]:
                 if cand.is_file() and os.access(cand, os.X_OK):
                     return str(cand.resolve())
