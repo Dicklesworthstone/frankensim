@@ -12,6 +12,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -208,15 +209,20 @@ impl Scene {
         (simulation, law)
     }
 
+    /// The timeline on laws it borrows or, when [`shared_laws`], on laws it
+    /// keeps alive itself. Either way the test keeps a handle on each law.
     fn build_laws(&self) -> (DepositionSimulation<'static>, [&'static Sensible; 2]) {
-        let [law, other] = self.datums_j_kg.map(|datum_j_kg| {
-            let law: &'static Sensible = Box::leak(Box::new(Sensible {
+        let laws = self.datums_j_kg.map(|datum_j_kg| {
+            Rc::new(Sensible {
                 datum_j_kg,
                 tripwire: Cell::new(None),
                 refuse: Cell::new(false),
                 conductivity_slope_per_k: self.conductivity_slope_per_k,
-            }));
-            law
+            })
+        });
+        let [law, other] = [0, 1].map(|i| {
+            let kept: &'static Rc<Sensible> = Box::leak(Box::new(Rc::clone(&laws[i])));
+            &**kept
         });
         let at = |event| TimedEvent {
             time_s: self.birth_s,
@@ -236,19 +242,29 @@ impl Scene {
             })));
         }
         schedule.extend(self.extra.iter().cloned());
-        let simulation = DepositionSimulation::new(
-            schedule,
-            &[
-                (MaterialId(0), law as &dyn ThermalLaw),
-                (MaterialId(1), other as &dyn ThermalLaw),
-            ],
-            DepositionBudget {
-                max_cells: 8,
-                max_links: 8,
-                max_events: 16,
-                max_substeps: 100_000,
-            },
-        )
+        let budget = DepositionBudget {
+            max_cells: 8,
+            max_links: 8,
+            max_events: 16,
+            max_substeps: 100_000,
+        };
+        let simulation = if shared_laws() {
+            let [first, second] = laws.map(|law| law as Rc<dyn ThermalLaw>);
+            DepositionSimulation::new_shared(
+                schedule,
+                &[(MaterialId(0), first), (MaterialId(1), second)],
+                budget,
+            )
+        } else {
+            DepositionSimulation::new(
+                schedule,
+                &[
+                    (MaterialId(0), law as &dyn ThermalLaw),
+                    (MaterialId(1), other as &dyn ThermalLaw),
+                ],
+                budget,
+            )
+        }
         .expect("timeline");
         (simulation, [law, other])
     }
@@ -256,6 +272,13 @@ impl Scene {
     fn timeline(&self) -> DepositionSimulation<'static> {
         self.build().0
     }
+}
+
+/// Whether this run builds every [`Scene`] on laws the timeline keeps alive
+/// itself (`FS_THERMAL_SHARED_LAWS` set) instead of laws it borrows: the
+/// suite run both ways shows the two forms step alike.
+fn shared_laws() -> bool {
+    std::env::var_os("FS_THERMAL_SHARED_LAWS").is_some()
 }
 
 fn boundary_event(time_s: f64, cell: CellId, boundary: Boundary) -> TimedEvent {

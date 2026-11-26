@@ -176,7 +176,7 @@ impl DepositionSimulation<'_> {
             if cell != &removal.expected {
                 return Err(invalid("stale material-removal cell"));
             }
-            let law = self.materials[&cell.material_id];
+            let law = &*self.materials[&cell.material_id];
             if law.storage_basis() != ThermalStorageBasis::Enthalpy
                 || law.caloric_identity() != Some(removal.caloric_identity)
             {

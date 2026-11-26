@@ -408,7 +408,7 @@ fn local_solve(
         checkpoint()?;
         work.temperature_evaluations += 1;
         let cell = &initial.cells()[&id];
-        return solve_thermal_cell(cell, initial.thermal.materials[&cell.material_id], input);
+        return solve_thermal_cell(cell, &*initial.thermal.materials[&cell.material_id], input);
     }
     solve_cell(
         initial.inventories[&id],

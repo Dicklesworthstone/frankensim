@@ -321,7 +321,7 @@ impl<'a> CoatingSimulation<'a> {
         ))?;
         let model = &self.surfaces[&id];
         let cell = &self.thermal.cells[&id];
-        let caloric = self.thermal.materials[&cell.material_id];
+        let caloric = &*self.thermal.materials[&cell.material_id];
         let area = self.thermal.exposed_area_m2(id)?;
         let chart_error = std::cell::RefCell::new(None);
         let mut checkpoint_error = None;
@@ -598,7 +598,7 @@ impl<'a> CoatingSimulation<'a> {
                 let old_h = cell.specific_h_j_kg;
                 let stored_heat = if let Some(coating) = next.coatings.get_mut(&id) {
                     let model = &next.surfaces[&id];
-                    let caloric = next.thermal.materials[&cell.material_id];
+                    let caloric = &*next.thermal.materials[&cell.material_id];
                     let mut refusal = None;
                     let result = heat_supported_surface(
                         model.law,
@@ -679,7 +679,7 @@ impl<'a> CoatingSimulation<'a> {
                     checkpoint()?;
                     let model = &next.surfaces[&id];
                     let cell = next.thermal.cells.get_mut(&id).unwrap();
-                    let caloric = next.thermal.materials[&cell.material_id];
+                    let caloric = &*next.thermal.materials[&cell.material_id];
                     let mut refusal = None;
                     let result = advance_supported_surface(
                         model.law,

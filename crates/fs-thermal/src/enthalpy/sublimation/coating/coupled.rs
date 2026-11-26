@@ -195,7 +195,7 @@ impl CoatingSimulation<'_> {
                 .ok_or(DepositionError::Arithmetic)?;
             let model = &self.surfaces[&id];
             let cell = self.thermal.cells.get_mut(&id).unwrap();
-            let caloric = self.thermal.materials[&cell.material_id];
+            let caloric = &*self.thermal.materials[&cell.material_id];
             let chart_error = std::cell::RefCell::new(None);
             let mut refusal = None;
             let result = advance_supported_surface_with_heat(

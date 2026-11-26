@@ -303,7 +303,7 @@ impl DepositionSimulation<'_> {
                 .into());
             }
             cell_ids.push(surface.cell_id);
-            caloric.push(self.materials[&cell.material_id]);
+            caloric.push(&*self.materials[&cell.material_id]);
             inputs.push(phase::ChamberSurface {
                 solid: SolidSurfaceState {
                     mass_kg: cell.mass_kg,

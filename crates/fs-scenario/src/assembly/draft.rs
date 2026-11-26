@@ -37,6 +37,7 @@ use crate::{Environment, FrameId, Scenario};
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const FREQUENCY: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const ACCEL: Dims = Dims([1, 0, -2, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
@@ -384,6 +385,26 @@ pub struct DraftPartDecl {
     pub fidelity: FidelityPolicy,
     /// Coordinate/dimensional uncertainty bounds.
     pub uncertainty: Vec<DimensionBound>,
+    /// Declared initial state. A constructor that needs one refuses a part
+    /// without it; none is assumed.
+    pub initial: Option<DraftInitialState>,
+}
+
+/// Where a part starts, how it moves and how warm it is at the start of the
+/// time plan, in the assembly frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftInitialState {
+    /// Position of the part's body origin [m].
+    pub position: [QtyAny; 3],
+    /// Orientation of the part's body frame, a unit quaternion `[w, x, y, z]`.
+    pub orientation: [f64; 4],
+    /// Linear velocity of the body origin [m/s].
+    pub linear_velocity: [QtyAny; 3],
+    /// Angular velocity [rad/s].
+    pub angular_velocity: [QtyAny; 3],
+    /// Uniform initial temperature [K]; `None` means the environment's ambient
+    /// temperature.
+    pub temperature: Option<QtyAny>,
 }
 
 /// Kinematic joint classes matching `fs-mbd::articulated::JointKind`.
@@ -872,6 +893,33 @@ fn check_name(name: &str, scope: &str) -> Result<(), DraftAssemblyError> {
             scope,
             "name must be non-empty, <= 256 bytes, and free of control characters",
         ));
+    }
+    Ok(())
+}
+
+fn check_initial_state(initial: &DraftInitialState, scope: &str) -> Result<(), DraftAssemblyError> {
+    let scope = format!("{scope}.initial");
+    for (field, values, dims) in [
+        ("position", &initial.position, LENGTH),
+        ("linear_velocity", &initial.linear_velocity, VELOCITY),
+        ("angular_velocity", &initial.angular_velocity, FREQUENCY),
+    ] {
+        for (axis, value) in values.iter().enumerate() {
+            let item = format!("{scope}.{field}[{axis}]");
+            check_qty(*value, dims, &item, false, false)?;
+        }
+    }
+    let q = initial.orientation;
+    let norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if !q.iter().all(|c| c.is_finite()) || (norm_sq - 1.0).abs() > 1.0e-12 {
+        return Err(DraftAssemblyError::new(
+            format!("{scope}.orientation"),
+            "orientation must be a finite unit quaternion [w, x, y, z]",
+        ));
+    }
+    if let Some(temperature) = initial.temperature {
+        let item = format!("{scope}.temperature");
+        check_qty(temperature, TEMPERATURE, &item, true, false)?;
     }
     Ok(())
 }
@@ -1444,6 +1492,9 @@ impl DraftAssembly {
                 ));
             }
             check_geometry(&part.geometry, part.entity, &input.catalog, &scope)?;
+            if let Some(initial) = &part.initial {
+                check_initial_state(initial, &scope)?;
+            }
             if part.fidelity.rungs.is_empty() {
                 return Err(DraftAssemblyError::new(
                     &scope,

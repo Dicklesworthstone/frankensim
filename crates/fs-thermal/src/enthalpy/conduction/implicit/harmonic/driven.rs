@@ -50,7 +50,7 @@ pub struct DrivenThermalImpedanceModel<'m> {
     original: ThermalImpedanceModel,
     baths: Vec<ThermalBathPort>,
     inlets: Vec<ThermalInletPort>,
-    inlet_laws: Vec<&'m dyn ThermalLaw>,
+    inlet_laws: Vec<crate::enthalpy::ThermalLawRef<'m>>,
     advective_power_w: Vec<f64>,
     has_advection: bool,
 }
@@ -184,8 +184,8 @@ impl ImplicitConductionChain<'_> {
                         boundary_id: id, cell, mass_rate_kg_s: kg_s,
                         specific_enthalpy_j_kg: specific_h_j_kg, row: self.index[&cell],
                     });
-                    inlet_laws.push(*thermal.materials.get(&material_id)
-                        .ok_or(DepositionError::Arithmetic)?);
+                    inlet_laws.push(thermal.materials.get(&material_id)
+                        .ok_or(DepositionError::Arithmetic)?.clone());
                 }
             }
         }
@@ -297,7 +297,7 @@ impl<'m> DrivenThermalImpedanceModel<'m> {
             let port = self.inlets[index];
             if delta == C64::ZERO { continue; }
             let amplitude = finite(delta.abs())?;
-            let law = self.inlet_laws[index];
+            let law = &*self.inlet_laws[index];
             for h in [
                 finite(port.specific_enthalpy_j_kg - amplitude)?,
                 finite(port.specific_enthalpy_j_kg + amplitude)?,

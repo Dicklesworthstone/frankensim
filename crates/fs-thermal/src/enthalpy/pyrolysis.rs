@@ -629,7 +629,7 @@ impl<'a> PyrolysisSimulation<'a> {
                         &mut checkpoint,
                     )?
                 } else {
-                    solve_thermal_cell(cell, next.thermal.materials[&cell.material_id], input_j)?
+                    solve_thermal_cell(cell, &*next.thermal.materials[&cell.material_id], input_j)?
                 };
                 let old_h = cell.specific_h_j_kg;
                 let old_mass = cell.mass_kg;

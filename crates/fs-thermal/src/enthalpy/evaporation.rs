@@ -206,7 +206,7 @@ impl DepositionSimulation<'_> {
                     "external liquid endpoint leaves admitted branch, inventory or reference area",
                 ));
             }
-            let caloric = self.materials[&cell.material_id];
+            let caloric = &*self.materials[&cell.material_id];
             for h in [cell.specific_h_j_kg, next.specific_enthalpy_j_kg] {
                 if !super::positive(caloric.temperature_k(h)?) {
                     return Err(DepositionError::MaterialDomain);
@@ -294,7 +294,7 @@ impl DepositionSimulation<'_> {
         let cell = self.cells.get(&id).ok_or(DepositionError::InvalidInput(
             "evaporation requires an active liquid cell",
         ))?;
-        let caloric = self.materials[&cell.material_id];
+        let caloric = &*self.materials[&cell.material_id];
         let chart_error = std::cell::RefCell::new(None);
         let mut checkpoint_error = None;
         let result = advance_surface_with_heat(

@@ -13,11 +13,11 @@ use fs_blake3::{ContentHash, hash_bytes};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
     ControllerDecl, ControllerLaw, DraftAssembly, DraftAssemblyInput, DraftEnvironment,
-    DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind,
-    FidelityErrorBudget, FidelityPolicy, FidelityRung, GasComponent, GearGenerator, GearMeshDecl,
-    JointDecl, JointKind, JointLimits, MicrophonePattern, PhysicsDomain, PrimitiveShape, ProbeDecl,
-    ProbeKind, SourceDecl, SourceTarget, SpiralSpringGenerator, StepPolicy, ThirdBodyDecl,
-    TimeHistory, TimePlan, TimingEdge,
+    DraftGeometrySource, DraftInitialState, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
+    DraftPartKind, FidelityErrorBudget, FidelityPolicy, FidelityRung, GasComponent, GearGenerator,
+    GearMeshDecl, JointDecl, JointKind, JointLimits, MicrophonePattern, PhysicsDomain,
+    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, SpiralSpringGenerator,
+    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan, TimingEdge,
 };
 use fs_scenario::assembly::{GeometrySource, MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{
@@ -27,6 +27,7 @@ use fs_scenario::{
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const FREQUENCY: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
@@ -140,6 +141,7 @@ fn build_slice_a_rigid_damper_heat(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Mechanics]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "thermal_housing".to_owned(),
@@ -154,6 +156,7 @@ fn build_slice_a_rigid_damper_heat(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Thermal]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![JointDecl {
@@ -250,6 +253,7 @@ fn build_slice_b_gas_piston(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Fluid, PhysicsDomain::Thermal]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "piston".to_owned(),
@@ -263,6 +267,7 @@ fn build_slice_b_gas_piston(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Mechanics]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "cylinder_wall".to_owned(),
@@ -277,6 +282,7 @@ fn build_slice_b_gas_piston(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Thermal]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![JointDecl {
@@ -372,6 +378,7 @@ fn build_slice_c_friction_heating(scenario: &Scenario) -> DraftAssembly {
                 ]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "steel_track".to_owned(),
@@ -389,6 +396,7 @@ fn build_slice_c_friction_heating(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![JointDecl {
@@ -488,6 +496,7 @@ fn build_slice_d_modal_acoustics(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "soundboard".to_owned(),
@@ -505,6 +514,7 @@ fn build_slice_d_modal_acoustics(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: Vec::new(),
@@ -591,6 +601,7 @@ fn build_slice_e_field_conduction(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Thermal]),
                 fidelity: fem_policy.clone(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "steel_slab".to_owned(),
@@ -605,6 +616,7 @@ fn build_slice_e_field_conduction(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Thermal]),
                 fidelity: fem_policy,
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![JointDecl {
@@ -696,6 +708,7 @@ fn build_heatsink_project(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "finned_heatsink".to_owned(),
@@ -716,6 +729,7 @@ fn build_heatsink_project(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "cooling_channel".to_owned(),
@@ -735,6 +749,7 @@ fn build_heatsink_project(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: Vec::new(),
@@ -876,6 +891,7 @@ fn build_clarinet_note(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "cane_reed".to_owned(),
@@ -893,6 +909,7 @@ fn build_clarinet_note(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "tone_holes".to_owned(),
@@ -906,6 +923,7 @@ fn build_clarinet_note(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Acoustics]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: Vec::new(),
@@ -1010,6 +1028,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Mechanics]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "barrel_wheel".to_owned(),
@@ -1027,6 +1046,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Mechanics]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "escape_wheel".to_owned(),
@@ -1044,6 +1064,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                 physics: domain_set(&[PhysicsDomain::Mechanics, PhysicsDomain::Tribology]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "balance_wheel".to_owned(),
@@ -1062,6 +1083,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                 ]),
                 fidelity: lumped_policy(),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "hairspring".to_owned(),
@@ -1085,6 +1107,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                     error_budget: lumped_policy().error_budget,
                 },
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![
@@ -1372,4 +1395,40 @@ fn draft_assembly_refuses_invalid_inputs_by_name() {
     });
     let err = DraftAssembly::admit(bad, &scenario).unwrap_err();
     assert_eq!(err.item, "source:bad_param_src");
+}
+
+#[test]
+fn a_part_initial_state_admits_and_refuses_its_bad_fields_by_name() {
+    let scenario = Scenario::new("draft-initial-state", 111, Environment::earth_lab());
+    let mut base = build_slice_a_rigid_damper_heat(&scenario).input().clone();
+    base.parts[0].initial = Some(DraftInitialState {
+        position: zero_pos(),
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        linear_velocity: [QtyAny::new(1.0, VELOCITY); 3],
+        angular_velocity: [QtyAny::new(2.0, FREQUENCY); 3],
+        temperature: Some(QtyAny::new(320.0, TEMPERATURE)),
+    });
+    assert!(DraftAssembly::admit(base.clone(), &scenario).is_ok());
+    let refused = |edit: fn(&mut DraftInitialState)| {
+        let mut bad = base.clone();
+        edit(bad.parts[0].initial.as_mut().expect("declared"));
+        DraftAssembly::admit(bad, &scenario).unwrap_err().item
+    };
+    let item = |field: &str| format!("part:rotor_body.initial.{field}");
+    assert_eq!(
+        refused(|s| s.linear_velocity[1] = QtyAny::new(1.0, LENGTH)),
+        item("linear_velocity[1]")
+    );
+    assert_eq!(
+        refused(|s| s.position[2].value = f64::NAN),
+        item("position[2]")
+    );
+    assert_eq!(
+        refused(|s| s.orientation = [1.0, 1.0, 0.0, 0.0]),
+        item("orientation")
+    );
+    assert_eq!(
+        refused(|s| s.temperature = Some(QtyAny::new(0.0, TEMPERATURE))),
+        item("temperature")
+    );
 }

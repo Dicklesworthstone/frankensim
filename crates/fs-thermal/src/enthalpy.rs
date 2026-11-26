@@ -405,7 +405,7 @@ pub struct DepositionSimulation<'a> {
     // ThermalLaw has no Sync bound, so this timeline already stays on its
     // calling thread. Rc avoids atomic reference-count work on every trial.
     schedule: Rc<Vec<TimedEvent>>,
-    materials: Rc<BTreeMap<MaterialId, &'a dyn ThermalLaw>>,
+    materials: Rc<BTreeMap<MaterialId, ThermalLawRef<'a>>>,
     // Immutable global CFL bounds, admitted once rather than rescanning a
     // material chart for every active cell at every thermal substep.
     material_temperature_slopes: Rc<BTreeMap<MaterialId, f64>>,
@@ -414,6 +414,32 @@ pub struct DepositionSimulation<'a> {
     // Overrides only; symmetric links retain their existing area semantics.
     covered_areas: BTreeMap<u64, [f64; 2]>,
     budget: DepositionBudget,
+}
+
+/// How a [`DepositionSimulation`] holds one material's [`ThermalLaw`]:
+/// borrowed for the simulation's lifetime ([`DepositionSimulation::new`]) or
+/// shared, so the simulation keeps the law alive itself
+/// ([`DepositionSimulation::new_shared`]). Every use goes through [`Deref`],
+/// so both forms step through the same code.
+///
+/// [`Deref`]: core::ops::Deref
+#[derive(Clone)]
+pub(crate) enum ThermalLawRef<'a> {
+    /// A law that outlives the simulation.
+    Borrowed(&'a dyn ThermalLaw),
+    /// A law the simulation and every state derived from it keep alive.
+    Shared(Rc<dyn ThermalLaw>),
+}
+
+impl<'a> core::ops::Deref for ThermalLawRef<'a> {
+    type Target = dyn ThermalLaw + 'a;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(law) => *law,
+            Self::Shared(law) => &**law,
+        }
+    }
 }
 
 fn finite(value: f64) -> Result<f64, DepositionError> {
@@ -430,6 +456,26 @@ fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
+impl DepositionSimulation<'static> {
+    /// [`DepositionSimulation::new`] for laws the timeline keeps alive
+    /// itself: the simulation and every state derived from it share them, so
+    /// it borrows nothing. It steps through the same code as a timeline built
+    /// by `new` on the same laws, to the bit.
+    ///
+    /// # Errors
+    /// As [`DepositionSimulation::new`].
+    pub fn new_shared(
+        schedule: Vec<TimedEvent>,
+        materials: &[(MaterialId, Rc<dyn ThermalLaw>)],
+        budget: DepositionBudget,
+    ) -> Result<Self, DepositionError> {
+        let laws = materials
+            .iter()
+            .map(|(id, law)| (*id, ThermalLawRef::Shared(Rc::clone(law))));
+        Self::from_laws(schedule, laws.collect(), budget)
+    }
+}
+
 impl<'a> DepositionSimulation<'a> {
     /// Start an empty physical timeline at t=0. Initial bed/support/existing
     /// material can be declared as births at t=0 with their known enthalpy.
@@ -437,6 +483,18 @@ impl<'a> DepositionSimulation<'a> {
     pub fn new(
         schedule: Vec<TimedEvent>,
         materials: &[(MaterialId, &'a dyn ThermalLaw)],
+        budget: DepositionBudget,
+    ) -> Result<Self, DepositionError> {
+        let laws = materials
+            .iter()
+            .map(|&(id, law)| (id, ThermalLawRef::Borrowed(law)));
+        Self::from_laws(schedule, laws.collect(), budget)
+    }
+
+    /// [`Self::new`] on laws the simulation holds itself.
+    fn from_laws(
+        schedule: Vec<TimedEvent>,
+        materials: Vec<(MaterialId, ThermalLawRef<'a>)>,
         budget: DepositionBudget,
     ) -> Result<Self, DepositionError> {
         if schedule.len() > budget.max_events || materials.len() > budget.max_cells {
@@ -453,7 +511,7 @@ impl<'a> DepositionSimulation<'a> {
         }
         let mut laws = BTreeMap::new();
         let mut material_temperature_slopes = BTreeMap::new();
-        for &(id, law) in materials {
+        for (id, law) in materials {
             let slope = law.maximum_temperature_slope();
             if !nonnegative(slope) || laws.insert(id, law).is_some() {
                 return Err(DepositionError::InvalidInput(
@@ -618,7 +676,7 @@ impl<'a> DepositionSimulation<'a> {
                 }
                 validate_boundary(cell.boundary)?;
                 self.materials[&cell.material_id].validate_cell(&cell)?;
-                if !positive(temperature(&cell, self.materials[&cell.material_id])?) {
+                if !positive(temperature(&cell, &*self.materials[&cell.material_id])?) {
                     return Err(DepositionError::MaterialDomain);
                 }
                 audit.incoming_mass_kg = finite(audit.incoming_mass_kg + cell.mass_kg)?;

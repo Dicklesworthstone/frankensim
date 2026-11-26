@@ -888,7 +888,7 @@ fn material_density(
     thermal: &DepositionSimulation<'_>,
     cell: &DepositedCell,
 ) -> Result<f64, DepositionError> {
-    let law = thermal.materials[&cell.material_id];
+    let law = &*thermal.materials[&cell.material_id];
     if law.storage_basis() != ThermalStorageBasis::Enthalpy {
         return Err(DepositionError::InvalidInput(
             "material density layers require enthalpy storage",

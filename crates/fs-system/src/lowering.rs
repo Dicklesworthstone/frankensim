@@ -2549,6 +2549,78 @@ pub type AcousticFamilyConstructor = Box<
     ) -> Result<LoweredAcousticMemberOutput, LoweringError>,
 >;
 
+/// Which parts, interfaces and sources of a draft one owner Component takes
+/// whole, as indices into the draft's `parts`, `interfaces` and `sources`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupSelection {
+    /// Indices into `DraftAssemblyInput::parts`, in assembly order.
+    pub parts: Vec<usize>,
+    /// Indices into `DraftAssemblyInput::interfaces`, in assembly order.
+    pub interfaces: Vec<usize>,
+    /// Indices into `DraftAssemblyInput::sources`, in assembly order.
+    pub sources: Vec<usize>,
+}
+
+/// Context passed to a registered [`GroupConstructor`].
+pub struct GroupLoweringContext<'a> {
+    /// Assembly being lowered.
+    pub draft: &'a DraftAssembly,
+    /// The items this constructor lowers.
+    pub selection: &'a GroupSelection,
+    /// Card store for `fs-matdb` lookups.
+    pub cards: &'a CardStore,
+    /// Material claim selection policy.
+    pub selection_policy: SelectionPolicy,
+}
+
+/// Output of a [`GroupConstructor`]: one record per selected item, in the
+/// selection's order.
+#[derive(Debug, Default)]
+pub struct LoweredGroupOutput {
+    /// One record per selected part.
+    pub parts: Vec<LoweredPartOutput>,
+    /// One record per selected interface.
+    pub interfaces: Vec<LoweredInterfaceOutput>,
+    /// One receipt per selected source.
+    pub sources: Vec<SourceLoweringReceipt>,
+}
+
+/// Selector of an owner group: the selections it lowers in one draft.
+pub type GroupSelector =
+    Box<dyn Fn(&DraftAssembly, &CardStore) -> Result<Vec<GroupSelection>, LoweringError>>;
+
+/// Constructor of an owner group: lowers one [`GroupSelection`].
+pub type GroupConstructor = Box<
+    dyn Fn(
+        &GroupLoweringContext<'_>,
+        &mut LoweringGraph,
+    ) -> Result<LoweredGroupOutput, LoweringError>,
+>;
+
+struct GroupEntry {
+    name: String,
+    selector: GroupSelector,
+    constructor: GroupConstructor,
+}
+
+/// Record that `group` lowered item `index`; refuse an item two groups take.
+fn claim<T>(
+    claimed: &mut BTreeMap<usize, (String, T)>,
+    index: usize,
+    group: &str,
+    item: impl FnOnce() -> String,
+    out: T,
+) -> Result<(), LoweringError> {
+    if let Some((first, _)) = claimed.get(&index) {
+        return Err(LoweringError::Invalid {
+            item: item(),
+            detail: format!("selected by owner groups '{first}' and '{group}'"),
+        });
+    }
+    claimed.insert(index, (group.to_owned(), out));
+    Ok(())
+}
+
 // ============================================================================
 // Lowering Output
 // ============================================================================
@@ -2587,6 +2659,7 @@ pub struct LoweringRegistry {
     joints: BTreeMap<JointLoweringKey, JointConstructor>,
     gear_meshes: BTreeMap<GearMeshLoweringKey, GearMeshConstructor>,
     acoustic_families: BTreeMap<AcousticFamilyKey, AcousticFamilyConstructor>,
+    groups: Vec<GroupEntry>,
     fidelity_policy: FidelitySelectionPolicy,
     selection_policy: SelectionPolicy,
 }
@@ -2607,6 +2680,7 @@ impl LoweringRegistry {
             joints: BTreeMap::new(),
             gear_meshes: BTreeMap::new(),
             acoustic_families: BTreeMap::new(),
+            groups: Vec::new(),
             fidelity_policy: FidelitySelectionPolicy::FirstRegistered,
             selection_policy: SelectionPolicy::SingleClaimOnly,
         }
@@ -2638,6 +2712,34 @@ impl LoweringRegistry {
     pub const fn with_selection_policy(mut self, policy: SelectionPolicy) -> Self {
         self.selection_policy = policy;
         self
+    }
+
+    /// Register an owner group: every selection `selector` makes in a draft
+    /// lowers whole through `constructor`, before any per-item constructor
+    /// runs. Groups lower in registration order; registering a name again
+    /// replaces that group in its place.
+    pub fn register_group<S, F>(&mut self, name: impl Into<String>, selector: S, constructor: F)
+    where
+        S: Fn(&DraftAssembly, &CardStore) -> Result<Vec<GroupSelection>, LoweringError> + 'static,
+        F: Fn(
+                &GroupLoweringContext<'_>,
+                &mut LoweringGraph,
+            ) -> Result<LoweredGroupOutput, LoweringError>
+            + 'static,
+    {
+        let entry = GroupEntry {
+            name: name.into(),
+            selector: Box::new(selector),
+            constructor: Box::new(constructor),
+        };
+        match self
+            .groups
+            .iter_mut()
+            .find(|group| group.name == entry.name)
+        {
+            Some(slot) => *slot = entry,
+            None => self.groups.push(entry),
+        }
     }
 
     /// Register a part constructor for `(part kind, physics set, fidelity rung)`.
@@ -2760,8 +2862,82 @@ impl LoweringRegistry {
         let mut interface_receipts = Vec::with_capacity(input.interfaces.len());
         let mut source_receipts = Vec::with_capacity(input.sources.len());
 
+        // 0. Owner groups, in registration order: each selection lowers
+        //    whole into one owner Component, and its items skip the
+        //    per-item constructors below.
+        let mut group_parts = BTreeMap::new();
+        let mut group_interfaces = BTreeMap::new();
+        let mut group_sources = BTreeMap::new();
+        let beyond = |items: &[usize], count: usize| items.iter().any(|&i| i >= count);
+        for group in &self.groups {
+            for selection in (group.selector)(draft, cards)? {
+                let scope = format!("group:{}", group.name);
+                if beyond(&selection.parts, input.parts.len())
+                    || beyond(&selection.interfaces, input.interfaces.len())
+                    || beyond(&selection.sources, input.sources.len())
+                {
+                    return Err(LoweringError::Invalid {
+                        item: scope,
+                        detail: "selection names an item the draft does not have".to_owned(),
+                    });
+                }
+                let ctx = GroupLoweringContext {
+                    draft,
+                    selection: &selection,
+                    cards,
+                    selection_policy: self.selection_policy,
+                };
+                let out = (group.constructor)(&ctx, &mut graph)?;
+                if out.parts.len() != selection.parts.len()
+                    || out.interfaces.len() != selection.interfaces.len()
+                    || out.sources.len() != selection.sources.len()
+                {
+                    return Err(LoweringError::Invalid {
+                        item: scope,
+                        detail: "one record per selected item is required".to_owned(),
+                    });
+                }
+                for (&i, part_out) in selection.parts.iter().zip(out.parts) {
+                    let item = || format!("part:{}", input.parts[i].name);
+                    claim(&mut group_parts, i, &group.name, item, part_out)?;
+                }
+                for (&i, iface_out) in selection.interfaces.iter().zip(out.interfaces) {
+                    let item = || format!("interface:{}", input.interfaces[i].name);
+                    claim(&mut group_interfaces, i, &group.name, item, iface_out)?;
+                }
+                for (&i, receipt) in selection.sources.iter().zip(out.sources) {
+                    let item = || format!("source:{}", input.sources[i].name);
+                    claim(&mut group_sources, i, &group.name, item, receipt)?;
+                }
+            }
+        }
+
         // 1. Lower parts.
-        for part in &input.parts {
+        for (index, part) in input.parts.iter().enumerate() {
+            if let Some((group, out)) = group_parts.remove(&index) {
+                let chosen_fidelity =
+                    part.fidelity
+                        .rungs
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| LoweringError::Invalid {
+                            item: format!("part:{}", part.name),
+                            detail: "part declares no fidelity rung".to_owned(),
+                        })?;
+                component_receipts.push(ComponentLoweringReceipt {
+                    part_name: part.name.clone(),
+                    entity: part.entity,
+                    part_kind: part.kind,
+                    physics: part.physics.clone(),
+                    geometry_fingerprint: resolve_geometry_fingerprint(&part.geometry),
+                    chosen_fidelity,
+                    fidelity_rationale: format!("lowered whole by owner group '{group}'"),
+                    created_nodes: out.created_nodes,
+                    property_receipts: out.property_receipts,
+                    parameter_sources: out.parameter_sources,
+                });
+                continue;
+            }
             let (chosen_rung, rationale, ctor) = self.select_part_constructor(part)?;
             let geometry_fingerprint = resolve_geometry_fingerprint(&part.geometry);
             let ctx = PartLoweringContext {
@@ -2852,7 +3028,7 @@ impl LoweringRegistry {
         }
 
         // 4. Lower card-bound interfaces.
-        for iface in &input.interfaces {
+        for (index, iface) in input.interfaces.iter().enumerate() {
             let kind_tag = InterfaceKindTag::from(&iface.kind);
             let scope = format!("interface:{}", iface.name);
             let (card_hash, card_family, resolved_card, third_body_card) =
@@ -2924,7 +3100,7 @@ impl LoweringRegistry {
                     kind: kind_tag,
                     card_family: card_family.clone(),
                 }
-            })?;
+            });
             let ctx = InterfaceLoweringContext {
                 draft,
                 interface: iface,
@@ -2933,7 +3109,10 @@ impl LoweringRegistry {
                 cards,
                 selection_policy: self.selection_policy,
             };
-            let out = ctor(&ctx, &mut graph)?;
+            let out = match group_interfaces.remove(&index) {
+                Some((_, out)) => out,
+                None => (ctor?)(&ctx, &mut graph)?,
+            };
             interface_receipts.push(InterfaceLoweringReceipt {
                 interface_name: iface.name.clone(),
                 entity: iface.entity,
@@ -2948,7 +3127,11 @@ impl LoweringRegistry {
         }
 
         // 5. Lower declared external sources.
-        for src in &input.sources {
+        for (index, src) in input.sources.iter().enumerate() {
+            if let Some((_, rec)) = group_sources.remove(&index) {
+                source_receipts.push(rec);
+                continue;
+            }
             let rec = lower_source(src, &input.catalog, &mut graph)?;
             source_receipts.push(rec);
         }

@@ -590,6 +590,7 @@ pub(crate) fn admit_assembly_source(
                         },
                     },
                     uncertainty: Vec::new(),
+                    initial: None,
                 });
             }
             "joint" => {

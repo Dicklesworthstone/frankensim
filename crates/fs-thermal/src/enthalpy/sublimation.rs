@@ -213,7 +213,7 @@ impl DepositionSimulation<'_> {
         let cell = self.cells.get(&id).ok_or(DepositionError::InvalidInput(
             "sublimation requires an active cell",
         ))?;
-        let caloric = self.materials[&cell.material_id];
+        let caloric = &*self.materials[&cell.material_id];
         if caloric.storage_basis() != super::ThermalStorageBasis::Enthalpy {
             return Err(DepositionError::InvalidInput(
                 "sublimation requires enthalpy storage and an explicit open-mass model",

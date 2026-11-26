@@ -32,10 +32,12 @@ use fs_system::elements::{
 };
 use fs_system::{
     AcousticAssemblySpec, AcousticMemberSpec, AnalysisKind, BlockSolveMode, BlockSolverPolicy,
-    CardStore, FidelityRungKind, FidelitySelectionPolicy, InterfaceKindTag, InterfaceLoweringKey,
-    LoweredAcousticMemberOutput, LoweredInterfaceOutput, LoweredPartOutput, LoweringError,
-    LoweringRegistry, MonolithicConfig, ParameterProvenance, ParameterSource, PartLoweringKey,
-    ProvenanceRecorder, RouteTemperature, SystemBuilder, heat_sink,
+    CardStore, FidelityRungKind, FidelitySelectionPolicy, GroupLoweringContext, GroupSelection,
+    InterfaceKindTag, InterfaceLoweringKey, LoweredAcousticMemberOutput, LoweredGroupOutput,
+    LoweredInterfaceOutput, LoweredPartOutput, LoweringError, LoweringGraph, LoweringRegistry,
+    MatDbQueryEnv, MonolithicConfig, ParameterProvenance, ParameterSource, PartLoweringKey,
+    ProvenanceRecorder, RouteTemperature, SystemBuilder, geometry_generator_label,
+    geometry_volume_m3, heat_sink, resolve_geometry_fingerprint,
 };
 
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
@@ -293,6 +295,7 @@ fn step_sources_keep_exact_jumps_and_integrated_force_and_heat() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics, PhysicsDomain::Thermal]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             }],
             joints: Vec::new(),
             gear_meshes: Vec::new(),
@@ -403,6 +406,7 @@ fn slice_a_draft_lowers_to_exact_hand_built_graph_match() {
             physics: BTreeSet::from([PhysicsDomain::Mechanics, PhysicsDomain::Thermal]),
             fidelity: policy_rungs(vec![FidelityRung::Lumped]),
             uncertainty: Vec::new(),
+            initial: None,
         }],
         joints: vec![JointDecl {
             name: "suspension".to_owned(),
@@ -756,6 +760,7 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "wheel".to_owned(),
@@ -773,6 +778,7 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "carriage".to_owned(),
@@ -792,6 +798,7 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
                     FidelityRung::Lumped,
                 ]),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "heatsink".to_owned(),
@@ -806,6 +813,7 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
                 physics: BTreeSet::from([PhysicsDomain::Thermal]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             },
             DraftPartDecl {
                 name: "bench_frame".to_owned(),
@@ -820,6 +828,7 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             },
         ],
         joints: vec![
@@ -1016,6 +1025,7 @@ fn unknown_combinations_refuse_by_name_stating_missing_constructor() {
                     FidelityRung::Modal { mode_count: 8 },
                 ]),
                 uncertainty: Vec::new(),
+                initial: None,
             }],
             joints: Vec::new(),
             gear_meshes: Vec::new(),
@@ -1065,6 +1075,7 @@ fn unknown_combinations_refuse_by_name_stating_missing_constructor() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             }],
             joints: vec![JointDecl {
                 name: "lead_screw".to_owned(),
@@ -1154,6 +1165,7 @@ fn unknown_combinations_refuse_by_name_stating_missing_constructor() {
                     physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                     fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                     uncertainty: Vec::new(),
+                    initial: None,
                 },
                 DraftPartDecl {
                     name: "body_b".to_owned(),
@@ -1166,6 +1178,7 @@ fn unknown_combinations_refuse_by_name_stating_missing_constructor() {
                     physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                     fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                     uncertainty: Vec::new(),
+                    initial: None,
                 },
             ],
             joints: Vec::new(),
@@ -1231,6 +1244,7 @@ fn unknown_combinations_refuse_by_name_stating_missing_constructor() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             }],
             joints: Vec::new(),
             gear_meshes: Vec::new(),
@@ -1314,6 +1328,7 @@ fn receipt_completeness_refuses_unsourced_parameters() {
                 physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                 fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                 uncertainty: Vec::new(),
+                initial: None,
             }],
             joints: Vec::new(),
             gear_meshes: Vec::new(),
@@ -1544,6 +1559,7 @@ fn owner_extensibility_custom_em_constructors_register_without_kernel_edits() {
                     physics: BTreeSet::from([PhysicsDomain::Electromagnetics]),
                     fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                     uncertainty: Vec::new(),
+                    initial: None,
                 },
                 DraftPartDecl {
                     name: "chassis".to_owned(),
@@ -1558,6 +1574,7 @@ fn owner_extensibility_custom_em_constructors_register_without_kernel_edits() {
                     physics: BTreeSet::from([PhysicsDomain::Mechanics]),
                     fidelity: policy_rungs(vec![FidelityRung::Lumped]),
                     uncertainty: Vec::new(),
+                    initial: None,
                 },
             ],
             joints: Vec::new(),
@@ -1874,4 +1891,132 @@ fn typed_t_axis_matches_absolute_temperature_keeps_legacy_and_refuses_mismatch()
         run(tv(Qk::TemperatureDifference), true),
         Err(LoweringError::MatDb { source, .. }) if matches!(*source, AxisQuantityMismatch { .. })
     ));
+}
+
+/// A toy owner group: one heat capacity of the card's density and specific
+/// heat over the part's box volume, each with its receipt.
+fn toy_capacity(
+    ctx: &GroupLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+) -> Result<LoweredGroupOutput, LoweringError> {
+    let input = ctx.draft.input();
+    let part = &input.parts[ctx.selection.parts[0]];
+    let scope = format!("part:{}", part.name);
+    let env = MatDbQueryEnv {
+        ambient_temp_k: input.environment.base.ambient_temperature.value,
+        ambient_pressure_pa: input.environment.base.ambient_pressure.value,
+        policy: ctx.selection_policy,
+    };
+    let mut rec = ProvenanceRecorder::default();
+    let mut query = |property| {
+        let material = &part.materials[0];
+        let (sample, _) =
+            rec.query_material_property(&scope, ctx.cards, material, property, property, env)?;
+        Ok::<f64, LoweringError>(sample.value)
+    };
+    let density = query("density")?;
+    let specific_heat = query("specific_heat_capacity")?;
+    let (volume, formula) = geometry_volume_m3(&part.geometry).expect("a box");
+    rec.record_geometry_derived(
+        "volume",
+        volume,
+        Dims([3, 0, 0, 0, 0, 0]),
+        resolve_geometry_fingerprint(&part.geometry),
+        geometry_generator_label(&part.geometry),
+        formula,
+    );
+    let capacity = HeatCapacity::new(density * specific_heat * volume).expect("a capacity");
+    let node = graph.add("toy.block", Some(part.entity), capacity, env.ambient_temp_k)?;
+    // Nothing in the draft reaches the block: it is insulated.
+    let heat = graph.port(node, "heat")?;
+    graph.bind_zero_boundary(heat);
+    let (property_receipts, parameter_sources) = rec.finish();
+    Ok(LoweredGroupOutput {
+        parts: vec![LoweredPartOutput {
+            created_nodes: vec!["toy.block".to_owned()],
+            property_receipts,
+            parameter_sources,
+        }],
+        ..LoweredGroupOutput::default()
+    })
+}
+
+#[test]
+fn an_owner_group_lowers_its_part_whole_and_two_groups_cannot_share_one() {
+    let mut cards = CardStore::new();
+    let steel_hash = cards.insert_material(steel_card());
+    let mut catalog = EntityCatalog::new();
+    let root = catalog
+        .declare(EntityDeclaration::assembly("toy_group"))
+        .unwrap();
+    let block = catalog
+        .declare(EntityDeclaration::part(root, "block"))
+        .unwrap();
+    let input = DraftAssemblyInput {
+        name: "toy_group".to_owned(),
+        root,
+        catalog,
+        reference_state: Some(ReferenceState::Unloaded),
+        environment: DraftEnvironment::earth_lab_air(),
+        time_plan: fixed_time_plan(1.0, 1.0),
+        parts: vec![DraftPartDecl {
+            name: "block".to_owned(),
+            entity: block,
+            kind: DraftPartKind::Solid,
+            geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
+                lx: QtyAny::new(0.1, LENGTH),
+                ly: QtyAny::new(0.05, LENGTH),
+                lz: QtyAny::new(0.05, LENGTH),
+            }),
+            materials: vec![mat_ref(steel_hash)],
+            physics: BTreeSet::from([PhysicsDomain::Thermal]),
+            fidelity: policy_rungs(vec![FidelityRung::Lumped]),
+            uncertainty: Vec::new(),
+            initial: None,
+        }],
+        joints: Vec::new(),
+        gear_meshes: Vec::new(),
+        interfaces: Vec::new(),
+        sources: Vec::new(),
+        controllers: Vec::new(),
+        probes: Vec::new(),
+    };
+    let draft = DraftAssembly::admit(input, &base_scenario("toy_group")).unwrap();
+    let first_part = |_: &DraftAssembly, _: &CardStore| {
+        Ok(vec![GroupSelection {
+            parts: vec![0],
+            ..GroupSelection::default()
+        }])
+    };
+    let mut registry = LoweringRegistry::with_kernel_defaults();
+    registry.register_group("toy", first_part, toy_capacity);
+    // Registering the name again replaces the group: two groups named `toy`
+    // would both take the block, and the lowering would refuse.
+    registry.register_group("toy", first_part, toy_capacity);
+
+    let lowered = registry.lower(&draft, &cards).unwrap();
+    // The group's node, and not the kernel default's (named after the part).
+    assert!(lowered.node_map.contains_key("toy.block"));
+    assert!(!lowered.node_map.contains_key("block"));
+    let receipt = &lowered.receipt.components[0];
+    assert_eq!(
+        receipt.fidelity_rationale,
+        "lowered whole by owner group 'toy'"
+    );
+    assert_eq!(receipt.created_nodes, ["toy.block"]);
+    assert_eq!(receipt.property_receipts.len(), 2);
+    assert_eq!(receipt.parameter_sources.len(), 3);
+
+    // A second group takes the same part (and creates nothing).
+    registry.register_group("other", first_part, |_, _| {
+        Ok(LoweredGroupOutput {
+            parts: vec![LoweredPartOutput::default()],
+            ..LoweredGroupOutput::default()
+        })
+    });
+    let Err(LoweringError::Invalid { item, detail }) = registry.lower(&draft, &cards) else {
+        panic!("two groups took one part");
+    };
+    assert_eq!(item, "part:block");
+    assert_eq!(detail, "selected by owner groups 'toy' and 'other'");
 }

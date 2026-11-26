@@ -91,7 +91,7 @@ impl DepositionSimulation<'_> {
     pub fn uses_material_law(&self, id: MaterialId, law: &dyn ThermalLaw) -> bool {
         self.materials.get(&id).is_some_and(|actual| {
             std::ptr::addr_eq(
-                *actual as *const dyn ThermalLaw,
+                &**actual as *const dyn ThermalLaw,
                 law as *const dyn ThermalLaw,
             )
         })

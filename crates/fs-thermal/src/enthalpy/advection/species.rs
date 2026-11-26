@@ -333,13 +333,13 @@ impl StationarySpecies {
         };
         for (&id, fractions) in &self.cells {
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive stationary species cell"))?;
-            admit(thermal.materials[&cell.material_id], fractions)?;
+            admit(&*thermal.materials[&cell.material_id], fractions)?;
         }
         for boundary in boundaries {
             if let MassBoundary::Inlet { id, material_id, .. } = boundary {
                 let law = thermal.materials.get(material_id)
                     .ok_or(invalid("unregistered stationary inlet caloric law"))?;
-                admit(*law, &self.inlets[id])?;
+                admit(&**law, &self.inlets[id])?;
             }
         }
         for (&id, material) in selective_outlet_laws {
@@ -347,7 +347,7 @@ impl StationarySpecies {
                 .ok_or(invalid("selective outlet law lost its stream descriptor"))?;
             let law = thermal.materials.get(material)
                 .ok_or(invalid("unregistered selective outlet caloric law"))?;
-            admit(*law, &outlet.mass_fractions)?;
+            admit(&**law, &outlet.mass_fractions)?;
             if law.storage_basis() != crate::enthalpy::ThermalStorageBasis::Enthalpy {
                 return Err(invalid("selective outlet requires an enthalpy caloric law"));
             }

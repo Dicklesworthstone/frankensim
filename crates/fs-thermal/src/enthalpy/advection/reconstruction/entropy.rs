@@ -16,7 +16,7 @@ pub(super) fn limit_face(
             "thermal entropy face limiting requires one original caloric law",
         ));
     }
-    let law = thermal.materials[&donor.material_id];
+    let law = &*thermal.materials[&donor.material_id];
     let state = |id, h| -> Result<(f64, f64), DepositionError> {
         let (temperature, slope) = if let Some(calorics) = calorics {
             calorics(id)?
