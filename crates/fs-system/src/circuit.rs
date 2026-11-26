@@ -85,15 +85,21 @@ use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
-use fs_phs::circuit::{
-    Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
-    assemble_circuit_with_mutual_inductance,
-};
+use fs_phs::circuit::{CircuitDae, CircuitError, assemble_circuit_with_mutual_inductance};
 use fs_phs::{StepRecord, arithmetic_rounding_floor};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, Proposal, Receipt,
 };
 use fs_ports::{CoupleError, PortKind, StableId};
+
+/// The owner's branch, which the CLI's `kirchhoff_circuit` scenes name through here.
+pub use fs_phs::circuit::Branch;
+/// The owner's netlist, which the CLI's `kirchhoff_circuit` scenes name through here.
+pub use fs_phs::circuit::CircuitGraph;
+/// The owner's mutual inductance, which the CLI's `kirchhoff_circuit` scenes name through here.
+pub use fs_phs::circuit::MutualInductance;
+/// The owner's ideal transformer, which the CLI's `kirchhoff_circuit` scenes name through here.
+pub use fs_phs::circuit::TransformerLink;
 
 /// A resistance that follows the temperature where the resistor's heat
 /// leaves, and may also follow the resistor's operating point.

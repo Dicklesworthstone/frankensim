@@ -9,6 +9,7 @@
 
 mod adaptive_metric;
 mod battery;
+mod circuit;
 mod conduction;
 mod contact;
 mod dirac;
@@ -767,6 +768,26 @@ An OCV/SOC equivalent-circuit battery, stepped by its fs-system owner:
                  tolerances name the three charges; order at most 2.
                  Constant resistances: the owner's temperature laws are not
                  exposed. A step leaving the curve's soc support refuses.)
+A netlist of fs-phs, stepped by its fs-system owner:
+  kirchhoff_circuit node_count (node 0 is ground), branches =
+                 [{nodes = [a, b] and exactly one of resistance_ohm,
+                 inductance_h (flux_wb = 0), capacitance_f (charge_c = 0),
+                 voltage_port or current_port (a port index below 64)},
+                 ...], mutual = [{branches = [i, j], inductance_h}, ...],
+                 transformers = [{primary = [a, b], secondary = [a, b],
+                 ratio}, ...], energy_tolerance_j
+                                       [source<p>, heat<b>]
+                 (Ports are numbered from 0 without gaps, one source branch
+                 each. A voltage port receives the voltage and returns the
+                 step's mean current into the circuit, a current port the
+                 reverse. heat<b> is resistor branch b's heat port. Reports the
+                 owner's state, flux<b>_wb for each inductor then
+                 charge<b>_c for each capacitor in branch order, then
+                 source<p>.current_a or source<p>.voltage_v, heat<b>_w (null
+                 initially) and energy_tolerance_j. Adaptive tolerances name
+                 the state coordinates; order at most 2. Constant
+                 resistances: the owner's resistance laws and operating-point
+                 iteration are not exposed.)
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -1592,6 +1613,9 @@ enum Kind {
     /// An OCV/SOC equivalent-circuit battery stepped by its fs-system owner,
     /// with a terminal and a heat port for each resistance.
     Battery,
+    /// A netlist of fs-phs stepped by its fs-system owner, with a port per
+    /// source and a heat port per resistor.
+    KirchhoffCircuit,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
     /// The same with Maxwell branches and actuators on the connectors.
@@ -1629,7 +1653,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 62] = [
+    const TABLE: [(&'static str, Self); 63] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1679,6 +1703,7 @@ impl Kind {
         ("dirac_junction", Self::DiracJunction),
         ("port_hamiltonian", Self::PortHamiltonian),
         ("battery", Self::Battery),
+        ("kirchhoff_circuit", Self::KirchhoffCircuit),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
@@ -1769,6 +1794,8 @@ struct Element {
     laminar: Option<MaterialLaminarPipe>,
     /// A battery's capacity, capacitances and the controls its run used.
     battery: Option<battery::Declared>,
+    /// A circuit's state coordinate names and the tolerance its run used.
+    circuit: Option<circuit::Declared>,
 }
 
 /// A controlled source's scalar command uses the SI unit of what its physical
@@ -2037,12 +2064,14 @@ fn step_order(element: &Element) -> Option<u32> {
                 2
             },
         ),
-        // A battery: the owner's discrete gradient of a separable energy.
+        // A battery: the owner's discrete gradient of a separable energy; a
+        // circuit: the owner's midpoint rule.
         Kind::ModalStructure
         | Kind::GasVolume
         | Kind::GapCapacitor
         | Kind::GapInductor
-        | Kind::Battery => Some(2),
+        | Kind::Battery
+        | Kind::KirchhoffCircuit => Some(2),
         _ => None,
     }
 }
@@ -3507,6 +3536,7 @@ fn element(
     let mut ohmic = None;
     let mut laminar = None;
     let mut battery_declared = None;
+    let mut circuit_declared = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -3722,6 +3752,16 @@ fn element(
                 .map_err(|e| Refusal::Admission(e.to_string()))?;
             (node, ports)
         }
+        Kind::KirchhoffCircuit => {
+            let (owner, state, declared) = circuit::circuit(definition, &what)?;
+            circuit_declared = Some(declared);
+            // As the battery: no port tangent.
+            let ports = owner.ports().to_vec();
+            let node = builder
+                .add(name, owner, state)
+                .map_err(|e| Refusal::Admission(e.to_string()))?;
+            (node, ports)
+        }
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
                 rigid_network(builder, name, definition, scene, &what)?
@@ -3879,6 +3919,7 @@ fn element(
         ohmic,
         laminar,
         battery: battery_declared,
+        circuit: circuit_declared,
     })
 }
 
@@ -4833,6 +4874,21 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
                 }
                 Vec::new()
             }
+            Kind::KirchhoffCircuit => {
+                // The reported names of the owner's coordinates, in its order.
+                let names = element
+                    .circuit
+                    .iter()
+                    .flat_map(|declared| &declared.coordinates);
+                for (index, name) in names.enumerate() {
+                    expected.push((
+                        format!("{}.{name}", element.name),
+                        element.node,
+                        Coordinate::State(index),
+                    ));
+                }
+                Vec::new()
+            }
             Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
                 for (body, &properties) in element.bodies.iter().enumerate() {
                     for (field, quantity) in adaptive_metric::BodyQuantity::ACCOUNTS {
@@ -5455,6 +5511,18 @@ impl Device {
         if self
             .elements
             .iter()
+            .any(|element| element.kind == Kind::KirchhoffCircuit)
+        {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; a kirchhoff_circuit is fs-phs's descriptor circuit, stepped by \
+                 its fs-system owner on the midpoint rule with constant resistances: no \
+                 resistance laws or operating-point iteration, no switching, saturation or \
+                 parasitic elements"
+            ));
+        }
+        if self
+            .elements
+            .iter()
             .any(|element| !element.material_sources.is_empty())
         {
             let base = description
@@ -5764,6 +5832,9 @@ impl Device {
         }
         if let Some(declared) = &element.battery {
             return battery::values(&self.system, element.node, declared);
+        }
+        if let Some(declared) = &element.circuit {
+            return circuit::values(&self.system, element.node, &element.ports, declared);
         }
         if element.kind == Kind::DiracJunction {
             return self.dirac_values(element);
@@ -6215,6 +6286,7 @@ impl Device {
             | Kind::DiracJunction
             | Kind::PortHamiltonian
             | Kind::Battery
+            | Kind::KirchhoffCircuit
             | Kind::ModalStructure
             | Kind::ThermalTimeline
             | Kind::ConductionBody

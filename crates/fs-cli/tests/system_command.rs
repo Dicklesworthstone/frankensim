@@ -40,6 +40,8 @@ mod dissipation;
 mod gap_field;
 #[path = "system_command/battery.rs"]
 mod battery;
+#[path = "system_command/circuit.rs"]
+mod circuit;
 
 fn example(name: &str) -> String {
     format!(

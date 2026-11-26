@@ -2225,6 +2225,37 @@ refusals of a curve short of soc 1, a start soc of 1.5, a missing
 `energy_tolerance_j`, an unknown field and a fractional
 `backtracking_halvings`.
 
+`kirchhoff_circuit` lowers to fs-system's `KirchhoffCircuit` (feature `phs`):
+a netlist of `fs_phs::circuit` with `node_count` (node 0 is ground),
+`branches` (`nodes` and exactly one of `resistance_ohm`, `inductance_h`,
+`capacitance_f`, `voltage_port`, `current_port`), `mutual` couplings between
+inductor branches, ideal `transformers` (v1 = `ratio` v2) and the required
+`energy_tolerance_j`. The start is each inductor's `flux_wb` and each
+capacitor's `charge_c` (default 0), mapped by the owner's `state`. The owner
+admits the graph and its refusals are reported under the element's name.
+Ports are the owner's: `source<p>` for external port `p` (a voltage port
+receives the voltage and returns the step's mean current into the circuit, a
+current port the reverse) and `heat<b>` per resistor branch `b`. Reports the
+state by name, `flux<b>_wb` for every inductor then `charge<b>_c` for every
+capacitor in branch order (the owner's order; one list that also names the
+adaptive accounts), then each port's `source<p>.current_a` or
+`source<p>.voltage_v`, `heat<b>_w` (null before a step) and
+`energy_tolerance_j`. Adaptive runs are of order at most 2. fs-system
+re-exports `Branch`, `CircuitGraph`, `MutualInductance` and `TransformerLink`
+from `circuit`. Not exposed: the owner's resistance laws and operating-point
+iteration (the resistances are constant). Tested in
+`tests/system_command/circuit.rs` against the midpoint rule's recurrences
+from the authored values (1e-9 relative): a charged capacitor heats its two
+resistors in proportion; a netlist with its capacitor first reports its state
+by name, its source's mean current and both bodies' heat from an authored
+flux; two coupled inductors behind a transformer give both fluxes, the
+source current and each loop's heat; an adaptive run at order 2 meets the
+exact solutions to 1e-6, with order 3 and a missing account refused; nulls
+before a step and refusals of a branch with two elements, a port driving two
+sources, a `charge_c` on an inductor, a node out of range, a floating node,
+a mutual coupling on a resistor, a missing `energy_tolerance_j` and an
+unknown field.
+
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
 `fs_mbd::component::network::ViscousNetwork` (rigid bodies in three
