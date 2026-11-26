@@ -118,7 +118,7 @@ fn material(values: &[(&str, f64, Dims)], models: Vec<ConstitutiveModelCard>) ->
     MaterialCard::assemble(state("fixture solid"), claims(values), models).unwrap()
 }
 
-fn interface_card(family: &str, values: &[(&str, f64, Dims)]) -> InterfaceSystemCard {
+pub(crate) fn interface_card(family: &str, values: &[(&str, f64, Dims)]) -> InterfaceSystemCard {
     let surface = |side: &str| SurfaceSpec {
         material: state(side),
         texture_frame: side.to_owned(),
@@ -146,7 +146,7 @@ fn law_id(basis: ThermalStorageBasis) -> String {
     format!("fixture-quadratic-{basis:?}")
 }
 
-fn fixture_cards(laws: &[Caloric; 2]) -> [MaterialCard; 2] {
+pub(crate) fn fixture_cards(laws: &[Caloric; 2]) -> [MaterialCard; 2] {
     core::array::from_fn(|c| {
         let law = &laws[c];
         let ab = [
@@ -162,7 +162,7 @@ fn fixture_cards(laws: &[Caloric; 2]) -> [MaterialCard; 2] {
 
 /// The fixture laws, registered from the test: `a` and `b` from the model,
 /// and the energy of the initial temperature from the law's own 300 K datum.
-fn fixture_laws() -> CaloricLaws {
+pub(crate) fn fixture_laws() -> CaloricLaws {
     let mut laws = CaloricLaws::new();
     for basis in [
         ThermalStorageBasis::Enthalpy,
@@ -204,7 +204,7 @@ fn fixture_laws() -> CaloricLaws {
 
 /// The pairing as a draft, its cells on `cell_cards`.
 #[allow(clippy::too_many_lines)] // One draft literal: entities, parts, interfaces, cards.
-fn pairing(cell_cards: [MaterialCard; 2], source_w: f64) -> (DraftAssembly, CardStore) {
+pub(crate) fn pairing(cell_cards: [MaterialCard; 2], source_w: f64) -> (DraftAssembly, CardStore) {
     let mut cards = CardStore::new();
     let body_card = cards.insert_material(material(&[("density", 2.0, DENSITY)], Vec::new()));
     let cell_cards = cell_cards.map(|card| cards.insert_material(card));
@@ -413,14 +413,14 @@ fn pairing(cell_cards: [MaterialCard; 2], source_w: f64) -> (DraftAssembly, Card
     (DraftAssembly::admit(input, &scenario).unwrap(), cards)
 }
 
-fn lower(draft: &DraftAssembly, cards: &CardStore) -> LoweredSystem {
+pub(crate) fn lower(draft: &DraftAssembly, cards: &CardStore) -> LoweredSystem {
     let mut registry = LoweringRegistry::with_kernel_defaults();
     register_owners(&mut registry, fixture_laws());
     registry.lower(draft, cards).unwrap()
 }
 
-/// The bodies' mass properties as the lowering recorded them.
-fn lowered_mass(lowered: &LoweredSystem) -> [MassProperties; 4] {
+/// The first `N` parts' mass properties as the lowering recorded them.
+pub(crate) fn lowered_mass<const N: usize>(lowered: &LoweredSystem) -> [MassProperties; N] {
     core::array::from_fn(|b| {
         let sources = &lowered.receipt.components[b].parameter_sources;
         let value = |name: &str| sources.iter().find(|p| p.parameter == name).unwrap().value;
@@ -433,7 +433,7 @@ fn bodies_of(system: &System, node: NodeId) -> &[RigidBodyState] {
     system.state::<Vec<RigidBodyState>>(node).unwrap()
 }
 
-fn temperature_bits(system: &System, node: NodeId) -> [u64; 2] {
+pub(crate) fn temperature_bits(system: &System, node: NodeId) -> [u64; 2] {
     let timeline = system.state::<TimelineState<'static>>(node).unwrap();
     [0, 1].map(|c| {
         timeline
@@ -536,7 +536,7 @@ fn the_lowered_draft_steps_with_the_declared_graph_bit_for_bit() {
 }
 
 /// The part's value from its owner's reader, in the lowered system's state.
-fn observe(lowered: &LoweredSystem, entity: EntityId) -> Option<Observed> {
+pub(crate) fn observe(lowered: &LoweredSystem, entity: EntityId) -> Option<Observed> {
     let read = lowered.observers.get(&entity)?;
     read(&lowered.system)
 }

@@ -93,7 +93,13 @@ constructors:
   receipted with its reason. `mu` is read from the third body's card at the
   declared query point and held there (one-way coupling). A film's receipt
   has a null `card_hash`, family `shear-film`, and its fluid as
-  `third_body_card`.
+  `third_body_card`. Bodies joined by `relaxation-bushing` interfaces lower
+  to one `RelaxationNetwork` instead, and a network that mixes the families
+  is refused, naming both sets. Such a card holds the damping and, for each
+  branch `k`, a diagonal stiffness `stiffness_<k>_x` .. `_rz` (factor
+  `L = sqrt(K)`) and `relaxation_time_<k>`. The memory has no default: the
+  interface's state declares each branch's elastic displacement
+  `displacement_<k>_x` .. `_rz`, held as `a = L x`.
 - `owners::thermal`: thermal solids whose material card names a registered
   caloric law lower to the cells of one fs-thermal `ThermalTimeline`. The
   card picks the path: a model-bearing card on a thermal-only `Solid` moves

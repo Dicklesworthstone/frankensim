@@ -46,6 +46,10 @@ use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::Relax
 use fs_system::{NodeId, RouteTemperature, System, SystemBuilder, heat_sink};
 use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
 
+// The same pair declared as a draft and lowered by the owner constructors.
+#[path = "lowering.rs"]
+mod lowering;
+
 /// 0.7 of the connector's heat to cell 0, 0.2 to cell 1, the rest
 /// unallocated: the module's own routes for this fixture.
 fn routes() -> [BTreeMap<CellId, f64>; 1] {

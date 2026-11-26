@@ -2,7 +2,8 @@
 //! the physics owners' own Components, through their public constructors.
 //!
 //! - [`mbd`]: the rigid bodies joined by [`VISCOUS_BUSHING_FAMILY`]
-//!   interfaces or card-less `ShearFilm`s lower to one `fs_mbd` `ViscousNetwork`.
+//!   interfaces or card-less `ShearFilm`s lower to one `fs_mbd` `ViscousNetwork`,
+//!   and those joined by [`RELAXATION_BUSHING_FAMILY`] ones to one `RelaxationNetwork`.
 //! - [`thermal`]: thermal solids whose material card names a registered
 //!   caloric law lower to the cells of one `fs_thermal` `ThermalTimeline`.
 //! - Loss routes: a card-less `HeatRoute` interface from a part that one
@@ -36,6 +37,9 @@ pub mod thermal;
 /// Card family of a passive viscous bushing between two rigid bodies (a
 /// `MechanicalContact` interface).
 pub const VISCOUS_BUSHING_FAMILY: &str = "viscous-bushing";
+/// Card family of a viscous bushing that also has Maxwell branches, each with
+/// its own elastic memory (a `MechanicalContact` interface).
+pub const RELAXATION_BUSHING_FAMILY: &str = "relaxation-bushing";
 /// Card family of a cell's surface exchange with the ambient (a
 /// `ThermalContact` interface between a cell's face and a face of a
 /// stationary `DrivenBody` frame).
@@ -233,7 +237,7 @@ pub(crate) fn family_entry<'a>(
     iface: &'a DraftInterfaceDecl,
     family: &str,
 ) -> Option<(&'a InterfaceCardEntry, State<'a>)> {
-    let bushing = family == VISCOUS_BUSHING_FAMILY;
+    let bushing = [VISCOUS_BUSHING_FAMILY, RELAXATION_BUSHING_FAMILY].contains(&family);
     let (card, state) = match &iface.kind {
         DraftInterfaceKind::MechanicalContact {
             law_card, state, ..
@@ -257,10 +261,12 @@ pub(crate) fn route_state(iface: &DraftInterfaceDecl) -> Option<State<'_>> {
     }
 }
 
-/// Whether `iface` is a bushing: a `viscous-bushing` card, or a shear film.
+/// Whether `iface` is a bushing: a `viscous-bushing` or `relaxation-bushing`
+/// card, or a shear film.
 pub(crate) fn is_bushing(cards: &CardStore, iface: &DraftInterfaceDecl) -> bool {
     matches!(iface.kind, DraftInterfaceKind::ShearFilm { .. })
         || family_entry(cards, iface, VISCOUS_BUSHING_FAMILY).is_some()
+        || family_entry(cards, iface, RELAXATION_BUSHING_FAMILY).is_some()
 }
 
 /// The bushing a loss route draws from: the one bushing that joins the part
