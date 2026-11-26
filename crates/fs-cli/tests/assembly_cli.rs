@@ -1,8 +1,8 @@
-//! Real-binary, no-mock end-to-end tests for `.11.7` Stage 3:
-//! `frankensim run <assembly>`, `frankensim run --resume`, `frankensim explain`,
-//! FrankenScript `(assembly.run …)` with `:hash` pin enforcement, unchanged
-//! legacy `run <project>` and `run <program.fs>` paths, heatsink bit-for-bit
-//! identity, and existing-table structured refusal exit codes.
+//! Real-binary, no-mock end-to-end tests for `.11.7` Stage 3 and `.11.10`
+//! Stage 1b: `frankensim run <assembly>`, `frankensim run --resume`,
+//! `frankensim explain`, FrankenScript `(assembly.run …)` with `:hash` pin
+//! enforcement, unchanged legacy `run <project>` and `run <program.fs>` paths,
+//! heatsink bit-for-bit identity, and existing-table structured refusal codes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -13,14 +13,7 @@ use fs_cli::{
     AssemblyAnalysisMode, AssemblyCancelPlan, AssemblyStage, CardPackKind, CardPackSet,
     RawCardPack, exit, run_assembly,
 };
-use fs_evidence::ValidityDomain;
 use fs_ledger::Ledger;
-use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack,
-    NormalizedMaterialCardPack, NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, SurfaceSpec, SystemContext, UncertaintyModel,
-};
-use fs_qty::Dims;
 
 const PINNED_HEATSINK_RUN_ID: &str =
     "5aa11590e72d49ec218c9d5049c71ae19c1ce5e647efa083a08d20d9e21b0a91";
@@ -28,6 +21,9 @@ const PINNED_HEATSINK_REPORT_HASH: &str =
     "5fe2c82237d11ea78a526a348f074c9e69311cbe9167e8e8fe92f4113c250399";
 const PINNED_HEATSINK_PACKAGE_ROOT: &str =
     "1b42e3d70134c85c021e3e0442c75dd17e5d45a2c11b7ea5b750c533747a80b4";
+
+const SLIDER_FSIM: &str = include_str!("../../../examples/assemblies/thermo_mech_slider.fsim");
+const TWO_BODY_FSIM: &str = include_str!("../../../examples/assemblies/two_body_conduction.fsim");
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -37,6 +33,12 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+fn repo_path(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 fn bin_run(args: &[&str]) -> Output {
@@ -58,168 +60,17 @@ fn jstr<'a>(json: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing `{key}` in {json}"))
 }
 
-fn make_claims(tag: &str, entries: &[(&str, f64, Dims)]) -> NormalizedPack {
-    let prov = |src: &str| Provenance {
-        source: src.into(),
-        license: "CC-BY-4.0".into(),
-        artifact: Some(hash_bytes(src.as_bytes())),
-    };
-    let mut claims = ClaimSet::new();
-    let obs = claims
-        .register_observation(ObservationDataset {
-            specimen: format!("coupon-{tag}"),
-            method: "test-fixture".into(),
-            artifact: hash_bytes(tag.as_bytes()),
-            caveats: "test fixture".into(),
-            provenance: prov(tag),
-        })
-        .unwrap();
-    for &(name, value, dims) in entries {
-        claims
-            .insert_claim(PropertyClaim {
-                key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained().with("T", 200.0, 600.0),
-                uncertainty: UncertaintyModel::HalfWidth {
-                    half_width: (value.abs() * 0.01).max(1.0e-6),
-                    confidence: 0.95,
-                },
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: vec![obs],
-                provenance: prov(name),
-            })
-            .unwrap();
-    }
-    NormalizedPack::new(
-        format!("pack-{tag}"),
-        "fs-cli-s3-test-v1",
-        hash_bytes(tag.as_bytes()),
-        "CC-BY-4.0",
-        claims,
-        Vec::new(),
-        Vec::new(),
-    )
-    .unwrap()
-}
-
-fn write_mat(dir: &Path, chem: &str, rho: f64, cp: f64, youngs: f64) -> PathBuf {
-    let norm = make_claims(
-        chem,
-        &[
-            ("density", rho, Dims([-3, 1, 0, 0, 0, 0])),
-            ("specific_heat_capacity", cp, Dims([2, 0, -2, -1, 0, 0])),
-            ("youngs_modulus", youngs, Dims([-1, 1, -2, 0, 0, 0])),
-        ],
-    );
-    let pack = NormalizedMaterialCardPack::new(
-        MaterialStateId {
-            chemistry: chem.into(),
-            phase: "wrought".into(),
-            process: "annealed".into(),
-            revision: 0,
-        },
-        norm,
-    )
-    .unwrap();
-    let p = dir.join(format!("{chem}.fsmcdpk"));
-    std::fs::write(&p, pack.to_bytes()).unwrap();
-    p
-}
-
-fn write_tim(dir: &Path, g_w_k: f64) -> PathBuf {
-    let norm = make_claims(
-        "tim",
-        &[("thermal_conductance", g_w_k, Dims([2, 1, -3, -1, 0, 0]))],
-    );
-    let surf = |chem: &str| SurfaceSpec {
-        material: MaterialStateId {
-            chemistry: chem.into(),
-            phase: "wrought".into(),
-            process: "annealed".into(),
-            revision: 0,
-        },
-        texture_frame: "ground".into(),
-    };
-    let pack = NormalizedInterfacePack::new(
-        surf("AISI-304"),
-        surf("AA6061"),
-        SystemContext {
-            medium: "dry-contact".into(),
-            third_body: None,
-            environment: "air".into(),
-            history: "run-in".into(),
-        },
-        norm,
-    )
-    .unwrap();
-    let p = dir.join("contact.fsintpk");
-    std::fs::write(&p, pack.to_bytes()).unwrap();
-    p
-}
-
-const SLIDER_FSIM: &str = r#"(assembly "thermo_mech_slider"
-  (version 1) (units "SI") (seed 0x7)
-  (versions (constellation "2026-07") (workspace "stage3-cli"))
-  (budget (wall 60s) (mem 64MiB))
-  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
-  (reference-state unloaded) (environment earth-lab-air)
-  (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz)
-  (part "slider" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
-    :material "AISI-304" :query-temp 293.15K :physics (mechanics thermal) :fidelity lumped)
-  (joint "suspension" :kind prismatic :parent root :child "slider"
-    :axis (1.0 0.0 0.0) :damping 12N*s/m :stiffness 400N/m)
-  (source "drive" :part "slider" :port "mechanics"
-    :history (harmonic :amplitude 15N :frequency 3Hz :phase 0.25 :offset 5N))
-  (probe "slider_temp" :kind thermocouple :target "slider" :sample-rate 1000Hz :time-constant 0.005s)
-)"#;
-
-const TWO_BODY_FSIM: &str = r#"(assembly "two_body_conduction"
-  (version 1) (units "SI") (seed 0x11)
-  (versions (constellation "2026-07") (workspace "stage3-cli"))
-  (budget (wall 60s) (mem 64MiB))
-  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
-  (reference-state assembled) (environment :ambient-temp 300K :ambient-pressure 101325Pa)
-  (time-plan :horizon 0.1s :dt 0.005s :sample-rate 200Hz)
-  (part "hot" :kind solid :geometry (box 0.05m 0.05m 0.05m)
-    :material "AISI-304" :query-temp 300K :physics (thermal) :fidelity lumped)
-  (part "cold" :kind solid :geometry (box 0.05m 0.05m 0.05m)
-    :material "AA6061" :query-temp 300K :physics (thermal) :fidelity lumped)
-  (interface "joint_tim" :kind thermal-contact :a "hot" :b "cold"
-    :card "AISI-304" :family "thermal-conductance" :area 0.0025m^2)
-  (source "heater" :part "hot" :port "thermal" :history (constant 500W))
-  (probe "hot_temp" :kind thermocouple :target "hot" :sample-rate 200Hz)
-)"#;
-
-const FORCED_OSC_FSIM: &str = r#"(assembly "forced_oscillator"
-  (version 1) (units "SI") (seed 0x22)
-  (versions (constellation "2026-07") (workspace "stage3-cli"))
-  (budget (wall 60s) (mem 64MiB))
-  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
-  (reference-state unloaded) (environment earth-lab-air)
-  (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz)
-  (part "mass" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
-    :material "AISI-304" :query-temp 293.15K :physics (mechanics) :fidelity lumped)
-  (joint "spring_damper" :kind prismatic :parent root :child "mass"
-    :axis (1.0 0.0 0.0) :damping 4N*s/m :stiffness 200N/m)
-  (source "load" :part "mass" :port "mechanics" :history (constant 10N))
-  (analysis-options :harmonic-frequencies (1.0 2.0 5.0) :modal-max 4)
-)"#;
-
 #[test]
 #[allow(clippy::too_many_lines)]
 fn binary_runs_three_assemblies_explains_and_resumes_interrupted_run() {
     let dir = scratch_dir("assemblies");
-    let steel = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
-    let alum = write_mat(&dir, "AA6061", 2700.0, 896.0, 68.9e9);
-    let tim = write_tim(&dir, 45.0);
-    let (sp, tp, op) = (
-        dir.join("slider.fsim"),
-        dir.join("twobody.fsim"),
-        dir.join("osc.fsim"),
-    );
-    std::fs::write(&sp, SLIDER_FSIM).unwrap();
-    std::fs::write(&tp, TWO_BODY_FSIM).unwrap();
-    std::fs::write(&op, FORCED_OSC_FSIM).unwrap();
+    let steel =
+        repo_path("examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk");
+    let alum = repo_path("examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk");
+    let atkins = repo_path("examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk");
+    let sp = repo_path("examples/assemblies/thermo_mech_slider.fsim");
+    let tp = repo_path("examples/assemblies/two_body_conduction.fsim");
+    let op = repo_path("examples/assemblies/forced_oscillator.fsim");
     let ledger_p = dir.join("assemblies.db");
     let (lstr, steel_s) = (ledger_p.to_str().unwrap(), steel.to_str().unwrap());
 
@@ -304,18 +155,16 @@ fn binary_runs_three_assemblies_explains_and_resumes_interrupted_run() {
     assert!(rj.contains("\"status\":\"completed\"") && rj.contains("\"stages_completed\":6"));
     assert_eq!((jstr(&rj, "run"), jstr(&rj, "plan_hash")), (run1, plan1));
 
-    // 3. Assembly 2 (two-body conduction)
+    // 3. Assembly 2 (two-body conduction with tracked NBS C447 Al + Atkins 1964 joint)
     let out2 = bin_run(&[
         "--json",
         "run",
         tp.to_str().unwrap(),
         lstr,
         "--materials",
-        steel_s,
-        "--materials",
         alum.to_str().unwrap(),
         "--interfaces",
-        tim.to_str().unwrap(),
+        atkins.to_str().unwrap(),
     ]);
     assert_eq!(
         out2.status.code(),
@@ -358,9 +207,9 @@ fn binary_runs_three_assemblies_explains_and_resumes_interrupted_run() {
 #[test]
 fn binary_frankenscript_assembly_run_matches_direct_cli_and_enforces_hash_pin() {
     let dir = scratch_dir("frankenscript_asm");
-    let steel = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
-    let sp = dir.join("slider.fsim");
-    std::fs::write(&sp, SLIDER_FSIM).unwrap();
+    let steel =
+        repo_path("examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk");
+    let sp = repo_path("examples/assemblies/thermo_mech_slider.fsim");
     let (dl, pl) = (dir.join("direct.db"), dir.join("prog.db"));
 
     let direct = bin_run(&[
@@ -387,7 +236,9 @@ fn binary_frankenscript_assembly_run_matches_direct_cli_and_enforces_hash_pin() 
     std::fs::write(
         &prog_ok,
         format!(
-            "(study \"slider_via_fs\" (seed 0x7) (versions (constellation :lock \"2026-07\")) (budget (wall 60s) (mem 64MiB)) (capability :cores 1 :mem 64MiB :wall 60s :ops (assembly.*)) (assembly.run \"slider.fsim\" :materials (\"AISI-304.fsmcdpk\") :analysis \"transient\" :hash \"{exact_hash}\"))\n"
+            "(study \"slider_via_fs\" (seed 0x7) (versions (constellation :lock \"2026-07\")) (budget (wall 60s) (mem 64MiB)) (capability :cores 1 :mem 64MiB :wall 60s :ops (assembly.*)) (assembly.run \"{}\" :materials (\"{}\") :analysis \"transient\" :hash \"{exact_hash}\"))\n",
+            sp.display(),
+            steel.display(),
         ),
     )
     .unwrap();
@@ -411,7 +262,9 @@ fn binary_frankenscript_assembly_run_matches_direct_cli_and_enforces_hash_pin() 
     std::fs::write(
         &prog_bad,
         format!(
-            "(study \"bad_hash_study\" (seed 0x7) (versions (constellation :lock \"2026-07\")) (budget (wall 60s) (mem 64MiB)) (capability :cores 1 :mem 64MiB :wall 60s :ops (assembly.*)) (assembly.run \"slider.fsim\" :materials (\"AISI-304.fsmcdpk\") :hash \"{}\"))\n",
+            "(study \"bad_hash_study\" (seed 0x7) (versions (constellation :lock \"2026-07\")) (budget (wall 60s) (mem 64MiB)) (capability :cores 1 :mem 64MiB :wall 60s :ops (assembly.*)) (assembly.run \"{}\" :materials (\"{}\") :hash \"{}\"))\n",
+            sp.display(),
+            steel.display(),
             "0".repeat(64)
         ),
     )
@@ -428,10 +281,9 @@ fn binary_frankenscript_assembly_run_matches_direct_cli_and_enforces_hash_pin() 
 
 #[test]
 fn binary_legacy_run_project_and_run_program_fs_paths_remain_unchanged() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
-    let stl = root.join("examples/heatsink-fan/heatsink.stl");
-    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let fsim = repo_path("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = repo_path("examples/heatsink-fan/heatsink.stl");
+    let pack = repo_path("data/reference-project/aa6061.fsmcdpk");
 
     // Old form 1: `frankensim run <project.fsim> <ledger>` (heatsink-fan identity).
     let dir1 = scratch_dir("legacy_project");
@@ -510,10 +362,8 @@ fn binary_structured_refusals_use_existing_exit_codes() {
     let dir = scratch_dir("refusals");
     let l = dir.join("refusals.db");
     let lstr = l.to_str().unwrap();
-    let sp = dir.join("slider.fsim");
-    std::fs::write(&sp, SLIDER_FSIM).unwrap();
-    let hs =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/heatsink-fan/heatsink-fan.fsim");
+    let sp = repo_path("examples/assemblies/thermo_mech_slider.fsim");
+    let hs = repo_path("examples/heatsink-fan/heatsink-fan.fsim");
     let unk = "a".repeat(64);
 
     let e1 = bin_run(&["--json", "explain", &unk]);
@@ -554,9 +404,9 @@ fn binary_structured_refusals_use_existing_exit_codes() {
 #[test]
 fn binary_assembly_run_two_ledgers_pass_replay_audit_cleanly() {
     let dir = scratch_dir("assembly_replay");
-    let steel = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
-    let sp = dir.join("slider.fsim");
-    std::fs::write(&sp, SLIDER_FSIM).unwrap();
+    let steel =
+        repo_path("examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk");
+    let sp = repo_path("examples/assemblies/thermo_mech_slider.fsim");
     let (db_a, db_b) = (dir.join("asm_a.db"), dir.join("asm_b.db"));
     for (idx, db) in [&db_a, &db_b].into_iter().enumerate() {
         if idx == 1 {
@@ -630,27 +480,39 @@ fn binary_assembly_run_two_ledgers_pass_replay_audit_cleanly() {
 #[test]
 fn binary_lowers_atkins_contact_resistance_and_refuses_missing_area() {
     let dir = scratch_dir("atkins_tcr");
-    let st = write_mat(&dir, "AISI-304", 8000.0, 500.0, 193.0e9);
-    let atk = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk");
-    let old = ":card \"AISI-304\" :family \"thermal-conductance\" :area 0.0025m^2";
-    let base = ":card \"6061-T6 aluminum alloy\" :family \"thermal-contact-resistance\"";
-    let tpl = TWO_BODY_FSIM.replace("\"AA6061\"", "\"AISI-304\"");
-    let (m, ic) = (st.to_str().unwrap(), atk.to_str().unwrap());
-    let go = |tag: &str, extra: &str| {
-        let f = dir.join(format!("{tag}.fsim"));
-        let d = dir.join(format!("{tag}.db"));
-        std::fs::write(&f, tpl.replace(old, &format!("{base} {extra}"))).unwrap();
-        let mut a = vec!["--json", "run", f.to_str().unwrap(), d.to_str().unwrap()];
-        a.extend(["--materials", m, "--interfaces", ic]);
-        (bin_run(&a), d)
-    };
-    let (r, db1) = go("ok", ":area 0.0025m^2 :normal-pressure 313000Pa");
+    let alum = repo_path("examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk");
+    let atk = repo_path("examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk");
+    let tp = repo_path("examples/assemblies/two_body_conduction.fsim");
+    let (m, ic) = (alum.to_str().unwrap(), atk.to_str().unwrap());
+    let db1 = dir.join("ok.db");
+    let r = bin_run(&[
+        "--json",
+        "run",
+        tp.to_str().unwrap(),
+        db1.to_str().unwrap(),
+        "--materials",
+        m,
+        "--interfaces",
+        ic,
+    ]);
     assert_eq!(r.status.code(), Some(i32::from(exit::SUCCESS)));
     let id = jstr(&s(&r.stdout), "run").to_owned();
     let ej = s(&bin_run(&["--json", "explain", &id, db1.to_str().unwrap()]).stdout);
     assert!(ej.contains("area-specific-thermal-contact-resistance") && ej.contains("7.909890527"));
-    let (r2, _) = go("bad", ":normal-pressure 313000Pa");
+
+    let bad_f = dir.join("missing_area.fsim");
+    std::fs::write(&bad_f, TWO_BODY_FSIM.replace(":area 0.0025m^2 ", "")).unwrap();
+    let db2 = dir.join("bad.db");
+    let r2 = bin_run(&[
+        "--json",
+        "run",
+        bad_f.to_str().unwrap(),
+        db2.to_str().unwrap(),
+        "--materials",
+        m,
+        "--interfaces",
+        ic,
+    ]);
     assert_eq!(r2.status.code(), Some(i32::from(exit::REFUSED)));
     assert!(s(&r2.stderr).contains("requires positive :area"));
 }

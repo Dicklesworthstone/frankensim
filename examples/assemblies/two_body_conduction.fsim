@@ -1,0 +1,21 @@
+(assembly "two_body_conduction"
+  (version 1) (units "SI") (seed 0x11)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 293.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 5.0s :dt 0.05s :sample-rate 20Hz)
+  (part "hot" :kind solid :geometry (box 0.06m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped)
+  (part "cold" :kind solid :geometry (box 0.04m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped)
+  (interface "atkins_joint" :kind thermal-contact :a "hot" :b "cold"
+    :card "6061-T6 aluminum alloy" :family "thermal-contact-resistance"
+    :area 0.0025m^2 :normal-pressure 313000Pa)
+  (source "heater" :part "hot" :port "thermal" :history (constant 500W))
+  (probe "hot_temp" :kind thermocouple :target "hot" :sample-rate 20Hz)
+  (probe "cold_temp" :kind thermocouple :target "cold" :sample-rate 20Hz)
+)

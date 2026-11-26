@@ -1,0 +1,64 @@
+# Assembly Gallery (`examples/assemblies/`)
+
+Tracked `.fsim` assembly files that run directly through `frankensim run` with
+measured `fs-matdb` card packs and independent closed-form analytical oracles.
+No physics behavior is tuned to the expected answer; every parameter is declared
+in the `.fsim` file or queried from a measured card with provenance.
+
+## Assemblies and Expected Emergence
+
+| Assembly | Measured cards | Modes | Expected emergence & independent closed-form oracle |
+| --- | --- | --- | --- |
+| `forced_oscillator.fsim` | `packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk` (`rho = 7800 kg/m^3`, box `0.1 x 0.05 x 0.05 m` -> `m = 1.95 kg`) | `transient`, `modal`, `harmonic`, `stationary` | 1-DOF damped oscillator (`k = 200 N/m`, `c = 4 N*s/m`, constant `F = 10 N`). Modal: `omega_n = sqrt(k/m) = 10.12739367 rad/s`, damped `f_d = omega_n*sqrt(1 - zeta^2)/(2*pi) = 1.60353769 Hz`, `zeta = c/(2*sqrt(k*m)) = 0.10127394` (`<= 1e-9`). Harmonic (`1, 2, 5 Hz`, spring root-velocity input -> spring extension): `|H(i*w)| = |(c + i*m*w)/(k - m*w^2 + i*c*w)|` (`<= 1e-9`). Stationary: `|x_eq| = F/k = 0.05 m`, `v_eq = 0` (`<= 1e-9`). Transient (`50` steps, `dt = 1 ms`): underdamped step response `x(t), v(t)` (`<= 1e-5 m`, `<= 1e-4 m/s`) and energy residual `<= 1e-12 J`. |
+| `two_body_conduction.fsim` | `packs/aluminum-pure-thermal-nbs-c447.fsmcdpk` (`rho = 2700 kg/m^3`, `c_p = 945.584 J/(kg*K)`) + `../system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk` | `transient` | Two pure-Al blocks of distinct size (`0.06 x 0.05 x 0.05 m` -> `C_h = 382.96152 J/K`; `0.04 x 0.05 x 0.05 m` -> `C_c = 255.30768 J/K`) sharing a `0.0025 m^2` contact face at `P = 313 kPa` (`R'' = 3.1606e-4 m^2*K/W`, `G = A/R'' = 7.909890527 W/K`), `500 W` heater on `hot` for `5.0 s` (`dt = 0.05 s`). Both blocks remain inside the Atkins validity window (`289.35..305.85 K`). Exact two-lump exponential `T_hot(t), T_cold(t)` (`<= 1e-4 K`) and total enthalpy conservation `|C_h*(T_h - T_0) + C_c*(T_c - T_0) - Q*t| <= 1e-8 J`. |
+| `thermo_mech_slider.fsim` | `packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk` (`m = 1.95 kg`, `c_p = 486 J/(kg*K)` -> `C = 947.7 J/K`) | `transient` | Coupled thermo-mechanical damped slider (`k = 400 N/m`, `c = 12 N*s/m`, `F(t) = 5 + 15*sin(2*pi*3*t + 0.25) N`, `horizon = 0.05 s`, `dt = 1 ms`) where viscous damping heats the body and a thermocouple lags raw temperature (`tau = 5 ms`). Closed-form forced damped oscillator `x(t), v(t)` (`<= 1e-5 m`, `<= 1e-4 m/s`), exact step-mean midpoint-quadrature energy identity `|E_mech + E_th - W_ext| <= 1e-9 J` and `|E_th - Q_damp| <= 1e-9 J`, and discrete lag filter on `slider_temp` (`<= 1e-12 K`). |
+
+### Material Card Disclosure (`two_body_conduction.fsim`)
+
+The bulk heat capacities use elemental aluminum from NBS Circular C447 Table 67
+(`aluminum-pure-nbs-c447`), whereas the vacuum contact-resistance curve is
+Atkins (1964) Table II runs 23-28 measured on lathe-cut 6061-T6 aluminum alloy
+faces (`6061-T6 aluminum alloy`). Both parts are aluminum so only the alloy
+differs between bulk and surface cards; this mismatch is disclosed rather than
+masked under a single material label.
+
+## Reproducing the Tracked Card Packs
+
+Both material packs under `examples/assemblies/packs/` are built deterministically
+from `data/matdb/seed-v1/` via `xtask matdb-pack`:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/steel-music-wire-string-heptonstall-ligo-p1400229/manifest.tsv \
+  --material-state "steel-music-wire-ligo-p1400229" "solid" "drawn untreated music wire" 0 \
+  --out examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/aluminum-pure-thermal-nbs-c447/manifest.tsv \
+  --material-state "aluminum-pure-nbs-c447" "solid" "elemental aluminum, NBS C447 Table 67" 0 \
+  --out examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk
+```
+
+The thermal contact interface pack is reused in place from
+`examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk`
+(built from `data/matdb/seed-v1/atkins-1964-al6061t6-lathe-0p30um-vacuum-interface/`).
+
+## Running the End-to-End Lane
+
+```bash
+scripts/e2e/assemblies.sh --artifact-dir /tmp/frankensim-assemblies-e2e \
+  --prebuilt-binary target/debug/frankensim
+```
+
+Omit `--prebuilt-binary` on a clean git tree to build and run directly from
+committed sources.
+
+## Scope & No-Claim Boundary
+
+- **Heatsink-as-assembly (gallery item 6):** `examples/heatsink-fan/heatsink-fan.fsim`
+  is not yet expressible as a `.fsim` assembly because it requires STL geometry
+  ingestion, non-lumped CHT/conduction fidelity, and 3-D field QoIs beyond the
+  current lumped assembly lowering path.
+- **Authority:** These runs provide **Estimate-only** numerical, conservation,
+  determinism, and provenance verification against closed-form analytical
+  oracles; they make no experimental or physical-validation claim.

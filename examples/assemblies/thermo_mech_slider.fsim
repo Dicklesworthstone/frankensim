@@ -1,0 +1,23 @@
+(assembly "thermo_mech_slider"
+  (version 1) (units "SI") (seed 0x7)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz)
+  (part "slider" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics thermal) :fidelity lumped)
+  (joint "suspension" :kind prismatic :parent root :child "slider"
+    :axis (1.0 0.0 0.0) :damping 12N*s/m :stiffness 400N/m)
+  (source "drive" :part "slider" :port "mechanics"
+    :history (harmonic :amplitude 15N :frequency 3Hz :phase 0.25 :offset 5N))
+  (probe "slider_temp" :kind thermocouple :target "slider"
+    :sample-rate 1000Hz :time-constant 0.005s)
+  (probe "slider_temp_raw" :kind field-quantity :target "slider"
+    :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 1000Hz)
+  (probe "slider_pos" :kind field-quantity :target "slider"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)
+  (probe "slider_vel" :kind field-quantity :target "slider"
+    :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 1000Hz)
+)
