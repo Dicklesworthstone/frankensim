@@ -26,7 +26,7 @@
 import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import type { Detail } from "./shop";
+import { applyMatrixInto, applyNormalInto, attributeValues, type Detail } from "./shop";
 
 export type Cohort = "p05" | "p50" | "p95";
 export type Side = "L" | "R";
@@ -2680,26 +2680,43 @@ export function loadDetailedBody(cohort: Cohort): Promise<DetailedAsset> {
 const _dm = new THREE.Matrix4();
 const _dn = new THREE.Matrix3();
 const _dp = new THREE.Vector3();
-const _dq = new THREE.Vector3();
 
-function metresPerUv(g: THREE.BufferGeometry): number {
+/**
+ * Metres of surface per unit of UV: the square root of the triangles' total area over their total area in UV. Read
+ * over the arrays, with Vector3's subtract, cross and length written out in its order.
+ */
+export function metresPerUv(g: THREE.BufferGeometry): number {
   const pos = g.getAttribute("position");
   const uv = g.getAttribute("uv");
   if (!uv) return 1;
   const ix = g.index;
   const n = ix ? ix.count : pos.count;
-  const at = (k: number) => (ix ? ix.getX(k) : k);
+  const P = attributeValues(pos, 3);
+  const U = attributeValues(uv, 2);
+  const I = ix ? attributeValues(ix, 1) : null;
   let a3 = 0;
   let a2 = 0;
-  const p = [V(), V(), V()];
-  const u = [new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2()];
   for (let t = 0; t + 2 < n; t += 3) {
-    for (let k = 0; k < 3; k++) {
-      p[k]!.fromBufferAttribute(pos as THREE.BufferAttribute, at(t + k));
-      u[k]!.fromBufferAttribute(uv as THREE.BufferAttribute, at(t + k));
-    }
-    a3 += _dp.subVectors(p[1]!, p[0]!).cross(_dq.subVectors(p[2]!, p[0]!)).length() / 2;
-    a2 += Math.abs((u[1]!.x - u[0]!.x) * (u[2]!.y - u[0]!.y) - (u[2]!.x - u[0]!.x) * (u[1]!.y - u[0]!.y)) / 2;
+    const i0 = I ? I[t]! : t;
+    const i1 = I ? I[t + 1]! : t + 1;
+    const i2 = I ? I[t + 2]! : t + 2;
+    const x0 = P[i0 * 3]!;
+    const y0 = P[i0 * 3 + 1]!;
+    const z0 = P[i0 * 3 + 2]!;
+    // (p1 - p0) × (p2 - p0)
+    const ax = P[i1 * 3]! - x0;
+    const ay = P[i1 * 3 + 1]! - y0;
+    const az = P[i1 * 3 + 2]! - z0;
+    const bx = P[i2 * 3]! - x0;
+    const by = P[i2 * 3 + 1]! - y0;
+    const bz = P[i2 * 3 + 2]! - z0;
+    const cx = ay * bz - az * by;
+    const cy = az * bx - ax * bz;
+    const cz = ax * by - ay * bx;
+    a3 += Math.sqrt(cx * cx + cy * cy + cz * cz) / 2;
+    const u0 = U[i0 * 2]!;
+    const v0 = U[i0 * 2 + 1]!;
+    a2 += Math.abs((U[i1 * 2]! - u0) * (U[i2 * 2 + 1]! - v0) - (U[i2 * 2]! - u0) * (U[i1 * 2 + 1]! - v0)) / 2;
   }
   return a2 > 0 ? Math.sqrt(a3 / a2) : 1;
 }
@@ -2729,25 +2746,21 @@ function prepareDetailed(cohort: Cohort, gltf: GLTF): DetailedAsset {
       if (j) jointErr = Math.max(jointErr, _dp.setFromMatrixPosition(sk.bones[k]!.matrixWorld).distanceTo(j));
     }
     const g = m.geometry;
+    // Read as three.js's accessors read them (the file's are interleaved and quantized), moved as Vector3 moves.
     const pos = g.getAttribute("position");
     const P = new Float32Array(pos.count * 3);
-    for (let i = 0; i < pos.count; i++) _dp.fromBufferAttribute(pos, i).applyMatrix4(D).toArray(P, i * 3);
+    applyMatrixInto(attributeValues(pos, 3), P, D);
     g.setAttribute("position", new THREE.BufferAttribute(P, 3));
     const nrm = g.getAttribute("normal");
     if (nrm) {
-      _dn.getNormalMatrix(D);
       const N = new Float32Array(nrm.count * 3);
-      for (let i = 0; i < nrm.count; i++) _dp.fromBufferAttribute(nrm, i).applyMatrix3(_dn).normalize().toArray(N, i * 3);
+      applyNormalInto(attributeValues(nrm, 3), N, _dn.getNormalMatrix(D));
       g.setAttribute("normal", new THREE.BufferAttribute(N, 3));
     }
     const si = g.getAttribute("skinIndex");
+    const J4 = attributeValues(si, 4);
     const S = new Uint8Array(si.count * 4);
-    for (let i = 0; i < si.count; i++) {
-      S[i * 4] = map[si.getX(i)]!;
-      S[i * 4 + 1] = map[si.getY(i)]!;
-      S[i * 4 + 2] = map[si.getZ(i)]!;
-      S[i * 4 + 3] = map[si.getW(i)]!;
-    }
+    for (let i = 0; i < S.length; i++) S[i] = map[J4[i]!]!;
     g.setAttribute("skinIndex", new THREE.BufferAttribute(S, 4));
     g.boundingBox = null;
     g.boundingSphere = null;

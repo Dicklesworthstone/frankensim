@@ -41,6 +41,84 @@ function plain(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | und
 const normalM = new THREE.Matrix3();
 
 /**
+ * An attribute's first `size` components, item after item, as three.js's getX/getY/getZ/getW give them. A plain
+ * array is returned as it is; anything else (interleaved, normalised integers) is copied out with three.js's
+ * arithmetic: a normalised integer over its type's largest value, no lower than -1 when signed. Half floats go
+ * through three.js's accessors.
+ */
+export function attributeValues(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, size: number): ArrayLike<number> {
+  const inter = (a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute === true;
+  // three.js sets this flag on Float16BufferAttribute; its type declarations omit it.
+  const half = (a as { isFloat16BufferAttribute?: boolean }).isFloat16BufferAttribute === true;
+  if (!inter && !half && !a.normalized && a.itemSize === size) return a.array;
+  const n = a.count;
+  const out = new Float64Array(n * size);
+  if (half) {
+    const get = [a.getX, a.getY, a.getZ, a.getW];
+    for (let i = 0; i < n; i++) for (let c = 0; c < size; c++) out[i * size + c] = get[c]!.call(a, i);
+    return out;
+  }
+  const arr = a.array;
+  const stride = inter ? (a as THREE.InterleavedBufferAttribute).data.stride : a.itemSize;
+  const off = inter ? (a as THREE.InterleavedBufferAttribute).offset : 0;
+  // three.js's denormalize, by the array's type: 0 leaves the value as it is.
+  let div = 0;
+  let signed = false;
+  if (a.normalized) {
+    const C = arr.constructor;
+    if (C === Uint32Array) div = 4294967295.0;
+    else if (C === Uint16Array) div = 65535.0;
+    else if (C === Uint8Array) div = 255.0;
+    else if (C === Int32Array) [div, signed] = [2147483647.0, true];
+    else if (C === Int16Array) [div, signed] = [32767.0, true];
+    else if (C === Int8Array) [div, signed] = [127.0, true];
+    else if (C !== Float32Array) throw new Error("Invalid component type.");
+  }
+  for (let i = 0, o = 0; i < n; i++) {
+    const b = i * stride + off;
+    for (let c = 0; c < size; c++, o++) {
+      const x = arr[b + c]!;
+      out[o] = div === 0 ? x : signed ? Math.max(x / div, -1.0) : x / div;
+    }
+  }
+  return out;
+}
+
+/** Points `src` (x, y, z after each other) moved by `m` into `dst`, as Vector3.applyMatrix4 does; `dst` may be `src`. */
+export function applyMatrixInto(src: ArrayLike<number>, dst: Float32Array, m: THREE.Matrix4): void {
+  const e = m.elements;
+  for (let i = 0, l = dst.length; i < l; i += 3) {
+    const x = src[i]!;
+    const y = src[i + 1]!;
+    const z = src[i + 2]!;
+    const w = 1 / (e[3]! * x + e[7]! * y + e[11]! * z + e[15]!);
+    dst[i] = (e[0]! * x + e[4]! * y + e[8]! * z + e[12]!) * w;
+    dst[i + 1] = (e[1]! * x + e[5]! * y + e[9]! * z + e[13]!) * w;
+    dst[i + 2] = (e[2]! * x + e[6]! * y + e[10]! * z + e[14]!) * w;
+  }
+}
+
+/**
+ * Normals `src` turned by `k3` (a move's normal matrix, from Matrix3.getNormalMatrix) and made unit length into `dst`,
+ * as Vector3.applyMatrix3 then normalize do; `dst` may be `src`.
+ */
+export function applyNormalInto(src: ArrayLike<number>, dst: Float32Array, k3: THREE.Matrix3): void {
+  const k = k3.elements;
+  for (let i = 0, l = dst.length; i < l; i += 3) {
+    const x = src[i]!;
+    const y = src[i + 1]!;
+    const z = src[i + 2]!;
+    const nx = k[0]! * x + k[3]! * y + k[6]! * z;
+    const ny = k[1]! * x + k[4]! * y + k[7]! * z;
+    const nz = k[2]! * x + k[5]! * y + k[8]! * z;
+    const s = 1 / (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
+    dst[i] = nx * s;
+    dst[i + 1] = ny * s;
+    dst[i + 2] = nz * s;
+  }
+}
+
+/**
  * `g.applyMatrix4(m)` with three.js's per-vertex loops written out over the arrays: Vector3.applyMatrix4 for
  * positions, and applyMatrix3 then normalize for normals, in the same order, so the floats are the same. three.js
  * reads and writes every vertex through getX/getY/getZ and setXYZ instead. Tangents, and data that is not plain
@@ -50,33 +128,12 @@ export function transformGeometry(g: THREE.BufferGeometry, m: THREE.Matrix4): TH
   const p = g.attributes.position;
   const n = g.attributes.normal;
   if (!plain(p, 3) || (n !== undefined && !plain(n, 3)) || g.attributes.tangent !== undefined) return g.applyMatrix4(m);
-  const e = m.elements;
   const a = p.array as Float32Array;
-  for (let i = 0, l = p.count * 3; i < l; i += 3) {
-    const x = a[i]!;
-    const y = a[i + 1]!;
-    const z = a[i + 2]!;
-    const w = 1 / (e[3]! * x + e[7]! * y + e[11]! * z + e[15]!);
-    a[i] = (e[0]! * x + e[4]! * y + e[8]! * z + e[12]!) * w;
-    a[i + 1] = (e[1]! * x + e[5]! * y + e[9]! * z + e[13]!) * w;
-    a[i + 2] = (e[2]! * x + e[6]! * y + e[10]! * z + e[14]!) * w;
-  }
+  applyMatrixInto(a, a, m);
   p.needsUpdate = true;
   if (n !== undefined) {
-    const k = normalM.getNormalMatrix(m).elements;
     const b = n.array as Float32Array;
-    for (let i = 0, l = n.count * 3; i < l; i += 3) {
-      const x = b[i]!;
-      const y = b[i + 1]!;
-      const z = b[i + 2]!;
-      const nx = k[0]! * x + k[3]! * y + k[6]! * z;
-      const ny = k[1]! * x + k[4]! * y + k[7]! * z;
-      const nz = k[2]! * x + k[5]! * y + k[8]! * z;
-      const s = 1 / (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
-      b[i] = nx * s;
-      b[i + 1] = ny * s;
-      b[i + 2] = nz * s;
-    }
+    applyNormalInto(b, b, normalM.getNormalMatrix(m));
     n.needsUpdate = true;
   }
   if (g.boundingBox !== null) g.computeBoundingBox();

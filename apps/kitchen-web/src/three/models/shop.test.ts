@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { boundSphere, boxUVs, transformGeometry } from "./shop";
+import { applyMatrixInto, applyNormalInto, attributeValues, boundSphere, boxUVs, transformGeometry } from "./shop";
 
 // The shop's fast paths must give three's own results to the bit: every float of positions, normals, UVs and
 // bounding spheres, signed zeros included.
@@ -156,4 +156,70 @@ describe("shop fast paths", () => {
       }
     }
   });
+
+  // The kinds of attribute a glTF file can hand three.js: every array type, normalised or not, plain or interleaved.
+  const TYPES = [Float32Array, Uint32Array, Uint16Array, Uint8Array, Int32Array, Int16Array, Int8Array] as const;
+  function fill(T: (typeof TYPES)[number], n: number): ArrayLike<number> & { [i: number]: number } {
+    const a = new T(n);
+    const lo = T === Float32Array ? -3 : T === Uint32Array || T === Uint16Array || T === Uint8Array ? 0 : -(2 ** (8 * T.BYTES_PER_ELEMENT - 1));
+    const hi = T === Float32Array ? 3 : T === Uint32Array || T === Uint16Array || T === Uint8Array ? 2 ** (8 * T.BYTES_PER_ELEMENT) - 1 : 2 ** (8 * T.BYTES_PER_ELEMENT - 1) - 1;
+    let r = 12345;
+    for (let i = 0; i < n; i++) {
+      r = (Math.imul(r, 1103515245) + 12345) >>> 0;
+      // The ends of the range, zero, and values between.
+      a[i] = i % 7 === 0 ? lo : i % 7 === 1 ? hi : i % 7 === 2 ? 0 : T === Float32Array ? lo + (r / 2 ** 32) * (hi - lo) : Math.floor(lo + (r / 2 ** 32) * (hi - lo + 1));
+    }
+    return a;
+  }
+  function attributes(T: (typeof TYPES)[number], itemSize: number, normalized: boolean): [string, THREE.BufferAttribute | THREE.InterleavedBufferAttribute][] {
+    const count = 53;
+    const plainA = new THREE.BufferAttribute(fill(T, count * itemSize) as THREE.TypedArray, itemSize, normalized);
+    // Interleaved: two attributes in one buffer, this one second, with a spare component after it.
+    const stride = itemSize + 3;
+    const buf = new THREE.InterleavedBuffer(fill(T, count * stride) as THREE.TypedArray, stride);
+    const inter = new THREE.InterleavedBufferAttribute(buf, itemSize, 2, normalized);
+    return [
+      ["plain", plainA],
+      ["interleaved", inter],
+    ];
+  }
+
+  test("attributeValues reads as three's accessors do", () => {
+    const get = (a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, i: number, c: number) => [a.getX(i), a.getY(i), a.getZ(i), a.getW(i)][c]!;
+    for (const T of TYPES)
+      for (const normalized of [false, true])
+        for (const itemSize of [1, 2, 3, 4])
+          for (const [kind, a] of attributes(T, itemSize, normalized))
+            for (let size = 1; size <= itemSize; size++) {
+              const v = attributeValues(a, size);
+              const ref: number[] = [];
+              for (let i = 0; i < a.count; i++) for (let c = 0; c < size; c++) ref.push(get(a, i, c));
+              expect(same(v, ref), `${T.name} ${normalized ? "normalised" : "raw"} ${kind} itemSize ${itemSize} size ${size}`).toBe(true);
+            }
+    const half = new THREE.Float16BufferAttribute(new Float32Array([0.5, -1.25, 3, 1e-3, 65504, -0]), 3);
+    expect(same(attributeValues(half, 3), [half.getX(0), half.getY(0), half.getZ(0), half.getX(1), half.getY(1), half.getZ(1)]), "half floats").toBe(true);
+    // Types three.js cannot denormalise are refused, as three.js refuses them.
+    const odd = new THREE.BufferAttribute(new Float64Array(6), 3, true);
+    expect(() => odd.getX(0)).toThrow("Invalid component type.");
+    expect(() => attributeValues(odd, 3)).toThrow("Invalid component type.");
+  });
+
+  test("applyMatrixInto and applyNormalInto match Vector3 over quantized data", () => {
+    const v = new THREE.Vector3();
+    const k = new THREE.Matrix3();
+    for (const T of [Float32Array, Int16Array, Int8Array, Uint16Array] as const)
+      for (const [kind, a] of attributes(T, 3, T !== Float32Array))
+        for (const [mn, m] of matrices()) {
+          const ref = new Float32Array(a.count * 3);
+          for (let i = 0; i < a.count; i++) v.fromBufferAttribute(a, i).applyMatrix4(m).toArray(ref, i * 3);
+          const out = new Float32Array(a.count * 3);
+          applyMatrixInto(attributeValues(a, 3), out, m);
+          expect(same(out, ref), `${T.name} ${kind} × ${mn}: points`).toBe(true);
+          k.getNormalMatrix(m);
+          for (let i = 0; i < a.count; i++) v.fromBufferAttribute(a, i).applyMatrix3(k).normalize().toArray(ref, i * 3);
+          applyNormalInto(attributeValues(a, 3), out, k);
+          expect(same(out, ref), `${T.name} ${kind} × ${mn}: normals`).toBe(true);
+        }
+  });
 });
+
