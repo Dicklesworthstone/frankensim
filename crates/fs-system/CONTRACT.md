@@ -107,6 +107,12 @@ constructors:
   the cell its one `TemperatureSource` names, as that cell is at the start
   of each step (lagged feedback). A partial or two-model shift, a shift on a
   `viscous-bushing` card and a network of shifted and unshifted bushings are
+  refused by name. A relaxation bushing may hold a force and couple on its
+  second body, in its first body's axes (`DriveFrame::MaterialFirst`): one
+  constant source on each held component, the bushing's ports `drive_x` ..
+  `drive_z` (N) and `couple_x` .. `couple_z` (N m), any other component 0.
+  A held force on a viscous bushing or film, a history that is not
+  constant, a source in other units and two sources on one component are
   refused by name.
 - `owners::thermal`: thermal solids whose material card names a registered
   caloric law lower to the cells of one fs-thermal `ThermalTimeline`. The

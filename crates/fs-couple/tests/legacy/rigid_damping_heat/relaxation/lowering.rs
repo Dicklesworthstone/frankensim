@@ -7,7 +7,9 @@
 //! routes send 0.7 and 0.2 of its heat to the cells. Fixture values; not a
 //! seed-dataset authority. With the module's Arrhenius shift on the card and
 //! cell 0 as its `TemperatureSource`, against `memory_graph` with that shift
-//! on cell 0's published temperature.
+//! on cell 0's published temperature. With bushing0 holding 0.7 N or -0.7 N
+//! on x (a constant source on its `drive_x`), against `memory_graph` with
+//! that held force.
 
 use super::*;
 use crate::graph::lowering::{
@@ -20,7 +22,8 @@ use fs_material::visco::temperature::TemperatureShiftModel;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::ParameterKey;
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftAssemblyInput, DraftInterfaceKind, TimeScheme,
+    DraftAssembly, DraftAssemblyInput, DraftInterfaceKind, SourceDecl, SourceTarget, TimeHistory,
+    TimeScheme,
 };
 use fs_scenario::{EntityDeclaration, InterfacePair, Scenario};
 use fs_system::lowering::Observed;
@@ -37,6 +40,7 @@ const STIFFNESS: Dims = Dims([0, 1, -2, 0, 0, 0]);
 const TORSIONAL_STIFFNESS: Dims = Dims([2, 1, -2, 0, 0, 0]);
 const KELVIN: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const MOLAR_ENERGY: Dims = Dims([2, 1, -2, 0, 0, -1]);
+const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
 /// The branch's elastic displacement [m]: 1.3 times it is the fixture's
 /// 0.6 sqrt(J), to the bit.
 const DISPLACEMENT_M: f64 = 0.461_538_461_538_461_5;
@@ -166,28 +170,60 @@ fn memory_pair(
     (admit(input), cards)
 }
 
+/// `pair` with bushing0 holding each `(port, history)` as a source.
+fn holding(
+    (draft, cards): (DraftAssembly, CardStore),
+    held: &[(&str, TimeHistory)],
+) -> (DraftAssembly, CardStore) {
+    let mut input = draft.input().clone();
+    let entity = input.interfaces[0].entity;
+    for (n, (port, history)) in held.iter().enumerate() {
+        input.sources.push(SourceDecl {
+            name: format!("hold{n}"),
+            target: SourceTarget::Port {
+                entity,
+                port: (*port).to_owned(),
+            },
+            history: history.clone(),
+        });
+    }
+    (admit(input), cards)
+}
+
 #[test]
 fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
     // M1 (MB 39274): the factor sqrt(1.69) is 1.3, and 1.3 times the declared
     // displacement is the fixture's 0.6 sqrt(J), each to the bit.
     assert_eq!(1.69_f64.sqrt().to_bits(), 1.3_f64.to_bits());
     assert_eq!((1.3 * DISPLACEMENT_M).to_bits(), 0.6_f64.to_bits());
-    steps_with_the_memory_graph(None);
+    steps_with_the_memory_graph(None, None);
 }
 
 #[test]
 fn a_shifted_memory_draft_follows_its_cell_as_the_shifted_memory_graph_bit_for_bit() {
-    steps_with_the_memory_graph(Some(arrhenius(300.0, 360.0)));
+    steps_with_the_memory_graph(Some(arrhenius(300.0, 360.0)), None);
+}
+
+#[test]
+fn a_held_memory_draft_steps_with_the_driven_memory_graph_bit_for_bit() {
+    // The oracle's held forces (`HELD`), then 0.7 N with the shift.
+    for force in [0.7, -0.7] {
+        steps_with_the_memory_graph(None, Some(force));
+    }
+    steps_with_the_memory_graph(Some(arrhenius(300.0, 360.0)), Some(0.7));
 }
 
 /// The memory pair, with `shift` on its card and cell 0 as its temperature
-/// source, against `memory_graph` with that shift and cell 0 published.
-fn steps_with_the_memory_graph(shift: Option<TemperatureShift>) {
+/// source and bushing0 holding `held` [N] on x, against `memory_graph` with
+/// that shift, cell 0 published and that held force.
+fn steps_with_the_memory_graph(shift: Option<TemperatureShift>, held: Option<f64>) {
     let keys = shift.as_ref().map(shift_keys).unwrap_or_default();
     let sources = usize::from(shift.is_some());
-    let (draft, cards) = memory_pair(displacement(DISPLACEMENT_M), &keys, sources);
+    let pair = memory_pair(displacement(DISPLACEMENT_M), &keys, sources);
+    let force = held.map(|f| ("drive_x", TimeHistory::Constant(QtyAny::new(f, FORCE))));
+    let (draft, cards) = holding(pair, force.as_slice());
     // The oracle takes the bodies' mass properties from the receipts, as 1b's.
-    let mut fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, 0.0);
+    let mut fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, held.unwrap_or(0.0));
     let mass: [MassProperties; 2] = lowered_mass(&lower(&draft, &cards));
     fixture.bodies.properties[..2].copy_from_slice(&mass);
     let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
@@ -199,13 +235,13 @@ fn steps_with_the_memory_graph(shift: Option<TemperatureShift>) {
         (TimeScheme::BackwardEuler, 0.3),
         (TimeScheme::Sdirk2, 0.3),
     ] {
-        let case = format!("{scheme:?} to {target_s} s");
+        let case = format!("{scheme:?} to {target_s} s, held {held:?}");
         let draft = under(&draft, scheme, scheme != TimeScheme::Explicit);
         let (mut timeline, heat) = oracle_timeline(laws, scheme);
         if shift.is_some() {
             timeline = timeline.publishing(vec![CellId(0)]).unwrap();
         }
-        let graph = memory_graph(&fixture, controls.mechanical, timeline, &heat, None, shift);
+        let graph = memory_graph(&fixture, controls.mechanical, timeline, &heat, held, shift);
         let (mut oracle, network, cells) = graph;
         let mut lowered = lower(&draft, &cards);
         let nodes = ["relaxation-network", "thermal-timeline"].map(|name| lowered.node_map[name]);
@@ -253,6 +289,15 @@ fn steps_with_the_memory_graph(shift: Option<TemperatureShift>) {
                 "{case}: {name}"
             );
         }
+        // The actuator's work entered through its boundary, as the oracle's.
+        let drive = |ledger: &Ledger, node: &str| {
+            let port = format!("{node}.drive0");
+            let account = ledger.boundaries.iter().find(|a| a.port == port);
+            account.map(|account| account.energy_in_j.value().to_bits())
+        };
+        let work = drive(got, "relaxation-network");
+        assert_eq!(work, drive(want, "network"), "{case}: the actuator's work");
+        assert_eq!(work.is_some(), held.is_some(), "{case}: an actuator");
         // The residual is a sum of accounts that cancel: within 1e-12 of the
         // dissipated energy, as in 1b.
         let residual = got.energy_residual_j();
@@ -399,6 +444,34 @@ fn shift_keys_on_a_viscous_card_or_in_a_partly_shifted_network_refuse() {
     );
     let why = refusal((admit(input), cards));
     assert!(why.contains("all shifted or none"), "{why}");
+}
+
+#[test]
+fn a_held_force_on_a_viscous_bushing_not_constant_in_other_units_or_twice_refuses() {
+    let force = |f| TimeHistory::Constant(QtyAny::new(f, FORCE));
+    let harmonic = TimeHistory::Harmonic {
+        amplitude: QtyAny::new(0.7, FORCE),
+        frequency: QtyAny::new(2.0, Dims([0, 0, -1, 0, 0, 0])),
+        phase: QtyAny::dimensionless(0.0),
+        offset: QtyAny::new(0.0, FORCE),
+    };
+    let couple = TimeHistory::Constant(QtyAny::new(0.7, TORSIONAL_STIFFNESS));
+    let memory = || memory_pair(displacement(DISPLACEMENT_M), &[], 0);
+    // 1b's pairing: both bushings on viscous cards.
+    let viscous = pairing(fixture_cards(&laws()), 0.0);
+    let twice = vec![force(0.7), force(0.1)];
+    for (pair, held, named) in [
+        (viscous, vec![force(0.7)], "needs a `relaxation-bushing`"),
+        (memory(), vec![harmonic], "a held force is constant"),
+        (memory(), vec![couple], "`drive_x` holds a force [N]"),
+        (memory(), twice, "a bushing holds one source on `drive_x`"),
+    ] {
+        let held: Vec<_> = held.into_iter().map(|h| ("drive_x", h)).collect();
+        // The last source is the one refused.
+        let item = format!("refusal for source:hold{}: ", held.len() - 1);
+        let why = refusal(holding(pair, &held));
+        assert!(why.contains(&item) && why.contains(named), "{why}");
+    }
 }
 
 #[test]

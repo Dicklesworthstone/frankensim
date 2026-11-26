@@ -32,6 +32,12 @@
 //! and `wlf_c2` (1, K). It scales the Kelvin viscosity and branch times at the
 //! start-of-step temperature of the cell its one `TemperatureSource` names. A
 //! network's relaxation bushings are all shifted or none.
+//!
+//! A relaxation bushing may hold a force and couple on its second body, in
+//! its first body's axes: a constant source on each component it holds, the
+//! bushing's ports `drive_x`, `drive_y`, `drive_z` (N) and `couple_x`,
+//! `couple_y`, `couple_z` (N m), any other component 0. The first body takes
+//! the opposite wrench.
 
 use core::f64::consts::PI;
 use std::rc::Rc;
@@ -39,7 +45,7 @@ use std::rc::Rc;
 use fs_blake3::DomainHasher;
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 use fs_mbd::component::network::ViscousNetwork;
-use fs_mbd::component::relaxation::{RelaxationNetwork, RelaxationState, ShiftLaw};
+use fs_mbd::component::relaxation::{DriveFrame, RelaxationNetwork, RelaxationState, ShiftLaw};
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::driven::DrivenViscousNetworkLimits;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::relaxation::{
@@ -55,11 +61,12 @@ use fs_mbd::spatial_loads::internal_motion::viscous::network::{
     ViscousNetworkMotionControls, relaxation::RelaxationNetworkMotionControls,
 };
 use fs_mbd::{Gravity, MassProperties, RigidBodyState, Vec3};
+use fs_ports::PortKind;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::ParameterKey;
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
-    DraftPartKind, PrimitiveShape, ThirdBodyDecl,
+    DraftPartKind, PrimitiveShape, SourceTarget, ThirdBodyDecl, TimeHistory,
 };
 use fs_scenario::entity::EntityId;
 
@@ -70,8 +77,9 @@ use super::{
 use crate::lowering::{
     AREA_DIMS, CardStore, DAMPING_DIMS, GroupLoweringContext, GroupSelection, INERTIA_DIMS,
     InterfaceCardEntry, LENGTH_DIMS, LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS,
-    Observed, STIFFNESS_DIMS, TEMPERATURE_DIMS, TIME_DIMS, TORSIONAL_DAMPING_DIMS,
-    TORSIONAL_STIFFNESS_DIMS, VOLUME_DIMS, geometry_volume_m3,
+    Observed, STIFFNESS_DIMS, SourceLoweringReceipt, TEMPERATURE_DIMS, TIME_DIMS,
+    TORSIONAL_DAMPING_DIMS, TORSIONAL_STIFFNESS_DIMS, VOLUME_DIMS, geometry_volume_m3,
+    record_time_history_provenance,
 };
 use crate::{NodeId, RouteTemperature, System};
 
@@ -88,6 +96,9 @@ type Bank = (
 );
 /// Each connector's bank.
 type Memory = Vec<Bank>;
+/// A connector's held force and couple in its first body's axes, or `None`
+/// when it holds nothing.
+type Held = Option<[f64; 6]>;
 /// A temperature shift's band: its reference, lowest and highest [K].
 const SHIFT_BAND: [&str; 3] = [
     "shift_reference_temperature",
@@ -118,6 +129,11 @@ const BRANCH: [(&str, Dims, Dims); 6] = [
     ("ry", TORSIONAL_STIFFNESS_DIMS, Dims::NONE),
     ("rz", TORSIONAL_STIFFNESS_DIMS, Dims::NONE),
 ];
+/// A held wrench's source ports, in the actuator's order: the force (N) on
+/// x, y and z, then the couple (N m).
+const HELD: [&str; 6] = [
+    "drive_x", "drive_y", "drive_z", "couple_x", "couple_y", "couple_z",
+];
 /// Working memory one network step may hold: a resource cap, not physics.
 const LIVE_BYTES: usize = 64 << 20;
 
@@ -140,6 +156,16 @@ pub(crate) fn select(
         };
         selection.parts.extend([a, b]);
     }
+    let held = |target: &SourceTarget| match target {
+        SourceTarget::Port { entity, port } => {
+            let bushing = |&index: &usize| input.interfaces[index].entity == *entity;
+            HELD.contains(&port.as_str()) && selection.interfaces.iter().any(bushing)
+        }
+        SourceTarget::Parameter(_) => false,
+    };
+    let sources = input.sources.iter().enumerate();
+    let sources = sources.filter(|(_, source)| held(&source.target));
+    selection.sources = sources.map(|(index, _)| index).collect();
     selection.parts.sort_unstable();
     selection.parts.dedup();
     let found = !selection.parts.is_empty();
@@ -228,8 +254,9 @@ pub(crate) fn lower(
         gravity.map_err(|err| Scoped::new("environment", "gravity").invalid(format!("{err:?}")))?;
     let controls = controls(tolerance, properties.len(), links.len(), work);
     let entities: Vec<EntityId> = parts.iter().map(|&p| input.parts[p].entity).collect();
-    let (bodies, bank) = ((properties, states), memory.then_some(bank));
-    let node = add_network(graph, &entities, bodies, (links, bank), (gravity, controls))?;
+    let held: &[_] = &holds(ctx, memory, &mut out)?;
+    let (bodies, bank) = ((properties, states), (links, memory.then_some(bank), held));
+    let node = add_network(graph, &entities, bodies, bank, (gravity, controls))?;
     for &entity in &entities[1..] {
         graph.entity_nodes.entry(entity).or_default().push(node);
     }
@@ -237,17 +264,70 @@ pub(crate) fn lower(
         let force = graph.port(node, &format!("force{body}"))?;
         graph.bind_zero_boundary(force);
     }
-    bushing_ports(ctx, graph, node)?;
+    bushing_ports(ctx, graph, (node, held))?;
     Ok(out)
+}
+
+/// Each connector's held force and couple in its first body's axes, from
+/// the constant sources on its bushing's ports (any other component 0), or
+/// `None` for a connector that holds nothing; one receipt per source.
+fn holds(
+    ctx: &GroupLoweringContext<'_>,
+    memory: bool,
+    out: &mut LoweredGroupOutput,
+) -> Result<Vec<Held>, LoweringError> {
+    let input = ctx.draft.input();
+    let interfaces = &ctx.selection.interfaces;
+    let mut held: Vec<Option<[Option<f64>; 6]>> = vec![None; interfaces.len()];
+    for &index in &ctx.selection.sources {
+        let source = &input.sources[index];
+        let mut it = Scoped::new("source", &source.name);
+        let SourceTarget::Port { entity, port } = &source.target else {
+            return Err(it.invalid("a held force targets a bushing's port"));
+        };
+        let bushing = |&i: &usize| input.interfaces[i].entity == *entity;
+        let link = interfaces.iter().position(bushing);
+        let (Some(link), Some(axis)) = (link, HELD.iter().position(|name| name == port)) else {
+            return Err(it.invalid("a held force targets a bushing's port"));
+        };
+        if !memory {
+            return Err(it.invalid("a held force needs a `relaxation-bushing` card"));
+        }
+        let TimeHistory::Constant(value) = &source.history else {
+            return Err(it.invalid("a held force is constant"));
+        };
+        let kind = [
+            PortKind::MechanicalForceVelocity,
+            PortKind::RotationalTorqueAngularVelocity,
+        ];
+        if value.dims != kind[axis / 3].canonical_effort_dimensions() {
+            let (what, unit) = [("a force", "N"), ("a couple", "N m")][axis / 3];
+            return Err(it.invalid(format!("`{port}` holds {what} [{unit}]")));
+        }
+        let wrench = held[link].get_or_insert([None; 6]);
+        if wrench[axis].replace(value.value).is_some() {
+            return Err(it.invalid(format!("a bushing holds one source on `{port}`")));
+        }
+        record_time_history_provenance(&it.item, &source.history, &mut it.r);
+        out.sources.push(SourceLoweringReceipt {
+            source_name: source.name.clone(),
+            target_description: format!("{}.{port}", entity.token()),
+            created_nodes: vec![RELAXATION.to_owned()],
+            parameter_sources: it.r.finish().1,
+        });
+    }
+    let zero = |wrench: [Option<f64>; 6]| wrench.map(|value| value.unwrap_or(0.0));
+    Ok(held.into_iter().map(|wrench| wrench.map(zero)).collect())
 }
 
 /// Each bushing's ports on its entity: `heat`, whose heat goes to
 /// `unallocated` when no loss route takes it, and, in a shifted network,
-/// `temperature`, which exactly one temperature source drives.
+/// `temperature`, which exactly one temperature source drives. A connector
+/// that holds a wrench holds it on its `drive<e>` and `couple<e>`.
 fn bushing_ports(
     ctx: &GroupLoweringContext<'_>,
     graph: &mut LoweringGraph,
-    node: NodeId,
+    (node, held): (NodeId, &[Held]),
 ) -> Result<(), LoweringError> {
     let input = ctx.draft.input();
     let ambient_k = input.environment.base.ambient_temperature.value;
@@ -255,6 +335,13 @@ fn bushing_ports(
         let bushing = input.interfaces[index].entity;
         let heat = graph.port(node, &format!("heat{link}"))?;
         graph.expose_port(bushing, "heat", heat);
+        if let Some([fx, fy, fz, cx, cy, cz]) = held[link] {
+            for (name, wrench) in [("drive", [fx, fy, fz]), ("couple", [cx, cy, cz])] {
+                let port = graph.port(node, &format!("{name}{link}"))?;
+                let hold = move |_: f64, _: f64, out: &mut [f64]| out.copy_from_slice(&wrench);
+                graph.builder_mut().boundary(port, Box::new(hold))?;
+            }
+        }
         let from = |route: &&DraftInterfaceDecl| {
             route_bushing(input, ctx.cards, route).is_some_and(|b| b.entity == bushing)
         };
@@ -287,7 +374,7 @@ fn add_network(
     graph: &mut LoweringGraph,
     entities: &[EntityId],
     (properties, states): (Vec<MassProperties>, Vec<RigidBodyState>),
-    (links, memory): (Vec<ViscousNetworkLink>, Option<Memory>),
+    (links, memory, held): (Vec<ViscousNetworkLink>, Option<Memory>, &[Held]),
     (gravity, controls): (Gravity, ViscousNetworkMotionControls),
 ) -> Result<NodeId, LoweringError> {
     let masses = properties.clone();
@@ -337,6 +424,10 @@ fn add_network(
         |err: &dyn core::fmt::Debug| Scoped::new("network", RELAXATION).invalid(format!("{err:?}"));
     let network = RelaxationNetwork::new(properties, links, gravity, controls);
     let mut network = network.map_err(|err| fail(&err))?;
+    for connector in (0..held.len()).filter(|&link| held[link].is_some()) {
+        let driven = network.driven(connector, DriveFrame::MaterialFirst);
+        network = driven.map_err(|err| fail(&err))?;
+    }
     if shifts.iter().any(Option::is_some) {
         let all: Option<Vec<TemperatureShift>> = shifts.into_iter().collect();
         let mixed = "a network's relaxation bushings are all shifted or none";
