@@ -489,7 +489,7 @@ pub struct ThirdBodyDecl {
 }
 
 /// Card-bound interface laws across mechanical, thermal, electrical, and power-port boundaries,
-/// and card-less heat routes.
+/// and card-less heat routes and shear films.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftInterfaceKind {
     /// Typed power-conjugate port schema.
@@ -533,6 +533,14 @@ pub enum DraftInterfaceKind {
     /// share of the heat dissipated at `feature_a` delivered to `feature_b`.
     HeatRoute {
         /// Explicit route state (e.g. the dimensionless `fraction`).
+        state: Vec<(ParameterKey, QtyAny)>,
+    },
+    /// A Newtonian shear film; no card, since its one measured property is
+    /// the viscosity on its third body's card.
+    ShearFilm {
+        /// The fluid, its film thickness and its query point.
+        third_body: ThirdBodyDecl,
+        /// Explicit film state (the wetted `area`).
         state: Vec<(ParameterKey, QtyAny)>,
     },
 }
@@ -1885,6 +1893,10 @@ impl DraftAssembly {
                     check_params(state, &format!("{scope}.state"))?;
                 }
                 DraftInterfaceKind::HeatRoute { state } => {
+                    check_params(state, &format!("{scope}.state"))?;
+                }
+                DraftInterfaceKind::ShearFilm { third_body, state } => {
+                    check_third_body(third_body, &scope)?;
                     check_params(state, &format!("{scope}.state"))?;
                 }
             }

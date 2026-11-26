@@ -64,6 +64,8 @@ pub const LOWERING_RECEIPT_SCHEMA: &str = "frankensim.lowering_receipt.v1";
 
 /// Dispatch family of a card-less [`DraftInterfaceKind::HeatRoute`].
 pub const HEAT_ROUTE_FAMILY: &str = "heat-route";
+/// Dispatch family of a card-less [`DraftInterfaceKind::ShearFilm`].
+pub const SHEAR_FILM_FAMILY: &str = "shear-film";
 
 /// BLAKE3 domain for parametric geometry fingerprints minted during lowering.
 pub const LOWERING_GEOMETRY_HASH_DOMAIN: &str = "org.frankensim.fs-system.lowering.geometry.v1";
@@ -269,7 +271,9 @@ impl From<&DraftInterfaceKind> for InterfaceKindTag {
     fn from(kind: &DraftInterfaceKind) -> Self {
         match kind {
             DraftInterfaceKind::PowerPort { .. } => Self::PowerPort,
-            DraftInterfaceKind::MechanicalContact { .. } => Self::MechanicalContact,
+            DraftInterfaceKind::MechanicalContact { .. } | DraftInterfaceKind::ShearFilm { .. } => {
+                Self::MechanicalContact
+            }
             DraftInterfaceKind::Glue { .. } => Self::Glue,
             DraftInterfaceKind::ThermalContact { .. } => Self::ThermalContact,
             DraftInterfaceKind::ElectricalContact { .. } => Self::ElectricalContact,
@@ -2355,7 +2359,7 @@ pub enum ResolvedInterfaceCard<'a> {
     System(&'a InterfaceCardEntry),
     /// Power-port schema card entry.
     PowerPort(&'a PowerPortSchemaCard),
-    /// No card: a [`DraftInterfaceKind::HeatRoute`].
+    /// No card: a [`DraftInterfaceKind::HeatRoute`] or [`DraftInterfaceKind::ShearFilm`].
     None,
 }
 
@@ -3114,6 +3118,12 @@ impl LoweringRegistry {
                         HEAT_ROUTE_FAMILY.to_owned(),
                         ResolvedInterfaceCard::None,
                         None,
+                    ),
+                    DraftInterfaceKind::ShearFilm { third_body, .. } => (
+                        None,
+                        SHEAR_FILM_FAMILY.to_owned(),
+                        ResolvedInterfaceCard::None,
+                        Some(third_body.material_card),
                     ),
                 };
             let key = InterfaceLoweringKey::new(kind_tag, card_family.clone());

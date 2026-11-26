@@ -13,6 +13,7 @@
 //! authority.
 
 use super::*;
+use core::f64::consts::PI;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -25,7 +26,7 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
     DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
     FidelityPolicy, FidelityRung, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget,
-    StepPolicy, TimeHistory, TimePlan,
+    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
@@ -610,6 +611,54 @@ fn the_product_laws_band_refuses_a_cell_outside_it_and_never_clamps() {
         (0..1000).find_map(|_| lowered.system.step(0.5 - lowered.system.time_s(), cx).err())
     });
     assert!(refused.is_some() && lowered.system.time_s() < 0.5);
+}
+
+#[test]
+fn a_shear_film_of_mu_a_over_h_steps_as_its_card_bushing_bit_for_bit() {
+    // mu A / h = 0.175 * 2 / 0.5 = 0.7 to the bit, bushing0's card value. The
+    // bodies move along x alone, so the film's y and twist terms meet no slip.
+    let (draft, mut cards) = pairing(fixture_cards(static_laws()), 2.0);
+    let card = lower(&draft, &cards);
+    let viscosity = ("dynamic_viscosity", 0.175, Dims([-1, 1, -1, 0, 0, 0]));
+    let fluid = cards.insert_material(material(&[viscosity], Vec::new()));
+    let at = |name, value, dims| vec![(ParameterKey::new(name, dims), QtyAny::new(value, dims))];
+    let third_body = ThirdBodyDecl {
+        material_card: fluid,
+        film_thickness: QtyAny::new(0.5, LENGTH),
+        query_point: at("T", 300.0, TEMPERATURE),
+    };
+    let (mut input, state) = (draft.input().clone(), at("area", 2.0, AREA));
+    input.interfaces[0].kind = DraftInterfaceKind::ShearFilm { third_body, state };
+    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+    let film = lower(&DraftAssembly::admit(input, &scenario).unwrap(), &cards);
+    let r = &film.receipt.interfaces[0];
+    assert_eq!((r.card_hash, r.third_body_card), (None, Some(fluid)));
+    assert_eq!(r.card_family, "shear-film");
+    let sources = &r.parameter_sources;
+    let source = |name: &str| sources.iter().find(|p| p.parameter == name).unwrap();
+    assert_eq!(source("damping_x").value.to_bits(), 0.7_f64.to_bits());
+    let twist = 0.175 * 2.0 * 2.0 / (2.0 * PI * 0.5); // mu A^2 / (2 pi h), by hand
+    assert!((source("damping_rz").value / twist - 1.0).abs() <= 1e-15);
+    let ParameterSource::DeclaredAssemblyField { field, .. } = &source("damping_z").source else {
+        panic!("{:?}", source("damping_z"));
+    };
+    assert_eq!(field, "absent: squeeze is not linear");
+    let names = ["viscous-network", "thermal-timeline"];
+    let [film_n, card_n] = [&film, &card].map(|l| names.map(|k| l.node_map[k]));
+    let (mut film, mut card) = (film.system, card.system);
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        while card.time_s() < 0.5 {
+            let theirs = card.step(0.5 - card.time_s(), cx).unwrap().dt_s;
+            let step = film.step(0.5 - film.time_s(), cx).unwrap().dt_s;
+            assert_eq!(step.to_bits(), theirs.to_bits());
+            assert_eq!(bodies_of(&film, film_n[0]), bodies_of(&card, card_n[0]));
+            let cells = temperature_bits(&card, card_n[1]);
+            assert_eq!(temperature_bits(&film, film_n[1]), cells);
+        }
+    });
+    let dissipated = node(card.ledger(), "viscous-network").dissipated_j.value();
+    assert!(dissipated > 0.5, "enough heat to compare: {dissipated} J");
 }
 
 #[test]

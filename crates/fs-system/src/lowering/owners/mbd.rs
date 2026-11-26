@@ -1,16 +1,22 @@
-//! The rigid bodies joined by `viscous-bushing` interfaces, lowered to one
-//! `fs_mbd` `ViscousNetwork`.
+//! The rigid bodies joined by `viscous-bushing` interfaces or shear films,
+//! lowered to one `fs_mbd` `ViscousNetwork`.
 //!
 //! A body's mass and principal inertia come from its primitive geometry and
 //! the density on its card, about its centroid, which is its body origin;
 //! its pose and motion are its declared initial state. A bushing's damping
 //! is the diagonal SI form on its card (`damping_x`, `damping_y`,
 //! `damping_z` in N s/m; `damping_rx`, `damping_ry`, `damping_rz` in
-//! N m s/rad), acting at both bodies' origins. The network checks impulse,
+//! N m s/rad), acting at both bodies' origins. A card-less shear film's
+//! normal is the bushing's z axis: `mu A / h` on x and y, `mu J / h` on rz
+//! with `J = A^2 / (2 pi)` (a full disk), and 0 on z, rx and ry, since
+//! squeeze is not linear. `mu` is its third body's at the declared query
+//! temperature and stays there (one-way coupling). The network checks impulse,
 //! work and speed to the bodies' shared absolute tolerance, relaxes at most
 //! their `max_work_units` pairs, and takes one source substep per step. Its
 //! body forces are bound to zero; a bushing's heat goes where its loss
 //! routes send it, all of it to `unallocated` when it has none.
+
+use core::f64::consts::PI;
 
 use fs_mbd::component::network::ViscousNetwork;
 use fs_mbd::spatial_loads::internal_impulse::InternalWrenchImpulseControls;
@@ -23,17 +29,19 @@ use fs_mbd::spatial_loads::internal_impulse::viscous::{
 use fs_mbd::spatial_loads::internal_motion::viscous::network::ViscousNetworkMotionControls;
 use fs_mbd::{Gravity, MassProperties, RigidBodyState, Vec3};
 use fs_qty::{Dims, QtyAny};
+use fs_scenario::assembly::ParameterKey;
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftGeometrySource, DraftPartDecl, DraftPartKind, PrimitiveShape,
+    DraftAssembly, DraftGeometrySource, DraftInterfaceKind, DraftPartDecl, DraftPartKind,
+    PrimitiveShape, ThirdBodyDecl,
 };
 
 use super::{
-    Scoped, VISCOUS_BUSHING_FAMILY, family_entry, of_family, owning_part, route_bushing,
+    Scoped, State, VISCOUS_BUSHING_FAMILY, family_entry, is_bushing, owning_part, route_bushing,
     route_state, slot, unallocated,
 };
 use crate::RouteTemperature;
 use crate::lowering::{
-    CardStore, DAMPING_DIMS, GroupLoweringContext, GroupSelection, INERTIA_DIMS,
+    AREA_DIMS, CardStore, DAMPING_DIMS, GroupLoweringContext, GroupSelection, INERTIA_DIMS,
     LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS, TORSIONAL_DAMPING_DIMS,
     VOLUME_DIMS, geometry_volume_m3,
 };
@@ -42,6 +50,8 @@ use crate::lowering::{
 pub const GROUP: &str = "owners.mbd.viscous-network";
 const NETWORK: &str = "viscous-network";
 const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
+const VISCOSITY: Dims = Dims([-1, 1, -1, 0, 0, 0]);
+const POLAR_MOMENT: Dims = Dims([4, 0, 0, 0, 0, 0]);
 /// A bushing card's diagonal coefficients, in the matrix's order.
 const DAMPING: [(&str, Dims); 6] = [
     ("damping_x", DAMPING_DIMS),
@@ -60,7 +70,10 @@ pub(crate) fn select(
     cards: &CardStore,
 ) -> Result<Vec<GroupSelection>, LoweringError> {
     let input = draft.input();
-    let mut selection = of_family(draft, cards, VISCOUS_BUSHING_FAMILY);
+    let mut selection = GroupSelection::default();
+    let bushings = input.interfaces.iter().enumerate();
+    let bushings = bushings.filter(|(_, iface)| is_bushing(cards, iface));
+    selection.interfaces = bushings.map(|(index, _)| index).collect();
     for &index in &selection.interfaces {
         let iface = &input.interfaces[index];
         let ends = [iface.feature_a, iface.feature_b].map(|end| owning_part(input, end));
@@ -116,11 +129,15 @@ pub(crate) fn lower(
     for &index in &ctx.selection.interfaces {
         let iface = &input.interfaces[index];
         let mut it = Scoped::new("interface", &iface.name);
-        let card = family_entry(ctx.cards, iface, VISCOUS_BUSHING_FAMILY);
-        let card = card.ok_or_else(|| it.invalid("not a viscous-bushing interface"))?;
         let mut coefficients = [[0.0; 6]; 6];
-        for (axis, (name, dims)) in DAMPING.into_iter().enumerate() {
-            coefficients[axis][axis] = it.interface(ctx, card, name, dims)?;
+        if let DraftInterfaceKind::ShearFilm { third_body, state } = &iface.kind {
+            film(ctx, &mut it, (third_body, state), &mut coefficients)?;
+        } else {
+            let card = family_entry(ctx.cards, iface, VISCOUS_BUSHING_FAMILY);
+            let card = card.ok_or_else(|| it.invalid("not a viscous-bushing interface"))?;
+            for (axis, (name, dims)) in DAMPING.into_iter().enumerate() {
+                coefficients[axis][axis] = it.interface(ctx, card, name, dims)?;
+            }
         }
         // The card's coefficients are SI, so the coordinates are SI units.
         let scales = BushingCoordinateScales {
@@ -206,6 +223,37 @@ fn controls(
             maximum_live_bytes: LIVE_BYTES,
         },
     }
+}
+
+/// A shear film's diagonal damping, each value receipted with its formula or reason.
+fn film(
+    ctx: &GroupLoweringContext<'_>,
+    it: &mut Scoped,
+    (fluid, state): (&ThirdBodyDecl, State<'_>),
+    coefficients: &mut [[f64; 6]; 6],
+) -> Result<(), LoweringError> {
+    let mu = it.third_body(ctx, fluid, "dynamic_viscosity", VISCOSITY)?;
+    for (key, q) in &fluid.query_point {
+        let held = "held: mu does not follow the film's temperature (one-way)";
+        it.r.record_declared_field(&key.name, q.value, q.dims, &it.item, held);
+    }
+    it.declare("third_body.film_thickness", fluid.film_thickness);
+    let wetted = ParameterKey::new("area", AREA_DIMS);
+    let area = state.iter().find(|(k, _)| *k == wetted).map(|&(_, q)| q);
+    let area = area.ok_or_else(|| it.invalid("a film needs `area`"))?;
+    it.declare("state.area", area);
+    let (a, h) = (area.value, fluid.film_thickness.value);
+    let (j, disk) = (a * a / (2.0 * PI), "disk: J = A^2 / (2 pi)");
+    it.r.record_declared_field("polar_moment", j, POLAR_MOMENT, &it.item, disk);
+    let shear = (mu * a / h, "mu A / h");
+    let twist = (mu * j / h, "mu J / h");
+    let none = (0.0, "absent: squeeze is not linear");
+    let axes = [shear, shear, none, none, none, twist];
+    for (axis, ((name, dims), (c, why))) in DAMPING.into_iter().zip(axes).enumerate() {
+        it.r.record_declared_field(name, c, dims, &it.item, why);
+        coefficients[axis][axis] = c;
+    }
+    Ok(())
 }
 
 /// Mass and principal inertia about the centroid from the part's primitive

@@ -80,8 +80,14 @@ With `slices`, `lowering::owners::register_owner_defaults` adds three groups.
 They lower into the physics owners' own Components through those owners' public
 constructors:
 
-- `owners::mbd`: rigid bodies joined by `viscous-bushing` interfaces lower to
-  one fs-mbd `ViscousNetwork`.
+- `owners::mbd`: rigid bodies joined by `viscous-bushing` interfaces or
+  card-less `ShearFilm`s lower to one fs-mbd `ViscousNetwork`. A film's normal
+  is the bushing's z axis. Its damping is `mu A / h` on x and y, `mu J / h` on
+  rz with `J = A^2 / (2 pi)` (a full disk), and 0 on z, rx and ry, each
+  receipted with its reason. `mu` is read from the third body's card at the
+  declared query point and held there (one-way coupling). A film's receipt
+  has a null `card_hash`, family `shear-film`, and its fluid as
+  `third_body_card`.
 - `owners::thermal`: thermal solids whose material card names a registered
   caloric law lower to the cells of one fs-thermal `ThermalTimeline`. The
   card picks the path: a model-bearing card on a thermal-only `Solid` moves

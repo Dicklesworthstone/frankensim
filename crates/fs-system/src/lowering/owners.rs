@@ -2,7 +2,7 @@
 //! the physics owners' own Components, through their public constructors.
 //!
 //! - [`mbd`]: the rigid bodies joined by [`VISCOUS_BUSHING_FAMILY`]
-//!   interfaces lower to one `fs_mbd` `ViscousNetwork`.
+//!   interfaces or card-less `ShearFilm`s lower to one `fs_mbd` `ViscousNetwork`.
 //! - [`thermal`]: thermal solids whose material card names a registered
 //!   caloric law lower to the cells of one `fs_thermal` `ThermalTimeline`.
 //! - Loss routes: a card-less `HeatRoute` interface from a part that one
@@ -18,7 +18,7 @@ use fs_mbd::{Pose, UnitQuaternion, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftInitialState, DraftInterfaceDecl, DraftInterfaceKind,
-    DraftPartDecl,
+    DraftPartDecl, ThirdBodyDecl,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey};
 use fs_scenario::entity::{Entity, EntityId};
@@ -153,6 +153,19 @@ impl Scoped {
         self.checked(name, &q, dims)
     }
 
+    /// Property `name` of a third body's card at its query point, recorded.
+    pub(crate) fn third_body(
+        &mut self,
+        ctx: &GroupLoweringContext<'_>,
+        tb: &ThirdBodyDecl,
+        name: &str,
+        dims: Dims,
+    ) -> Result<f64, LoweringError> {
+        let (r, env) = (&mut self.r, query_env(ctx));
+        let (q, _) = r.query_third_body_property(&self.item, ctx.cards, tb, name, name, env)?;
+        self.checked(name, &q, dims)
+    }
+
     fn checked(&self, name: &str, q: &PropertySample, dims: Dims) -> Result<f64, LoweringError> {
         if q.dims == dims {
             return Ok(q.value);
@@ -244,8 +257,14 @@ pub(crate) fn route_state(iface: &DraftInterfaceDecl) -> Option<State<'_>> {
     }
 }
 
-/// The bushing a loss route draws from: the one viscous bushing that joins
-/// the part owning the route's `feature_a`.
+/// Whether `iface` is a bushing: a `viscous-bushing` card, or a shear film.
+pub(crate) fn is_bushing(cards: &CardStore, iface: &DraftInterfaceDecl) -> bool {
+    matches!(iface.kind, DraftInterfaceKind::ShearFilm { .. })
+        || family_entry(cards, iface, VISCOUS_BUSHING_FAMILY).is_some()
+}
+
+/// The bushing a loss route draws from: the one bushing that joins the part
+/// owning the route's `feature_a`.
 pub(crate) fn route_bushing<'a>(
     input: &'a DraftAssemblyInput,
     cards: &CardStore,
@@ -253,10 +272,10 @@ pub(crate) fn route_bushing<'a>(
 ) -> Option<&'a DraftInterfaceDecl> {
     let part = owning_part(input, route.feature_a)?;
     let on_part = |end| owning_part(input, end) == Some(part);
-    let mut joined = input.interfaces.iter().filter(|b| {
-        (on_part(b.feature_a) || on_part(b.feature_b))
-            && family_entry(cards, b, VISCOUS_BUSHING_FAMILY).is_some()
-    });
+    let mut joined = input
+        .interfaces
+        .iter()
+        .filter(|b| (on_part(b.feature_a) || on_part(b.feature_b)) && is_bushing(cards, b));
     let bushing = joined.next()?;
     joined.next().is_none().then_some(bushing)
 }
