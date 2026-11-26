@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 12 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 13 WebGL canvases render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -165,8 +165,8 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 12 WebGL canvases render non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd"];
+    // 4. Mount all chapters cleanly by scrolling through each and verifying all 13 WebGL canvases render non-blank frames
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -180,6 +180,7 @@ async function main() {
       "[data-rush-canvas]",
       "[data-morning-canvas]",
       "[data-crowd-canvas]",
+      '[data-pair-canvas="hub"]',
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -490,6 +491,37 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-crowd.png");
       }
 
+      if (sid === "pair") {
+        // As set on arrival (the all-keeping menu, 1,400 meals, two cooks across town): the hub alone is late and both
+        // kitchens make lunch; both halves draw; the most meals with both is more than alone. Swapping the thighs for
+        // the piccata, which keeps only 90 minutes, must keep the piccata at the hub and say why.
+        const info = () => page.$eval("[data-pair-stage]", (el) => el.pair.info());
+        await page.waitForFunction(() => {
+          const i = document.querySelector("[data-pair-stage]")?.pair?.info();
+          return i?.ready && i.limit;
+        }, { timeout: 90000 });
+        await page.waitForFunction(() => document.querySelector('[data-pair-canvas="far"]')?.dataset.drawn === "1", { timeout: 20000 });
+        const both = await info();
+        const status = () => page.$eval("[data-pr-status]", (el) => el.textContent || "");
+        console.log(`[verify-chrome] Two kitchens: ${JSON.stringify({ made: both.made, parts: both.parts, alone: both.alone, limit: [both.limit.alone, both.limit.both] })} | ${(await status()).slice(0, 90)}`);
+        if (!both.made || !both.far || both.alone?.made !== false) throw new Error(`Two kitchens: the default order did not tell the hub alone from both: ${JSON.stringify(both)}`);
+        if (!(both.limit.both > both.limit.alone)) throw new Error(`Two kitchens: a second kitchen did not raise the most meals: ${JSON.stringify(both.limit)}`);
+        await page.click('[data-pr-mode="alone"]');
+        await sleep(300);
+        const alone = await status();
+        if (!/late/.test(alone)) throw new Error(`Two kitchens: the hub alone's status does not say it is late: ${alone}`);
+        await page.click('[data-pr-mode="both"]');
+        await page.click("[data-pr-menu] li:first-child button");
+        await page.waitForFunction(() => document.querySelector("[data-pair-stage]")?.pair?.info().ready, { timeout: 30000 });
+        const swapped = await status();
+        const parts = (await info()).parts;
+        console.log(`[verify-chrome] Two kitchens, piccata: ${JSON.stringify(parts)} | ${swapped.slice(0, 110)}`);
+        if (parts[0] !== 0 || !/too late for a van at 10:00/.test(swapped)) throw new Error(`Two kitchens: the piccata travelled or the status did not say why: ${swapped}`);
+        await page.click("[data-pr-menu] li:first-child button");
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-pair.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-pair.png");
+      }
+
       if (sid === "morning") {
         // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
         // must say which, and the worker must post every menu's limit, cooked today and ahead.
@@ -516,9 +548,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 12 WebGL canvases render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 13 WebGL canvases (14 with the two-kitchen figure's second half) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -532,13 +564,16 @@ async function main() {
         "[data-rush-canvas]",
         "[data-morning-canvas]",
         "[data-crowd-canvas]",
+        '[data-pair-canvas="hub"]',
+        '[data-pair-canvas="far"]',
       ];
+      ids.push("pair-far");
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 12 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 13 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -576,7 +611,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 12/12 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 13/13 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

@@ -19,6 +19,7 @@ import { RUSH_PIECES, mountRushLab } from "./three/rushLab";
 import { MORNING_PIECES, mountMorningLab } from "./three/morningLab";
 import { PIVOT_PIECES, mountPivotLab } from "./three/pivotLab";
 import { CROWD_PIECES, mountCrowdLab } from "./three/crowdLab";
+import { PAIR_PIECES, mountPairLab } from "./three/pairLab";
 
 declare global {
   interface Window {
@@ -259,6 +260,7 @@ function bootstrap(): void {
     { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false, pieces: RUSH_PIECES },
     { id: "morning", el: document.getElementById("morning")!, mount: mountMorningLab, done: false, pieces: MORNING_PIECES },
     { id: "crowd", el: document.getElementById("crowd")!, mount: mountCrowdLab, done: false, pieces: CROWD_PIECES },
+    { id: "pair", el: document.getElementById("pair")!, mount: mountPairLab, done: false, pieces: PAIR_PIECES },
   ].filter((entry) => entry.el !== null);
 
   // Each chapter mounts in a task of its own, in the order asked. Two that come into range together, or the stove

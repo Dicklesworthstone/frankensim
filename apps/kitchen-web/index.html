@@ -1146,7 +1146,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
               <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
               <p class="kicker">
-                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other.
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning.
               </p>
             </div>
             <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -1280,6 +1280,73 @@
               <div>
                 <code class="formula">lost = 1 − pans with bodies ÷ pans as ghosts</code>
                 <p class="model">Model: <code>runCrowd</code>, on the crowd planner that walks the cooks in the kitchen at the top of the page. Seconds per pan are set for a commissary hot line.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal pr-fig" id="pair">
+            <header class="fig-head">
+              <p class="todo">Borrow a second kitchen across town</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage pr-stage" data-pair-stage>
+                <div class="pr-half" data-pr-half="hub">
+                  <canvas data-pair-canvas="hub" tabindex="0" aria-label="The hub's kitchen: two combi ovens and a six-burner range across the aisle from a worktable, its cooks working the morning, and insulated carriers by the door that roll out when its van leaves at 10:30. Drag to look around both kitchens."></canvas>
+                  <div class="wk-hud pr-hud" aria-hidden="true"><b>The hub</b><span data-pr-hud-clock>6:00</span><em data-pr-hud-note="hub">…</em></div>
+                </div>
+                <div class="pr-half" data-pr-half="far">
+                  <canvas data-pair-canvas="far" tabindex="0" aria-label="The second kitchen, across town, built the same: its cooks work their share of the order, and its carriers roll out when its van leaves at 10:00. Drag to look around both kitchens."></canvas>
+                  <div class="wk-hud pr-hud" aria-hidden="true"><b>Across town</b><em data-pr-hud-note="far">…</em></div>
+                </div>
+              </div>
+              <div class="lab pr-lab">
+                <div class="lab-view">
+                  <div class="rs-chart pr-chart" data-pair-chart role="img" aria-label="For each kitchen and each dish it cooks: the time in which a batch must come off the heat to make that kitchen's van and still be at its best at lunch, each batch's time, the vans and lunch at 11:30"></div>
+                  <p class="wk-keys pr-keys" aria-hidden="true"><span class="win">Cooked in here: at its best at lunch, and on the van</span><span class="tick">A batch off the heat</span><span class="bad">Past its best, or after the van</span></p>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>Lunch at 11:30</span><b><i data-pr-lunch>…</i></b><small data-pr-lunch-s>…</small></div>
+                    <div class="wk-tile"><span>Past their best</span><b><i data-pr-past>…</i></b><small data-pr-past-s>…</small></div>
+                    <div class="wk-tile"><span>Cooked across town</span><b><i data-pr-far>…</i></b><small data-pr-far-s>…</small></div>
+                    <div class="wk-tile"><span>Most meals by lunch</span><b><i data-pr-limit>…</i><em data-pr-limit-d hidden></em></b><small data-pr-limit-s>…</small></div>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">Only food that keeps can travel.</p>
+                  <div class="seg fill" role="group" aria-label="Kitchens">
+                    <button type="button" data-pr-mode="alone" aria-pressed="false">The hub alone</button>
+                    <button type="button" data-pr-mode="both" aria-pressed="true">Both kitchens</button>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish holds · where it's cooked · press to swap</p>
+                    <ul class="wk-menu pr-menu" data-pr-menu></ul>
+                  </div>
+                  <label class="range"><span><b>Meals for lunch</b><output data-pr-meals-val>1,400 meals</output></span><input type="range" min="400" max="2400" step="50" value="1400" data-pr-meals aria-label="Meals for lunch" /></label>
+                  <div class="field">
+                    <p class="micro">Cooks across town · the hub has three</p>
+                    <div class="seg fill" role="group" aria-label="Cooks across town">
+                      <button type="button" data-pr-crew="2" aria-pressed="true">2 cooks</button>
+                      <button type="button" data-pr-crew="3" aria-pressed="false">3 cooks</button>
+                    </div>
+                  </div>
+                  <div class="status" data-pr-status data-state="warn">Planning both kitchens…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="pair-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>Both kitchens are the one above: two 10-pan combi ovens, a six-burner range and a worktable for three cooks. The hub has three cooks and its van leaves at 10:30, as before. The second kitchen is half an hour farther from the client, so its van leaves at 10:00, and both arrive for lunch at 11:30.</p>
+                <p>Each dish on the menu, and the salad and bread, is cooked all at the hub, half at each kitchen, or all across town. Each kitchen then plans its share of the morning on its own, exactly as the morning above is planned, against its own van. A dish made across town sits half an hour longer before lunch, so it can go there only if it keeps longer than the hour and a half from that van to lunch. Lunch is served when the later van arrives, and a portion is past its best if it came off the heat longer before lunch than its dish keeps.</p>
+                <p>For the order on screen every possible split is planned, and the best one is shown: the one that gets lunch out on time with every portion at its best, then the soonest lunch, then the fewest portions past their best, then the most time to spare in the busier kitchen, then the least food carried across town. For the most meals, each split is tried at ten meals more than the best so far and, if it makes lunch, raised by halving.</p>
+              </div>
+              <div>
+                <code class="formula">cooked ≥ 11:30 − holding time<br />cooked ≤ the van − packing<br />lunch = the later van + its drive</code>
+                <p class="model">Model: <code>bestPair</code> on <code>planMorning</code>, the morning above, run for each kitchen with its own van.</p>
               </div>
                 </div>
               </details>

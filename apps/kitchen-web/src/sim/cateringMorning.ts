@@ -174,7 +174,15 @@ export interface MorningSettings {
   menu: number;
   /** Prep that keeps, and the dishes that keep, done the day before. */
   ahead: boolean;
+  /** When this kitchen's van leaves, minutes from 6:00 (DOOR, 10:30, unless it has farther to drive). */
+  door?: number;
+  /** This kitchen's portions of each place (the sides last), when another kitchen cooks the rest; else each place's
+   *  share of the meals (portionsFor). */
+  portions?: readonly number[];
 }
+
+/** When the van leaves for these settings. */
+export const doorOf = (s: MorningSettings): number => s.door ?? DOOR;
 
 /** One stretch of a cook's work. */
 export interface Job {
@@ -233,7 +241,7 @@ export interface Morning {
   burns: Burn[];
   loads: Load[];
   batches: BatchOut[];
-  /** The van leaves when the last pan is packed, at 10:30 at the soonest. */
+  /** The van leaves when the last pan is packed, at its time (10:30) at the soonest; `late` is how far past it. */
   depart: number;
   late: number;
   /** Everything packed: false only when the horizon ran out first. */
@@ -306,7 +314,8 @@ export function portionsFor(meals: number): number[] {
 
 function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean): Morning {
   const dishes = menuDishes(s.menu);
-  const portions = portionsFor(s.meals);
+  const door = doorOf(s);
+  const portions = s.portions ?? portionsFor(s.meals);
   const batches = dishes.flatMap((d, k) => batchesFor(d, k, portions[k]!, s.ahead));
   batches.forEach((b, i) => (b.id = i));
   // The work moved to the day before: the prep that keeps, or all but the packing of a dish that keeps.
@@ -334,7 +343,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
       chain += st.at === "oven" ? st.min + b.pans * (st.perPan ?? 0) : stageMin(st, b);
     }
     const floor = SERVE - d.holdMin - chain;
-    const soon = DOOR - tailMin - EARLY;
+    const soon = door - tailMin - EARLY;
     const sh = shift[b.slot] ?? 0;
     b.release = Math.max(0, fresh ? Math.max(floor, soon - sh) : Math.max(floor, soon) - sh);
   }
@@ -576,8 +585,8 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
       packPans[b.id] = Math.ceil(cum / d.pan - EPS) - before;
     }
   });
-  const depart = finished ? Math.max(DOOR, last) : HORIZON;
-  const late = depart - DOOR;
+  const depart = finished ? Math.max(door, last) : HORIZON;
+  const late = depart - door;
   const lunch = SERVE + late;
   const pastBestBySlot = dishes.map(() => 0);
   const lastPacked = dishes.map(() => 0);
@@ -629,7 +638,7 @@ function settle(s: MorningSettings, fresh: boolean, from: readonly number[] | nu
   let cur = schedule(s, shift, fresh);
   let best = cur;
   for (let k = 0; k < 12 && cur.late > 0.5; k++) {
-    const next = shift.map((x, d) => Math.min(SERVE, x + Math.max(0, cur.lastPacked[d]! - DOOR)));
+    const next = shift.map((x, d) => Math.min(SERVE, x + Math.max(0, cur.lastPacked[d]! - doorOf(s))));
     if (next.every((x, d) => Math.abs(x - shift[d]!) < 0.5)) break;
     shift = next;
     cur = schedule(s, shift, fresh);
