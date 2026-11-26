@@ -77,7 +77,8 @@ enforces the matching evidence.
   a receipt that names each applied rule (or decodes byte-identically under its
   frozen predecessor grammar while preserving usage-receipt verification).
   Requires at least one named cross-version migration test, verified to exist.
-  Held by `project.fsim`, `scenario.ir`, `matdb.pack`, and `ledger.schema`.
+  Held by `project.fsim`, `scenario.ir`, `scenario.gesture`, `matdb.pack`, and
+  `ledger.schema`.
 - **`refuse-unmigratable`** — an older document is refused by name with an
   honest error rather than reinterpreted approximately. Requires a named
   refusal/advertisement test. Held by `package.format` and `checker.protocol`.
@@ -86,7 +87,8 @@ enforces the matching evidence.
 - **`no-predecessor`** — the schema has never been bumped, so there is nothing
   to migrate from. Held by `euler.scientific-contract`,
   `euler.owner-matrix`, `euler.claim-policy`, `euler.protocol`, `study.fsim`,
-  `scenario.assembly`, `sbom.source_manifest`, and `maturity.registry`.
+  `scenario.assembly`, `scenario.performance`, `sbom.source_manifest`, and
+  `maturity.registry`.
 
 `no-predecessor` is the load-bearing case. It may cite no evidence, and the
 check additionally refuses any `no-predecessor` record whose current version has
