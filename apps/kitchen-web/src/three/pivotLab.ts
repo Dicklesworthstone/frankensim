@@ -391,7 +391,8 @@ export function mountPivotLab(root: HTMLElement): void {
     const a = stations[0]!.cost;
     const b = stations[1]!.cost;
     if (nameB) nameB.textContent = stations[1]!.layout.name;
-    setTile(tiles.steps, `${a.steps} → ${b.steps}`, `as built → moved; ${a.pivots} and ${b.pivots} pivots`, a.steps > b.steps ? `−${a.steps - b.steps}` : null);
+    const pv = a.pivots === b.pivots ? `${a.pivots} pivots at both` : `${a.pivots} → ${b.pivots} pivots`;
+    setTile(tiles.steps, `${a.steps} → ${b.steps}`, `as built → moved, and ${pv}`, a.steps > b.steps ? `−${a.steps - b.steps}` : null);
     setTile(tiles.service, num((a.steps - b.steps) * plates), `fewer, ${num(a.steps * plates)} → ${num(b.steps * plates)}`, null);
     const minA = (a.moveS * plates) / 60;
     const minB = (b.moveS * plates) / 60;
