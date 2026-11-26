@@ -408,6 +408,18 @@ fn assembly1_thermo_mech_slider_runs_explains_and_resumes_at_every_stage() {
             .unwrap()
             .contains("frankensim.lowering_receipt.v1")
     );
+    // The ledger's lowering receipt is the one the lower stage's receipt names.
+    let lower = &fresh.stages[1];
+    assert_eq!(lower.stage, "lower");
+    let stage_json = read_report_receipt(&fresh_ledger, &lower.receipt);
+    let receipt = explained.lowering_receipt_json.as_deref().unwrap();
+    let artifact = hash_bytes(receipt.as_bytes()).to_hex();
+    assert_eq!(json_str_field(&stage_json, "lowering_artifact"), artifact);
+    let receipt_hash = json_str_field(receipt, "receipt_hash");
+    let named = json_str_field(&stage_json, "lowering_receipt_hash");
+    assert_eq!(named, receipt_hash);
+    let explained_hash = explained.lowering_receipt_hash.as_deref();
+    assert_eq!(explained_hash, Some(receipt_hash));
     assert!(explained.plan_json.as_deref().unwrap().contains(plan_hash));
     assert!(explained.causalization_audit_json.is_some());
     assert!(

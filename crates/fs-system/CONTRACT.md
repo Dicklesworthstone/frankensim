@@ -107,7 +107,9 @@ constructors:
   `thermal-boundary` interface from a cell's face to a face of a stationary
   `DrivenBody` frame is the cell's exchange with the ambient. A cell outside
   the product law's `T` band is refused at lowering or stops the run; nothing
-  clamps.
+  clamps. The time plan's `scheme` is the timeline's; the mechanical owners
+  run beside any scheme. Only `explicit` lowers so far, and an implicit
+  scheme is refused by name.
 - Loss routes: a card-less `HeatRoute` interface (bookkeeping, not a material
   interface) from a part that exactly one bushing joins to a cell carries its
   declared fraction of that bushing's heat. The rest goes to a sink named

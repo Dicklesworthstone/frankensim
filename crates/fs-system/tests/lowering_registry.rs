@@ -21,7 +21,7 @@ use fs_scenario::assembly::draft::{
     DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind,
     FidelityErrorBudget, FidelityPolicy, FidelityRung, GearGenerator, GearMeshDecl, JointDecl,
     JointKind, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
-    TimeHistory, TimePlan,
+    TimeHistory, TimePlan, TimeScheme,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState, UnknownProperty};
 use fs_scenario::{
@@ -245,6 +245,7 @@ fn fixed_time_plan(horizon_s: f64, dt_s: f64) -> TimePlan {
             dt: QtyAny::new(dt_s, TIME),
         },
         default_sample_rate: QtyAny::new(1.0 / dt_s, FREQUENCY),
+        scheme: TimeScheme::Explicit,
     }
 }
 

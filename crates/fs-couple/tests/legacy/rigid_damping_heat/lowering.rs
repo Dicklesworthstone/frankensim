@@ -26,7 +26,7 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
     DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
     FidelityPolicy, FidelityRung, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget,
-    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan,
+    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan, TimeScheme,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
@@ -401,6 +401,7 @@ pub(crate) fn pairing(cell_cards: [MaterialCard; 2], source_w: f64) -> (DraftAss
                 dt: QtyAny::new(0.125, TIME),
             },
             default_sample_rate: QtyAny::new(8.0, Dims([0, 0, -1, 0, 0, 0])),
+            scheme: TimeScheme::Explicit,
         },
         parts,
         joints: Vec::new(),
@@ -624,6 +625,24 @@ fn cells_on_the_product_law_lower_with_their_card_receipts() {
         "{}",
         ledger.energy_residual_j()
     );
+}
+
+#[test]
+fn an_implicit_scheme_refuses_by_name_while_only_explicit_lowers() {
+    let (draft, cards) = pairing(fixture_cards(static_laws()), 2.0);
+    for (scheme, name) in [
+        (TimeScheme::BackwardEuler, "backward-euler"),
+        (TimeScheme::Sdirk2, "sdirk2"),
+    ] {
+        let mut input = draft.input().clone();
+        input.time_plan.scheme = scheme;
+        let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+        let draft = DraftAssembly::admit(input, &scenario).unwrap();
+        let mut registry = LoweringRegistry::with_kernel_defaults();
+        register_owners(&mut registry, fixture_laws());
+        let why = registry.lower(&draft, &cards).err().unwrap().to_string();
+        assert!(why.contains(&format!("implicit scheme `{name}`")), "{why}");
+    }
 }
 
 #[test]

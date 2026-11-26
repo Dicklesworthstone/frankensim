@@ -683,6 +683,19 @@ pub enum StepPolicy {
     },
 }
 
+/// How the thermal timeline integrates in time. The mechanical networks
+/// have one step each and run beside any scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeScheme {
+    /// The timeline's explicit step.
+    #[default]
+    Explicit,
+    /// Backward Euler, on the owner's implicit conduction graph.
+    BackwardEuler,
+    /// Two-stage singly diagonally implicit Runge-Kutta, on the same graph.
+    Sdirk2,
+}
+
 /// Simulation time horizon, stepping policy, and default output sample rate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimePlan {
@@ -692,6 +705,8 @@ pub struct TimePlan {
     pub step_policy: StepPolicy,
     /// Default output sampling frequency [Hz] (`FREQUENCY`, positive finite).
     pub default_sample_rate: QtyAny,
+    /// The thermal timeline's integration scheme.
+    pub scheme: TimeScheme,
 }
 
 /// One species mole fraction in the ambient gas mixture.

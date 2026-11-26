@@ -13,7 +13,7 @@ use fs_scenario::assembly::draft::{
     DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
     FidelityPolicy, FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain,
     PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
-    TimeHistory, TimePlan, TimingEdge,
+    TimeHistory, TimePlan, TimeScheme, TimingEdge,
 };
 use fs_scenario::assembly::{DimensionBound, MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::entity::ToleranceSource;
@@ -776,7 +776,15 @@ pub(crate) fn admit_assembly_source(
                 env = Some(e);
             }
             "time-plan" => {
-                let kw = kwargs(&items[1..], &["horizon", "dt", "sample-rate"], "time-plan")?;
+                let keys = ["horizon", "dt", "sample-rate", "scheme"];
+                let kw = kwargs(&items[1..], &keys, "time-plan")?;
+                let scheme = kw.get("scheme").map(|s| as_sym(s, "scheme")).transpose()?;
+                let scheme = match scheme {
+                    None | Some("explicit") => TimeScheme::Explicit,
+                    Some("backward-euler") => TimeScheme::BackwardEuler,
+                    Some("sdirk2") => TimeScheme::Sdirk2,
+                    Some(o) => return Err(err(format!("unknown scheme `{o}`"))),
+                };
                 time_plan = Some(TimePlan {
                     horizon: as_qty_d(req(&kw, "horizon", "time-plan")?, TIME, "horizon")?,
                     step_policy: StepPolicy::Fixed {
@@ -787,6 +795,7 @@ pub(crate) fn admit_assembly_source(
                         FREQUENCY,
                         "sample-rate",
                     )?,
+                    scheme,
                 });
             }
             "part" => {
@@ -1267,6 +1276,23 @@ mod tests {
             Some(&want_no_temp)
         );
         assert_eq!(admit("").unwrap().draft.input().parts[0].initial, None);
+    }
+
+    #[test]
+    fn a_time_plan_is_explicit_unless_it_names_an_implicit_scheme() {
+        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        let plain = admit("").unwrap();
+        assert_eq!(plain.draft.input().time_plan.scheme, TimeScheme::Explicit);
+        let source = std::str::from_utf8(&plain.canonical_source).unwrap();
+        let scheme = |name: &str| {
+            let named = format!(":scheme {name} :sample-rate");
+            let src = source.replace(":sample-rate", &named);
+            let admitted = admit_assembly_source(src.as_bytes(), &packs);
+            admitted.map(|a| a.draft.input().time_plan.scheme)
+        };
+        assert_eq!(scheme("backward-euler").unwrap(), TimeScheme::BackwardEuler);
+        assert_eq!(scheme("sdirk2").unwrap(), TimeScheme::Sdirk2);
+        assert!(scheme("rk4").is_err());
     }
 
     #[test]

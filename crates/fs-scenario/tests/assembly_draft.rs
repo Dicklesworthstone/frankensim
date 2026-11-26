@@ -17,7 +17,7 @@ use fs_scenario::assembly::draft::{
     DraftPartKind, FidelityErrorBudget, FidelityPolicy, FidelityRung, GasComponent, GearGenerator,
     GearMeshDecl, JointDecl, JointKind, JointLimits, MicrophonePattern, PhysicsDomain,
     PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, SpiralSpringGenerator,
-    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan, TimingEdge,
+    StepPolicy, ThirdBodyDecl, TimeHistory, TimePlan, TimeScheme, TimingEdge,
 };
 use fs_scenario::assembly::{GeometrySource, MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{
@@ -69,6 +69,7 @@ fn time_plan(horizon_s: f64, dt_s: f64, sample_hz: f64) -> TimePlan {
             dt: QtyAny::new(dt_s, TIME),
         },
         default_sample_rate: QtyAny::new(sample_hz, FREQUENCY),
+        scheme: TimeScheme::Explicit,
     }
 }
 
@@ -239,6 +240,7 @@ fn build_slice_b_gas_piston(scenario: &Scenario) -> DraftAssembly {
                 order: 2,
             },
             default_sample_rate: QtyAny::new(2_000.0, FREQUENCY),
+            scheme: TimeScheme::Explicit,
         },
         parts: vec![
             DraftPartDecl {

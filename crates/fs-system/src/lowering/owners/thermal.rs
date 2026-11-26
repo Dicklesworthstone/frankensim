@@ -26,7 +26,7 @@ use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::MaterialRef;
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftPartDecl, DraftPartKind, PhysicsDomain,
-    PrimitiveShape, SourceTarget, StepPolicy, TimeHistory,
+    PrimitiveShape, SourceTarget, StepPolicy, TimeHistory, TimeScheme,
 };
 use fs_scenario::entity::EntityId;
 use fs_thermal::component::{ThermalTimeline, TimelineState};
@@ -292,6 +292,7 @@ fn lower(
     let Some(work) = work else {
         return Err(Scoped::new("part", &first.name).invalid("a timeline needs max_work_units"));
     };
+    explicit_only(input.time_plan.scheme, first)?;
     let (mut schedule, mut cell_laws) = (Vec::new(), Vec::new());
     for (cell, &index) in ctx.selection.parts.iter().enumerate() {
         let part = &input.parts[index];
@@ -370,6 +371,18 @@ fn lower(
         );
     }
     Ok(out)
+}
+
+/// The timeline lowers only the explicit scheme so far: an implicit one is
+/// refused by name.
+fn explicit_only(scheme: TimeScheme, first: &DraftPartDecl) -> Result<(), LoweringError> {
+    let name = match scheme {
+        TimeScheme::Explicit => return Ok(()),
+        TimeScheme::BackwardEuler => "backward-euler",
+        TimeScheme::Sdirk2 => "sdirk2",
+    };
+    let why = format!("implicit scheme `{name}`: only `explicit` is lowered so far");
+    Err(Scoped::new("part", &first.name).invalid(why))
 }
 
 /// Registers cell `cell`'s reader for probes: its temperature, from its slot in
