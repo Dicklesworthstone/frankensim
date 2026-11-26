@@ -170,9 +170,12 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(comp.project_hash_left, comp.project_hash_right)
             self.assertEqual(comp.qoi_count, 3)
             self.assertEqual(len(comp.qoi_diffs), 3)
-            self.assertEqual(comp.qoi_diffs[0].name, "temperature-max")
-            self.assertEqual(comp.qoi_diffs[0].delta, 0.0)
-            self.assertEqual(comp.qoi_diffs[0].classification, "same")
+            # The run is compared with itself, so every QoI is unchanged. The
+            # binary's QoI order is not promised: find the decision QoI by name.
+            for diff in comp.qoi_diffs:
+                self.assertEqual(diff.delta, 0.0, diff.name)
+                self.assertEqual(diff.classification, "same", diff.name)
+            self.assertIn("temperature-max", [diff.name for diff in comp.qoi_diffs])
             self.assertIn("identical runs", comp.summary)
 
     def test_report_names_the_files_the_binary_exports(self):
