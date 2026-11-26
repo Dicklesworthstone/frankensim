@@ -19,7 +19,8 @@ fs-blake3, fs-substrate, fs-obs.
   `Cancelled` break marker without converting the refusal into a panic.
 - `StreamKey { seed, kernel_id, tile, iteration }` + `key128()` — RNG
   stream identity derived from LOGICAL work identity only, never from the
-  worker (Decalogue P2). fs-rand's Philox consumes the 128-bit key.
+  worker (Decalogue P2). fs-rand's v2 bridge takes the four original fields.
+  `key128()` provides a lossy fold for consumers that require 128 bits.
 - `CancelGate` — request → drain → finalize: `request()` is idempotent and
   stamps the first-request time; workers finish their current tile, stop
   claiming, and the run returns a structured outcome. `new_clock_free()` is
@@ -739,10 +740,12 @@ restart) goes through `run_declared(kernel, gate, RunId(g))`, where
 the id comes from the caller's ledger. Keys derive solely from
 (study seed, kernel id, tile, declared run) — bit-identical across
 pool reuse, concurrency, arrival order, and worker count, and
-reconstructible from ledger fields alone (conformance-tested). The
-checked width-refusing bridge into fs-rand's key type lives in
-fs-rand (`StreamKey::from_exec_parts`, bridge v1) — layering forbids
-the reverse dependency.
+reconstructible from ledger fields alone (conformance-tested). Pass the four
+fields of `cx.stream_key()` in that order to
+`fs_rand::StreamKeyV2::from_exec_parts_v2`. Every executor key has an exact
+representation, including 64-bit kernel-name hashes and every declared
+`RunId`. Callers replaying v1 use the checked `StreamKey::from_exec_parts`
+bridge. Both conversions live in fs-rand.
 
 ## Race drain totality (bead wf9.8.1)
 

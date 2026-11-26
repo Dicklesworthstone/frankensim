@@ -326,13 +326,45 @@ pending an actual 32-bit test lane.
 
 `StreamKey::from_exec_parts(seed, kernel_id, tile, iteration)` is the
 CHECKED bridge from fs-exec's four-u64 logical key: seed is lossless,
-kernel and tile must fit their u32 slots, and iteration must be 0 (the
-draw index is a within-stream counter, not an identity axis — callers
-with generation-diverging streams ledger the generation upstream).
+kernel and tile must fit their u32 slots, and iteration must be 0.
+The full-width bridge below supports generation-diverging streams.
 REFUSAL, never truncation: a lossy mapping would alias distinct
 logical streams (collision-tested at every boundary). Field widths and
 rules are versioned (`EXEC_KEY_BRIDGE_VERSION`); bump only with
 recorded justification, since ledgered replay depends on them.
+
+## Full-width executor streams (bridge v2)
+
+A tile kernel can open its stream directly from the executor context:
+
+```rust
+let k = cx.stream_key();
+let mut rng = fs_rand::StreamKeyV2::from_exec_parts_v2(
+    k.seed, k.kernel_id, k.tile, k.iteration,
+).stream();
+let first = rng.next_u64();
+```
+
+`StreamV2::at(key, index)` evaluates Philox4x64-10 with counter
+`[index, tile, iteration, kernel]` and key `[seed, 2]`. Each position
+therefore encodes the four executor fields and the draw index in separate
+64-bit words. This preserves the numeric kernel id supplied by the executor;
+kernel names sharing an upstream hash still share that id. A 64-bit draw
+may repeat across distinct identities.
+
+`next_u64` returns lane zero and advances the index by one modulo 2⁶⁴.
+`next_f64` consumes one such draw and scales its high 53 bits by 2⁻⁵³.
+For the frozen wide-key fixture, FNV-1a over the little-endian bytes of
+100,000 sequential draws is `17b77422223d6ca0`.
+
+`StreamV2::checkpoint().to_canonical_le_bytes()` writes exactly 107 bytes:
+the eight-byte `FSRCKPT\0` magic, the ASCII domain
+`org.frankensim.fs-rand.stream-checkpoint.v2`, transport and stream versions
+(both 2, u32), seed, kernel, tile, iteration, next index (each u64), and the
+FNV-1a-64 checksum of all preceding bytes. Every integer is little-endian.
+`StreamV2::resume_retained` checks the length, magic, domain, both versions
+and checksum before restoring the cursor. The checksum detects accidental
+corruption. For existing v1 replay records use `Stream::resume_retained`.
 
 ## Perf-lane evidence (bead 1za9, measured)
 

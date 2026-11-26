@@ -12,9 +12,13 @@
 //! A ziggurat normal is available as an explicit fast-mode path; strict
 //! callers stay on Box–Muller until the cross-ISA admission proof lands.
 //!
-//! Field widths (documented contract): seed 64 bits (Philox key), tile id
+//! Field widths of the v1 stream: seed 64 bits (Philox key), tile id
 //! 32 bits, kernel id 32 bits (together counter words 2–3), draw index 64
 //! bits (counter words 0–1). 2⁶⁴ draws per (seed, kernel, tile) stream.
+//!
+//! For executor keys, [`StreamKeyV2::from_exec_parts_v2`] preserves all 64 bits
+//! of the seed, kernel id, tile and iteration. [`StreamV2::at`] addresses a
+//! block of this Philox4x64-10 stream by a separate 64-bit draw index.
 
 pub mod cbc;
 pub mod cbc_cert;
@@ -24,7 +28,15 @@ pub mod dist;
 pub mod philox;
 pub mod philox_normals;
 pub mod qmc;
+mod wide;
+mod wide_checkpoint;
 pub mod ziggurat;
+
+pub use wide::{EXEC_KEY_BRIDGE_VERSION_V2, STREAM_SEMANTICS_VERSION_V2, StreamKeyV2, StreamV2};
+pub use wide_checkpoint::{
+    STREAM_CHECKPOINT_CANONICAL_LEN_V2, STREAM_CHECKPOINT_IDENTITY_DOMAIN_V2,
+    STREAM_CHECKPOINT_VERSION_V2, StreamCheckpointV2, StreamReplayErrorV2,
+};
 
 use fs_math::det;
 
@@ -404,9 +416,7 @@ pub enum ExecKeyBridgeError {
     },
     /// fs-exec's iteration/generation axis has NO slot here: fs-rand's
     /// draw index is the WITHIN-stream counter, not an identity axis.
-    /// Callers with generation-diverging streams must ledger the
-    /// generation into the seed (e.g. fs-exec's `key128` path) rather
-    /// than silently folding it.
+    /// [`StreamKeyV2::from_exec_parts_v2`] gives iteration its own slot.
     IterationUnrepresentable {
         /// The offending value.
         iteration: u64,
@@ -426,7 +436,7 @@ impl core::fmt::Display for ExecKeyBridgeError {
             ),
             ExecKeyBridgeError::IterationUnrepresentable { iteration } => write!(
                 f,
-                "exec iteration {iteration} has no slot in fs-rand's key (bridge v{EXEC_KEY_BRIDGE_VERSION}): the draw index is a counter, not identity — ledger the generation into the seed instead"
+                "exec iteration {iteration} has no slot in fs-rand's key (bridge v{EXEC_KEY_BRIDGE_VERSION}): the draw index is within-stream; use StreamKeyV2::from_exec_parts_v2 to preserve the generation"
             ),
         }
     }
@@ -444,6 +454,8 @@ impl StreamKey {
         }
     }
 
+    /// For full-width executor identities use [`StreamKeyV2::from_exec_parts_v2`].
+    ///
     /// CHECKED bridge from fs-exec's four-u64 logical key fields
     /// (`seed`, `kernel_id`, `tile`, `iteration` — bead wf9.7.1,
     /// bridge v[`EXEC_KEY_BRIDGE_VERSION`]). Field-width contract:
