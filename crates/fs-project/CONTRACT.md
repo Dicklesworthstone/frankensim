@@ -356,7 +356,7 @@ bindings; it runs no solves and admits no scenarios itself.
   uniform temperatures and regional enthalpies; pre-v15 payloads declaring
   regional initialization refuse. Actual heat exchange, conductivity-domain
   checks and conservation remain execution responsibilities.
-- `FSIM_VERSION = 15`. Readers refuse other versions
+- `FSIM_VERSION = 17`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The
