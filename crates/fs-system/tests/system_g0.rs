@@ -2433,6 +2433,91 @@ fn scheduled_resting_inertia(events: Option<Vec<f64>>) -> System {
 }
 
 #[test]
+fn absolute_horizons_keep_clock_compensation_and_avoid_roundoff_only_tail_steps() {
+    let before_one = f64::from_bits(1.0_f64.to_bits() - 1);
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for (end_s, cap_s, steps, minimum_s) in [
+            (0.01, 0.001, 10, 0.0009),
+            (0.0105, 0.001, 11, 0.0004),
+            (1.0, before_one, 2, 0.49),
+        ] {
+            let mut system = scheduled_resting_inertia(None);
+            while system.time_s() < end_s {
+                let before = system.time_s();
+                let report = system.step_toward(end_s, cap_s, cx).unwrap();
+                assert!(report.dt_s >= minimum_s && report.dt_s <= cap_s);
+                assert!(report.time_s > before && report.time_s <= end_s);
+                assert!(system.steps() <= steps);
+            }
+            assert_eq!(system.time_s(), end_s);
+            assert_eq!(system.steps(), steps);
+            assert_eq!(system.ledger().duration_s.value(), end_s);
+        }
+    });
+}
+
+#[test]
+fn absolute_horizons_preserve_component_and_scheduled_step_shortening() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for announce in [false, true] {
+            let mut builder = SystemBuilder::new();
+            builder.add("timer", Timer { announce }, 0.125).unwrap();
+            let mut system = builder.seal().unwrap();
+            let first = system.step_toward(0.5, 1.0, cx).unwrap();
+            assert_eq!(first.time_s, 0.125);
+            assert_eq!(first.shortenings, u32::from(!announce));
+            assert_eq!(system.step_toward(0.5, 1.0, cx).unwrap().time_s, 0.5);
+            assert_eq!(system.steps(), 2);
+        }
+        let mut system = scheduled_resting_inertia(Some(vec![0.25, 0.75, 1.0]));
+        for expected_s in [0.25, 0.75, 1.0, 1.25] {
+            let report = system.step_toward(1.25, 2.0, cx).unwrap();
+            assert_eq!(report.time_s, expected_s);
+        }
+        assert_eq!(system.steps(), 4);
+    });
+}
+
+#[test]
+fn invalid_or_cancelled_absolute_horizon_steps_leave_the_system_unchanged() {
+    let mut system = scheduled_resting_inertia(None);
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        system.step(1.0, cx).unwrap();
+        let before = system.checkpoint().unwrap();
+        let receipts = system.last_receipts().to_vec();
+        for (end_s, cap_s) in [
+            (1.0, 1.0),
+            (0.5, 1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (2.0, 0.0),
+            (2.0, -1.0),
+            (2.0, f64::NAN),
+            (2.0, f64::INFINITY),
+        ] {
+            assert!(matches!(
+                system.step_toward(end_s, cap_s, cx),
+                Err(SystemError::Step { .. })
+            ));
+            assert_eq!(system.time_s(), before.time_s());
+            assert_eq!(system.steps(), before.steps());
+            assert_eq!(system.ledger(), before.ledger());
+            assert_eq!(system.last_receipts(), receipts);
+        }
+    });
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    let before = system.checkpoint().unwrap();
+    assert!(matches!(
+        with_cx(&gate, |cx| system.step_toward(2.0, 1.0, cx)),
+        Err(SystemError::Cancelled)
+    ));
+    assert_eq!(system.time_s(), before.time_s());
+    assert_eq!(system.steps(), before.steps());
+    assert_eq!(system.ledger(), before.ledger());
+}
+
+#[test]
 fn boundary_events_retain_clock_compensation_and_distinct_adjacent_times() {
     let adjacent = f64::from_bits(1.0_f64.to_bits() + 1);
     let before_one = f64::from_bits(1.0_f64.to_bits() - 1);

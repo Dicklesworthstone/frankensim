@@ -48,13 +48,14 @@ use crate::stage_driver::{
 };
 
 /// Wire version of the assembly stage driver.
-pub const ASSEMBLY_DRIVER_VERSION: u32 = 1;
+pub const ASSEMBLY_DRIVER_VERSION: u32 = 2;
 /// BLAKE3 domain separating assembly run identities from thermal solve runs.
 pub const ASSEMBLY_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.assembly-run-identity.v1";
 
 const ASSEMBLY_STATE_TYPE_ID: u64 = 0x6673_636c_6961_736d; // b"fscliasm"
 const ASSEMBLY_TRACE_KIND: &str = "assembly-run-trace";
 const ASSEMBLY_ANALYSIS_META_KIND: &str = "assembly-analysis-mode";
+const MAX_TRANSIENT_STEPS: usize = 200_000;
 
 const ASSEMBLY_SCHEMA: PipelineSchema = PipelineSchema {
     driver_version: ASSEMBLY_DRIVER_VERSION,
@@ -334,10 +335,45 @@ impl AssemblyPipeline<'_> {
         let tp = &self.admitted.draft.input().time_plan;
         let dt_s = match tp.step_policy {
             StepPolicy::Fixed { dt } => dt.value,
-            StepPolicy::Adaptive { dt_initial, .. } => dt_initial.value,
+            StepPolicy::Adaptive { .. } => {
+                return Err(staged_refusal(
+                    "cli-assembly-step-policy",
+                    "run",
+                    "the assembly runner does not yet bind an adaptive state-error metric",
+                    "use the fixed step policy",
+                ));
+            }
         };
+        let end_s = lowered.system.time_s() + tp.horizon.value;
+        if !(end_s.is_finite() && end_s > lowered.system.time_s()) {
+            return Err(staged_refusal(
+                "cli-assembly-time-range",
+                "run",
+                "the requested horizon has no finite advancing endpoint",
+                "choose a representable simulation duration",
+            ));
+        }
+        let step_limit = || {
+            staged_refusal(
+                "cli-assembly-step-limit",
+                "run",
+                format!(
+                    "the full {} s horizon requires more than {MAX_TRANSIENT_STEPS} accepted steps",
+                    tp.horizon.value,
+                ),
+                "increase the fixed step size or reduce the horizon",
+            )
+        };
+        // A count estimated from the requested step is only a capacity hint:
+        // scheduled events and owners may shorten any accepted kernel step.
+        let estimated_steps = (tp.horizon.value / dt_s).ceil();
+        // Leave one step of slack for division rounding at the limit. The
+        // accepted-step guard below is authoritative.
+        if estimated_steps > (MAX_TRANSIENT_STEPS + 1) as f64 {
+            return Err(step_limit());
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let steps = ((tp.horizon.value / dt_s).round().max(1.0) as usize).min(200_000);
+        let steps = (estimated_steps as usize).min(MAX_TRANSIENT_STEPS);
         let mut times_s = Vec::with_capacity(steps + 1);
         let mut entities: BTreeMap<String, Vec<EntitySample>> = self
             .admitted
@@ -386,7 +422,7 @@ impl AssemblyPipeline<'_> {
                 Budget::INFINITE,
                 ExecMode::Deterministic,
             );
-            for _ in 0..steps {
+            while lowered.system.time_s() < end_s {
                 if self.gate.is_requested() {
                     return Err(SolveRefusal::plain(
                         "cli-solve-cancelled",
@@ -394,7 +430,11 @@ impl AssemblyPipeline<'_> {
                         "resume",
                     ));
                 }
-                lowered.system.step(dt_s, &cx).map_err(|e| {
+                if times_s.len() - 1 == MAX_TRANSIENT_STEPS {
+                    return Err(step_limit());
+                }
+                let before_s = lowered.system.time_s();
+                lowered.system.step_toward(end_s, dt_s, &cx).map_err(|e| {
                     staged_refusal(
                         "cli-assembly-step",
                         "run",
@@ -402,7 +442,16 @@ impl AssemblyPipeline<'_> {
                         "check step size",
                     )
                 })?;
-                times_s.push(lowered.system.time_s());
+                let after_s = lowered.system.time_s();
+                if !(after_s.is_finite() && after_s > before_s) {
+                    return Err(staged_refusal(
+                        "cli-assembly-time-progress",
+                        "run",
+                        "the accepted kernel step made no finite clock progress",
+                        "increase the step size or rescale the simulation time",
+                    ));
+                }
+                times_s.push(after_s);
                 sample(&lowered.system, &mut entities);
             }
             Ok(())

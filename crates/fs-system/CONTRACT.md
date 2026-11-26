@@ -394,6 +394,14 @@ physics owners below fs-couple can be composed without it.
   relative one (for a block with a load line see "The load line"). A
   checkpoint retains it together with `last_receipts`, so both describe the
   restored last accepted step rather than a discarded trial.
+- `System::step_toward(end_s, dt_max_s, cx) -> StepReport` caps one ordinary
+  step at an absolute endpoint using the compensated clock. It retains the
+  clock's low bits when finding the remaining interval; when a full cap would
+  leave only clock roundoff before the endpoint, it takes at most half the
+  remaining interval. Component limits, scheduled events, trial shortening,
+  audits and atomic publication still use `step`. The endpoint must be finite
+  and strictly later than `time_s()`, and the cap finite and positive. Repeated
+  calls support nonmultiple horizons without a rounded-time subtraction tail.
 - `System::step_adaptive(dt_max, config, metric, cx) -> AdaptiveReport`:
   error-controlled stepping of the same coupled graph. From one checkpoint,
   compare one coarse step to two equal half steps at the same end time. The

@@ -254,6 +254,101 @@ const TWO_BODY_THERMAL: &str = r#"(assembly "two_body_conduction"
   (probe "hot_cross" :kind timing :target "hot" :sample-rate 200Hz :threshold 300.05K :edge rising)
 )"#;
 
+const HEATED_BODY: &str = r#"(assembly "horizon_heater"
+  (version 1)
+  (units "SI")
+  (seed 0x31)
+  (versions (constellation "2026-07") (workspace "horizon-regression"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 101325Pa)
+  (time-plan :horizon 0.01025s :dt 0.003s :sample-rate 1000Hz)
+  (part "body"
+    :kind solid :geometry (box 0.1m 0.1m 0.1m)
+    :material "fixture" :query-temp 300K :physics (thermal) :fidelity lumped)
+  (source "heater" :part "body" :port "thermal" :history (constant 500W))
+  (probe "temperature" :kind thermocouple :target "body" :sample-rate 1000Hz)
+)"#;
+
+#[test]
+fn transient_horizon_uses_accepted_time_and_caps_the_final_step() {
+    // rho * volume * cp = 500 J/K, so 500 W gives exactly 1 K/s.
+    let packs = CardPackSet::admit(vec![material_pack("fixture", 1000.0, 500.0, 1.0e9)]).unwrap();
+    for (horizon, history) in [
+        (0.01025, "(constant 500W)"), // rounding the count used to stop early
+        (0.011, "(constant 500W)"),   // rounding up used to overshoot
+        (0.01025, "(step :t 0.004s :before 500W :after 500W)"),
+    ] {
+        // Equal levels isolate source-knot negotiation from the heat law.
+        let src = HEATED_BODY
+            .replace("0.01025s", &format!("{horizon}s"))
+            .replace("(constant 500W)", history);
+        let ledger = Ledger::open(":memory:").unwrap();
+        let (out, _) = run_assembly(
+            &ledger,
+            src.as_bytes(),
+            &packs,
+            AssemblyAnalysisMode::Transient,
+            &mut step_clock(0.1),
+            AssemblyCancelPlan::default(),
+        )
+        .expect("complete requested horizon");
+        assert_eq!(out.status, SolveRunStatus::Completed);
+        let receipt = read_report_receipt(&ledger, &out.stages[3].receipt);
+        let trace = read_report_receipt(&ledger, json_str_field(&receipt, "trace_artifact"));
+        let times: Vec<f64> = trace
+            .split("\"times_s\":[")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap()
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(times[0], 0.0);
+        assert_eq!(*times.last().unwrap(), horizon, "retained times {times:?}");
+        assert!(
+            times
+                .windows(2)
+                .all(|w| { w[1] > w[0] && w[1] - w[0] <= 0.003 * (1.0 + 8.0 * f64::EPSILON) })
+        );
+        if history.starts_with("(step") {
+            assert!(times.len() > 5, "source knots must shorten accepted steps");
+        } else {
+            assert_eq!(times.len(), 5);
+        }
+        let final_temperature: f64 = trace
+            .rsplit("\"temperature_k\":")
+            .next()
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((final_temperature - (300.0 + horizon)).abs() < 1.0e-11);
+    }
+}
+
+#[test]
+fn transient_step_limit_refuses_instead_of_publishing_a_truncated_run() {
+    let packs = CardPackSet::admit(vec![material_pack("fixture", 1000.0, 500.0, 1.0e9)]).unwrap();
+    let src = HEATED_BODY.replace(":dt 0.003s", ":dt 0.00000001s");
+    let ledger = Ledger::open(":memory:").unwrap();
+    let refusal = run_assembly(
+        &ledger,
+        src.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .expect_err("the whole horizon exceeds the accepted-step limit");
+    assert_eq!(refusal.code, "cli-assembly-step-limit");
+}
+
 const OSCILLATOR_ASSEMBLY: &str = r#"(assembly "harmonic_oscillator"
   (version 1)
   (units "SI")

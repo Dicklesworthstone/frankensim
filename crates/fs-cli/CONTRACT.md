@@ -93,6 +93,17 @@ remain a separate bead. The CLI lineage/replay-audit verbs landed separately
 
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
 
+Assembly driver version 2 advances transient runs to their declared horizon
+using the accepted kernel clock. The last requested step is capped to the
+remaining duration; owner or scheduled-event shortenings cannot prematurely
+complete a run. The 200,000 accepted-step limit is a named refusal, including
+an early refusal when the fixed-step plan already exceeds it, never a
+successful truncated trajectory. Nonadvancing or nonfinite clocks refuse.
+The current assembly wire format admits fixed stepping; an adaptive policy
+without a bound state-error metric refuses instead of running at a fixed
+initial step. Version 2 gives these runs a new identity and refuses old
+driver checkpoints rather than accepting their potentially truncated results.
+
 `crates/fs-cli/src/assembly_run.rs` (with `assembly_run/codec.rs` and
 `assembly_run/report.rs`) implements the six-stage generic assembly pipeline
 (`AssemblyStage::{Admit, Lower, Plan, Run, Probe, Report}`) on top of the shared

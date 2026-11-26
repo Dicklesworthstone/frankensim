@@ -4894,6 +4894,42 @@ impl System {
         Ok(())
     }
 
+    /// Take one step of at most `dt_max_s` toward the absolute time `end_s`.
+    ///
+    /// The remaining interval retains the compensated clock's low bits.
+    /// If taking the full cap would leave only clock roundoff before the
+    /// endpoint, take at most half the remaining interval instead. The
+    /// ordinary driver still owns component limits, scheduled events,
+    /// shortening, audits and publication. Call again while `time_s() < end_s`.
+    ///
+    /// # Errors
+    /// [`SystemError::Step`] if the cap is not finite and positive, or if
+    /// the endpoint is not finite and strictly later than the current time.
+    /// Any ordinary [`Self::step`] refusal leaves the system unchanged.
+    pub fn step_toward(
+        &mut self,
+        end_s: f64,
+        dt_max_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<StepReport, SystemError> {
+        if !(dt_max_s.is_finite() && dt_max_s > 0.0) {
+            return Err(SystemError::Step { dt_s: dt_max_s });
+        }
+        let remaining_s = self.time.interval_to(end_s);
+        if !(end_s.is_finite()
+            && end_s > self.time.value()
+            && remaining_s.is_finite()
+            && remaining_s > 0.0)
+        {
+            return Err(SystemError::Step { dt_s: remaining_s });
+        }
+        let dt_s = self
+            .time
+            .limit_before_event(dt_max_s, remaining_s)
+            .min(remaining_s);
+        self.step(dt_s, cx)
+    }
+
     /// Advance by at most `dt_max_s`.
     ///
     /// The step respects every component's `limit_dt_s` and `next_event_s`
