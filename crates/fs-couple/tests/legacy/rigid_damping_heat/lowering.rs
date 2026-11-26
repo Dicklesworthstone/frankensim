@@ -30,7 +30,6 @@ use fs_scenario::assembly::draft::{
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
-use fs_system::lowering::HEAT_ROUTE_FAMILY;
 use fs_system::lowering::owners::thermal::{
     self, CaloricCell, CaloricLaws, CaloricRequest, HEAT_SOURCE_PORT, SENSIBLE_HEAT_LAW,
 };
@@ -38,6 +37,7 @@ use fs_system::lowering::owners::{
     LOSS_ROUTES, THERMAL_BOUNDARY_FAMILY, VISCOUS_BUSHING_FAMILY, mbd, register_owner_defaults,
     register_owners,
 };
+use fs_system::lowering::{HEAT_ROUTE_FAMILY, Observed};
 use fs_system::{
     CardStore, ConstitutiveModelRef, LoweredSystem, LoweringError, LoweringRegistry,
     ParameterSource, ProvenanceRecorder,
@@ -532,6 +532,49 @@ fn the_lowered_draft_steps_with_the_declared_graph_bit_for_bit() {
                 "{case}: the ledger closes: {residual:e} J"
             );
         }
+    }
+}
+
+/// The part's value from its owner's reader, in the lowered system's state.
+fn observe(lowered: &LoweredSystem, entity: EntityId) -> Option<Observed> {
+    let read = lowered.observers.get(&entity)?;
+    read(&lowered.system)
+}
+
+#[test]
+fn observers_read_each_part_from_its_slot_in_its_owner_node() {
+    let (draft, cards) = pairing(fixture_cards(static_laws()), 2.0);
+    let mut lowered = lower(&draft, &cards);
+    let parts = &draft.input().parts;
+    // As declared: the bodies move along x at 1, -1, 0.5 and -0.5 m/s, not turning.
+    for (part, v) in parts.iter().zip([1.0, -1.0, 0.5, -0.5]) {
+        let want = Observed::Body {
+            velocity_m_s: [v, 0.0, 0.0],
+            angular_velocity_rad_s: [0.0; 3],
+        };
+        let seen = observe(&lowered, part.entity);
+        assert_eq!(seen, Some(want), "{}", part.name);
+    }
+    // After a step, each part reads its own slot: momentum over 2 kg, and the cell's T.
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        lowered.system.step(0.05, cx).unwrap();
+    });
+    let system = &lowered.system;
+    let bodies = bodies_of(system, lowered.node_map["viscous-network"]);
+    for (state, part) in bodies.iter().zip(parts) {
+        let v = state.linear_momentum_world().scale(0.5);
+        let seen = observe(&lowered, part.entity);
+        let Some(Observed::Body { velocity_m_s, .. }) = seen else {
+            panic!("{}: {seen:?}", part.name);
+        };
+        let [seen, want] = [velocity_m_s, [v.x, v.y, v.z]].map(|v| v.map(f64::to_bits));
+        assert_eq!(seen, want, "{}", part.name);
+    }
+    let cells = temperature_bits(system, lowered.node_map["thermal-timeline"]);
+    for (bits, part) in cells.into_iter().zip(&parts[4..]) {
+        let (seen, want) = (observe(&lowered, part.entity), f64::from_bits(bits));
+        assert_eq!(seen, Some(Observed::Cell(want)), "{}", part.name);
     }
 }
 

@@ -28,7 +28,8 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftPartDecl, DraftPartKind, PhysicsDomain,
     PrimitiveShape, SourceTarget, StepPolicy, TimeHistory,
 };
-use fs_thermal::component::ThermalTimeline;
+use fs_scenario::entity::EntityId;
+use fs_thermal::component::{ThermalTimeline, TimelineState};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
@@ -40,11 +41,11 @@ use super::{
 use crate::lowering::ConstitutiveModelRef;
 use crate::lowering::{
     CONDUCTANCE_DIMS, CardStore, GroupLoweringContext, GroupSelection, LoweredGroupOutput,
-    LoweringError, LoweringGraph, LoweringRegistry, MASS_DIMS, MatDbQueryEnv, POWER_DIMS,
+    LoweringError, LoweringGraph, LoweringRegistry, MASS_DIMS, MatDbQueryEnv, Observed, POWER_DIMS,
     ProvenanceRecorder, SourceLoweringReceipt, TEMPERATURE_DIMS, VOLUME_DIMS,
     record_time_history_provenance,
 };
-use crate::{RouteTemperature, heat_sink};
+use crate::{NodeId, RouteTemperature, System, heat_sink};
 
 /// Group name of the thermal timeline.
 pub const GROUP: &str = "owners.thermal.timeline";
@@ -356,6 +357,7 @@ fn lower(
         }
         let port = graph.port(node, &format!("cell{cell}"))?;
         graph.expose_port(entity, "heat", port);
+        observe_cell(graph, node, entity, cell);
     }
     if environment {
         let port = graph.port(node, "environment")?;
@@ -368,6 +370,17 @@ fn lower(
         );
     }
     Ok(out)
+}
+
+/// Registers cell `cell`'s reader for probes: its temperature, from its slot in
+/// the timeline's state.
+fn observe_cell(graph: &mut LoweringGraph, node: NodeId, entity: EntityId, cell: usize) {
+    let id = CellId(cell as u64);
+    let read = move |system: &System| {
+        let timeline = system.state::<TimelineState<'static>>(node)?.simulation();
+        timeline.temperature_k(id).ok().map(Observed::Cell)
+    };
+    graph.observers.insert(entity, Box::new(read));
 }
 
 /// Each boundary's cell and exchange: the convection coefficient, and the

@@ -39,12 +39,12 @@ use super::{
     Scoped, State, VISCOUS_BUSHING_FAMILY, family_entry, is_bushing, owning_part, route_bushing,
     route_state, slot, unallocated,
 };
-use crate::RouteTemperature;
 use crate::lowering::{
     AREA_DIMS, CardStore, DAMPING_DIMS, GroupLoweringContext, GroupSelection, INERTIA_DIMS,
-    LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS, TEMPERATURE_DIMS,
+    LoweredGroupOutput, LoweringError, LoweringGraph, MASS_DIMS, Observed, TEMPERATURE_DIMS,
     TORSIONAL_DAMPING_DIMS, VOLUME_DIMS, geometry_volume_m3,
 };
+use crate::{NodeId, RouteTemperature, System};
 
 /// Group name of the viscous network.
 pub const GROUP: &str = "owners.mbd.viscous-network";
@@ -163,7 +163,7 @@ pub(crate) fn lower(
     let gravity =
         gravity.map_err(|err| Scoped::new("environment", "gravity").invalid(format!("{err:?}")))?;
     let controls = controls(tolerance, properties.len(), links.len(), work);
-    let bodies = properties.len();
+    let (bodies, masses) = (properties.len(), properties.clone());
     let network = ViscousNetwork::new(properties, links, gravity, controls);
     let network =
         network.map_err(|err| Scoped::new("network", NETWORK).invalid(format!("{err:?}")))?;
@@ -175,6 +175,7 @@ pub(crate) fn lower(
             .or_default()
             .push(node);
     }
+    observe_bodies(graph, node, &input.parts, parts, masses);
     for body in 0..bodies {
         let force = graph.port(node, &format!("force{body}"))?;
         graph.bind_zero_boundary(force);
@@ -194,6 +195,31 @@ pub(crate) fn lower(
         }
     }
     Ok(out)
+}
+
+/// Registers each body's reader for probes: its velocity and angular velocity
+/// in the assembly frame, from its slot in the network's state.
+fn observe_bodies(
+    graph: &mut LoweringGraph,
+    node: NodeId,
+    decls: &[DraftPartDecl],
+    parts: &[usize],
+    masses: Vec<MassProperties>,
+) {
+    for (body, (&index, mass)) in parts.iter().zip(masses).enumerate() {
+        let entity = decls[index].entity;
+        let read = move |system: &System| {
+            let state = *system.state::<Vec<RigidBodyState>>(node)?.get(body)?;
+            let velocity = state.center_of_mass_velocity_world(mass).ok()?;
+            let omega = mass.angular_velocity_body_checked(state.angular_momentum_body());
+            let omega = state.pose().orientation().rotate_body_to_world(omega.ok()?);
+            Some(Observed::Body {
+                velocity_m_s: [velocity.x, velocity.y, velocity.z],
+                angular_velocity_rad_s: [omega.x, omega.y, omega.z],
+            })
+        };
+        graph.observers.insert(entity, Box::new(read));
+    }
 }
 
 /// The network's controls: every tolerance at the bodies' shared absolute

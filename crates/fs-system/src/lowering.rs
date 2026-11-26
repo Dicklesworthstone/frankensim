@@ -1607,6 +1607,7 @@ struct SealedLoweringGraph {
     node_map: BTreeMap<String, NodeId>,
     entity_nodes: BTreeMap<EntityId, Vec<NodeId>>,
     entity_ports: BTreeMap<(EntityId, String), PortRef>,
+    observers: BTreeMap<EntityId, Observer>,
 }
 
 /// Mutable graph construction surface passed to registered constructors.
@@ -1627,6 +1628,7 @@ pub struct LoweringGraph {
     boundary_zero_ports: BTreeSet<PortRef>,
     ground_entities: BTreeSet<EntityId>,
     initial_guesses: BTreeMap<PortRef, Vec<f64>>,
+    observers: BTreeMap<EntityId, Observer>,
 }
 
 impl LoweringGraph {
@@ -1643,6 +1645,7 @@ impl LoweringGraph {
             boundary_zero_ports: BTreeSet::new(),
             ground_entities: BTreeSet::new(),
             initial_guesses: BTreeMap::new(),
+            observers: BTreeMap::new(),
         }
     }
 
@@ -1945,6 +1948,7 @@ impl LoweringGraph {
             node_map: self.node_map,
             entity_nodes: self.entity_nodes,
             entity_ports: self.entity_ports,
+            observers: self.observers,
         })
     }
 }
@@ -2685,7 +2689,30 @@ pub struct LoweredSystem {
     pub entity_nodes: BTreeMap<EntityId, Vec<NodeId>>,
     /// Mapping from `(EntityId, logical_port_name)` to [`PortRef`].
     pub part_ports: BTreeMap<(EntityId, String), PortRef>,
+    /// Readers of each part's slot in an owner node's state (a body in a
+    /// network, a cell in a timeline), registered by the owner constructors:
+    /// `observers.get(&part).and_then(|read| read(system))`. A part with a node
+    /// of its own has none.
+    pub observers: BTreeMap<EntityId, Observer>,
 }
+
+/// One part's motion or temperature, read from its slot in its owner node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Observed {
+    /// A rigid body's centre-of-mass velocity (m/s) and angular velocity
+    /// (rad/s), both in the assembly frame.
+    Body {
+        /// Centre-of-mass velocity, m/s.
+        velocity_m_s: [f64; 3],
+        /// Angular velocity, rad/s.
+        angular_velocity_rad_s: [f64; 3],
+    },
+    /// A cell's temperature, K, computed from its stored enthalpy.
+    Cell(f64),
+}
+
+/// Reads one part's [`Observed`] value from a state of its lowered system.
+pub type Observer = Box<dyn Fn(&System) -> Option<Observed>>;
 
 // ============================================================================
 // Lowering Registry
@@ -3197,6 +3224,7 @@ impl LoweringRegistry {
             node_map,
             entity_nodes,
             entity_ports: part_ports,
+            observers,
         } = graph.finalize_and_seal(ambient_temp_k)?;
         let probe_dt = match input.time_plan.step_policy {
             StepPolicy::Fixed { dt } => dt.value,
@@ -3231,6 +3259,7 @@ impl LoweringRegistry {
             node_map,
             entity_nodes,
             part_ports,
+            observers,
         })
     }
 
@@ -3300,6 +3329,7 @@ impl LoweringRegistry {
             node_map,
             entity_nodes,
             entity_ports: part_ports,
+            observers,
         } = graph.finalize_and_seal(spec.ambient_temperature_k)?;
         let dt_s = 1.0 / f64::from(spec.sample_rate_hz);
         let plan = system.execution_plan_for_dt(dt_s);
@@ -3334,6 +3364,7 @@ impl LoweringRegistry {
             node_map,
             entity_nodes,
             part_ports,
+            observers,
         })
     }
 
