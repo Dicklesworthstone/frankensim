@@ -5427,6 +5427,17 @@ No unsafe code.
 
 ## Feature flags
 
+- `cooling-design` (on by default) runs `cooling-network resistance-design
+  <model.json> <design.json>`: bounded branch-resistance and optional fan-speed
+  sizing against a declared mean or hotspot temperature limit with fs-ascent's
+  projected augmented-Lagrangian optimizer. Its `authority` is
+  `nominal-estimate`; status `feasible-incumbent` is an independently replayed
+  nominally feasible design over every declared case, not optimizer
+  convergence; `locally-converged` means the optimizer stopped converged at
+  that selected point. Neither status claims a global optimum.
+  `--no-default-features` builds refuse the verb by name
+  (`cooling-design-feature`). `examples/cooling-network/RESISTANCE_DESIGN.md`
+  runs it on tracked inputs.
 - `sdf3-study` enables the numerical 3-D compliance and stress-constrained
   study producers described above.
 - `thermal-verification` (on by default) computes an explicitly requested

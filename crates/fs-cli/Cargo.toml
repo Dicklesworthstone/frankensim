@@ -68,8 +68,9 @@ fs-voi = { path = "../fs-voi" }
 
 [features]
 # The shipping binary computes the verified mean bound a project's explicit
-# output row requests; `--no-default-features` builds refuse that row by name.
-default = ["thermal-verification"]
+# output row requests and runs `cooling-network resistance-design`;
+# `--no-default-features` builds refuse each of them by name.
+default = ["thermal-verification", "cooling-design"]
 # Bounded resistance sizing with the existing projected AL optimizer.
 cooling-design = ["dep:fs-ascent"]
 # Explicit nominal linear continuum bounds retain the verifier's feature gate.

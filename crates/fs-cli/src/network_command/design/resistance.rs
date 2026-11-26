@@ -22,7 +22,7 @@ mod operating;
 use fan_control::FanControl;
 
 const SCHEMA: &str = "frankensim.cooling-resistance-design.v1";
-const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nRequires --features cooling-design. Optimize bounded branch-resistance\nmultipliers and optional fan_speed_control against a mean or hotspot limit,\nusing complete hydraulic/convection/solid adjoints. Optional air_power_cost\nadds a declared weight on nominal fan air power. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nOptional operating_envelope checks every declared source/inlet case, including nominal.\nSee examples/cooling-network/RESISTANCE_DESIGN.md and OPERATING_ENVELOPE.md.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network resistance-design <model.json> <design.json>\n\nOptimize bounded branch-resistance multipliers and optional fan_speed_control\nagainst a mean or hotspot limit, using complete hydraulic/convection/solid\nadjoints. Optional air_power_cost adds a declared weight on nominal fan air\npower. The model must set objective.gradient=true.\nMaximum selectors require explicit maximum_smoothing_k in the design policy;\nthe smooth upper envelope and actual selected peak must both pass on replay.\nOptional operating_envelope checks every declared source/inlet case, including nominal.\nSee examples/cooling-network/RESISTANCE_DESIGN.md and OPERATING_ENVELOPE.md.\n";
 
 #[derive(Debug)]
 struct Control {

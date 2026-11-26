@@ -77,7 +77,7 @@ not the aggregated constraint.
 Run the included policy with the existing whole-solid hotspot model:
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-hotspot-model.json \
   examples/cooling-network/operating-envelope-design.json
@@ -139,7 +139,7 @@ after both successful and failed sweeps. The per-case objective definitions,
 limits and gradients remain fixed through the entire optimization.
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-model.json \
   examples/cooling-network/component-requirements-design.json

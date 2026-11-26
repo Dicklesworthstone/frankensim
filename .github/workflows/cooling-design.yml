@@ -77,4 +77,4 @@ jobs:
       - name: Test actual hydraulic derivatives and coupled resistance design
         run: |
           cargo test -p fs-airflow --lib graph::sensitivity::
-          cargo test -p fs-cli --features cooling-design --bin frankensim network_command::design::resistance::
+          cargo test -p fs-cli --features cooling-design --lib network_command::design::resistance::

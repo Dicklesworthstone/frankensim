@@ -1,9 +1,10 @@
 # Bounded resistance design against a temperature limit
 
-Build with `cooling-design` and run the two-file command from the repository root:
+The default build includes fs-cli's `cooling-design` feature. Run the two-file
+command from the repository root:
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-model.json \
   examples/cooling-network/resistance-design.json
@@ -11,8 +12,8 @@ cargo run --release -p fs-cli --features cooling-design -- --json \
 
 The model is an ordinary cooling-network v1 request. The separate design file
 selects branches, resistance multiplier bounds, a temperature requirement and
-optimizer work limits. Neither input file is changed. A build without the feature
-returns the explicit `cooling-design-feature` diagnostic for this command.
+optimizer work limits. Neither input file is changed. A `--no-default-features`
+build returns the explicit `cooling-design-feature` diagnostic for this command.
 
 ## What is optimized
 
@@ -45,7 +46,7 @@ are refused rather than solving a simpler model under the same request.
 A complete whole-solid example is included:
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-hotspot-model.json \
   examples/cooling-network/resistance-hotspot-design.json

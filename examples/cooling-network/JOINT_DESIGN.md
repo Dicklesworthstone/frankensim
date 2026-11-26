@@ -5,7 +5,7 @@ The existing `cooling-network resistance-design` command also admits an optional
 with the selected branch resistances, not through a nested fan-sizing search.
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-hotspot-model.json \
   examples/cooling-network/joint-fan-resistance-design.json
@@ -63,7 +63,7 @@ remain positive: this is a weighted tradeoff, not an unregularized pure-power
 minimizer. The thermal requirement and its gradient are unchanged.
 
 ```sh
-cargo run --release -p fs-cli --features cooling-design -- --json \
+cargo run --release -p fs-cli -- --json \
   cooling-network resistance-design \
   examples/cooling-network/resistance-hotspot-model.json \
   examples/cooling-network/air-power-design.json
