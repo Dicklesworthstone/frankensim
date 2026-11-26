@@ -318,7 +318,7 @@
       "title": "Steady conduction FEM solve on solids",
       "level": "L3",
       "owner": "jemanuel",
-      "last_review": "2026-09-02",
+      "last_review": "2026-11-26",
       "crates": ["fs-conduction", "fs-feec", "fs-solid"],
       "evidence": [
         {
@@ -359,7 +359,7 @@
           "ref": "crates/fs-conduction/tests/adjoint.rs::ift_gradient_matches_central_differences"
         }
       ],
-      "notes": "L3 asserts that the pipeline executes conduction end to end with retained receipts, not that the answer is converged or validated. Under the receipt rule (bead frankensim-rc-root-q61wp.13): the cited lane drives the real `frankensim` binary through validate/import/solve/report/package on the tracked reference project and its retained receipt (spine-e2e-summary.json) lists the conduction stage as executed at a HEAD at or after the lane's own commit, with the seven-stage run, the export verbs, determinism repeat and resume drills green. What L3 covers: the single-command pipeline through all seven stages; the heterogeneous steady conduction solve with card-backed matching-P1 contact; the declared-Robin and the one-branch conjugate airflow path (card-bounded convection, frozen dry-air properties) when a project declares it; the retained QoI/report/package projections. What it does NOT cover: L4 corpus validation (every row is Estimated), CFD or transient thermal physics, multi-branch air networks, mesh-convergence claims, cross-ISA bit-exactness outside the declared platforms, or any authority beyond what each stage receipt records; the QoI verdict in the retained run is Indeterminate with eight explicit NO-DATA terms."
+      "notes": "L3 asserts that the pipeline executes conduction end to end with retained receipts, not that the answer is converged or validated. Under the receipt rule (bead frankensim-rc-root-q61wp.13): the cited lane drives the real `frankensim` binary through validate/import/solve/report/package on the tracked reference project and its retained receipt (spine-e2e-summary.json) lists the conduction stage as executed at a HEAD at or after the lane's own commit, with the seven-stage run, the export verbs, determinism repeat and resume drills green. What L3 covers: the single-command pipeline through all seven stages; the heterogeneous steady conduction solve with card-backed matching-P1 contact; the declared-Robin and the one-branch conjugate airflow path (card-bounded convection, frozen dry-air properties) when a project declares it; the retained QoI/report/package projections. What it does NOT cover: L4 corpus validation (every corpus row is Estimated), CFD or transient thermal physics, multi-branch air networks, mesh-convergence claims, cross-ISA bit-exactness outside the declared platforms, or any authority beyond what each stage receipt records; the QoI verdict in the retained run is Indeterminate with eight explicit NO-DATA terms. Since 285a8fefcf (bead frankensim-k0org) the default binary also computes an explicitly requested `temperature-volume-mean-bound` report: a Verified interval for the temperature-max region's volume mean under the nominal linear conduction PDE, shown end to end on the tracked examples/verified-mean project. It bounds the mean, not the maximum that the requirement checks."
     },
     {
       "id": "ledger.design-ledger",
