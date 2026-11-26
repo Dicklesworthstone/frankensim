@@ -20,6 +20,7 @@ mod gas;
 mod hydraulic;
 mod materials;
 mod modal;
+mod motor_drive;
 mod phs;
 mod snapshot;
 mod solid;
@@ -788,6 +789,43 @@ A netlist of fs-phs, stepped by its fs-system owner:
                  the state coordinates; order at most 2. Constant
                  resistances: the owner's resistance laws and operating-point
                  iteration are not exposed.)
+A battery-fed commutated motor drive of fs-phs, stepped by its fs-system owner:
+  motor_drive    battery = {the battery's curve and four constants},
+                 lead_resistance_ohm, converter = {inductance_h,
+                 bus_capacitance_f = [input, output], winding_resistance_ohm,
+                 switch = {on_resistance_ohm, off_resistance_ohm,
+                 diode_forward_v, diode_resistance_ohm, max_reverse_v,
+                 max_channel_a, max_diode_a} or four of them (input high,
+                 input low, output high, output low)}, motor = {inductance_h,
+                 winding_resistance_ohm, rotor_inertia_kg_m2,
+                 stator_inertia_kg_m2, coupling_nm_per_a,
+                 bearing_drag_nm_s_per_rad}, output_capacitance_f = [4]
+                 (optional: the switches then store charge), program =
+                 {intervals = [{on = [4 booleans], duration_s}, ...],
+                 substeps}, start = {soc, polarization_v = 0, bus_v,
+                 converter_current_a, converter_bus_v = [2], node_v = [2]
+                 (with output_capacitance_f only), motor_current_a,
+                 shaft_rad_s = [rotor, stator]}, energy_tolerance_j, solve
+                 and backtracking_halvings as for battery, interval_tolerance
+                 = {absolute_j, relative} (default 1e-10, 1e-12), cycle =
+                 {max_intervals, absolute_j, relative} (default 64, 1e-9,
+                 1e-11)    [rotor, stator, heat_converter_winding,
+                 heat_input_high, heat_input_low, heat_output_high,
+                 heat_output_low, heat_battery_series,
+                 heat_battery_polarization, heat_lead, heat_motor_winding,
+                 heat_bearing]
+                 (A step is the whole program: step_s must be its period and
+                 duration_s a whole number of steps; fixed step_s only, and
+                 --until with --whole-steps, as the owner refuses a cut step.
+                 Each shaft receives a torque and returns its mean speed.
+                 Reports the owner's state by name, soc, polarization_v,
+                 battery_bus_v, converter_current_a, motor_current_a,
+                 rotor_rad_s, stator_rad_s, relative_rad_s, without
+                 output_capacitance_f input_bus_v and output_bus_v, each heat
+                 port's <port>_w (null initially), the controls the run used
+                 and period_s. Not exposed: the gate lane, charge-curve
+                 storage, auxiliary loads, scheduled programs, resistance and
+                 switch laws.)
 Rigid bodies in three dimensions joined by viscous connectors, stepped by the
 fs-mbd network owner. Vectors are [x, y, z] in world axes unless said
 otherwise; a body's principal axes are its own axes and its centre of mass
@@ -1288,8 +1326,10 @@ impl SystemScene {
     ///
     /// Returns true after acceptance and false when already finished. The
     /// caller's ceiling must be positive and finite. Adaptive retries and
-    /// component events may shorten it further. A refusal leaves the accepted
-    /// state, ledger, samples and driver statistics unchanged.
+    /// component events may shorten it further. A scene with a motor drive
+    /// steps whole periods only: a ceiling within 1e-5 of the step is the
+    /// step, and the drive's owner refuses a shorter one. A refusal leaves the
+    /// accepted state, ledger, samples and driver statistics unchanged.
     pub fn advance(&mut self, max_interval_s: f64, cx: &Cx<'_>) -> Result<bool, SystemSceneError> {
         if !max_interval_s.is_finite() || max_interval_s <= 0.0 {
             return Err(SystemSceneError {
@@ -1616,6 +1656,10 @@ enum Kind {
     /// A netlist of fs-phs stepped by its fs-system owner, with a port per
     /// source and a heat port per resistor.
     KirchhoffCircuit,
+    /// A battery-fed commutated motor drive of fs-phs stepped by its
+    /// fs-system owner one gate program per step, with its two shafts and
+    /// ten heat ports.
+    MotorDrive,
     /// Rigid bodies and viscous connectors, stepped by their fs-mbd owner.
     RigidNetwork,
     /// The same with Maxwell branches and actuators on the connectors.
@@ -1653,7 +1697,7 @@ enum Kind {
 }
 
 impl Kind {
-    const TABLE: [(&'static str, Self); 63] = [
+    const TABLE: [(&'static str, Self); 64] = [
         ("mass", Self::Inertance(Domain::Translation)),
         ("spring", Self::Compliance(Domain::Translation)),
         ("damper", Self::Resistance(Domain::Translation)),
@@ -1704,6 +1748,7 @@ impl Kind {
         ("port_hamiltonian", Self::PortHamiltonian),
         ("battery", Self::Battery),
         ("kirchhoff_circuit", Self::KirchhoffCircuit),
+        ("motor_drive", Self::MotorDrive),
         ("rigid_network", Self::RigidNetwork),
         ("viscoelastic_network", Self::ViscoelasticNetwork),
         ("heat_capacity", Self::HeatCapacity),
@@ -1796,6 +1841,8 @@ struct Element {
     battery: Option<battery::Declared>,
     /// A circuit's state coordinate names and the tolerance its run used.
     circuit: Option<circuit::Declared>,
+    /// A motor drive's lane, period, constants and the controls its run used.
+    drive: Option<motor_drive::Declared>,
 }
 
 /// A controlled source's scalar command uses the SI unit of what its physical
@@ -1992,6 +2039,7 @@ fn no_error_account(element: &Element) -> String {
         Kind::IdealDiode | Kind::IdealSwitch => {
             "its switching relation has no event-resolved step-doubling error metric here"
         }
+        Kind::MotorDrive => "a step is its whole gate program, which step doubling cannot halve",
         // A slider, a friction interface, a Hertz patch, a contact interface.
         _ => {
             "its force jumps where it sticks, slips or strikes, and an estimate by step \
@@ -3537,6 +3585,7 @@ fn element(
     let mut laminar = None;
     let mut battery_declared = None;
     let mut circuit_declared = None;
+    let mut drive_declared = None;
     let (node, ports) = match kind {
         Kind::Inertance(domain) => {
             let names = domain.names();
@@ -3762,6 +3811,11 @@ fn element(
                 .map_err(|e| Refusal::Admission(e.to_string()))?;
             (node, ports)
         }
+        Kind::MotorDrive => {
+            let (node, ports, declared) = motor_drive::add(builder, name, definition, &what)?;
+            drive_declared = Some(declared);
+            (node, ports)
+        }
         Kind::RigidNetwork | Kind::ViscoelasticNetwork => {
             let parts = if kind == Kind::RigidNetwork {
                 rigid_network(builder, name, definition, scene, &what)?
@@ -3920,6 +3974,7 @@ fn element(
         laminar,
         battery: battery_declared,
         circuit: circuit_declared,
+        drive: drive_declared,
     })
 }
 
@@ -4938,6 +4993,7 @@ fn adaptive(definition: &J, elements: &[Element], step_s: f64) -> Result<Adaptiv
             | Kind::SpeedController
             | Kind::IdealDiode
             | Kind::IdealSwitch
+            | Kind::MotorDrive
             | Kind::ThermalTimeline => return Err(no_error_account(element)),
         };
         for (field, coordinate) in coordinates {
@@ -5044,6 +5100,12 @@ fn load_text(text: &str, source_path: &Path) -> Result<Device, Refusal> {
                 &elements,
             )?;
             elements.push(added);
+        }
+    }
+    for element in &elements {
+        if let Some(declared) = &element.drive {
+            let what = format!("elements.{}", element.name);
+            motor_drive::admit(declared, step_s, duration_s, &what)?;
         }
     }
     let connections = root
@@ -5520,6 +5582,14 @@ impl Device {
                  parasitic elements"
             ));
         }
+        if self.elements.iter().any(|element| element.drive.is_some()) {
+            description = std::borrow::Cow::Owned(format!(
+                "{description}; a motor_drive is fs-phs's battery-fed commutated drive, \
+                 stepped by its fs-system owner one authored gate program per step at its \
+                 authored resistances and switches: no gate drivers, charge curves, \
+                 auxiliary loads, scheduled programs or resistance and switch laws"
+            ));
+        }
         if self
             .elements
             .iter()
@@ -5748,10 +5818,17 @@ impl Device {
             adaptive.record(&report);
             report.time_s
         } else {
-            let report = self
-                .system
-                .step(self.step_s.min(remaining), cx)
-                .map_err(RunError::Step)?;
+            // A motor drive's owner refuses to cut its period, so an interval
+            // within 1e-5 of the step (the summed time's rounding at the end,
+            // or a ceiling at a period's end) is the step.
+            let whole = remaining > self.step_s * (1.0 - 1e-5)
+                && self.elements.iter().any(|element| element.drive.is_some());
+            let dt_s = if whole {
+                self.step_s
+            } else {
+                self.step_s.min(remaining)
+            };
+            let report = self.system.step(dt_s, cx).map_err(RunError::Step)?;
             self.iterations += u64::from(report.iterations);
             self.shortenings += u64::from(report.shortenings);
             report.time_s
@@ -5835,6 +5912,9 @@ impl Device {
         }
         if let Some(declared) = &element.circuit {
             return circuit::values(&self.system, element.node, &element.ports, declared);
+        }
+        if let Some(declared) = &element.drive {
+            return motor_drive::values(&self.system, element.node, declared);
         }
         if element.kind == Kind::DiracJunction {
             return self.dirac_values(element);
@@ -6287,6 +6367,7 @@ impl Device {
             | Kind::PortHamiltonian
             | Kind::Battery
             | Kind::KirchhoffCircuit
+            | Kind::MotorDrive
             | Kind::ModalStructure
             | Kind::ThermalTimeline
             | Kind::ConductionBody

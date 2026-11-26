@@ -2313,6 +2313,44 @@ sources, a `charge_c` on an inductor, a node out of range, a floating node,
 a mutual coupling on a resistor, a missing `energy_tolerance_j` and an
 unknown field.
 
+`motor_drive` lowers to fs-system's `CommutatedBatteryMotorDrive` (feature
+`phs`): a `battery` (the battery kind's curve and constants) behind
+`lead_resistance_ohm`, a two-leg `converter` (one `switch` for all four or
+four in the owner's order: input high, input low, output high, output low)
+and a DC `motor` whose rotor and stator both turn. `output_capacitance_f`
+selects the owner's eleven-state lane (switches that store charge), its
+absence the nine-state lane. One `program` of gate `intervals` is every
+step: `step_s` must be its period within the owner's 64 rounding units and
+`duration_s` a whole number of steps, or admission refuses the scene; an
+interval within 1e-5 of the step (the summed time's rounding at the end, or
+a caller's ceiling at a period's end) is the step; `--until` needs
+`--whole-steps`, as the owner refuses a cut step; adaptive runs are refused.
+The `start` (the battery's three,
+`converter_current_a`, `converter_bus_v`, `node_v` in the eleven-state lane
+only, `motor_current_a`, `shaft_rad_s`) is mapped by the owners' `state`
+constructors. `rotor` and `stator` receive a torque and return the shaft's
+mean speed; ten heat ports return minus their heat rates. Controls:
+`energy_tolerance_j` is required; `solve`, `backtracking_halvings`,
+`interval_tolerance` and `cycle` are optional, with fs-system's test values
+as defaults, and every report gives the controls used and `period_s`,
+beside the owner's state by name, `soc`, the battery's voltages, both
+currents, the shaft speeds and `relative_rad_s`, the bus voltages in the
+nine-state lane only (in the other a bus shares its charge with a switch's
+capacitor) and `<heat port>_w` (null before a step). fs-system re-exports
+from `commutated_drive` the types the CLI names. Not exposed: the gate lane,
+charge-curve storage, auxiliary loads, scheduled programs, resistance and
+switch laws. Tested in `tests/system_command/motor_drive.rs`: a synchronous
+buck in the eleven-state lane over 140 periods of 5 ms (whose summed time
+misses the last by more than 64 rounding units) keeps the free shafts' total
+momentum to 1e-12 and closes the ledger, defaults reported exactly; both
+lanes hold the DC operating point of the resistive network with both high
+switches on at its closed form (1e-9 relative, with the eleven-state lane's
+bus and node electrode charges and all ten heat rates);
+nulls before a step, authored controls reported exactly, and refusals of a
+step that is not the period, a fractional step count, five switches, three
+gate commands, a start soc of 1.5, `node_v` without switch storage and an
+adaptive run.
+
 A `rigid_network` is the first scene element that is a physics owner behind
 the Component contract and not a lumped law: it lowers to
 `fs_mbd::component::network::ViscousNetwork` (rigid bodies in three

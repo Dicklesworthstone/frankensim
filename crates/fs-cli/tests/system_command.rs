@@ -42,6 +42,8 @@ mod gap_field;
 mod battery;
 #[path = "system_command/circuit.rs"]
 mod circuit;
+#[path = "system_command/motor_drive.rs"]
+mod motor_drive;
 
 fn example(name: &str) -> String {
     format!(

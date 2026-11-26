@@ -112,7 +112,6 @@ use fs_phs::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource
 use fs_phs::circuit::capacitance::CapacitorChargeCurve;
 use fs_phs::circuit::converter::battery_fed::motor::BatteryMotorDrive;
 use fs_phs::circuit::converter::commutation::battery_motor::PreparedCommutatedBatteryMotorCycle;
-use fs_phs::circuit::converter::commutation::capacitance::CapacitiveCommutationParameters;
 use fs_phs::circuit::converter::commutation::capacitance::battery_motor::{
     PreparedCapacitiveBatteryMotorCycle, PreparedChargeBatteryMotorCycle,
     PreparedGateBatteryMotorCycle,
@@ -122,14 +121,9 @@ use fs_phs::circuit::converter::commutation::capacitance::gate::GateCommutationP
 use fs_phs::circuit::converter::commutation::gate::{
     GateChannelLaw, GateChannelPoint, GateChannelResponse, GateDriver,
 };
-use fs_phs::circuit::converter::commutation::{
-    CommutationInterval, CommutationParameters, SwitchDevice,
-};
-use fs_phs::circuit::converter::power_load::{PowerLoadControls, RegulatedPowerLoad};
-use fs_phs::circuit::converter::switching::SwitchCycleControls;
+use fs_phs::circuit::converter::power_load::RegulatedPowerLoad;
 use fs_phs::circuit::converter::switching::battery_motor::BatteryMotorSwitchCommand;
 use fs_phs::circuit::converter::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters};
-use fs_phs::circuit::motor::{DcMotor, DcMotorParameters};
 use fs_phs::{PhsError, PreparedStepError, PreparedStepRecord, arithmetic_rounding_floor};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortLayout, PortRole, PortSpec, Proposal, Receipt,
@@ -137,6 +131,29 @@ use fs_ports::component::{
 use fs_ports::{CoupleError, PortKind, StableId};
 
 use crate::circuit::ResistanceLaw;
+
+/// The owner's body diode, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::BodyDiode;
+/// The owner's gate interval, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::CommutationInterval;
+/// The owner's converter, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::CommutationParameters;
+/// The owner's gate commands, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::DeviceGateState;
+/// The owner's switch limits, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::DeviceOperatingBounds;
+/// The owner's switch, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::SwitchDevice;
+/// The owner's storing converter, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::commutation::capacitance::CapacitiveCommutationParameters;
+/// The owner's interval controls, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::power_load::PowerLoadControls;
+/// The owner's cycle controls, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::converter::switching::SwitchCycleControls;
+/// The owner's motor, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::motor::DcMotor;
+/// The owner's motor parameters, which the CLI's `motor_drive` scenes name through here.
+pub use fs_phs::circuit::motor::DcMotorParameters;
 
 /// The ten heat ports every drive has, in port order after `rotor` and
 /// `stator`.

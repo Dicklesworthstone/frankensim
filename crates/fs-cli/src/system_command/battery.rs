@@ -44,6 +44,13 @@ pub(super) struct Declared {
     energy_tolerance_j: f64,
 }
 
+/// A cell's capacity, curve and constants, which a `motor_drive` also reads.
+pub(super) struct Cell {
+    pub(super) capacity_c: f64,
+    pub(super) soc_voltage: Vec<(f64, f64)>,
+    pub(super) parameters: BatteryParameters,
+}
+
 /// A `battery` and its start, `[remaining charge, polarization charge, bus
 /// charge]` \[C\], from its state of charge and two voltages.
 pub(super) fn battery(
@@ -69,6 +76,31 @@ pub(super) fn battery(
         ],
         what,
     )?;
+    let solve = solve(definition, what)?;
+    let halvings = halvings(definition, what)?;
+    let energy_tolerance_j = positive(definition, "energy_tolerance_j", what)?;
+    let (battery, cell) = cell(definition, what, solve, halvings, energy_tolerance_j)?;
+    let state = start(&battery, definition, what)?;
+    let declared = Declared {
+        capacity_c: cell.capacity_c,
+        polarization_capacitance_f: cell.parameters.polarization_capacitance_f,
+        bus_capacitance_f: cell.parameters.bus_capacitance_f,
+        solve,
+        halvings,
+        energy_tolerance_j,
+    };
+    Ok((battery, state, declared))
+}
+
+/// The cell at `definition` (its curve and four constants, whose fields the
+/// caller has checked), built under the owner's controls.
+pub(super) fn cell(
+    definition: &J,
+    what: &str,
+    solve: SolveBudget,
+    halvings: u8,
+    energy_tolerance_j: f64,
+) -> Result<(EquivalentCircuitBattery, Cell), String> {
     let capacity_c = positive(definition, "capacity_c", what)?;
     let soc_voltage = definition
         .get("soc_voltage")
@@ -91,6 +123,25 @@ pub(super) fn battery(
         polarization_capacitance_f: number(definition, "polarization_capacitance_f", what)?,
         bus_capacitance_f: number(definition, "bus_capacitance_f", what)?,
     };
+    let battery = EquivalentCircuitBattery::new(
+        capacity_c,
+        &soc_voltage,
+        parameters,
+        solve,
+        halvings,
+        energy_tolerance_j,
+    )
+    .map_err(|e| format!("{what}: {e}"))?;
+    let cell = Cell {
+        capacity_c,
+        soc_voltage,
+        parameters,
+    };
+    Ok((battery, cell))
+}
+
+/// The owner's Newton budget at `solve`, or fs-system's test value.
+pub(super) fn solve(definition: &J, what: &str) -> Result<SolveBudget, String> {
     let solve = match definition.get("solve") {
         None => DEFAULT_SOLVE,
         Some(budget) => {
@@ -108,6 +159,12 @@ pub(super) fn battery(
             }
         }
     };
+    Ok(solve)
+}
+
+/// The owner's step halvings at `backtracking_halvings`, or fs-system's test
+/// value.
+pub(super) fn halvings(definition: &J, what: &str) -> Result<u8, String> {
     let halvings = match definition.get("backtracking_halvings") {
         None => DEFAULT_HALVINGS,
         Some(value) => value
@@ -116,16 +173,16 @@ pub(super) fn battery(
             .map(|n| n as u8)
             .ok_or_else(|| format!("{what}.backtracking_halvings: a whole number, 0 to 64"))?,
     };
-    let energy_tolerance_j = positive(definition, "energy_tolerance_j", what)?;
-    let battery = EquivalentCircuitBattery::new(
-        capacity_c,
-        &soc_voltage,
-        parameters,
-        solve,
-        halvings,
-        energy_tolerance_j,
-    )
-    .map_err(|e| format!("{what}: {e}"))?;
+    Ok(halvings)
+}
+
+/// The start at `definition`, the three charges mapped by the owner's
+/// `state` from the state of charge and two voltages.
+pub(super) fn start(
+    battery: &EquivalentCircuitBattery,
+    definition: &J,
+    what: &str,
+) -> Result<[f64; 3], String> {
     let state = battery
         .state(
             number(definition, "soc", what)?,
@@ -133,15 +190,7 @@ pub(super) fn battery(
             number(definition, "bus_v", what)?,
         )
         .map_err(|e| format!("{what}: {e}"))?;
-    let declared = Declared {
-        capacity_c,
-        polarization_capacitance_f: parameters.polarization_capacitance_f,
-        bus_capacitance_f: parameters.bus_capacitance_f,
-        solve,
-        halvings,
-        energy_tolerance_j,
-    };
-    Ok((battery, state, declared))
+    Ok(state)
 }
 
 /// The three charges, in the owner's order; then the state of charge and the
