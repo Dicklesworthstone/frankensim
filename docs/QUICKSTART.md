@@ -3,36 +3,41 @@
 Bootstrap to a first validated project in about 15 minutes on a warm
 machine (measured: Apple M4 Pro, pinned nightly toolchain, siblings already
 materialized; the first cold build takes longer because it compiles the
-workspace). Every command below is executed continuously by
+workspace). The same commands are scripted in
 `scripts/ci/examples_freshness_e2e.sh` and
-`scripts/ci/solve_stage_producers_e2e.sh`, and the same facts are
-pinned by the fs-cli G0/G1 battery (`crates/fs-cli/tests/cli.rs`), so if a
-command here drifts from what the product actually does, a lane breaks.
+`scripts/ci/solve_stage_producers_e2e.sh` (run each with `--binary PATH`;
+no CI workflow runs them today), and the fs-cli G0/G1 battery
+(`crates/fs-cli/tests/cli.rs`) pins the same facts, so a command here that
+drifts from what the product does fails those lanes when they run.
 
 ## 0. What you are validating
 
 FrankenSim is fail-closed by design. `validate` reports every structural
 finding about your project and never guesses. A green validate means the
-file is a well-formed project under the frozen schema (`.fsim` v10) — not that
+file is a well-formed project under the frozen schema (`.fsim` v17, which `validate` prints as `fsim_version`) — not that
 physics has been solved. A solve runs seven durable stages — import-verify,
 assign, material-resolve, flow-network, conduction, qoi, report — and every
-number it retains carries an evidence colour and a no-claim. Today every
-quantity of interest is **Estimated / indeterminate**: the eight
-engineering-uncertainty terms are explicit NO-DATA until measured, the
-conduction mesh is the recovered surface without a refinement ladder, and no
-capability claims validation. A project that omits an input the stage needs
-refuses by name (`cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`);
-that refusal is the product working, and this quickstart reads two of them
-deliberately.
+number it retains carries an evidence colour and a no-claim. Every quantity
+of interest is **Estimated**. On the worked heatsink (section 4), seven of
+the eight engineering-uncertainty terms carry a value (six intervals and a
+negligible measurement term); the eighth, discretization, is explicit
+NO-DATA, because the default conduction mesh is the recovered surface
+without a refinement ladder, so the verdict is **indeterminate**. The ladder
+variant (section 5b) measures that term too, and its verdict is an Estimated
+`satisfied`. No capability claims validation. A project that omits an input
+the stage needs refuses by name (`cli-solve-conduction-undeclared`,
+`cli-solve-qoi-undeclared`); that refusal is the product working, and
+section 6 reads the first of them deliberately.
 
 ## 1. Materialize the sibling constellation
 
 The workspace path-depends on seven pinned sibling Franken repositories.
-From a fresh checkout:
+From a fresh checkout, in its root (with no argument, `rustup toolchain
+install` installs the toolchain `rust-toolchain.toml` pins,
+`nightly-2026-07-06`, with rustfmt and clippy):
 
 ```bash
-rustup toolchain install nightly
-rustup component add rustfmt clippy --toolchain nightly
+rustup toolchain install
 cargo run --manifest-path tools/bootstrap/Cargo.toml
 ```
 
@@ -67,8 +72,8 @@ cargo run -p fs-cli --bin frankensim -- --json validate examples/refusal-loop/br
 Expected: exit 4 (schema/semantic-refusal class) and a finding carrying
 code `project-duty-range`. `broken.fsim` is the tracked reference project
 with exactly one token changed; restoring `:duty 1.0` makes it
-byte-for-byte `data/reference-project/cooling-reference.fsim`. The
-freshness lane proves both directions continuously.
+byte-for-byte `data/reference-project/cooling-reference.fsim`;
+`scripts/ci/examples_freshness_e2e.sh` checks both directions.
 
 ## 4. Solve a real body end to end
 
@@ -89,8 +94,11 @@ cargo run -p fs-cli --bin frankensim -- --json solve \
 ```
 
 Expected on stderr: seven JSON progress lines, `"stage":"import-verify"`
-through `"stage":"report"`, each `"status":"ok"` with a wall-clock and a
-durable ledger receipt. Expected on stdout: `"status":"completed"`,
+through `"stage":"report"`, each `"status":"ok"` with its wall-clock
+(`wall_s`); each stage's receipt hash is in the report (section 5). Under
+`cargo run` these lines follow cargo's own output, which first replays the
+workspace's cached compiler warnings (over 300,000 lines on 2026-11-26);
+`2>&1 | grep '^{'` keeps only the JSON lines. Expected on stdout: `"status":"completed"`,
 `"stages_completed":7`, a 64-hex `"run"` id and the run receipt hash. Keep
 the run id:
 
@@ -109,8 +117,9 @@ What the receipts say about this body (read them; the numbers below are the
 retained values of the reference run, not a promise): the flow network
 certifies an operating point of about 1.15 L/s through the fin channels at
 70 % fan speed; the Hausen developing-flow card is inside its validity
-domain at Re ≈ 1.5 × 10³; the solid/air exchange closes its energy balance to
-about 1e-10 W; the conduction mesh has 246 vertices with its quality census
+domain at Re ≈ 1.5 × 10³; the conduction stage closes its energy balance to
+a relative 1e-10; the conduction mesh has 256 vertices (713 tetrahedra) with
+its quality census
 disclosed in the receipt; the temperature maximum is Estimated.
 
 ## 5. Export the report and the evidence package
@@ -138,7 +147,7 @@ copied from, and the uncertainty table prints NO-DATA where nothing was
 measured. For an indeterminate verdict it also states what would decide it:
 the unmeasured terms and how large they would have to be, combined, to fail
 the requirement (24.78 K on this body, all of it discretization, which the
-ladder variant below measures at 1.1 mK). Exporting twice is idempotent; an unknown run refuses without
+ladder variant below measures at 1.4 mK). Exporting twice is idempotent; an unknown run refuses without
 writing anything:
 
 ```bash
@@ -155,14 +164,18 @@ The default solve meshes the body once and says so: the conduction receipt's
 discretization term is `NO-DATA`. Declare `(solver :fidelity "ladder" ...)`
 and the conduction stage solves the audited mesh plus two uniform 1→8
 refinements (while they fit the memory budget), records every rung, and
-reports a grid-refinement half-width that the QoI stage carries as the first
-measured budget term; the report gains a convergence section. Budget the time:
-three rungs cost about seventy base solves (the finned heatsink takes a few
-minutes in a debug build), so raise `:solve-time` accordingly.
+reports a grid-refinement half-width that the QoI stage carries as the
+discretization budget term; the report gains a convergence section. Budget
+the time: on the finned heatsink the three rungs (256, 1478 and 9675
+vertices) took 100 s of conduction in a debug build, against 4 s for the
+single rung, so raise `:solve-time` accordingly.
 `examples/heatsink-fan/heatsink-fan-ladder.fsim` is that variant of the
-worked example; on it the maximum moves by 0.37 mK and then 0.05 mK across a
-factor four in mesh size, so the estimate is the disclosed `data-range` bound
-(1.1 mK), not an observed-order extrapolation — the receipt says which.
+worked example; on it the maximum moves by +0.45 mK and then −0.06 mK across
+a factor four in mesh size. The changes alternate in sign, so the estimate is
+the disclosed `data-range` bound (1.4 mK, three times the 0.45 mK range), not
+an observed-order extrapolation — the receipt says which. With all eight
+terms measured (21.4 K combined), the ladder run's verdict is an Estimated
+`satisfied`.
 
 ## 6. One-command run, and the two named refusals
 
@@ -181,7 +194,8 @@ Now read the refusals the pipeline is built around. Strip the
 `(conduction ...)` form out of a copy of the project and run it: the solve
 refuses at the conduction stage with `cli-solve-conduction-undeclared`
 (exit 4) — the stage exists, the declaration does not — and writes no
-report or package. Omit `--materials`: material-resolve refuses. Declare
+report or package. Omit `--materials`: material-resolve refuses with
+`project-material-card-unknown`. Declare
 `:speed-ratio 1.2` instead of `0.7`: the channel Reynolds number rises past
 the Hausen card's laminar ceiling (Re 2300; at 1.0 it is still about 2150
 and the card answers) and the conduction stage refuses with
@@ -191,7 +205,11 @@ the fix, instead of extrapolating.
 ## 7. Python SDK & Jupyter Notebooks
 
 Under Decision Record `ADPT-2026-07`, the Python SDK operates strictly
-out-of-process via structured JSON lines over the certified binary:
+out-of-process via structured JSON lines over the certified binary. The SDK
+is not packaged (there is no `pyproject.toml`): run Python from the checkout
+root with `PYTHONPATH=python`. The client runs `FRANKENSIM_BIN` when it is
+set, else the `frankensim` under `target/release` or `target/debug` (or the
+same under `CARGO_TARGET_DIR`), release first, else the one on `PATH`:
 
 ```python
 from frankensim import FrankenSimClient
