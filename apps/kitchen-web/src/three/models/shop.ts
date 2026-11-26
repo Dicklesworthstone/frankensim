@@ -33,6 +33,100 @@ export function alongAxis(g: THREE.BufferGeometry, axis: Axis): THREE.BufferGeom
   return g;
 }
 
+/** A float attribute stored one value per component, `size` to an item: the loops below read and write its array. */
+function plain(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined, size: number): a is THREE.BufferAttribute {
+  return a !== undefined && !(a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute && !a.normalized && a.itemSize === size && a.array instanceof Float32Array;
+}
+
+const normalM = new THREE.Matrix3();
+
+/**
+ * `g.applyMatrix4(m)` with three.js's per-vertex loops written out over the arrays: Vector3.applyMatrix4 for
+ * positions, and applyMatrix3 then normalize for normals, in the same order, so the floats are the same. three.js
+ * reads and writes every vertex through getX/getY/getZ and setXYZ instead. Tangents, and data that is not plain
+ * floats, go through three.js.
+ */
+export function transformGeometry(g: THREE.BufferGeometry, m: THREE.Matrix4): THREE.BufferGeometry {
+  const p = g.attributes.position;
+  const n = g.attributes.normal;
+  if (!plain(p, 3) || (n !== undefined && !plain(n, 3)) || g.attributes.tangent !== undefined) return g.applyMatrix4(m);
+  const e = m.elements;
+  const a = p.array as Float32Array;
+  for (let i = 0, l = p.count * 3; i < l; i += 3) {
+    const x = a[i]!;
+    const y = a[i + 1]!;
+    const z = a[i + 2]!;
+    const w = 1 / (e[3]! * x + e[7]! * y + e[11]! * z + e[15]!);
+    a[i] = (e[0]! * x + e[4]! * y + e[8]! * z + e[12]!) * w;
+    a[i + 1] = (e[1]! * x + e[5]! * y + e[9]! * z + e[13]!) * w;
+    a[i + 2] = (e[2]! * x + e[6]! * y + e[10]! * z + e[14]!) * w;
+  }
+  p.needsUpdate = true;
+  if (n !== undefined) {
+    const k = normalM.getNormalMatrix(m).elements;
+    const b = n.array as Float32Array;
+    for (let i = 0, l = n.count * 3; i < l; i += 3) {
+      const x = b[i]!;
+      const y = b[i + 1]!;
+      const z = b[i + 2]!;
+      const nx = k[0]! * x + k[3]! * y + k[6]! * z;
+      const ny = k[1]! * x + k[4]! * y + k[7]! * z;
+      const nz = k[2]! * x + k[5]! * y + k[8]! * z;
+      const s = 1 / (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
+      b[i] = nx * s;
+      b[i + 1] = ny * s;
+      b[i + 2] = nz * s;
+    }
+    n.needsUpdate = true;
+  }
+  if (g.boundingBox !== null) g.computeBoundingBox();
+  if (g.boundingSphere !== null) boundSphere(g);
+  return g;
+}
+
+/**
+ * `g.computeBoundingSphere()` over a plain float position array: the centre of the bounding box, then the farthest
+ * vertex from it, with three.js's arithmetic, so the sphere is the same. Morphed or other data goes through three.js.
+ */
+export function boundSphere(g: THREE.BufferGeometry): void {
+  const p = g.attributes.position;
+  if (!plain(p, 3) || g.morphAttributes.position !== undefined) {
+    g.computeBoundingSphere();
+    return;
+  }
+  const a = p.array as Float32Array;
+  const l = p.count * 3;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let z0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  let z1 = -Infinity;
+  for (let i = 0; i < l; i += 3) {
+    x0 = Math.min(x0, a[i]!);
+    y0 = Math.min(y0, a[i + 1]!);
+    z0 = Math.min(z0, a[i + 2]!);
+    x1 = Math.max(x1, a[i]!);
+    y1 = Math.max(y1, a[i + 1]!);
+    z1 = Math.max(z1, a[i + 2]!);
+  }
+  const s = (g.boundingSphere ??= new THREE.Sphere());
+  const empty = x1 < x0 || y1 < y0 || z1 < z0;
+  const cx = empty ? 0 : (x0 + x1) * 0.5;
+  const cy = empty ? 0 : (y0 + y1) * 0.5;
+  const cz = empty ? 0 : (z0 + z1) * 0.5;
+  s.center.set(cx, cy, cz);
+  let r2 = 0;
+  for (let i = 0; i < l; i += 3) {
+    const dx = cx - a[i]!;
+    const dy = cy - a[i + 1]!;
+    const dz = cz - a[i + 2]!;
+    r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
+  }
+  s.radius = Math.sqrt(r2);
+  if (isNaN(s.radius)) console.error('THREE.BufferGeometry.computeBoundingSphere(): Computed radius is NaN. The "position" attribute is likely to have NaN values.', g);
+}
+
 /** Every geometry merged must carry the same attributes and an index. */
 function normalise(g: THREE.BufferGeometry): THREE.BufferGeometry {
   for (const name of Object.keys(g.attributes)) if (name !== "position" && name !== "normal" && name !== "uv") g.deleteAttribute(name);
@@ -56,6 +150,31 @@ export function boxUVs(g: THREE.BufferGeometry, scale = 1): void {
   const p = g.attributes.position;
   const n = g.attributes.normal;
   const uv = g.attributes.uv as THREE.BufferAttribute;
+  if (plain(p, 3) && plain(n, 3) && plain(uv, 2)) {
+    // The accessor loop below, reading and writing the arrays directly: the same branches and products.
+    const P = p.array as Float32Array;
+    const N = n.array as Float32Array;
+    const U = uv.array as Float32Array;
+    for (let i = 0, c = p.count; i < c; i++) {
+      const j = i * 3;
+      const ax = Math.abs(N[j]!);
+      const ay = Math.abs(N[j + 1]!);
+      const az = Math.abs(N[j + 2]!);
+      const k = i * 2;
+      if (ay >= ax && ay >= az) {
+        U[k] = P[j]! * scale;
+        U[k + 1] = P[j + 2]! * scale;
+      } else if (ax >= az) {
+        U[k] = P[j + 2]! * scale;
+        U[k + 1] = P[j + 1]! * scale;
+      } else {
+        U[k] = P[j]! * scale;
+        U[k + 1] = P[j + 1]! * scale;
+      }
+    }
+    uv.needsUpdate = true;
+    return;
+  }
   for (let i = 0; i < p.count; i++) {
     const [ax, ay, az] = [Math.abs(n.getX(i)), Math.abs(n.getY(i)), Math.abs(n.getZ(i))];
     if (ay >= ax && ay >= az) uv.setXY(i, p.getX(i) * scale, p.getZ(i) * scale);
@@ -90,7 +209,7 @@ class Bins {
       const merged = geos.length === 1 ? geos[0]! : mergeGeometries(geos, false);
       if (!merged) continue;
       if (geos.length > 1) for (const g of geos) g.dispose();
-      merged.computeBoundingSphere();
+      boundSphere(merged);
       const mesh = new THREE.Mesh(merged, mat);
       const lit = !(mat as THREE.MeshBasicMaterial).isMeshBasicMaterial && !mat.transparent;
       mesh.castShadow = shadows && lit && mat.userData.castShadow !== false;
@@ -169,7 +288,7 @@ export class Shop {
   add(mat: THREE.Material, g: THREE.BufferGeometry, at: V3 = [0, 0, 0], rot?: V3, scale?: V3): this {
     tmpQ.setFromEuler(tmpE.set(rot?.[0] ?? 0, rot?.[1] ?? 0, rot?.[2] ?? 0));
     tmpM.compose(tmpV.set(at[0], at[1], at[2]), tmpQ, scale ? new THREE.Vector3(scale[0], scale[1], scale[2]) : ONE);
-    g.applyMatrix4(tmpM.premultiply(this.stack[this.stack.length - 1]!));
+    transformGeometry(g, tmpM.premultiply(this.stack[this.stack.length - 1]!));
     normalise(g);
     if (uvMode(mat) === "box") boxUVs(g, (mat.userData.uvScale as number | undefined) ?? 1);
     this.tris += (g.index ? g.index.count : g.attributes.position.count) / 3;

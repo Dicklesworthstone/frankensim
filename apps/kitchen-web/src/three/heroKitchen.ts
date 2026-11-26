@@ -22,7 +22,7 @@ import { EXEMPLARS, FLAGSHIP_EQUIPMENT, computeKitchenTelemetry, type CameraPres
 import { ASSET_BASE, createScrollSafeOrbit, createStudioRenderer, fitClipPlanes, getSoftParticleTexture, observeInView, shaderGate, thermalColor, type Scene3dFixture } from "./kit";
 import { buildFixture, type Model } from "./models/all";
 import { palette, perforation } from "./models/materials";
-import { placeFixture } from "./models/shop";
+import { boundSphere, placeFixture, transformGeometry } from "./models/shop";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { Crowd, NavGrid, PAIR_MARGIN, STATIC_MARGIN, rectDistance, type Footprint, type LegCandidate, type LegVerdict, type Motion, type Rect, type XZ } from "./models/crowd";
 import { HOTEL_PAN, PICK_S, PLACE_S, Routine, TOOLS, copyPose, makeStaff, newPose, panHoldZ, panSeconds, pickShortfall, standPose, type BodyPose, type Cohort, type RoutineStep, type Staff, type WorkKind, type WorkOpts } from "./models/people";
@@ -594,7 +594,7 @@ async function buildKitchen(spec: ExemplarSpec, manifest: Manifest, meta: SiteMe
       const own = new Map<THREE.Material, THREE.BufferGeometry[]>();
       for (const m of ownMerge) {
         const mat = m.material as THREE.Material;
-        const g = (m.geometry as THREE.BufferGeometry).clone().applyMatrix4(new THREE.Matrix4().copy(fxInv).multiply(m.matrixWorld));
+        const g = transformGeometry((m.geometry as THREE.BufferGeometry).clone(), new THREE.Matrix4().copy(fxInv).multiply(m.matrixWorld));
         for (const name of Object.keys(g.attributes)) if (!["position", "normal", "uv", "aFix", "aHeat"].includes(name)) g.deleteAttribute(name);
         g.morphAttributes = {};
         if (!g.getAttribute("normal")) g.computeVertexNormals();
@@ -618,7 +618,7 @@ async function buildKitchen(spec: ExemplarSpec, manifest: Manifest, meta: SiteMe
     }
     for (const m of toMerge) {
       const mat = m.material as THREE.Material;
-      const g = (m.geometry as THREE.BufferGeometry).clone().applyMatrix4(m.matrixWorld);
+      const g = transformGeometry((m.geometry as THREE.BufferGeometry).clone(), m.matrixWorld);
       for (const name of Object.keys(g.attributes)) if (!["position", "normal", "uv", "aFix", "aHeat", ...(mat as THREE.MeshStandardMaterial).vertexColors ? ["color"] : []].includes(name)) g.deleteAttribute(name);
       g.morphAttributes = {};
       if (!g.getAttribute("normal")) g.computeVertexNormals();
@@ -646,7 +646,7 @@ async function buildKitchen(spec: ExemplarSpec, manifest: Manifest, meta: SiteMe
     const g = bin.geos.length === 1 ? bin.geos[0]! : mergeGeometries(bin.geos, false);
     if (!g) continue;
     if (bin.geos.length > 1) for (const x of bin.geos) x.dispose();
-    g.computeBoundingSphere();
+    boundSphere(g);
     const mesh = new THREE.Mesh(g, bin.mat);
     mesh.castShadow = bin.cast;
     mesh.receiveShadow = bin.recv;
