@@ -21,7 +21,12 @@ The tree contains 184 `fs-*` crate directories: 164 in the native Cargo workspac
 and 20 standalone workspaces listed below. They include numerical kernels,
 geometry representations, meshing, physics, solvers, adjoints, optimization,
 imaging, evidence, packaging and ledger implementations, together with their
-contracts and tests.
+contracts and tests. Four of the standalone workspaces depend on no FrankenSim
+crate: `fs-demo-physics-wasm`, `fs-heatmap-wasm` and `fs-lenia-wasm` are
+browser surfaces for the CMA-ES explainer site (their only dependency is
+`wasm-bindgen`), and `fs-g1-train`, the transformer, Muon and PPO core that
+`fs-cmaes-viz-wasm` pulls in under its `g1-learned` feature, depends only on
+`libm`. The rest build on in-tree `fs-*` crates.
 
 The inventory numbers in this README are derived from the root workspace
 manifest, each crate's declared layer metadata, and the portable tracked-input
@@ -395,6 +400,22 @@ has no discretization estimate, so it stays indeterminate.
 | `dsr quality --tool frankensim` | Run the configured repo-level DSR quality gate when DSR is available |
 | `dsr build frankensim --target darwin/arm64` | Run the configured native DSR build lane |
 
+**What stops where.** On `examples/heatsink-fan/heatsink-fan.fsim`, `solve` and
+`run` complete all seven stages. A project that leaves out what a stage needs
+stops at that stage by name, with exit 4. `validate` refuses a project with no
+`requirements` (`project-requirements-missing`). `solve` stops at
+material-resolve without the `--materials` pack that holds the declared card
+(`project-material-card-unknown`); at conduction when the project declares no
+`cooling.conduction` (`cli-solve-conduction-undeclared`) or a channel's
+Reynolds number leaves its convection card's validity domain
+(`cli-solve-conduction-airflow-card-domain`); and at qoi without a
+`temperature-max` output and requirement on a conduction region
+(`cli-solve-qoi-undeclared`). `run` stops with its solve and writes no report
+or package. `solve --resume` of a completed run refuses with
+`cli-solve-resume-complete`, `report` of a run the ledger does not hold with
+`cli-solve-unknown-run`, and a default build's `study` of a 3-D study with
+`cli-study-sdf3-feature`, before it creates a ledger.
+
 The executable study fixture is
 [`examples/marquee/thermal-2d.fsim`](examples/marquee/thermal-2d.fsim).
 It minimizes `J = integral(f*u)` for scalar Poisson on the normalized unit plate
@@ -433,7 +454,7 @@ per-schema compatibility and deprecation rules, is
 
 | Frozen schema | Owner | Version | If an older document appears |
 |---------------|-------|---------|------------------------------|
-| `.fsim` project schema | `fs-project` | 10 | migrates, with a receipt |
+| `.fsim` project schema | `fs-project` | 17 | migrates, with a receipt |
 | `.fsim` study schema | `fs-project` | 1 | no predecessor yet |
 | Evidence-package format | `fs-package` | 9 | refused by name |
 | Checker protocol | `fs-checker` | 7 | refused by name |
@@ -1070,7 +1091,7 @@ surfaces that show how the layers are meant to compose.
 
 | Surface | What exists now | Why it matters |
 |---------|-----------------|----------------|
-| `fs-wasm::flagships` | Source for browser-facing `run_ornithoid`, `run_vessel`, and `run_frame` pipelines | The source composes reduced flagship workflows and builds again since the safe-step propagation (f85xj.2.39), but the capability registry holds browser flagships at L1 with two campaign tests still red from an earlier code-first slice; the internal "Tier V" campaign label is not an L5 maturity claim |
+| `fs-wasm::flagships` | Source for browser-facing `run_ornithoid`, `run_vessel`, and `run_frame` pipelines | The source composes reduced flagship workflows and builds again since the safe-step propagation (f85xj.2.39), but the capability registry holds browser flagships at L1 with three campaign tests (grammarforge, sensorforge and trusspath defaults; bead frankensim-vxnd3) still red; the internal "Tier V" campaign label is not an L5 maturity claim |
 | `fs-mesh` v2/v3 | Conforming PLC recovery, non-convex facet triangulation, exact audits, an opt-in perf ladder (`--ignored`) measured at 10^4/10^5/10^6 points with a further opt-in 10^7 rung (`FS_MESH_PERF_FULL=1`, otherwise recorded as skipped), and a measured boundary-layer decision | Meshing claims now include recovery quality, determinism, and honest continuation notes for residual near-coplanar slivers |
 | `fs-sparse::CsrCompact` | Compact u32 column-index CSR, sharded deterministic SpMV, tiled deterministic parallel assembly, and NUMA first-touch helpers | Sparse performance work is framed as a bandwidth and page-placement problem without sacrificing bitwise equality |
 | `fs-rand` fast paths | Ziggurat normal fast path, bulk Philox fills, and dev-only stream statistics | Random performance can improve while the strict deterministic Box-Muller path remains the certification default |
@@ -1615,7 +1636,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Enclosure airflow | `fs-airflow` validates monotone typed fan curves, bounds fan-law speed scaling, composes quadratic series/parallel losses with a mandatory explicit leakage branch, certifies the unique nominal-model operating root with `fs-ivl`, and hands evidence-bearing branch velocities/Reynolds inputs to `fs-convection`. Its retained tests use synthetic fixtures: no manufacturer curve/tolerance corpus, unequal parallel-fan model, installation-effects model, CFD comparison, experimental validation, or registered maturity claim exists |
 | Neural representations | `fs-rep-neural` exists as a first-class crate, but its current work is experimental/in flight and has no registered capability-maturity claim |
 | Design ledger | `fs-ledger` exists, but the registry holds it at L1: the evidence-binding guard was repaired (b4ece64b) and four GC suite failures remain red on one tracked upstream FrankenSQLite cascade-ordering root cause |
-| Browser flagships | Source surfaces exist and build; the registry holds the capability at L1 because two campaign tests (grammarforge, sensorforge) are red |
+| Browser flagships | Source surfaces exist and build; the registry holds the capability at L1 because three campaign tests (grammarforge, sensorforge and trusspath defaults; bead frankensim-vxnd3) are red |
 | Randomized NLA golden sentinel | Resolved: `rand_nla_golden_hash` is deliberately recorded (`0xeef1_0550_7daf_c0d5`) and verified identical on arm64 and x86-64 in both debug and release, after fixing a build-mode-dependent `powi` fixture; the workspace-wide `powi` sweep is tracked in bead `frankensim-powi-build-mode-determinism-4xnt` |
 | Ascent golden sentinels | Resolved: the trajectory and Pareto golden constants (`0xe185_4f98_a25e_3663` and `0x301b_04df_db91_3965`) under `TRAJECTORY_BIT_SEMANTICS_VERSION = 1` are requalified across darwin/arm64 and x86_64 in both debug and release profiles with clean-tree proofs; four retained receipts are archived at `crates/fs-ascent/tests/receipts/ascent_golden_{x86_64,aarch64}_{debug,release}.json` (bead `frankensim-ascent-golden-requalify-o6bne`) |
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |
