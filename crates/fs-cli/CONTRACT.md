@@ -1,5 +1,31 @@
 # CONTRACT: fs-cli
 
+## Read-Only Mesh & Tabular Artifact Exporters (bead `frankensim-vm286`)
+
+Exposes finished `fs-io` mesh (`export_glb`, `export_3mf`, `export_vtk`) and
+tabular (`export_tabular_csv`, `export_arrow_ipc_stream`) exporters through
+read-only CLI verbs with zero change to `import` or `solve` ledger transactions
+and no new exit codes:
+
+- `frankensim [--json] mesh export <promoted-mesh-hash> <ledger.db> --format glb|3mf|vtk --out <path>`:
+  opens `<ledger.db>` via `open_export_ledger` (refusing missing ledgers with
+  `exit::INPUT` before touching SQLite), verifies artifact kind
+  `geometry-mesh-ply` (`exit::REFUSED` on unknown hash or wrong kind), decodes
+  `Soup` via `fs_io::ply::read_ply`, exports via `fs_io::{export_glb, export_3mf,
+  export_vtk}`, and writes `<path>` via `write_retained` (idempotent on identical
+  bytes, `exit::REFUSED` `cli-export-output-conflict` on differing existing file).
+  GLB receipts record `precision="f32-preview"` and note that lossless canonical
+  f64 PLY remains in the ledger.
+- `frankensim [--json] table export <solution-hash> <ledger.db> --format csv|arrow --out <path>`:
+  opens `<ledger.db>` read-only, verifies artifact kind
+  `solve-conduction-solution` (`frankensim.cli.solve-conduction-solution.v1`),
+  builds a `TabularDataset` (`node_index`, `temperature`), exports via
+  `fs_io::tabular_export::{export_tabular_csv, export_arrow_ipc_stream}`, and
+  writes `<path>` via `write_retained`. No-claim: `export_tabular_csv` formats
+  `Float64` at fixed `{:.10e}` precision (~1e-10 rel) rather than bit-exact
+  IEEE-754 round-trip; `--format arrow` writes `fs-io` `ARROW1` binary buffers
+  with bit-exact little-endian IEEE-754 `f64` values.
+
 ## Ledger Lineage, Replay Audit, and Package Standards Coverage (bead `frankensim-dhqf7`)
 
 Exposes finished `fs-ledger` lineage/replay-audit queries and `fs-package`
