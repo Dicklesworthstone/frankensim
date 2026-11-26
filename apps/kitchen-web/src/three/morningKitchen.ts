@@ -272,6 +272,8 @@ function routineFor(rig: CookRig, acts: Act[], loopS: number): { routine: Routin
 /** How far the carriers roll out of the door when the van leaves, metres, and in how many animation seconds. */
 const ROLL_M = 3;
 const ROLL_S = 2.4;
+/** The roll in morning minutes: a loop must run at least this long past a van that rolls out, or it stops midway. */
+export const ROLL_MIN = ROLL_S / SEC_PER_MIN;
 
 /** What the kitchen shows at a moment, for the page's readouts. */
 export interface KitchenMoment {

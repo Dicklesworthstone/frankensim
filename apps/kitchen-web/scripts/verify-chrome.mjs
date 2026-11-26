@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 13 WebGL canvases render non-blank frames (pixel variance > 0)
+ *   - ALL 14 WebGL canvases (13 figures; the two-kitchen figure has two) render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -165,7 +165,7 @@ async function main() {
       }
     }
 
-    // 4. Mount all chapters cleanly by scrolling through each and verifying all 13 WebGL canvases render non-blank frames
+    // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
     const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
     const canvasSelectors = [
       "[data-hero-canvas]",
@@ -548,7 +548,7 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 13 WebGL canvases (14 with the two-kitchen figure's second half) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 14 WebGL canvases (13 figures; the two-kitchen figure has two) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
       const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
       const sels = [
@@ -573,7 +573,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 13 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 14 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -611,7 +611,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 13/13 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 14/14 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

@@ -3444,9 +3444,19 @@ button.wk-dish[aria-pressed="true"] {
 .pr-svg .lunchl.r {
   text-anchor: end;
 }
-.pr-svg .wait {
+.pr-svg.stale > :not(.planning) {
+  opacity: 0.4;
+}
+.pr-svg .planning {
   text-anchor: middle;
-  fill: var(--muted);
+  font-size: 12px;
+  fill: var(--text);
+}
+.pr-lab .wk-tiles {
+  transition: opacity 0.2s;
+}
+.pr-lab .wk-tiles[data-stale] {
+  opacity: 0.45;
 }
 .pr-keys {
   margin: 0.45rem 0 1rem;
@@ -3479,6 +3489,7 @@ button.wk-dish[aria-pressed="true"] {
 }
 .pr-sides {
   border-style: dashed;
+  border-left-style: solid;
 }
 @media (max-width: 720px) {
   .pr-stage {

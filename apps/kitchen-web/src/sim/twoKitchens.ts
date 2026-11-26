@@ -116,17 +116,21 @@ export function planPair(s: PairSettings, parts: readonly number[], cache: PlanC
 const tightness = (m: Morning, door: number) => (m.finished ? Math.max(...m.lastPacked) - door : Infinity);
 
 /**
- * The better of two plans: one that makes lunch at its best first; then the sooner lunch; then fewer portions past
- * their best; then the more time to spare in the tighter kitchen; then less carried across town.
+ * The better of two plans. One that makes lunch at its best first, and of two that do, the one that carries less
+ * across town (the kitchen across town is drafted only for what the hub cannot do itself). Of two that miss: the sooner
+ * lunch, then fewer portions past their best. Then the more time to spare in the kitchen nearest to missing its van;
+ * then less carried.
  */
 export function better(a: PairPlan, b: PairPlan): boolean {
+  const carried = (p: PairPlan) => p.there.reduce((x, y) => x + y, 0);
   if (a.made !== b.made) return a.made;
+  if (a.made && carried(a) !== carried(b)) return carried(a) < carried(b);
   if (Math.abs(a.lunchLate - b.lunchLate) > 0.5) return a.lunchLate < b.lunchLate;
   if (a.pastBest !== b.pastBest) return a.pastBest < b.pastBest;
   const ta = Math.max(tightness(a.hub, DOOR), a.far ? tightness(a.far, FAR_DOOR) : -Infinity);
   const tb = Math.max(tightness(b.hub, DOOR), b.far ? tightness(b.far, FAR_DOOR) : -Infinity);
   if (Math.abs(ta - tb) > 0.5) return ta < tb;
-  return a.there.reduce((x, y) => x + y, 0) < b.there.reduce((x, y) => x + y, 0);
+  return carried(a) < carried(b);
 }
 
 /** The best of every split for these settings; with `alone`, the hub on its own. */
@@ -145,11 +149,27 @@ export function bestPair(s: PairSettings, alone = false, cache: PlanCache | null
  * hub alone's most (morningLimit, where the search starts). Each split is tried at ten more than the best found so far
  * and, when it makes that, raised by halving.
  */
-export function pairLimit(s: Omit<PairSettings, "meals">, hi = 4000, cache: PlanCache | null = null): { meals: number; parts: number[]; alone: number } {
+export function pairLimit(s: Omit<PairSettings, "meals">, hi = 4000, cache: PlanCache | null = null): PairLimit {
+  const steps = pairLimitSteps(s, hi, cache);
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+  }
+}
+
+export interface PairLimit {
+  meals: number;
+  parts: number[];
+  alone: number;
+}
+
+/** pairLimit, a split at a time: it stops after each, for a worker to answer something newer in between. */
+export function* pairLimitSteps(s: Omit<PairSettings, "meals">, hi = 4000, cache: PlanCache | null = null): Generator<void, PairLimit, void> {
   const alone = morningLimit({ cooks: s.hubCooks, menu: s.menu, ahead: false });
   let best = { meals: alone, parts: splitsFor(s.menu)[0]! };
   const made = (meals: number, parts: number[]) => planPair({ ...s, meals }, parts, cache).made;
   for (const parts of splitsFor(s.menu).slice(1)) {
+    yield;
     if (best.meals + 10 > hi || !made(best.meals + 10, parts)) continue;
     let lo = (best.meals + 10) / 10;
     let top = hi / 10 + 1;

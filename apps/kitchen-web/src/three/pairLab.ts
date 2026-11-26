@@ -1,6 +1,7 @@
 /**
- * Two kitchens, one order (chapter 07, third figure): the morning's kitchen twice, one above the other on the same
- * clock: the hub, whose van leaves at 10:30, and a second kitchen across town, whose van leaves at 10:00.
+ * Two kitchens, one order (chapter 07, third figure): the morning's kitchen twice, side by side (one above the other on
+ * a phone) on the same clock: the hub, whose van leaves at 10:30, and a second kitchen across town, whose van leaves
+ * at 10:00.
  *
  * Everything shown follows the best split for the settings on the page (bestPair, sim/twoKitchens.ts, run in a
  * worker): each kitchen acts out its own planned morning (MorningKitchen), its carriers rolling out of the door when
@@ -9,11 +10,11 @@
  * van and still be at its best at lunch, and when each batch did.
  */
 import * as THREE from "three";
-import { DOOR, SERVE, SLOTS, clockOf, menuDishes, type Crew, type Morning, type MorningDish } from "../sim/cateringMorning";
+import { DOOR, MENUS, SERVE, SLOTS, clockOf, menuDishes, type Crew, type Morning, type MorningDish } from "../sim/cateringMorning";
 import type { PairAsk, PairDone } from "../sim/pairRuns.worker";
 import { FAR_DOOR, limitKey, planKey, travels, type PairPlan, type PairSettings } from "../sim/twoKitchens";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { CARRIER, CARRIER_COLS, CARRIER_X0, END_HOLD_S, LINE_Z, MORNING_PIECES, MorningKitchen, OVEN_X0, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec, type KitchenMoment } from "./morningKitchen";
+import { CARRIER, CARRIER_COLS, CARRIER_X0, END_HOLD_S, LINE_Z, MORNING_PIECES, MorningKitchen, OVEN_X0, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec, type KitchenMoment } from "./morningKitchen";
 import type { Piece } from "./models/all";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { backdrop, tilePlane } from "./weekLab";
@@ -42,7 +43,8 @@ type Side = "hub" | "far";
 /** "a", "a and b", "a, b and c". */
 const listOf = (xs: string[]) => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 const num = (v: number) => Math.round(v).toLocaleString("en-US");
-const holdText = (min: number) => (!Number.isFinite(min) ? "all morning, cold" : min >= 120 ? `${min / 60} h` : `${min} min`);
+/** Plans kept on the page for settings seen before (each holds two kitchens' mornings). */
+const PLANS_KEPT = 48;
 
 export function mountPairLab(root: HTMLElement): void {
   const mountT0 = performance.now();
@@ -116,6 +118,9 @@ export function mountPairLab(root: HTMLElement): void {
     });
   const ndc = new THREE.Vector3();
   const hudEls = Array.from(stageEl.querySelectorAll<HTMLElement>(".pr-hud"));
+  /** The HUDs' lowest edge so far at this width: a HUD that wraps for a moment and back must not refit the view. */
+  let hudMax = 0;
+  let hudW = 0;
   const frame = () => {
     if (userMoved) return;
     aim();
@@ -127,8 +132,12 @@ export function mountPairLab(root: HTMLElement): void {
     camera.updateProjectionMatrix();
     // The kitchen fits under the HUD (the taller of the two halves'): fitted to the band's height and the half's
     // width, then shifted into the band and across to the middle.
-    const hudBottom = Math.max(0, ...hudEls.map((e) => e.offsetTop + e.offsetHeight));
-    const top = Math.min(0.86, 1 - (2 * (hudBottom + 6)) / h);
+    if (w !== hudW) {
+      hudW = w;
+      hudMax = 0;
+    }
+    hudMax = Math.max(hudMax, ...hudEls.map((e) => e.offsetTop + e.offsetHeight));
+    const top = Math.min(0.86, 1 - (2 * (hudMax + 6)) / h);
     const bot = -0.94;
     let dist = 2.5;
     let lo = 0;
@@ -168,8 +177,18 @@ export function mountPairLab(root: HTMLElement): void {
   bindCanvasResize(halfEl.hub, rHub, camera, gate.hub);
   bindCanvasResize(halfEl.far, rFar, camera, gate.far);
   frame();
-  // The HUDs too: they wrap to a second line once their text is in, and the view must clear them.
-  const ro = new ResizeObserver(() => frame());
+  // The HUDs too: they wrap to a second line once their text is in, and the view must clear them. Only a HUD taller
+  // than any so far at this width refits it.
+  let fitW = 0;
+  let fitH = 0;
+  const ro = new ResizeObserver(() => {
+    const w = halfEl.hub!.clientWidth;
+    const h = halfEl.hub!.clientHeight;
+    if (w === fitW && h === fitH && Math.max(0, ...hudEls.map((e) => e.offsetTop + e.offsetHeight)) <= hudMax) return;
+    fitW = w;
+    fitH = h;
+    frame();
+  });
   for (const el of [halfEl.hub, ...hudEls]) ro.observe(el);
 
   /* ---------------------------------------------------------------------------------------------------------- */
@@ -188,6 +207,7 @@ export function mountPairLab(root: HTMLElement): void {
   const hudNote = { hub: q('[data-pr-hud-note="hub"]'), far: q('[data-pr-hud-note="far"]') };
   const tile = (k: string) => ({ v: q(`[data-pr-${k}]`), d: q(`[data-pr-${k}-d]`), s: q(`[data-pr-${k}-s]`) });
   const tiles = { lunch: tile("lunch"), past: tile("past"), far: tile("far"), limit: tile("limit") };
+  const tilesEl = q(".pr-lab .wk-tiles");
   const setTile = (t: (typeof tiles)[keyof typeof tiles], v: string, s: string, d: string | null = null, good = true) => {
     if (t.v) t.v.textContent = v;
     if (t.s) t.s.textContent = s;
@@ -200,7 +220,8 @@ export function mountPairLab(root: HTMLElement): void {
     }
   };
 
-  const settings: PairSettings = { meals: Number(mealsIn?.value ?? 1400), menu: SLOTS.length === 3 ? 7 : 0, hubCooks: HUB_CREW, farCooks: 2 };
+  // The menu with every swap made: every dish on it keeps long enough to travel.
+  const settings: PairSettings = { meals: Number(mealsIn?.value ?? 1400), menu: MENUS - 1, hubCooks: HUB_CREW, farCooks: 2 };
   let mode: Mode = "both";
   const plans = new Map<string, Extract<PairDone, { kind: "plan" }>>();
   const limits = new Map<string, Extract<PairDone, { kind: "limit" }>>();
@@ -277,14 +298,16 @@ export function mountPairLab(root: HTMLElement): void {
   const HEAD_H = 20;
   function renderChart(): void {
     if (!chartEl) return;
-    const p = ready() ? shown : null;
+    // The plan on screen; while the next is planned, the last one dimmed, so the chart keeps its size.
+    const p = shown;
+    const stale = !ready();
     const W = Math.max(300, Math.round(chartEl.clientWidth - 2 * 12));
     const narrow = W < 480;
     X0 = narrow ? 100 : 168;
     X1 = W - 8;
     const lunch = SERVE + (p?.lunchLate ?? 0);
     T1 = Math.max(360, Math.ceil((lunch + 10) / 60) * 60);
-    const dishes = menuDishes(settings.menu);
+    const dishes = menuDishes(p ? p.settings.menu : settings.menu);
     const groups: { side: Side; door: number; m: Morning; portions: number[] }[] = [];
     if (p) {
       groups.push({ side: "hub", door: DOOR, m: p.hub, portions: p.here });
@@ -310,8 +333,9 @@ export function mountPairLab(root: HTMLElement): void {
         const label = narrow ? (k === SLOTS.length ? "Sides" : shortName(d.name)) : `${shortName(d.name)} · ${num(g.portions[k]!)}`;
         body += `<text class="ya" x="${X0 - 8}" y="${ry + ROW_H / 2 + 3.5}">${label}</text>`;
         body += `<rect class="lane" x="${X0}" y="${ry + 2}" width="${X1 - X0}" height="${ROW_H - 4}"/>`;
-        // The window: off the heat no sooner than lunch less its holding time, and in time for the van.
-        const from = Number.isFinite(d.holdMin) ? SERVE - d.holdMin : 0;
+        // The window: off the heat no sooner than lunch (when it is actually served) less its holding time, and in
+        // time for the van.
+        const from = Number.isFinite(d.holdMin) ? lunch - d.holdMin : 0;
         if (from < g.door) body += r(Math.max(0, from), g.door, ry + 3, ROW_H - 6, `class="win" fill="${SLOT_COLOR[k]}"`);
         // Each batch: when it came off the heat (the sides, cold, when they were boxed).
         for (const b of g.m.batches) {
@@ -333,14 +357,14 @@ export function mountPairLab(root: HTMLElement): void {
     }
     const axisY = y + 2;
     const H = axisY + 34;
-    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="rs-svg mo-svg pr-svg" aria-hidden="true">`;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="rs-svg mo-svg pr-svg${stale ? " stale" : ""}" aria-hidden="true">`;
     // An hour's gridline; a label every hour, or every other on a narrow chart.
     const every = (X1 - X0) / (T1 / 60) < 40 ? 120 : 60;
     for (let t = 0; t <= T1; t += 60) svg += `<line class="g v" x1="${xOf(t)}" x2="${xOf(t)}" y1="4" y2="${axisY}"/>${xOf(t) > X1 - 14 || t % every ? "" : `<text class="xa" x="${xOf(t)}" y="${axisY + 14}">${clockOf(t)}</text>`}`;
     svg += body;
     // Lunch, at the client.
     svg += `<line class="lunch${p && p.lunchLate > 0.5 ? " late" : ""}" x1="${xOf(lunch)}" x2="${xOf(lunch)}" y1="4" y2="${axisY}"/><text class="lunchl${p && p.lunchLate > 0.5 ? " late" : ""}${xOf(lunch) > X1 - 70 ? " r" : ""}" x="${(xOf(lunch) + (xOf(lunch) > X1 - 70 ? -4 : 4)).toFixed(1)}" y="${axisY + 28}">lunch ${clockOf(lunch)}</text>`;
-    if (!p) svg += `<text class="wait" x="${((X0 + X1) / 2).toFixed(1)}" y="${axisY / 2 + 4}">Planning…</text>`;
+    if (stale) svg += `<text class="planning" x="${((X0 + X1) / 2).toFixed(1)}" y="${axisY / 2 + 4}">Planning…</text>`;
     svg += `<line class="cur" x1="${X0}" x2="${X0}" y1="4" y2="${axisY + 2}"/></svg>`;
     chartEl.innerHTML = svg;
     cursor = chartEl.querySelector<SVGLineElement>(".cur");
@@ -348,8 +372,9 @@ export function mountPairLab(root: HTMLElement): void {
 
   /* Tiles and status: the plan on screen, against the other mode's. */
   function renderTiles(): void {
+    tilesEl?.toggleAttribute("data-stale", !ready());
     if (!ready()) {
-      for (const t of Object.values(tiles)) setTile(t, "…", "");
+      if (!shown) for (const t of [tiles.lunch, tiles.past, tiles.far]) setTile(t, "…", "");
     } else {
       const r = plans.get(shownKey)!;
       const p = shown!;
@@ -361,7 +386,7 @@ export function mountPairLab(root: HTMLElement): void {
       setTile(tiles.past, p.pastBest ? num(p.pastBest) : "None", other && other.pastBest !== p.pastBest ? `the hub alone: ${other.pastBest ? num(other.pastBest) : "none"}` : p.pastBest ? "portions, by lunch" : "every portion at its best");
       const there = p.there.reduce((a, b) => a + b, 0);
       if (mode === "alone") setTile(tiles.far, "Nothing", "the kitchen stands dark");
-      else if (!p.far) setTile(tiles.far, "Nothing", menuDishes(settings.menu).some((d, k) => k < SLOTS.length && travels(d.holdMin)) ? "no split does better here" : "only the sides keep long enough");
+      else if (!p.far) setTile(tiles.far, "Nothing", p.made ? "the hub manages alone" : menuDishes(settings.menu).some((d, k) => k < SLOTS.length && travels(d.holdMin)) ? "no split does better here" : "only the sides keep long enough");
       else setTile(tiles.far, `${Math.round((100 * p.farHands) / Math.max(1, p.farHands + p.hubHands))}%`, `of the cooks' work: ${num(there)} portions`);
     }
     const l = limits.get(limitKey(settings.menu, HUB_CREW, settings.farCooks));
@@ -372,6 +397,11 @@ export function mountPairLab(root: HTMLElement): void {
 
   function renderStatus(): void {
     if (!statusEl) return;
+    if (failed) {
+      statusEl.textContent = failed;
+      statusEl.dataset.state = "warn";
+      return;
+    }
     if (!ready()) {
       statusEl.textContent = mode === "both" ? "Planning both kitchens…" : "Planning the hub's morning…";
       statusEl.dataset.state = "warn";
@@ -417,19 +447,30 @@ export function mountPairLab(root: HTMLElement): void {
   /* ---------------------------------------------------------------------------------------------------------- */
 
   let worker: Worker | null = null;
+  /** Why the plans cannot come, once the worker could not start or has failed. */
+  let failed = "";
   function ask(): void {
+    if (failed) return;
     if (!worker) {
       try {
         worker = new Worker(new URL("../sim/pairRuns.worker.ts", import.meta.url), { type: "module" });
       } catch {
-        if (statusEl) statusEl.textContent = "This browser can't plan the kitchens off the page.";
+        failed = "This browser could not start the planner for the two kitchens.";
         return;
       }
+      worker.onerror = () => {
+        failed = "The planner for the two kitchens stopped; reload the page to start it again.";
+        renderStatus();
+      };
       worker.onmessage = (e: MessageEvent<PairDone>) => {
         const d = e.data;
         if (d.kind === "plan") {
-          // Where each dish went, for the hub-alone status line.
           plans.set(d.key, d);
+          // The oldest go first, never the plan on screen or the one asked for.
+          for (const k of plans.keys()) {
+            if (plans.size <= PLANS_KEPT) break;
+            if (k !== shownKey && k !== planKey(settings)) plans.delete(k);
+          }
           if (d.key === planKey(settings)) apply();
         } else {
           limits.set(d.key, d);
@@ -451,16 +492,20 @@ export function mountPairLab(root: HTMLElement): void {
     const key = planKey(settings);
     const r = plans.get(key);
     if (r) {
+      // Kept as the newest.
+      plans.delete(key);
+      plans.set(key, r);
       const p = mode === "both" ? r.both : r.alone;
       const frac = endMin > 0 ? tMin / endMin : 0;
       shown = p;
       shownKey = key;
       let last = 0;
       for (const m of p.far ? [p.hub, p.far] : [p.hub]) for (const j of m.jobs) last = Math.max(last, j.t1);
-      endMin = Math.max(DOOR, p.hub.depart, p.far?.depart ?? 0, last) + 6;
+      // On past the last work, and past each van until its carriers are out of the door.
+      endMin = Math.max(DOOR + 6, last + 6, p.hub.depart + ROLL_MIN + 2, p.far ? p.far.depart + ROLL_MIN + 2 : 0);
       let loop = endMin * SEC_PER_MIN + END_HOLD_S;
       loop = kitchen.hub.plan(p.hub, HUB_CREW, endMin, loop);
-      const farLoop = kitchen.far.plan(p.far, settings.farCooks, endMin, loop);
+      const farLoop = kitchen.far.plan(p.far, p.settings.farCooks, endMin, loop);
       if (farLoop > loop + 1e-6) loop = kitchen.hub.plan(p.hub, HUB_CREW, endMin, farLoop);
       loopS = Math.max(loop, farLoop);
       view.far.lit(p.far ? 1 : DARK);
@@ -507,9 +552,10 @@ export function mountPairLab(root: HTMLElement): void {
   function showHud(t: number, a: KitchenMoment, b: KitchenMoment): void {
     const p = shown;
     const note = (side: Side, m: Morning | null, door: number, k: KitchenMoment): [string, string] => {
-      if (!m) return ["Not drafted", "idle"];
+      if (!m) return [p && side === "far" ? "Not drafted" : "Planning…", "idle"];
       if (t >= m.depart) return [`Van gone at ${clockOf(m.depart)}`, m.late > 0.5 ? "late" : "held"];
       if (t >= door) return ["The van is waiting", "late"];
+      if (k.hot === 0) return ["Only salad and bread", "idle"];
       return [`${k.packed} of ${k.hot} hot pans packed`, side === "hub" || k.packed > 0 ? "held" : "idle"];
     };
     const [hn, hk] = note("hub", p?.hub ?? null, DOOR, a);
@@ -595,7 +641,6 @@ export function mountPairLab(root: HTMLElement): void {
         loopS: +loopS.toFixed(2),
         t: +tMin.toFixed(1),
         cooks: { hub: kitchen.hub.cooks.filter((k) => k.st.group.visible).length, far: kitchen.far.cooks.filter((k) => k.st.group.visible).length },
-        holdText: holdText(menuDishes(settings.menu)[0]!.holdMin),
       }),
       hold(min: number | null) {
         frozen = min;

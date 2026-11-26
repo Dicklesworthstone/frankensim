@@ -87,6 +87,24 @@ describe("twoKitchens", () => {
     }
   });
 
+  test("the kitchen across town is drafted only when the hub cannot make lunch alone, and then for the least it can", () => {
+    for (const s of ORDERS) {
+      const alone = bestPair(s, true, cache);
+      const both = bestPair(s, false, cache);
+      if (alone.made) {
+        expect(both.far).toBeNull();
+        expect(both.parts.every((f) => f === 0)).toBe(true);
+      }
+      if (both.made) {
+        const carried = both.there.reduce((a, b) => a + b, 0);
+        for (const parts of splitsFor(s.menu)) {
+          const p = planPair(s, parts, cache);
+          if (p.made) expect(p.there.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(carried);
+        }
+      }
+    }
+  });
+
   test("the order on the page: the hub alone is late, both kitchens get lunch out on time at its best", () => {
     const s: PairSettings = { meals: 1400, menu: MENUS - 1, hubCooks: 3, farCooks: 2 };
     const alone = bestPair(s, true, cache);
