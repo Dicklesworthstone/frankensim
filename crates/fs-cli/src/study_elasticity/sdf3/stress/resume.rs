@@ -177,7 +177,7 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
             JsonValue::Null => None, value => Some(vector(value, n)?),
         },
     };
-    let spent = Spent::read(receipt)?;
+    let spent = Spent::read_attested(ledger, &old.hash, receipt)?;
     spent.validate(spec)?;
     Ok(Recovery { checkpoint, audit, spent })
 }
@@ -208,6 +208,26 @@ pub(super) fn drive(spec: &Spec, ledger: &Ledger, cap: Option<usize>, gate: &Can
     old: Option<&Loaded>) -> Result<Outcome> {
     let admission = Instant::now();
     let producer = checkpoint::producer_identity(gate)?;
+    if old.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && !ledger.in_transaction()
+        && let Some(retained) =
+            checkpoint::find_completed_sdf3_run(spec, ledger, STRESS3_DRIVER, |loaded| {
+                let rec = recover(spec, ledger, loaded, producer).ok()?;
+                let status = match loaded.value.str_field("status") {
+                    Some("completed") => "completed",
+                    Some("no-feasible-descent") => "no-feasible-descent",
+                    Some("budget-exhausted") => "budget-exhausted",
+                    _ => return None,
+                };
+                (matches!(status, "completed" | "no-feasible-descent")
+                    || rec.checkpoint.optimizer.work.iterations == spec.updates)
+                    .then_some(status)
+            })?
+    {
+        return Ok(retained);
+    }
     let recovery = old.map(|old| recover(spec, ledger, old, producer)).transpose()?;
     let limit = cap.unwrap_or(spec.updates).min(spec.updates);
     if let (Some(old), Some(recovery)) = (old, &recovery) {
@@ -265,4 +285,14 @@ fn g4_stress_checkpoint_binds_the_original_source_budget_and_executable() {
     }
     assert!(recover(&spec, &ledger, &old, hash_bytes(b"different executable")).is_err());
     assert_eq!(load(&ledger, &first.pointer).unwrap().bytes, old.bytes);
+}
+
+#[test]
+fn g4_stress_same_ledger_rerun_is_idempotent() {
+    let source = include_str!("../../../../../../examples/marquee/bracket-3d-stress.fsim")
+        .replace(":max-updates 80", ":max-updates 1");
+    let spec = spec::parse(&source).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let gate = CancelGate::new_clock_free();
+    checkpoint::assert_idempotent_rerun(&ledger, || drive(&spec, &ledger, None, &gate, None));
 }

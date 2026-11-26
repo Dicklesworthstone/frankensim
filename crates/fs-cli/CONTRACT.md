@@ -4285,9 +4285,9 @@ identical `solve` and `run` executions produce bit-identical hashes under
 `t = ordinal * 2 + 1` per stage and `t = 101` on terminal). The same
 metric-backed invariant (`study.consumed_wall_s` at `t = 1`, omitted from
 `ops.budget` and `study-run-receipt`, with idempotent same-ledger rerun
-re-attestation) holds for `study_thermal`, `study_uncertainty` (including
-`design`), and 2-D `study_elasticity` (`continuation`, `projected`, `volume`,
-`multi_load`); `sdf3` drivers are tracked in Increment 3 of `frankensim-4fs7g`. The
+re-attestation) holds across every study driver (`study_thermal`,
+`study_uncertainty` including `design`, and `study_elasticity` including all
+2-D continuation modes and all four `sdf3` drivers). The
 checkpoint hash and `open_expected` prove only bounded codec integrity; public
 `SolveDriverState`/`CompletedStage` construction grants no resume authority.
 
@@ -5295,11 +5295,11 @@ the diagnostic identity the binding layer already defines.
   keeping sealed stage checkpoints (`consumed_core_s = 0.0`,
   `consumed_wall_s = 0.0`) and terminal run receipts free of wall-clock fields.
   Identical `solve`, `run`, `study_thermal`, `study_uncertainty` (including
-  `design`), and 2-D `study_elasticity` executions therefore reproduce
-  bit-identical checkpoint, receipt, and `study-<hash>` identities under
-  `Ledger::replay_verdict`, and same-ledger reruns of completed runs re-attest
-  and return the retained receipt without writing duplicate ops (`sdf3`
-  drivers remain pending Increment 3 of `frankensim-4fs7g`). A non-finite or backward fresh clock refuses before a
+  `design`), and `study_elasticity` (2-D and all four `sdf3` drivers)
+  executions therefore reproduce bit-identical checkpoint, receipt, and
+  `study-<hash>` identities under `Ledger::replay_verdict`, and same-ledger
+  reruns of completed runs re-attest and return the retained receipt without
+  writing duplicate ops. A non-finite or backward fresh clock refuses before a
   checkpoint or lineage seal is published.
 - A pre-cancelled solve publishes nothing; cancellation between stages leaves
   the completed prefix durable and resumable with bit-identical stage

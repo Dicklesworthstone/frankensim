@@ -54,14 +54,16 @@ fn g1_g5_split_stages_replay_exact_fields_and_charge_all_repeated_work() {
         assert_eq!(bytes(&reference_ledger, &reference, key), bytes(&ledger, &resumed_json, key));
     }
     assert_eq!(original, bytes(&ledger, &first_json, "checkpoint"));
-    let initial = Spent::read(&first_json).unwrap();
-    let uninterrupted = Spent::read(&reference).unwrap();
-    let repeated = Spent::read(&resumed_json).unwrap();
+    let full_loaded = load(&reference_ledger, &full.pointer).unwrap();
+    let complete = load(&ledger, &resumed.pointer).unwrap();
+    let initial = Spent::read_attested(&ledger, &old.hash, &first_json).unwrap();
+    let uninterrupted =
+        Spent::read_attested(&reference_ledger, &full_loaded.hash, &reference).unwrap();
+    let repeated = Spent::read_attested(&ledger, &complete.hash, &resumed_json).unwrap();
     assert_eq!(repeated.linear, initial.add(uninterrupted.linear, uninterrupted.geometry, 0.0).unwrap().linear);
     assert_eq!(repeated.geometry, initial.add(uninterrupted.linear, uninterrupted.geometry, 0.0).unwrap().geometry);
     assert!(repeated.wall_s >= initial.wall_s);
     repeated.validate(&spec).unwrap();
-    let complete = load(&ledger, &resumed.pointer).unwrap();
     let again = drive(&spec, &ledger, None, &gate(), Some(&complete), |_, _| {
         panic!("completed resume must not publish or solve another stage")
     }).unwrap();
@@ -141,6 +143,7 @@ fn forged_state(ledger: &Ledger, spec: &Spec, old: &Loaded) -> Loaded {
     let output = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None).unwrap();
     ledger.link(op, &output.hash, EdgeRole::Out).unwrap();
     ledger.seal_artifact_output(&output.hash, op).unwrap();
+    record_study_wall_s(ledger, op, 0.1).unwrap();
     ledger.finish_op(op, OpOutcome::Ok, None, 1).unwrap();
     ledger.commit().unwrap();
     load(ledger, &format!("study-{}", output.hash.to_hex())).unwrap()
@@ -215,4 +218,68 @@ fn g4_every_work_counter_is_retained_and_overflow_cannot_reset_a_budget() {
     assert!(spent.add(overflow, QuadratureWork3::default(), 0.0).is_err());
     let overflow = QuadratureWork3 { field_evaluations: usize::MAX, ..Default::default() };
     assert!(spent.add(SolveWork::default(), overflow, 0.0).is_err());
+}
+
+#[test]
+fn g4_sdf3_replay_clean_idempotent_rerun_and_missing_or_exhausted_metric() {
+    let mut spec = spec();
+    let la = Ledger::open(":memory:").unwrap();
+    let lb = Ledger::open(":memory:").unwrap();
+    let a = drive(&spec, &la, None, &gate(), None, keep).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    let b = drive(&spec, &lb, None, &gate(), None, keep).unwrap();
+    assert_eq!(
+        (a.pointer.as_str(), a.receipt.as_str()),
+        (b.pointer.as_str(), b.receipt.as_str())
+    );
+    assert!(!a.receipt.contains("\"consumed_wall_s\""));
+    let verdict = la
+        .replay_verdict(fs_ledger::MAIN_BRANCH, &lb, fs_ledger::MAIN_BRANCH)
+        .unwrap();
+    assert!(verdict.deterministic_mismatches.is_empty() && verdict.structure_mismatch.is_none());
+
+    let ops_after = la.table_count("ops").unwrap();
+    let rerun = drive(&spec, &la, None, &gate(), None, |_, _| {
+        panic!("same-ledger rerun must not publish or solve")
+    })
+    .unwrap();
+    assert_eq!((rerun.pointer, rerun.receipt), (a.pointer, a.receipt));
+    assert_eq!(la.table_count("ops").unwrap(), ops_after);
+
+    let lc = Ledger::open(":memory:").unwrap();
+    let part = drive(&spec, &lc, Some(1), &gate(), None, keep).unwrap();
+    let old = load(&lc, &part.pointer).unwrap();
+    spec.wall_s = resolve_study_wall_s(&lc, &old.hash, &old.value).unwrap();
+    let exhausted = drive(&spec, &lc, None, &gate(), Some(&old), keep).unwrap_err();
+    assert_eq!(exhausted.exit, exit::BUDGET);
+
+    let prod_op = lc.artifact_output_seal(&old.hash).unwrap().unwrap();
+    let row = lc.op(prod_op).unwrap().unwrap();
+    let tampered = Ledger::open(":memory:").unwrap();
+    let op = tampered
+        .begin_op(
+            row.session.as_deref(),
+            &row.ir,
+            &FiveExplicits {
+                seed: &row.seed,
+                versions: &row.versions,
+                budget: &row.budget,
+                capability: &row.capability,
+            },
+            STUDY_OP_START_T,
+        )
+        .unwrap();
+    for edge in lc.op_artifact_edges_bounded(prod_op, 64).unwrap().edges {
+        let info = lc.artifact_info(&edge.artifact).unwrap().unwrap();
+        let data = lc.get_artifact(&edge.artifact).unwrap().unwrap();
+        tampered.put_artifact(&info.kind, &data, None).unwrap();
+        tampered.link(op, &edge.artifact, edge.role).unwrap();
+    }
+    tampered.seal_artifact_output(&old.hash, op).unwrap();
+    tampered
+        .finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)
+        .unwrap();
+    let loaded = load(&tampered, &part.pointer).unwrap();
+    let err = drive(&spec, &tampered, None, &gate(), Some(&loaded), keep).unwrap_err();
+    assert!(err.message.contains("lacks retained"), "{}", err.message);
 }

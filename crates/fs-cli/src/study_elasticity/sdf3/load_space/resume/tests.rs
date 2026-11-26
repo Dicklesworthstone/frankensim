@@ -72,3 +72,11 @@ fn g4_resume_refuses_spent_allowances_and_precancellation_without_losing_results
     assert_eq!(error.exit, exit::CANCELLED);
     assert_eq!(load(&ledger, &out.pointer).unwrap().bytes, old.bytes);
 }
+
+#[test]
+fn g4_load_space_same_ledger_rerun_is_idempotent() {
+    let spec = spec::parse(&FIXTURE.replace(":max-updates 80", ":max-updates 1")).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let gate = CancelGate::new_clock_free();
+    checkpoint::assert_idempotent_rerun(&ledger, || drive(&spec, &ledger, None, &gate, None));
+}

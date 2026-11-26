@@ -48,9 +48,9 @@ fn g5_affine_restore_continues_the_same_accepted_trajectory_and_charges_reconstr
         field(&prefix_report, "gradient_check").unwrap(),
         field(&restored_report, "gradient_check").unwrap()
     );
-    let before = Spent::read(&prefix.value).unwrap();
-    let full = Spent::read(&reference.value).unwrap();
-    let after = Spent::read(&restored.value).unwrap();
+    let before = Spent::read_attested(&ledger, &prefix.hash, &prefix.value).unwrap();
+    let full = Spent::read_attested(&ledger, &reference.hash, &reference.value).unwrap();
+    let after = Spent::read_attested(&ledger, &restored.hash, &restored.value).unwrap();
     assert_eq!(
         after.geometry.boxes,
         before.geometry.boxes + full.geometry.boxes
@@ -166,4 +166,12 @@ fn g3_historical_affine_receipts_without_optimizer_state_cannot_replay_a_fake_re
     let error = recover(&spec, &ledger, &old, producer).err().unwrap();
     assert_eq!(error.code, "cli-study-sdf3-resume-unsupported");
     assert_eq!(load(&ledger, &out.pointer).unwrap().bytes, old.bytes);
+}
+
+#[test]
+fn g4_affine_load_space_same_ledger_rerun_is_idempotent() {
+    let spec = spec::parse(&FIXTURE.replace(":max-updates 80", ":max-updates 1")).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let gate = CancelGate::new_clock_free();
+    checkpoint::assert_idempotent_rerun(&ledger, || drive(&spec, &ledger, None, &gate, None));
 }

@@ -307,8 +307,8 @@ pub(super) fn persist(spec: &Spec, ledger: &Ledger, run: &View<'_>, retained: &c
         env!("CARGO_PKG_VERSION"), quoted(&retained.producer.to_hex())
     );
     let budgets = format!(
-        "{{\"wall_s\":{},\"consumed_wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"work\":{work}}}",
-        spec.wall_s, run.spent.wall_s, spec.memory, spec.linear, spec.per_solve, spec.boxes, spec.points
+        "{{\"wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"work\":{work}}}",
+        spec.wall_s, spec.memory, spec.linear, spec.per_solve, spec.boxes, spec.points
     );
     let artifacts = [
         ("iterations", "study-iterations", rows.as_bytes()),
@@ -329,11 +329,11 @@ pub(super) fn persist(spec: &Spec, ledger: &Ledger, run: &View<'_>, retained: &c
     }
     let predecessor = retained.predecessor.map_or_else(|| "null".to_string(), |hash| quoted(&hash.to_hex()));
     ledger.begin()?;
-    let result = (|| -> Result<Outcome> {
+    let result = (|| -> Result<checkpoint::Persist> {
         let op = ledger.begin_op(Some(spec.id.as_bytes()), &ir_for(SDF3_DRIVER, spec.id, updates), &FiveExplicits {
             seed: &spec.seed.to_le_bytes(), versions: &versions, budget: &budgets,
             capability: "{\"ops\":[\"optimization.marquee-topopt\",\"geometry.sdf\",\"physics.cutfem\"]}",
-        }, 0)?;
+        }, STUDY_OP_START_T)?;
         if let Some(previous) = retained.predecessor {
             ledger.link(op, &previous, EdgeRole::In)?;
         }
@@ -351,35 +351,14 @@ pub(super) fn persist(spec: &Spec, ledger: &Ledger, run: &View<'_>, retained: &c
             let _ = write!(refs, ",\"checkpoint\":\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{SDF3_DRIVER:?},\"study_id\":\"{}\",\"status\":{:?},\"source\":\"{}\",\"iterations_completed\":{updates},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{},\"work\":{work},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":{resume_supported}{progress}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{SDF3_DRIVER:?},\"study_id\":\"{}\",\"status\":{:?},\"source\":\"{}\",\"iterations_completed\":{updates},\"target_iterations\":{},\"trace_hash\":\"{}\",\"work\":{work},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":{resume_supported}{progress}{refs}}}",
             spec.id.to_hex(),
             run.status,
             source.hash.to_hex(),
             spec.updates * spec.schedule.len(),
-            trace.to_hex(),
-            run.spent.wall_s
+            trace.to_hex()
         );
-        let artifact = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
-        ledger.link(op, &artifact.hash, EdgeRole::Out)?;
-        ledger.seal_artifact_output(&artifact.hash, op)?;
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
-        Ok(Outcome {
-            pointer: format!("study-{}", artifact.hash.to_hex()),
-            receipt,
-            status: run.status,
-        })
+        checkpoint::seal_or_reuse_receipt(ledger, op, receipt, run.spent.wall_s, run.status)
     })();
-    match result {
-        Ok(result) => match ledger.commit() {
-            Ok(()) => Ok(result),
-            Err(error) => {
-                ledger.rollback()?;
-                Err(error.into())
-            }
-        },
-        Err(error) => {
-            ledger.rollback()?;
-            Err(error)
-        }
-    }
+    checkpoint::commit_or_reuse(ledger, result, run.status)
 }

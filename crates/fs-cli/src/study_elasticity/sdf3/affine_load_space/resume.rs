@@ -411,7 +411,7 @@ pub(super) fn recover(original: &Spec, ledger: &Ledger, old: &Loaded, producer: 
             value => Some(vector(value, n)?),
         },
     };
-    let spent = Spent::read(receipt)?;
+    let spent = Spent::read_attested(ledger, &old.hash, receipt)?;
     spent.validate(spec)?;
     Ok(Recovery { checkpoint, spent, optimization_status, optimizer_stop, assessment_checked, refinement })
 }
@@ -425,6 +425,25 @@ pub(super) fn drive(
 ) -> Result<Outcome> {
     let admission = Instant::now();
     let producer = checkpoint::producer_identity(gate)?;
+    if old.is_none()
+        && cap.is_none()
+        && !gate.is_requested()
+        && !ledger.in_transaction()
+        && let Some(retained) = checkpoint::find_completed_sdf3_run(
+            spec,
+            ledger,
+            AFFINE_LOAD_SPACE3_DRIVER,
+            |loaded| {
+                let rec = recover(spec, ledger, loaded, producer).ok()?;
+                let st = status(loaded.value.str_field("status")).ok()?;
+                let assessment_done =
+                    spec.affine_grid_assessment.is_none() || rec.assessment_checked;
+                (rec.optimizer_finished(spec) && assessment_done).then_some(st)
+            },
+        )?
+    {
+        return Ok(retained);
+    }
     let recovery = old
         .map(|old| recover(spec, ledger, old, producer))
         .transpose()?;

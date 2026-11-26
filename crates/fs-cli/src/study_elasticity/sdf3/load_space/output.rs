@@ -248,15 +248,14 @@ pub(super) fn persist(
         env!("CARGO_PKG_VERSION"), producer.to_hex()
     );
     let budgets = format!(
-        "{{\"wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"max_optimizer_evaluations\":{},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer}}}",
+        "{{\"wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"max_optimizer_evaluations\":{},\"work\":{work},\"optimizer_work\":{optimizer}}}",
         spec.wall_s,
         spec.memory,
         spec.linear,
         spec.per_solve,
         spec.boxes,
         spec.points,
-        config.options.optimizer.max_evaluations,
-        state.spent.wall_s
+        config.options.optimizer.max_evaluations
     );
     let trace = hash_domain(
         "org.frankensim.cli.sdf3-load-space.trace.v1",
@@ -264,10 +263,10 @@ pub(super) fn persist(
     );
     let predecessor = previous.map_or_else(|| "null".into(), |p| quoted(&p.to_hex()));
     ledger.begin()?;
-    let result = (|| -> Result<Outcome> {
+    let result = (|| -> Result<checkpoint::Persist> {
         let op = ledger.begin_op(Some(spec.id.as_bytes()), &ir_for(LOAD_SPACE3_DRIVER, spec.id, state.optimizer.iterations),
             &FiveExplicits { seed: &spec.seed.to_le_bytes(), versions: &versions, budget: &budgets,
-                capability: "{\"ops\":[\"optimization.marquee-topopt\",\"geometry.sdf\",\"physics.cutfem\"]}" }, 0)?;
+                capability: "{\"ops\":[\"optimization.marquee-topopt\",\"geometry.sdf\",\"physics.cutfem\"]}" }, STUDY_OP_START_T)?;
         if let Some(previous) = previous {
             ledger.link(op, &previous, EdgeRole::In)?;
         }
@@ -280,37 +279,17 @@ pub(super) fn persist(
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refs}}}",
             spec.id.to_hex(),
             state.status,
             source.hash.to_hex(),
             state.optimizer.iterations,
             spec.updates,
             trace.to_hex(),
-            state.spent.wall_s,
-            resume::MODE, producer.to_hex()
+            resume::MODE,
+            producer.to_hex()
         );
-        let stored = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
-        ledger.link(op, &stored.hash, EdgeRole::Out)?;
-        ledger.seal_artifact_output(&stored.hash, op)?;
-        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
-        Ok(Outcome {
-            pointer: format!("study-{}", stored.hash.to_hex()),
-            receipt,
-            status: state.status,
-        })
+        checkpoint::seal_or_reuse_receipt(ledger, op, receipt, state.spent.wall_s, state.status)
     })();
-    match result {
-        Ok(value) => match ledger.commit() {
-            Ok(()) => Ok(value),
-            Err(e) => {
-                ledger.rollback()?;
-                Err(e.into())
-            }
-        },
-        Err(e) => {
-            ledger.rollback()?;
-            Err(e)
-        }
-    }
+    checkpoint::commit_or_reuse(ledger, result, state.status)
 }

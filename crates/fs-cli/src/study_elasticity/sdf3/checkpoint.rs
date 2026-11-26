@@ -54,11 +54,10 @@ impl Spent {
         })
     }
 
-    pub(super) fn read(receipt: &JsonValue) -> Result<Self> {
+    fn parse_work(receipt: &JsonValue, wall_s: f64) -> Result<Self> {
         let work = receipt.get("work").ok_or_else(|| malformed("missing cumulative work"))?;
         Ok(Self {
-            wall_s: receipt.get("consumed_wall_s").and_then(JsonValue::as_f64)
-                .ok_or_else(|| malformed("missing wall consumption"))?,
+            wall_s,
             linear: SolveWork {
                 linear_iterations: integer(work, "linear_iterations")?,
                 linear_solves: integer(work, "linear_solves")?,
@@ -71,6 +70,24 @@ impl Spent {
                 field_evaluations: integer(work, "geometry_field_evaluations")?,
             },
         })
+    }
+
+    pub(super) fn read_attested(
+        ledger: &Ledger,
+        receipt_hash: &ContentHash,
+        receipt: &JsonValue,
+    ) -> Result<Self> {
+        let wall_s = resolve_study_wall_s(ledger, receipt_hash, receipt).map_err(malformed)?;
+        Self::parse_work(receipt, wall_s)
+    }
+
+    #[cfg(test)]
+    pub(super) fn read(receipt: &JsonValue) -> Result<Self> {
+        let wall_s = receipt
+            .get("consumed_wall_s")
+            .and_then(JsonValue::as_f64)
+            .unwrap_or(0.0);
+        Self::parse_work(receipt, wall_s)
     }
 
     pub(super) fn json(&self) -> String {
@@ -194,9 +211,106 @@ fn expected(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) -
         }
         artifact(ledger, previous, RECEIPT_KIND)?;
     }
-    let spent = Spent::read(value)?;
+    let spent = Spent::read_attested(ledger, &old.hash, value)?;
     spent.validate(spec)?;
     Ok(Expected { stages, state, spent })
+}
+
+pub(super) enum Persist {
+    Written(Outcome),
+    Reuse(ContentHash),
+}
+
+pub(super) fn seal_or_reuse_receipt(
+    ledger: &Ledger,
+    op: i64,
+    receipt: String,
+    wall_s: f64,
+    status: &'static str,
+) -> Result<Persist> {
+    let stored = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
+    if wall_s.is_finite() && wall_s >= 0.0 && ledger.artifact_output_seal(&stored.hash)?.is_some() {
+        return Ok(Persist::Reuse(stored.hash));
+    }
+    ledger.link(op, &stored.hash, EdgeRole::Out)?;
+    ledger.seal_artifact_output(&stored.hash, op)?;
+    record_study_wall_s(ledger, op, wall_s)?;
+    ledger.finish_op(op, OpOutcome::Ok, None, STUDY_OP_END_T)?;
+    Ok(Persist::Written(Outcome {
+        pointer: format!("study-{}", stored.hash.to_hex()),
+        receipt,
+        status,
+    }))
+}
+
+pub(super) fn commit_or_reuse(
+    ledger: &Ledger,
+    result: Result<Persist>,
+    status: &'static str,
+) -> Result<Outcome> {
+    match result {
+        Ok(Persist::Written(out)) => match ledger.commit() {
+            Ok(()) => Ok(out),
+            Err(e) => {
+                ledger.rollback()?;
+                Err(e.into())
+            }
+        },
+        Ok(Persist::Reuse(hash)) => {
+            ledger.rollback()?;
+            let pointer = format!("study-{}", hash.to_hex());
+            let loaded = load(ledger, &pointer)?;
+            resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).map_err(malformed)?;
+            Ok(Outcome {
+                pointer,
+                receipt: loaded.bytes,
+                status,
+            })
+        }
+        Err(e) => {
+            ledger.rollback()?;
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_idempotent_rerun(ledger: &Ledger, run: impl Fn() -> Result<Outcome>) {
+    let first = run().unwrap();
+    assert!(!first.receipt.contains("\"consumed_wall_s\""));
+    let loaded = load(ledger, &first.pointer).unwrap();
+    assert!(resolve_study_wall_s(ledger, &loaded.hash, &loaded.value).is_ok());
+    let ops = ledger.table_count("ops").unwrap();
+    let second = run().unwrap();
+    assert_eq!(
+        (second.pointer, second.receipt),
+        (first.pointer, first.receipt)
+    );
+    assert_eq!(ledger.table_count("ops").unwrap(), ops);
+}
+
+pub(super) fn find_completed_sdf3_run(
+    spec: &Spec,
+    ledger: &Ledger,
+    driver: &str,
+    accept: impl Fn(&Loaded) -> Option<&'static str>,
+) -> Result<Option<Outcome>> {
+    for hash in retained_study_receipts(ledger, spec.id, RECEIPT_KIND)? {
+        let pointer = format!("study-{}", hash.to_hex());
+        let Ok(loaded) = load(ledger, &pointer) else {
+            continue;
+        };
+        if loaded.value.str_field("driver") == Some(driver)
+            && let Some(status) = accept(&loaded)
+        {
+            return Ok(Some(Outcome {
+                pointer,
+                receipt: loaded.bytes,
+                status,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Progress follows commit, so an interrupted process has a usable receipt ID.
@@ -220,6 +334,18 @@ pub(super) fn drive(
     let admission = Instant::now();
     cancelled(gate)?;
     let producer = producer_identity(gate)?;
+    if old.is_none()
+        && cap.is_none()
+        && !ledger.in_transaction()
+        && let Some(retained) = find_completed_sdf3_run(spec, ledger, SDF3_DRIVER, |loaded| {
+            let exp = expected(spec, ledger, loaded, producer).ok()?;
+            (loaded.value.str_field("status") == Some("completed")
+                && exp.stages == spec.schedule.len())
+            .then_some("completed")
+        })?
+    {
+        return Ok(retained);
+    }
     let expected = old.map(|old| expected(spec, ledger, old, producer)).transpose()?;
     if let (Some(old), Some(expected)) = (old, &expected) {
         if old.value.str_field("status") == Some("completed") && expected.stages == spec.schedule.len() {
