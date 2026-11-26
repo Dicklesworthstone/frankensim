@@ -467,7 +467,7 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
             }
             let _ = write!(
                 out,
-                ",\"lowering_receipt\":{},\"execution_plan\":{},\"causalization_audit\":{},\"window_ledger\":{},\"probe_series\":{},\"stages\":[",
+                ",\"lowering_receipt\":{},\"execution_plan\":{},\"causalization_audit\":{},\"window_ledger\":{},\"probe_series\":{},\"qoi_budget\":{},\"stages\":[",
                 exp.lowering_receipt_json
                     .as_deref()
                     .map_or("null", str::trim),
@@ -477,6 +477,7 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
                     .map_or("null", str::trim),
                 exp.window_ledger_json.as_deref().map_or("null", str::trim),
                 exp.probe_series_json.as_deref().map_or("null", str::trim),
+                exp.qoi_budget_json.as_deref().map_or("null", str::trim),
             );
             for (i, (stage, op_id, receipt)) in exp.stages.iter().enumerate() {
                 if i > 0 {
@@ -503,13 +504,39 @@ fn render_explanation(run_id: &str, exp: &super::AssemblyExplanation, mode: Outp
             }
             let _ = writeln!(
                 out,
-                "lowering_receipt_present={}\nexecution_plan_present={}\ncausalization_audit_present={}\nwindow_ledger_present={}\nprobe_series_present={}",
+                "lowering_receipt_present={}\nexecution_plan_present={}\ncausalization_audit_present={}\nwindow_ledger_present={}\nprobe_series_present={}\nqoi_budget_present={}",
                 exp.lowering_receipt_json.is_some(),
                 exp.plan_json.is_some(),
                 exp.causalization_audit_json.is_some(),
                 exp.window_ledger_json.is_some(),
                 exp.probe_series_json.is_some(),
+                exp.qoi_budget_json.is_some(),
             );
+            if let Some(raw) = &exp.qoi_budget_json
+                && let Ok(qb) = super::budget::EvaluatedQoiBudget::from_json(raw)
+            {
+                for r in &qb.requirements {
+                    let unm = r.unmeasured_terms.join(",");
+                    let _ = writeln!(
+                        out,
+                        "requirement={} qoi={} outcome={} limit={:.6e} margin={:.6e} unit={} unmeasured=[{unm}]",
+                        r.id, r.qoi, r.outcome, r.effective_limit, r.nominal_margin, r.unit
+                    );
+                }
+                for t in &qb.terms {
+                    let val = t
+                        .value
+                        .map_or_else(|| "NO-DATA".into(), |v| format!("{v:.6e}"));
+                    let _ = writeln!(
+                        out,
+                        "budget_term qoi={} kind={} state={} value={val} reason={}",
+                        t.qoi,
+                        t.kind,
+                        t.state,
+                        escape_text(&t.reason)
+                    );
+                }
+            }
             for (stage, op_id, receipt) in &exp.stages {
                 let _ = writeln!(out, "stage={stage} op_id={op_id} receipt={receipt}");
             }

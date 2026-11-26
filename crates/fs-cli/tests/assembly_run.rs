@@ -682,3 +682,120 @@ fn admit_refusals_probe_refusals_and_unknown_explain_fail_closed() {
         "cli-solve-unknown-run"
     );
 }
+
+#[test]
+fn qoi_budget_measures_stated_card_corners_resumes_without_recompute_and_refuses_bad_dims_or_wall()
+{
+    let packs =
+        CardPackSet::admit(vec![material_pack("AISI-304", 8000.0, 500.0, 193.0e9)]).unwrap();
+    let req_src = SLIDER_ASSEMBLY.replace(
+        "\n)",
+        "\n  (requirement \"t_lim\" :probe \"slider_temp\" :stat max :relation at-most :limit 310K)\n)",
+    );
+    let ledger = Ledger::open(":memory:").unwrap();
+    let e_cancel = run_assembly(
+        &ledger,
+        req_src.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan {
+            cancel_after: Some(AssemblyStage::Probe),
+            cancel_pre_publish: None,
+        },
+    )
+    .expect_err("cancel after probe");
+    assert_eq!(
+        (e_cancel.code, e_cancel.stage),
+        ("cli-solve-cancelled", Some("report"))
+    );
+    let run_id = SolveRunId::parse_hex(e_cancel.run.as_deref().unwrap()).unwrap();
+    let before_qb = explain_assembly_run(&ledger, run_id)
+        .unwrap()
+        .qoi_budget_json
+        .unwrap();
+    let (resumed, _) = resume_assembly(
+        &ledger,
+        run_id,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        (resumed.status, resumed.prior_stages, resumed.stages.len()),
+        (SolveRunStatus::Completed, 5, 1)
+    );
+    let after_qb = explain_assembly_run(&ledger, run_id)
+        .unwrap()
+        .qoi_budget_json
+        .unwrap();
+    assert_eq!(
+        before_qb, after_qb,
+        "resume restores retained qoi_budget without recomputing"
+    );
+    for needle in [
+        "\"id\":\"t_lim\"",
+        "\"outcome\":\"indeterminate\"",
+        "\"kind\":\"parameters\",\"state\":\"measured\"",
+        "\"kind\":\"discretization\",\"state\":\"measured\"",
+        "\"kind\":\"roundoff\",\"state\":\"measured\"",
+        "\"label\":\"param_corner_3\"",
+        "\"wall_s\":",
+        "conservative overlap with solver-algebraic",
+    ] {
+        assert!(
+            after_qb.contains(needle),
+            "missing `{needle}` in {after_qb}"
+        );
+    }
+    assert!(!after_qb.contains(
+        "\"kind\":\"parameters\",\"state\":\"measured\",\"value\":0.00000000000000000e0"
+    ));
+    let rep_rcpt = read_report_receipt(&ledger, &resumed.stages[0].receipt);
+    let rep_json_h = ContentHash::from_hex(json_str_field(&rep_rcpt, "report_json")).unwrap();
+    let rep_json = String::from_utf8(ledger.get_artifact(&rep_json_h).unwrap().unwrap()).unwrap();
+    assert!(rep_json.contains("\"id\": \"t_lim\"") && rep_json.contains("QoI uncertainty budget"));
+
+    let bad_dim = SLIDER_ASSEMBLY.replace(
+        "\n)",
+        "\n  (requirement \"bad_dim\" :probe \"slider_temp\" :stat max :relation at-most :limit 5m)\n)",
+    );
+    let e_dim = run_assembly(
+        &ledger,
+        bad_dim.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e_dim.code, e_dim.stage),
+        ("cli-assembly-requirement", Some("probe"))
+    );
+
+    let tight_wall = req_src
+        .replace("(wall 60s)", "(wall 1s)")
+        .replace(":wall 60s", ":wall 1s");
+    let mut n = 0usize;
+    let (w_out, _) = run_assembly(
+        &ledger,
+        tight_wall.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut || {
+            n += 1;
+            if n <= 7 { 0.0 } else { 0.999_999_999 }
+        },
+        AssemblyCancelPlan::default(),
+    )
+    .unwrap();
+    let w_qb = explain_assembly_run(&ledger, SolveRunId::parse_hex(&w_out.run).unwrap())
+        .unwrap()
+        .qoi_budget_json
+        .unwrap();
+    assert!(
+        w_qb.contains("\"status\":\"budget_exceeded\"") && w_qb.contains("wall budget"),
+        "{w_qb}"
+    );
+}

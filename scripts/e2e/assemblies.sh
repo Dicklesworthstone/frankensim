@@ -204,7 +204,22 @@ for y in traw[1:]: tf.append(tf[-1] + alpha * (y - tf[-1]))
 sl_tc = max(abs(a - b) for a, b in zip(tlag, tf))
 assert sl_ex <= 1e-5 and sl_ev <= 1e-4 and sl_etot <= 1e-9 and sl_eth <= 1e-9 and sl_tc <= 1e-12 and wres(e_sl) <= 1e-12
 
-# 4. Determinism replay-audit + resume idempotency
+# 4. Eight-term QoI uncertainty budgets & verdicts on gallery transient runs
+CANON_TERMS = ["roundoff", "solver-algebraic", "discretization", "geometry", "parameters", "boundary-conditions", "model-form", "measurement"]
+def check_budget(e, req_id, min_disc=0.0):
+  qb = e["qoi_budget"]
+  assert qb and len(qb["requirements"]) == 1 and qb["requirements"][0]["id"] == req_id, qb
+  r = qb["requirements"][0]
+  assert r["outcome"] == "indeterminate" and [t["kind"] for t in r["terms"]] == CANON_TERMS, r
+  byk = {t["kind"]: t for t in r["terms"]}
+  assert byk["roundoff"]["state"] == "measured" and byk["roundoff"]["value"] >= 0.0, r
+  assert byk["discretization"]["state"] == "measured" and byk["discretization"]["value"] >= min_disc, r
+  assert all(k in r["unmeasured_terms"] and byk[k]["state"] == "no-data" for k in ("geometry", "parameters", "boundary-conditions", "model-form", "measurement")), r
+  assert any(x["label"] == "step_halving" and x["wall_s"] >= 0.0 for x in qb["extra_runs"]), qb["extra_runs"]
+  return {"id": req_id, "outcome": r["outcome"], "solver_state": byk["solver-algebraic"]["state"], "unmeasured_terms": r["unmeasured_terms"]}
+bv_ft, bv_tb, bv_sl = check_budget(e_ft, "pos_limit", fo_ex), check_budget(e_tb, "hot_limit", tb_eh), check_budget(e_sl, "temp_limit")
+
+# 5. Determinism replay-audit + resume idempotency
 ra = ld("replay_audit.json"); sr = ld("slider.run.json"); sres = ld("slider_resume.json")
 assert ra["status"] == "clean" and ra["clean"] is True and ra["compared"] == 7 and not ra["deterministic_mismatches"], ra
 assert sres["run"] == sr["run"] and sres["status"] == "completed" and sres["stages_completed"] == 6 and e_sl["plan_hash"] == sr["plan_hash"], sres
@@ -216,11 +231,11 @@ receipt = {
   "source_identity": src_id, "runner_sha256": runner_sha,
   "inputs_sha256": {p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in inputs},
   "assemblies": {
-    "forced_oscillator": {"runs": {m: ld(f"fo_{m}.run.json")["run"] for m in ("transient","modal","harmonic","stationary")},
+    "forced_oscillator": {"runs": {m: ld(f"fo_{m}.run.json")["run"] for m in ("transient","modal","harmonic","stationary")}, "verdict": bv_ft,
       "errors": {"modal_wn_rad_s": err_wn, "modal_fd_hz": err_fd, "modal_zeta": err_z, "harmonic_max": err_harm, "stationary_x_m": err_xeq, "transient_x_m": fo_ex, "transient_v_m_s": fo_ev, "energy_residual_j": wres(e_ft)}},
-    "two_body_conduction": {"run": ld("two_body.run.json")["run"],
+    "two_body_conduction": {"run": ld("two_body.run.json")["run"], "verdict": bv_tb,
       "errors": {"hot_temp_k": tb_eh, "cold_temp_k": tb_ec, "enthalpy_j": tb_en, "energy_residual_j": wres(e_tb)}},
-    "thermo_mech_slider": {"run": sr["run"],
+    "thermo_mech_slider": {"run": sr["run"], "verdict": bv_sl,
       "errors": {"pos_m": sl_ex, "vel_m_s": sl_ev, "midpoint_total_energy_j": sl_etot, "midpoint_thermal_energy_j": sl_eth, "thermocouple_lag_k": sl_tc, "energy_residual_j": wres(e_sl)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area"]},

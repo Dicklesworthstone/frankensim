@@ -74,10 +74,12 @@ CANCELLED=130}` table):
   interrupted assembly run from its last sealed stage checkpoint through
   `resume_assembly`.
 - `frankensim [--json] explain <run-id> [<ledger.db>]` projects retained
-  `LoweringReceipt`, `ExecutionPlan` (`plan_hash`), `CausalizationAudit`, and
-  `WindowLedger` receipts from `explain_assembly_run` without replaying
-  physics. Omitting `<ledger.db>` refuses with `exit::INPUT`
-  (`cli-export-ledger-required`), matching `report`, `package`, and `compare`.
+  `LoweringReceipt`, `ExecutionPlan` (`plan_hash`), `CausalizationAudit`,
+  `WindowLedger`, `probe_series`, and (when `(requirement ...)` clauses are
+  declared) eight-term `qoi_budget` verdicts and extra-run accounting from
+  `explain_assembly_run` without replaying physics. Omitting `<ledger.db>`
+  refuses with `exit::INPUT` (`cli-export-ledger-required`), matching `report`,
+  `package`, and `compare`.
 - FrankenScript adds `"assembly.run"` to `EXECUTABLE_VERBS`:
   `(assembly.run "<path>" [:materials (…)] [:interfaces (…)] [:analysis "transient"|"stationary"|"modal"|"harmonic"] [:hash "<64-hex canonical assembly source_hash>"])`.
   Binding verifies path readability, canonical `:hash` pin
@@ -86,10 +88,12 @@ CANCELLED=130}` table):
   program and direct `frankensim run` yield the identical `run` id and
   `plan_hash`.
 
-No-claim boundary: Stage 3 wires CLI and FrankenScript dispatch with
-Estimate-only probe authority; generalized 8-term QoI error budgets (`.11.8`)
-remain a separate bead. The CLI lineage/replay-audit verbs landed separately
-(`frankensim-dhqf7`, ed1876af96; see the section above).
+No-claim boundary: `.11.8` Stage 1 adds eight-term QoI uncertainty budgets and
+tri-state verdicts (`pass`/`fail`/`indeterminate`) for declared assembly
+requirements; unmeasured terms stay explicit `NO-DATA` (never zero) and runs
+retain Estimate-only authority without external validation. The CLI
+lineage/replay-audit verbs landed separately (`frankensim-dhqf7`, ed1876af96;
+see the section above).
 
 ## Durable assembly pipeline (`admit -> lower -> plan -> run -> probe -> report`, bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2)
 

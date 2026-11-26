@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{ContentHash, hash_bytes};
+use fs_evidence::uncertainty::RequirementRelation;
 use fs_ir::ast::{CountUnit, Node, NodeKind};
 use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack};
 use fs_qty::{Dims, QtyAny};
@@ -29,6 +30,32 @@ const FREQUENCY: Dims = Dims([0, 0, -1, 0, 0, 0]);
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeStat {
+    Max,
+    Min,
+    Final,
+}
+
+impl ProbeStat {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Final => "final",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssemblyRequirement {
+    pub(crate) id: String,
+    pub(crate) probe: String,
+    pub(crate) stat: ProbeStat,
+    pub(crate) relation: RequirementRelation,
+    pub(crate) limit: QtyAny,
+}
+
 /// Admitted assembly document, Five Explicits, and resolved card store.
 pub(crate) struct AdmittedAssembly {
     pub(crate) canonical_source: Vec<u8>,
@@ -46,6 +73,7 @@ pub(crate) struct AdmittedAssembly {
     pub(crate) entity_names: BTreeMap<EntityId, String>,
     pub(crate) harmonic_frequencies_hz: Vec<f64>,
     pub(crate) modal_max_modes: usize,
+    pub(crate) requirements: Vec<AssemblyRequirement>,
 }
 
 fn err(what: impl Into<String>) -> SolveRefusal {
@@ -436,8 +464,15 @@ pub(crate) fn admit_assembly_source(
         .map_err(|e| err(format!("catalog error: {e}")))?;
     let mut entity_names = BTreeMap::from([(root, name.clone())]);
     let (mut by_name, mut families) = (BTreeMap::new(), BTreeMap::new());
-    let (mut parts, mut joints, mut interfaces, mut sources, mut probes) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut parts, mut joints, mut interfaces, mut sources, mut probes, mut requirements) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut req_ids = BTreeSet::new();
 
     for clause in &root_items[2..] {
         let items = as_list(clause, "clause")?;
@@ -800,6 +835,38 @@ pub(crate) fn admit_assembly_source(
                 });
             }
             "probe" => probes.push(parse_probe(items, &by_name)?),
+            "requirement" => {
+                let id = as_str(
+                    items.get(1).ok_or_else(|| err("requirement missing id"))?,
+                    "requirement.id",
+                )?
+                .to_string();
+                if id.trim().is_empty() || !req_ids.insert(id.clone()) {
+                    return Err(err(format!("duplicate or empty requirement `{id}`")));
+                }
+                let sc = format!("requirement `{id}`");
+                let kw = kwargs(&items[2..], &["probe", "stat", "relation", "limit"], &sc)?;
+                let probe = as_str(req(&kw, "probe", &sc)?, "probe")?.to_string();
+                let stat = match as_sym(req(&kw, "stat", &sc)?, "stat")? {
+                    "max" => ProbeStat::Max,
+                    "min" => ProbeStat::Min,
+                    "final" => ProbeStat::Final,
+                    o => return Err(err(format!("{sc} unsupported stat `{o}`"))),
+                };
+                let relation = match as_sym(req(&kw, "relation", &sc)?, "relation")? {
+                    "at-most" => RequirementRelation::AtMost,
+                    "at-least" => RequirementRelation::AtLeast,
+                    o => return Err(err(format!("{sc} unsupported relation `{o}`"))),
+                };
+                let limit = as_qty(req(&kw, "limit", &sc)?, "limit")?;
+                requirements.push(AssemblyRequirement {
+                    id,
+                    probe,
+                    stat,
+                    relation,
+                    limit,
+                });
+            }
             "analysis-options" => {
                 let kw = kwargs(
                     &items[1..],
@@ -860,6 +927,14 @@ pub(crate) fn admit_assembly_source(
         &scenario,
     )
     .map_err(|e| err(format!("structural admission refused: {e}")))?;
+    for r in &requirements {
+        if !draft.input().probes.iter().any(|p| p.name == r.probe) {
+            return Err(err(format!(
+                "requirement `{}` references unknown probe `{}`",
+                r.id, r.probe
+            )));
+        }
+    }
     let card_store = build_card_store(packs, &families)?;
     Ok(AdmittedAssembly {
         canonical_source,
@@ -877,6 +952,7 @@ pub(crate) fn admit_assembly_source(
         entity_names,
         harmonic_frequencies_hz: harm_hz,
         modal_max_modes: modal_max,
+        requirements,
     })
 }
 
@@ -1006,6 +1082,56 @@ mod tests {
                 "got `{}` without `{needle}`",
                 r.what
             );
+        }
+    }
+
+    #[test]
+    fn requirement_clause_parses_and_refuses_bad_probe_stat_relation_and_dup() {
+        let with = |extra: &str| {
+            let src = format!(
+                "(assembly \"req_check\" (version 1) (units \"SI\") (seed 0x1) \
+                 (versions (constellation \"2026-07\") (workspace \"t\")) \
+                 (budget (wall 60s) (mem 64MiB)) \
+                 (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) \
+                 (reference-state unloaded) (environment earth-lab-air) \
+                 (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz) \
+                 (part \"p\" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) :physics (thermal) :fidelity lumped) \
+                 (probe \"tp\" :kind thermocouple :target \"p\" :sample-rate 1000Hz) {extra})\n"
+            );
+            admit_assembly_source(src.as_bytes(), &CardPackSet::admit(Vec::new()).unwrap())
+        };
+        let ok = with("(requirement \"r1\" :probe \"tp\" :stat max :relation at-most :limit 310K)")
+            .unwrap();
+        assert_eq!(
+            (
+                ok.requirements.len(),
+                ok.requirements[0].id.as_str(),
+                ok.requirements[0].stat
+            ),
+            (1, "r1", ProbeStat::Max)
+        );
+        for (bad, needle) in [
+            (
+                "(requirement \"r1\" :probe \"missing\" :stat max :relation at-most :limit 310K)",
+                "unknown probe",
+            ),
+            (
+                "(requirement \"r1\" :probe \"tp\" :stat mean :relation at-most :limit 310K)",
+                "unsupported stat",
+            ),
+            (
+                "(requirement \"r1\" :probe \"tp\" :stat min :relation eq :limit 310K)",
+                "unsupported relation",
+            ),
+            (
+                "(requirement \"r1\" :probe \"tp\" :stat final :relation at-least :limit 290K) (requirement \"r1\" :probe \"tp\" :stat max :relation at-most :limit 310K)",
+                "duplicate",
+            ),
+        ] {
+            let Err(e) = with(bad) else {
+                panic!("expected refusal for {bad}")
+            };
+            assert!(e.what.contains(needle), "`{}` missing `{needle}`", e.what);
         }
     }
 }

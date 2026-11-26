@@ -4,9 +4,12 @@
 
 #![allow(clippy::result_large_err)]
 
+mod budget;
 pub(crate) mod cli;
 mod codec;
 mod report;
+
+use budget::{EvaluatedQoiBudget, QOI_BUDGET_KIND, attach_wall_metrics, evaluate_qoi_budgets};
 
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
@@ -206,6 +209,8 @@ pub struct AssemblyExplanation {
     pub window_ledger_json: Option<String>,
     /// Canonical evaluated probe series JSON, when `probe` completed.
     pub probe_series_json: Option<String>,
+    /// Canonical eight-term QoI uncertainty budget & verdict JSON, when requirements were declared.
+    pub qoi_budget_json: Option<String>,
     /// Completed stages `(name, op_id, receipt_hash)`.
     pub stages: Vec<(String, i64, String)>,
 }
@@ -301,9 +306,11 @@ struct AssemblyCtx {
     plan_artifact: Option<ContentHash>,
     ledger_artifact: Option<ContentHash>,
     energy_residual_j: Option<f64>,
+    largest_energy_defect_j: Option<f64>,
     trace: Option<RunTrace>,
     probe_series_artifact: Option<ContentHash>,
     probes: Vec<EvaluatedProbe>,
+    qoi_budget: Option<(ContentHash, EvaluatedQoiBudget)>,
     pending_metrics: Vec<(i64, String, f64)>,
 }
 
@@ -321,10 +328,12 @@ enum StageCommit {
         trace: RunTrace,
         ledger_artifact: Option<ContentHash>,
         energy_residual_j: Option<f64>,
+        largest_energy_defect_j: Option<f64>,
     },
     Probe {
         series_artifact: ContentHash,
         probes: Vec<EvaluatedProbe>,
+        qoi_budget: Option<(ContentHash, EvaluatedQoiBudget)>,
     },
     Report,
 }
@@ -343,17 +352,29 @@ impl AssemblyPipeline<'_> {
         &self,
         lowered: &mut LoweredSystem,
     ) -> Result<(RunTrace, fs_system::LedgerExport), SolveRefusal> {
+        self.run_transient_with(lowered, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_transient_with(
+        &self,
+        lowered: &mut LoweredSystem,
+        dt_override: Option<f64>,
+    ) -> Result<(RunTrace, fs_system::LedgerExport), SolveRefusal> {
         let tp = &self.admitted.draft.input().time_plan;
-        let dt_s = match tp.step_policy {
-            StepPolicy::Fixed { dt } => dt.value,
-            StepPolicy::Adaptive { .. } => {
-                return Err(staged_refusal(
-                    "cli-assembly-step-policy",
-                    "run",
-                    "the assembly runner does not yet bind an adaptive state-error metric",
-                    "use the fixed step policy",
-                ));
-            }
+        let dt_s = match dt_override {
+            Some(dt) => dt,
+            None => match tp.step_policy {
+                StepPolicy::Fixed { dt } => dt.value,
+                StepPolicy::Adaptive { .. } => {
+                    return Err(staged_refusal(
+                        "cli-assembly-step-policy",
+                        "run",
+                        "the assembly runner does not yet bind an adaptive state-error metric",
+                        "use the fixed step policy",
+                    ));
+                }
+            },
         };
         let end_s = lowered.system.time_s() + tp.horizon.value;
         if !(end_s.is_finite() && end_s > lowered.system.time_s()) {
@@ -779,10 +800,11 @@ impl StagePipeline for AssemblyPipeline<'_> {
                     .lowered
                     .as_mut()
                     .ok_or_else(|| resume_identity("missing lowered system"))?;
-                let (trace, sides, ledger_artifact, energy_residual_j) =
+                let (trace, sides, ledger_artifact, energy_residual_j, largest_energy_defect_j) =
                     if self.analysis == AssemblyAnalysisMode::Transient {
                         let (trace, export) = self.run_transient(lowered)?;
                         let defect = lowered.system.ledger().energy_residual_j();
+                        let largest = lowered.system.ledger().largest_absolute_energy_defect_j();
                         let wb = export.canonical_json.into_bytes();
                         let wh = hash_bytes(&wb);
                         ctx.pending_metrics
@@ -805,6 +827,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                             ],
                             Some(wh),
                             Some(defect),
+                            Some(largest),
                         )
                     } else {
                         let trace = self.run_non_transient(lowered)?;
@@ -817,6 +840,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                                 artifact: th,
                                 bytes: tb,
                             }],
+                            None,
                             None,
                             None,
                         )
@@ -835,6 +859,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                         trace,
                         ledger_artifact,
                         energy_residual_j,
+                        largest_energy_defect_j,
                     },
                 })
             }
@@ -849,12 +874,38 @@ impl StagePipeline for AssemblyPipeline<'_> {
                     trace,
                 )?;
                 let series_artifact = side.artifact;
+                let mut side_artifacts = vec![side];
+                let qoi_budget = if self.admitted.requirements.is_empty()
+                    || self.analysis != AssemblyAnalysisMode::Transient
+                {
+                    None
+                } else {
+                    let defect = ctx
+                        .energy_residual_j
+                        .map(f64::abs)
+                        .into_iter()
+                        .chain(ctx.largest_energy_defect_j.map(f64::abs))
+                        .reduce(f64::max);
+                    let (qb, qs, bm) = evaluate_qoi_budgets(
+                        self.admitted,
+                        &probes,
+                        ctx.lowered.as_ref().map(|l| &l.receipt),
+                        defect,
+                        state.consumed_wall_s,
+                        |ls, dt| self.run_transient_with(ls, dt).map(|(tr, _)| tr),
+                    )?;
+                    let qa = qs.artifact;
+                    side_artifacts.push(qs);
+                    ctx.pending_metrics.extend(bm);
+                    Some((qa, qb))
+                };
                 Ok(StageExecution {
                     receipt_json,
-                    side_artifacts: vec![side],
+                    side_artifacts,
                     on_commit: StageCommit::Probe {
                         series_artifact,
                         probes,
+                        qoi_budget,
                     },
                 })
             }
@@ -900,6 +951,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                             .probe_series_artifact
                             .ok_or_else(|| resume_identity("missing probe series"))?,
                         probes: &ctx.probes,
+                        qoi_budget: ctx.qoi_budget.as_ref().map(|(h, b)| (*h, b)),
                         stage_receipts: &stage_receipts,
                     })?;
                 Ok(StageExecution {
@@ -934,18 +986,22 @@ impl StagePipeline for AssemblyPipeline<'_> {
                 trace,
                 ledger_artifact,
                 energy_residual_j,
+                largest_energy_defect_j,
             } => {
                 ctx.trace = Some(trace);
                 ctx.ledger_artifact = ledger_artifact;
                 ctx.energy_residual_j = energy_residual_j;
+                ctx.largest_energy_defect_j = largest_energy_defect_j;
                 AssemblyStage::Run
             }
             StageCommit::Probe {
                 series_artifact,
                 probes,
+                qoi_budget,
             } => {
                 ctx.probe_series_artifact = Some(series_artifact);
                 ctx.probes = probes;
+                ctx.qoi_budget = qoi_budget;
                 AssemblyStage::Probe
             }
             StageCommit::Report => AssemblyStage::Report,
@@ -1166,7 +1222,11 @@ impl ResumeAttestor for AssemblyResumeAttestor {
                     )
                     .ok_or_else(|| resume_identity("bad lowering hash"))?;
                     ctx.lowering_hash = Some(lh);
-                    if state.completed.len() < 4 {
+                    if state.completed.len() < 4
+                        || (state.completed.len() == 4
+                            && analysis == AssemblyAnalysisMode::Transient
+                            && !admitted.requirements.is_empty())
+                    {
                         let lowered = lowering_registry()
                             .lower(&admitted.draft, &admitted.card_store)
                             .map_err(|e| resume_identity(format!("re-lowering failed: {e}")))?;
@@ -1205,10 +1265,13 @@ impl ResumeAttestor for AssemblyResumeAttestor {
                         EdgeRole::Out,
                         Ledger::WINDOW_LEDGER_ARTIFACT_KIND,
                     )?;
-                    if let Some(la) = ctx.ledger_artifact {
-                        ctx.energy_residual_j = JsonValue::parse(&read_utf8(ledger, &la)?)
-                            .ok()
-                            .and_then(|v| v.get("totals")?.f64_field("energy_residual_j"));
+                    if let Some(la) = ctx.ledger_artifact
+                        && let Ok(v) = JsonValue::parse(&read_utf8(ledger, &la)?)
+                        && let Some(t) = v.get("totals")
+                    {
+                        ctx.energy_residual_j = t.f64_field("energy_residual_j");
+                        ctx.largest_energy_defect_j =
+                            t.f64_field("largest_absolute_energy_defect_j");
                     }
                 }
                 AssemblyStage::Probe => {
@@ -1236,6 +1299,11 @@ impl ResumeAttestor for AssemblyResumeAttestor {
                             peak_value: item.f64_field("peak").unwrap_or(0.0),
                             values,
                         });
+                    }
+                    if let Some(qa) = find_edge(ledger, done.op_id, EdgeRole::Out, QOI_BUDGET_KIND)?
+                    {
+                        ctx.qoi_budget =
+                            Some((qa, EvaluatedQoiBudget::from_json(&read_utf8(ledger, &qa)?)?));
                     }
                 }
                 AssemblyStage::Admit | AssemblyStage::Report => {}
@@ -1413,7 +1481,8 @@ pub fn explain_assembly_run(
         mut causalization_audit_json,
         mut window_ledger_json,
         mut probe_series_json,
-    ) = (None, None, None, None, None);
+        mut qoi_budget_json,
+    ) = (None, None, None, None, None, None);
     let mut stages = Vec::with_capacity(v.state.completed.len());
     for done in &v.state.completed {
         let stage = AssemblyStage::from_ordinal(done.ordinal)
@@ -1462,6 +1531,11 @@ pub fn explain_assembly_run(
                 if let Some(h) = find_edge(ledger, done.op_id, EdgeRole::Out, PROBE_SERIES_KIND)? {
                     probe_series_json = Some(read_utf8(ledger, &h)?);
                 }
+                if let Some(h) = find_edge(ledger, done.op_id, EdgeRole::Out, QOI_BUDGET_KIND)? {
+                    let raw = read_utf8(ledger, &h)?;
+                    let m = ledger.metrics_for_op(done.op_id).unwrap_or_default();
+                    qoi_budget_json = Some(attach_wall_metrics(&raw, &m));
+                }
             }
             _ => {}
         }
@@ -1477,6 +1551,7 @@ pub fn explain_assembly_run(
         causalization_audit_json,
         window_ledger_json,
         probe_series_json,
+        qoi_budget_json,
         stages,
     })
 }

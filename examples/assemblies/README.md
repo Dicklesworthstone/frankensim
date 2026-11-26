@@ -55,6 +55,16 @@ committed sources.
 
 ## Scope & No-Claim Boundary
 
+- **Requirement verdicts & eight-term QoI budgets:** Each gallery `.fsim` declares
+  one `(requirement ...)` on its primary transient probe. Nominal values come from
+  the declared `dt` run, and the discretization half-width is the conservative
+  `2 * |stat(dt) - stat(dt/2)|` estimate assuming order `p >= 1` (bounding
+  the closed-form errors: `2.01e-7 >= 1.34e-7 m` on `forced_oscillator`,
+  `1.68e-6 >= 1.12e-6 K` on `two_body_conduction`). The tracked
+  gallery cards carry no stated uncertainty (`UncertaintyModel::Unstated`), which
+  is why `parameters` is `NO-DATA` (alongside undeclared geometry, boundary,
+  model-form, and measurement terms) and all gallery verdicts are `indeterminate`
+  (`Estimate`-only).
 - **Heatsink-as-assembly (gallery item 6):** `examples/heatsink-fan/heatsink-fan.fsim`
   is not yet expressible as a `.fsim` assembly because it requires STL geometry
   ingestion, non-lumped CHT/conduction fidelity, and 3-D field QoIs beyond the

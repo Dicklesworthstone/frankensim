@@ -15,6 +15,8 @@ use fs_report::{
 use fs_scenario::assembly::draft::{ProbeDecl, ProbeKind, TimingEdge};
 use fs_scenario::entity::EntityId;
 
+use super::budget::{EvaluatedQoiBudget, QOI_BUDGET_SCHEMA};
+
 use crate::import::json_string;
 use crate::json_read::JsonValue;
 use crate::solve::{SolveRefusal, SolveRunId};
@@ -528,6 +530,7 @@ pub(crate) struct AssemblyReportInputs<'a> {
     pub(crate) energy_residual_j: Option<f64>,
     pub(crate) probe_series_artifact: ContentHash,
     pub(crate) probes: &'a [EvaluatedProbe],
+    pub(crate) qoi_budget: Option<(ContentHash, &'a EvaluatedQoiBudget)>,
     pub(crate) stage_receipts: &'a [(&'static str, u32, ContentHash, String)],
 }
 
@@ -596,11 +599,28 @@ pub(crate) fn build_assembly_report(
             hash: lh.to_hex(),
         });
     }
+    if let Some((qh, qb)) = inp.qoi_budget {
+        report = report.with_lineage(LineageItem {
+            label: "QoI uncertainty budget".into(),
+            hash: qh.to_hex(),
+        });
+        for r in &qb.requirements {
+            report = report.with_requirement(r.clone());
+        }
+        for t in &qb.terms {
+            report = report.with_budget_term(t.clone());
+        }
+    }
+    let no_claim_stmt = if inp.qoi_budget.is_some() {
+        "8-term QoI uncertainty budget evaluated; unmeasured terms remain NO-DATA and authority remains Estimate without external validation"
+    } else {
+        "projects retained stage receipts; Estimate-only authority, no 8-term QoI budget or experimental validation claimed"
+    };
     report = report
         .with_no_claim(NoClaimItem {
             component: "assembly-report".to_string(),
             status: "Estimate".to_string(),
-            statement: "projects retained stage receipts; Estimate-only authority, no 8-term QoI budget or experimental validation claimed".to_string(),
+            statement: no_claim_stmt.to_string(),
         })
         .with_replay_command(format!("frankensim run <assembly.fsim> <ledger> --analysis {} # source {} run {run_hex}", inp.analysis, inp.source_hash.to_hex()));
 
@@ -645,6 +665,20 @@ pub(crate) fn build_assembly_report(
             ASSEMBLY_PROBE_SCHEMA,
             f64::INFINITY,
         ));
+    }
+    if let Some((_, qb)) = inp.qoi_budget {
+        for r in &qb.requirements {
+            let desc = format!(
+                "{} {} (margin={:.12e}, limit={:.12e} {})",
+                r.qoi, r.outcome, r.nominal_margin, r.effective_limit, r.unit
+            );
+            package = package.with_claim(Claim::estimated(
+                format!("requirement.{}", id_token(&r.id)),
+                desc,
+                QOI_BUDGET_SCHEMA,
+                f64::INFINITY,
+            ));
+        }
     }
     let package_root = package.try_merkle_root().map_err(|e| {
         staged_refusal(

@@ -18,4 +18,5 @@
   (source "heater" :part "hot" :port "thermal" :history (constant 500W))
   (probe "hot_temp" :kind thermocouple :target "hot" :sample-rate 20Hz)
   (probe "cold_temp" :kind thermocouple :target "cold" :sample-rate 20Hz)
+  (requirement "hot_limit" :probe "hot_temp" :stat max :relation at-most :limit 310K)
 )

@@ -111,7 +111,19 @@ fn binary_runs_three_assemblies_explains_and_resumes_interrupted_run() {
     assert!(ej1.contains("\"causalization_audit\":{"));
     let ps = "\"probe_series\":{\"schema\":\"frankensim.cli.assembly-probe-series.v1\"";
     assert!(ej1.contains(ps) && ej1.contains("\"name\":\"slider_temp\""));
-    assert!(s(&bin_run(&["explain", run1, lstr]).stdout).contains("probe_series_present=true"));
+    assert!(
+        ej1.contains("\"qoi_budget\":{\"schema\":\"frankensim.cli.assembly-qoi-budget.v1\"")
+            && ej1.contains("\"id\":\"temp_limit\"")
+            && ej1.contains("\"outcome\":\"indeterminate\"")
+            && ej1.contains("unstated card uncertainty")
+    );
+    let txt1 = s(&bin_run(&["explain", run1, lstr]).stdout);
+    assert!(
+        txt1.contains("probe_series_present=true")
+            && txt1.contains("qoi_budget_present=true")
+            && txt1.contains("requirement=temp_limit")
+            && txt1.contains("value=NO-DATA")
+    );
 
     // 2. Real-binary `run --resume` completes an interrupted run on disk.
     let partial_p = dir.join("partial.db");

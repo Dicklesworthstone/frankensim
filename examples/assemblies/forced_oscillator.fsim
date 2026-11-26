@@ -16,4 +16,5 @@
   (probe "mass_vel" :kind field-quantity :target "mass"
     :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 1000Hz)
   (analysis-options :harmonic-frequencies (1.0 2.0 5.0) :modal-max 4)
+  (requirement "pos_limit" :probe "mass_pos" :stat max :relation at-most :limit 0.06m)
 )

@@ -20,4 +20,5 @@
     :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)
   (probe "slider_vel" :kind field-quantity :target "slider"
     :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 1000Hz)
+  (requirement "temp_limit" :probe "slider_temp" :stat max :relation at-most :limit 300K)
 )
