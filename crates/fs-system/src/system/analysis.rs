@@ -966,7 +966,7 @@ fn l2_norm(v: &[f64]) -> f64 {
 
 fn clamp_perturbation(base: f64, eps: f64) -> f64 {
     let raw = eps * base.abs().max(1.0);
-    if base > 0.0 && raw >= 0.25 * base {
+    if base > raw && raw >= 0.25 * base {
         0.25 * base
     } else {
         raw
@@ -3027,5 +3027,18 @@ impl System {
         self.boundary_bias = saved_bias;
         let _ = self.restore(&initial_cp);
         reverse_res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_perturbation;
+
+    #[test]
+    fn clamp_perturbation_treats_zero_noise_symmetrically_and_guards_small_positive() {
+        let eps = 1.0e-6;
+        assert_eq!(clamp_perturbation(-1.6e-15, eps), eps);
+        assert_eq!(clamp_perturbation(1.6e-15, eps), eps);
+        assert_eq!(clamp_perturbation(2.0e-6, eps), 0.25 * 2.0e-6);
     }
 }

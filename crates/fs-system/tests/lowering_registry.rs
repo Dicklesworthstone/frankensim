@@ -264,6 +264,7 @@ fn step_sources_keep_exact_jumps_and_integrated_force_and_heat() {
         (0.0, 0.0, vec![1.0]),
         (0.375, 0.625, vec![0.375, 0.625, 1.0]),
         (0.5, adjacent, vec![0.5, adjacent, 1.0]),
+        (adjacent, 0.5, vec![0.5, adjacent, 1.0]),
     ] {
         let mut catalog = EntityCatalog::new();
         let root = catalog

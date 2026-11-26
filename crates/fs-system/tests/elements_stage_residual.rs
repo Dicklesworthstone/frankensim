@@ -9,14 +9,16 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::conformance::{Case, check_stage_residual};
-use fs_ports::component::{Component, Proposal, StageResidual};
+use fs_ports::component::{
+    Component, ContractViolation, PortLayout, Proposal, StageResidual, audit_step,
+};
 use fs_system::elements::{
     Admittance, Conductance, Damper, DissipationLaw, ElementError, FlowSource, Force, Gyrator,
     HeatCapacity, Heater, Mass, Motion, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{
-    AnalysisError, AnalysisKind, BlockSolveMode, BlockSolverPolicy, NodeId, RequiredTier,
-    RouteTemperature, StateMap, StationaryConfig, System, SystemBuilder,
+    AnalysisError, AnalysisKind, BlockSolveMode, BlockSolverPolicy, MonolithicConfig, NodeId,
+    RequiredTier, RouteTemperature, StateMap, StationaryConfig, System, SystemBuilder,
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -939,5 +941,55 @@ fn current_driven_capacitor_uses_monolithic_and_stationary_analysis() {
         assert_eq!(*system.state::<f64>(capacitor).unwrap(), charge_before);
         assert_eq!(*system.state::<SourceAccount>(source).unwrap(), account_before);
         assert_eq!(system.time_s(), time_before);
+    });
+}
+
+#[test]
+fn monolithic_equal_t_thermal_and_heat_capacity_endpoint_rejection() {
+    with_cx(|cx| {
+        let mut b = SystemBuilder::new();
+        let c = || HeatCapacity::new(500.0).unwrap();
+        let g = Conductance::new(45.0).unwrap();
+        let htr = Heater::new(Waveform::constant(0.01).unwrap()).unwrap();
+        let hot = b.add_with_tangent_and_stage_residual("hot", c(), 300.0);
+        let cold = b.add_with_tangent_and_stage_residual("cold", c(), 300.0);
+        let cond = b.add_with_tangent_and_stage_residual("cond", g, ());
+        let h = b.add_with_tangent_and_stage_residual("h", htr, SourceAccount::default());
+        let (hot, cold, cond, h) = (hot.unwrap(), cold.unwrap(), cond.unwrap(), h.unwrap());
+        let (ca, cb, ph) = (
+            b.port(cond, "a").unwrap(),
+            b.port(cond, "b").unwrap(),
+            b.port(h, "heat").unwrap(),
+        );
+        b.common_effort(b.port(hot, "heat").unwrap(), &[ca, ph])
+            .unwrap();
+        b.bond(b.port(cold, "heat").unwrap(), cb).unwrap();
+        let mut sys = b.seal().unwrap();
+        assert!(sys.guess(ca, &[300.0]) && sys.guess(cb, &[300.0]) && sys.guess(ph, &[300.0]));
+        let pol = BlockSolverPolicy::MonolithicNewtonKrylov(MonolithicConfig::default());
+        sys.set_solver_policy(pol);
+        for _ in 0..20 {
+            sys.step(1.0e-2, cx).expect("equal-T thermal step");
+        }
+        assert!(sys.ledger().energy_residual_j().abs() < 1.0e-11);
+        assert!(*sys.state::<f64>(hot).unwrap() > *sys.state::<f64>(cold).unwrap());
+
+        // HeatCapacity::accept still fails audit_step::EndpointEnergy on broken z.
+        let cap = HeatCapacity::new(1000.0).unwrap();
+        let (old_t, dt_s, q_w, z_bad) = (293.15, 1.0, 300.0, 293.45 + 1.0e-6);
+        let (mut r, mut out, mut cand) = ([0.0], [0.0], 0.0);
+        cap.residual(&old_t, dt_s, &[q_w], &[z_bad], &mut r, &mut out, cx)
+            .unwrap();
+        let rec = cap
+            .accept(&old_t, dt_s, &[q_w], &[z_bad], &mut cand)
+            .unwrap();
+        let lay = PortLayout::new(cap.ports()).unwrap();
+        let (e0, e1) = (
+            cap.stored_energy_j(&old_t).unwrap(),
+            cap.stored_energy_j(&cand).unwrap(),
+        );
+        let err = audit_step(cap.ports(), &lay, dt_s, &[q_w], &out, &rec, e0, e1)
+            .expect_err("broken endpoint state must fail EndpointEnergy audit");
+        assert!(matches!(err, ContractViolation::EndpointEnergy { .. }));
     });
 }

@@ -4945,33 +4945,36 @@ impl System {
             return Err(SystemError::Step { dt_s: dt_max_s });
         }
         cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
-        let mut dt_s = dt_max_s;
+        let mut cap_s = dt_max_s;
+        let mut earliest_event_s = f64::INFINITY;
         for node in 0..self.nodes.len() {
             let limited = self.nodes[node]
-                .limit_dt_s(self.accepted[node].as_ref(), dt_s)
+                .limit_dt_s(self.accepted[node].as_ref(), cap_s)
                 .map_err(|error| SystemError::Component {
                     node: self.names[node].clone(),
                     phase: Phase::Negotiate,
                     error,
                 })?;
             // The limit and the event are checked one at a time: `min` would
-            // silently drop a NaN from either.
+            // silently drop a NaN from either. Keep the cap separate from
+            // scheduled events so one component's exact event does not trigger
+            // another component's anti-sliver cap halving on an adjacent jump.
+            let proposed_s = cap_s;
             let refuse = |returned_s: f64| SystemError::Negotiation {
                 node: self.names[node].clone(),
-                proposed_s: dt_s,
+                proposed_s,
                 returned_s,
             };
-            if !(limited > 0.0 && limited <= dt_s) {
+            if !(limited > 0.0 && limited <= cap_s) {
                 return Err(refuse(limited));
             }
-            let mut next = limited;
+            cap_s = limited;
             if let Some(event) = self.nodes[node].next_event_s(self.accepted[node].as_ref()) {
                 if !(event > 0.0) {
                     return Err(refuse(event));
                 }
-                next = next.min(event);
+                earliest_event_s = earliest_event_s.min(event);
             }
-            dt_s = next;
         }
 
         // Schedules are immutable: lookup from the accepted clock needs no
@@ -4991,12 +4994,14 @@ impl System {
             if !(event_s > 0.0) {
                 return Err(SystemError::Negotiation {
                     node: self.ledger.boundaries[boundary].port.clone(),
-                    proposed_s: dt_s,
+                    proposed_s: cap_s,
                     returned_s: event_s,
                 });
             }
-            dt_s = self.time.limit_before_event(dt_s, event_s).min(event_s);
+            cap_s = self.time.limit_before_event(cap_s, event_s);
+            earliest_event_s = earliest_event_s.min(event_s);
         }
+        let mut dt_s = cap_s.min(earliest_event_s);
 
         self.unresolved = 0;
         self.step_tracker.reset(self.budgets);

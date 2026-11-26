@@ -352,15 +352,17 @@ impl System {
             x0[n_z + row] = self.inputs[index];
         }
         let mut row_scale = vec![1.0_f64; total_dim];
+        let mut r_tmp = Vec::new();
+        let mut base_ok = true;
         for (pos, &node) in nodes.iter().enumerate() {
             let zr = z_offsets[pos]..z_offsets[pos + 1];
             let nz_node = zr.len();
-            let inputs = self.node_inputs(node);
+            let (inp_r, out_r) = (self.node_inputs(node), self.node_outputs(node));
             self.nodes[node]
                 .stage_initial_guess(
                     self.accepted[node].as_ref(),
                     dt_s,
-                    &self.inputs[inputs.clone()],
+                    &self.inputs[inp_r.clone()],
                     &mut x0[zr.clone()],
                 )
                 .map_err(|error| self.refused(node, error, cx))?;
@@ -370,11 +372,11 @@ impl System {
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
             let ones = vec![1.0_f64; nz_node];
             let mut dr_probe = vec![0.0_f64; nz_node];
-            let mut do_probe = vec![0.0_f64; self.node_outputs(node).len()];
+            let mut do_probe = vec![0.0_f64; out_r.len()];
             match self.nodes[node].stage_jvp_z(
                 self.accepted[node].as_ref(),
                 dt_s,
-                &self.inputs[inputs],
+                &self.inputs[inp_r.clone()],
                 &x0[zr.clone()],
                 &ones,
                 &mut dr_probe,
@@ -392,9 +394,34 @@ impl System {
                 Err(_) if cx.checkpoint().is_err() => return Err(SystemError::Cancelled),
                 Err(_) => {}
             }
+            if base_ok {
+                r_tmp.resize(nz_node, 0.0);
+                let (old, inp) = (self.accepted[node].as_ref(), &self.inputs[inp_r]);
+                let out = &mut self.outputs[out_r];
+                match self.nodes[node].stage_residual(old, dt_s, inp, &x0[zr], &mut r_tmp, out, cx)
+                {
+                    Ok(()) => {}
+                    Err(_) if cx.checkpoint().is_err() => return Err(SystemError::Cancelled),
+                    Err(_) => base_ok = false,
+                }
+            }
         }
-        for row in 0..m {
-            let s = x0[n_z + row].abs().max(1.0);
+        let mut u_rounding = vec![0.0_f64; m];
+        let power_scale = if base_ok {
+            self.monolithic_interface_scales(nodes, unknowns, dt_s, work, &mut u_rounding, cx)?
+        } else {
+            0.0
+        };
+        for (row, &index) in unknowns.iter().enumerate() {
+            let mut s = x0[n_z + row].abs().max(1.0);
+            if base_ok {
+                s = s
+                    .max(work.group_scale[self.input_group[index]])
+                    .max(u_rounding[row]);
+                if self.input_is_energy_rate[index] {
+                    s = s.max(power_scale);
+                }
+            }
             if s.is_finite() && s > 0.0 {
                 row_scale[n_z + row] = s;
             }
@@ -403,6 +430,7 @@ impl System {
         struct MonolithicScratch {
             inputs: Vec<f64>,
             outputs: Vec<f64>,
+            d_inputs: Vec<f64>,
             d_outputs: Vec<f64>,
             plus_r: Vec<f64>,
             minus_r: Vec<f64>,
@@ -582,6 +610,35 @@ impl System {
                         }
                     }
                     if du_norm2 > 0.0 {
+                        if nz_node == 0 && self.system.nodes[node].has_tangent() {
+                            // Exact algebraic PortTangent::jvp (avoids FD cancellation).
+                            self.charge(inp_r.len().max(1) as u64)?;
+                            let mut sc = self.scratch.borrow_mut();
+                            sc.d_inputs.clear();
+                            sc.d_inputs.resize(inp_r.len(), 0.0);
+                            sc.plus_o.resize(n_out, 0.0);
+                            for (row, &index) in self.unknowns.iter().enumerate() {
+                                if inp_r.contains(&index) {
+                                    sc.d_inputs[index - inp_r.start] = du[row];
+                                }
+                            }
+                            let MonolithicScratch {
+                                inputs,
+                                d_inputs,
+                                plus_o,
+                                d_outputs,
+                                ..
+                            } = &mut *sc;
+                            let old = self.system.accepted[node].as_ref();
+                            let out_s = &mut plus_o[..n_out];
+                            self.system.nodes[node]
+                                .jvp(old, self.dt_s, &inputs[inp_r], d_inputs, out_s, cx)
+                                .map_err(|error| self.system.refused(node, error, cx))?;
+                            for k in 0..n_out {
+                                d_outputs[out_r.start + k] += plus_o[k];
+                            }
+                            continue;
+                        }
                         let du_norm = du_norm2.sqrt();
                         let mut eps = 1.0e-6 * u_scale / du_norm;
                         // Keep temperature perturbations strictly positive.
@@ -724,6 +781,7 @@ impl System {
             scratch: RefCell::new(MonolithicScratch {
                 inputs: self.inputs.clone(),
                 outputs: self.outputs.clone(),
+                d_inputs: Vec::new(),
                 d_outputs: vec![0.0; self.outputs.len()],
                 plus_r: Vec::new(),
                 minus_r: Vec::new(),
@@ -753,7 +811,7 @@ impl System {
         self.step_tracker.evaluations = self.step_tracker.evaluations.saturating_add(spent_evals);
         self.step_tracker.work_units = self.step_tracker.work_units.saturating_add(spent_work);
 
-        let sol = match solved {
+        let mut sol = match solved {
             Ok(sol) => sol,
             Err(FallibleNewtonError::Cancelled) => return Err(SystemError::Cancelled),
             Err(FallibleNewtonError::Problem(err)) => return Err(err),
@@ -802,66 +860,57 @@ impl System {
             return Err(self.not_converged(nodes, unknowns, &work.residual, iters_u32, worst_row));
         }
 
-        // Publish converged u into trial inputs, evaluate exact final outputs,
-        // and call `stage_accept` on every node to populate candidate & receipts.
+        // Publish converged u, polish scalar stage residuals, and re-verify
+        // every interface residual before calling `stage_accept`.
         for (row, &index) in unknowns.iter().enumerate() {
             self.inputs[index] = sol.x[n_z + row];
         }
-        let mut r_tmp = Vec::new();
         for (pos, &node) in nodes.iter().enumerate() {
-            let zr = z_offsets[pos]..z_offsets[pos + 1];
-            let inp_r = self.node_inputs(node);
-            let out_r = self.node_outputs(node);
+            let (zr, inp_r, out_r) = (
+                z_offsets[pos]..z_offsets[pos + 1],
+                self.node_inputs(node),
+                self.node_outputs(node),
+            );
+            let old = self.accepted[node].as_ref();
             r_tmp.resize(zr.len(), 0.0);
+            let (inp, out) = (&self.inputs[inp_r], &mut self.outputs[out_r.clone()]);
             self.nodes[node]
-                .stage_residual(
-                    self.accepted[node].as_ref(),
-                    dt_s,
-                    &self.inputs[inp_r.clone()],
-                    &sol.x[zr.clone()],
-                    &mut r_tmp,
-                    &mut self.outputs[out_r],
-                    cx,
-                )
+                .stage_residual(old, dt_s, inp, &sol.x[zr.clone()], &mut r_tmp, out, cx)
                 .map_err(|error| self.refused(node, error, cx))?;
-            let receipt = self.nodes[node]
-                .stage_accept(
-                    self.accepted[node].as_ref(),
-                    dt_s,
-                    &self.inputs[inp_r],
-                    &sol.x[zr],
-                    self.candidate[node].as_mut(),
-                )
-                .map_err(|error| self.refused(node, error, cx))?;
-            self.receipts[node] = receipt;
+            if zr.len() == 1 && r_tmp[0] != 0.0 {
+                let mut z_val = sol.x[zr.start];
+                let mut out_buf = self.outputs[out_r.clone()].to_vec();
+                self.polish_scalar_stage(node, dt_s, &mut z_val, &mut r_tmp[0], &mut out_buf, cx)?;
+                sol.x[zr.start] = z_val;
+                self.outputs[out_r].copy_from_slice(&out_buf);
+            }
         }
 
-        // Compute interface allowances for the energy audit.
-        work.group_scale.resize(self.group_count, 0.0);
-        work.group_scale.fill(0.0);
-        let mut l2_sq = 0.0_f64;
-        let mut linf = 0.0_f64;
+        let power_scale =
+            self.monolithic_interface_scales(nodes, unknowns, dt_s, work, &mut u_rounding, cx)?;
+        let (mut l2_sq, mut linf, mut worst, mut post_ok) = (0.0, 0.0_f64, (0_usize, 0.0), true);
         for (row, &index) in unknowns.iter().enumerate() {
-            let driver = &self.drivers[index];
-            let target = driver.value(&self.outputs, &self.boundary_values);
+            let target = self.drivers[index].value(&self.outputs, &self.boundary_values);
             let res = self.inputs[index] - target;
             work.residual[row] = res;
             l2_sq += res * res;
             linf = linf.max(res.abs());
-            let group = self.input_group[index];
-            let terms = driver.magnitude(&self.outputs, &self.boundary_values);
-            work.group_scale[group] = work.group_scale[group]
-                .max(self.inputs[index].abs())
-                .max(terms);
-        }
-        let power_scale = self.block_power_scale(nodes);
-        for &index in unknowns {
-            let scale = work.group_scale[self.input_group[index]];
-            let mut allow = self.config.absolute_tolerance + ROUNDING_UNITS * f64::EPSILON * scale;
+            let group_scale = work.group_scale[self.input_group[index]];
+            let mut allow = self.config.absolute_tolerance
+                + ROUNDING_UNITS * f64::EPSILON * u_rounding[row].max(group_scale);
             if self.input_is_energy_rate[index] {
                 allow += ROUNDING_UNITS * f64::EPSILON * power_scale;
             }
             self.input_allowance[index] = allow;
+            let allowed = (self.config.relative_tolerance * group_scale + allow)
+                .max(mono_cfg.absolute_tolerance * row_scale[n_z + row]);
+            let excess = res.abs() - allowed;
+            if !(excess <= 0.0) {
+                post_ok = false;
+                if !(excess <= worst.1) {
+                    worst = (row, excess);
+                }
+            }
         }
         self.record_block_diag(BlockStepDiagnostic {
             block,
@@ -871,6 +920,113 @@ impl System {
             residual_l2: l2_sq.sqrt(),
             residual_linf: linf,
         });
+        if !post_ok {
+            return Err(self.not_converged(nodes, unknowns, &work.residual, iters_u32, worst.0));
+        }
+
+        for (pos, &node) in nodes.iter().enumerate() {
+            let (zr, inp_r) = (z_offsets[pos]..z_offsets[pos + 1], self.node_inputs(node));
+            let (old, cand) = (self.accepted[node].as_ref(), self.candidate[node].as_mut());
+            self.receipts[node] = self.nodes[node]
+                .stage_accept(old, dt_s, &self.inputs[inp_r], &sol.x[zr], cand)
+                .map_err(|error| self.refused(node, error, cx))?;
+        }
         Ok(Ok(iters_u32))
+    }
+
+    fn monolithic_interface_scales(
+        &self,
+        nodes: &[usize],
+        unknowns: &[usize],
+        dt_s: f64,
+        work: &mut BlockWork,
+        u_rounding: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<f64, SystemError> {
+        u_rounding.fill(0.0);
+        let (mut grad, mut d_in, mut d_out) = (Vec::new(), Vec::new(), Vec::new());
+        for &col_index in unknowns {
+            let (u_val, node) = (self.inputs[col_index], self.input_owner[col_index]);
+            if u_val == 0.0 || !u_val.is_finite() || !self.nodes[node].has_tangent() {
+                continue;
+            }
+            cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
+            let (inp_r, out_r) = (self.node_inputs(node), self.node_outputs(node));
+            d_in.clear();
+            d_in.resize(inp_r.len(), 0.0);
+            d_in[col_index - inp_r.start] = 1.0;
+            d_out.clear();
+            d_out.resize(out_r.len(), 0.0);
+            let old = self.accepted[node].as_ref();
+            match self.nodes[node].jvp(old, dt_s, &self.inputs[inp_r], &d_in, &mut d_out, cx) {
+                Ok(()) => {}
+                Err(_) if cx.checkpoint().is_err() => return Err(SystemError::Cancelled),
+                Err(_) => continue,
+            }
+            for (row, &row_index) in unknowns.iter().enumerate() {
+                self.drivers[row_index].gradient(&self.outputs, &mut grad);
+                for &(src, slope) in &grad {
+                    if out_r.contains(&src) {
+                        let c = (slope * d_out[src - out_r.start] * u_val).abs();
+                        u_rounding[row] += if c.is_finite() { c } else { 0.0 };
+                    }
+                }
+            }
+        }
+        work.group_scale.resize(self.group_count, 0.0);
+        work.group_scale.fill(0.0);
+        for &index in unknowns {
+            let g = self.input_group[index];
+            let t = self.drivers[index].magnitude(&self.outputs, &self.boundary_values);
+            work.group_scale[g] = work.group_scale[g].max(self.inputs[index].abs()).max(t);
+        }
+        Ok(self.block_power_scale(nodes))
+    }
+
+    fn polish_scalar_stage(
+        &self,
+        node: usize,
+        dt_s: f64,
+        z_val: &mut f64,
+        r_val: &mut f64,
+        out_buf: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), SystemError> {
+        let (inp, old) = (
+            &self.inputs[self.node_inputs(node)],
+            self.accepted[node].as_ref(),
+        );
+        let (mut dr, mut cr) = ([0.0_f64; 1], [0.0_f64; 1]);
+        let (mut dout, mut cout) = (vec![0.0; out_buf.len()], vec![0.0; out_buf.len()]);
+        for _ in 0..3 {
+            let best_r = r_val.abs();
+            if best_r == 0.0 {
+                break;
+            }
+            cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
+            let z = [*z_val];
+            match self.nodes[node].stage_jvp_z(old, dt_s, inp, &z, &[1.0], &mut dr, &mut dout, cx) {
+                Ok(()) => {}
+                Err(_) if cx.checkpoint().is_err() => return Err(SystemError::Cancelled),
+                Err(_) => break,
+            }
+            let (slope, dz) = (dr[0], -*r_val / dr[0]);
+            let cand_z = *z_val + dz;
+            let ok = slope.is_finite() && slope != 0.0 && dz.is_finite() && dz != 0.0;
+            if !(ok && cand_z.is_finite()) {
+                break;
+            }
+            let res =
+                self.nodes[node].stage_residual(old, dt_s, inp, &[cand_z], &mut cr, &mut cout, cx);
+            match res {
+                Ok(()) if cr[0].is_finite() && cr[0].abs() < best_r => {
+                    (*z_val, *r_val) = (cand_z, cr[0]);
+                    out_buf.copy_from_slice(&cout);
+                }
+                Err(_) if cx.checkpoint().is_err() => return Err(SystemError::Cancelled),
+                _ => break,
+            }
+        }
+        Ok(())
     }
 }

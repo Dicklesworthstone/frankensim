@@ -2698,9 +2698,9 @@ impl StageResidual for HeatCapacity {
         inputs_finite(inputs)?;
         let next = temperature(z[0])?;
         *new = next;
-        let stored_change_j = self.capacity_j_k * (next - old);
-        let scale = self.capacity_j_k * (old.abs() + next.abs()) + (dt_s * inputs[0]).abs();
-        Ok(Receipt::lossless(stored_change_j, roundoff(scale)))
+        let heat_j = dt_s * inputs[0];
+        let scale = self.capacity_j_k * (old.abs() + next.abs()) + heat_j.abs();
+        Ok(Receipt::lossless(heat_j, roundoff(scale)))
     }
 }
 
