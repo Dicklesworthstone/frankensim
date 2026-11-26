@@ -1,0 +1,25 @@
+(assembly "two_mass_chain"
+  (version 1) (units "SI") (seed 0x33)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 1.0s :dt 0.001s :sample-rate 1000Hz)
+  (part "inner" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (part "outer" :kind rigid-body :geometry (box 0.06m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (joint "ground_link" :kind prismatic :parent root :child "inner"
+    :axis (1.0 0.0 0.0) :damping 4N*s/m :stiffness 200N/m)
+  (joint "middle_link" :kind prismatic :parent "inner" :child "outer"
+    :axis (1.0 0.0 0.0) :damping 3N*s/m :stiffness 150N/m)
+  (source "load" :part "outer" :port "mechanics" :history (constant 10N))
+  (probe "inner_pos" :kind field-quantity :target "inner"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)
+  (probe "outer_pos" :kind field-quantity :target "outer"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)
+  (analysis-options :modal-max 4)
+  ; added as a file only: nothing in crates/ changed for this device (bead .11.10 item 7)
+)

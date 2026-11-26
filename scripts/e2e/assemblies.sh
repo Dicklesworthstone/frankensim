@@ -55,7 +55,8 @@ ATKINS_PACK="examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk"
 SENS_PACK="$ASM_DIR/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
 PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
 SRM_PACK="$ASM_DIR/packs/eps-nist-srm1453-2013.fsmcdpk"
-FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK")
+FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK"
+  "$ASM_DIR/two_mass_chain.fsim")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -112,6 +113,14 @@ run_case two_body "$ASM_DIR/two_body_conduction.fsim" --materials "$ALUM_PACK" -
 run_case slider "$ASM_DIR/thermo_mech_slider.fsim" --materials "$STEEL_PACK"
 run_case film "$ASM_DIR/shear_film_pair.fsim" --materials "$SENS_PACK" --materials "$PG50_PACK"
 run_case srm1453 "$ASM_DIR/srm1453_slab.fsim" --materials "$SRM_PACK" --analysis stationary
+# The device added as a file only (no Rust change), and its transient again at half the step
+run_case tmc_modal "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK" --analysis modal
+run_case tmc_stationary "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK" --analysis stationary
+run_case tmc_transient "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK"
+TMC_HALF="$ARTIFACT_DIR/two_mass_chain_half_dt.fsim"
+sed 's/:dt 0.001s/:dt 0.0005s/' "$ASM_DIR/two_mass_chain.fsim" > "$TMC_HALF"
+grep -q ":dt 0.0005s" "$TMC_HALF" || die "half-step copy of two_mass_chain.fsim has no :dt 0.0005s"
+run_case tmc_half "$TMC_HALF" --materials "$STEEL_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -284,6 +293,41 @@ r_ind = ld("srm1453_ind.explain.json")["qoi_budget"]["requirements"][0]
 assert r_fail["outcome"] == "fail" and r_fail["unmeasured_terms"] == [], r_fail
 assert r_ind["outcome"] == "indeterminate" and r_ind["unmeasured_terms"] == [], r_ind
 
+# 8. Two-mass chain, added as a file only (steel card rho = 7800 kg/m^3: m1 = 1.95 kg, m2 = 1.17 kg; anchor -k1,c1- m1 -k2,c2- m2,
+# k1 = 200, k2 = 150 N/m, c = 0.02 k (stiffness-proportional, so the undamped modes decouple), F = 10 N on m2 from rest)
+m1, m2 = 7800.0 * 0.1 * 0.05 * 0.05, 7800.0 * 0.06 * 0.05 * 0.05
+k1, k2, beta, Ft = 200.0, 150.0, 0.02, 10.0
+qa, qb, qc = m1 * m2, -(m1 * k2 + m2 * (k1 + k2)), k1 * k2
+tm_modes = []
+for w2 in sorted(((-qb - math.sqrt(qb*qb - 4*qa*qc)) / (2*qa), (-qb + math.sqrt(qb*qb - 4*qa*qc)) / (2*qa))):
+  phi = (k2, k1 + k2 - w2 * m1); w = math.sqrt(w2); zt = beta * w / 2.0
+  tm_modes.append((w2, phi, phi[1] * Ft / (m1 * phi[0]**2 + m2 * phi[1]**2), w, zt, w * math.sqrt(1.0 - zt * zt)))
+def tm_exact(t):
+  x = [0.0, 0.0]
+  for w2, phi, f, w, zt, wd in tm_modes:
+    q = f / w2 * (1.0 - math.exp(-zt*w*t) * (math.cos(wd*t) + zt*w/wd * math.sin(wd*t)))
+    x[0] += phi[0] * q; x[1] += phi[1] * q
+  return x
+e_tm, e_ts, e_tt, e_th = ld("tmc_modal.explain.json"), ld("tmc_stationary.explain.json"), ld("tmc_transient.explain.json"), ld("tmc_half.explain.json")
+ptm, pts = probes(e_tm), probes(e_ts)
+# Each mode appears once per conjugate eigenvalue: (w1, w1, w2, w2)
+tm_err_modal = max(abs(got - want) for key, pick in (("modal.natural_rad_s", lambda m: m[3]), ("modal.frequency_hz", lambda m: m[5] / (2.0 * math.pi)),
+                                                    ("modal.damping_ratio", lambda m: m[4]))
+                   for got, want in zip(ptm[key], [pick(m) for m in tm_modes for _ in (0, 1)]))
+assert all(len(ptm[k]) == 4 for k in ("modal.natural_rad_s", "modal.frequency_hz", "modal.damping_ratio")) and tm_err_modal <= 1e-9, (tm_err_modal, ptm)
+tm_err_stat = max(abs(pts["stationary.state.joint.ground_link.spring.state"][0] + Ft / k1),
+                  abs(pts["stationary.state.joint.middle_link.spring.state"][0] + Ft / k2),
+                  abs(pts["stationary.state.inner.velocity_m_s"][0]), abs(pts["stationary.state.outer.velocity_m_s"][0]))
+assert tm_err_stat <= 1e-9 and pts["stationary.residual_norm"][0] <= 1e-9, (tm_err_stat, pts)
+def tm_err(e, horizon=1.0):
+  pr = probes(e); xi, xo = pr["inner_pos"], pr["outer_pos"]; dt = horizon / (len(xi) - 1)
+  return (max(abs(x - tm_exact(i * dt)[0]) for i, x in enumerate(xi)), max(abs(x - tm_exact(i * dt)[1]) for i, x in enumerate(xo)), len(xi))
+tm_full, tm_half = tm_err(e_tt), tm_err(e_th)
+tm_ratio = (tm_full[0] / tm_half[0], tm_full[1] / tm_half[1])
+# Second order: the error against the exact modal superposition falls by 4 when dt halves
+assert tm_full[2] == 1001 and tm_half[2] == 2001 and max(tm_full[:2]) <= 5e-6 and all(3.9 <= r <= 4.1 for r in tm_ratio), (tm_full, tm_half, tm_ratio)
+assert wres(e_tt) <= 1e-12 and wres(e_th) <= 1e-12, (wres(e_tt), wres(e_th))
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -304,6 +348,9 @@ receipt = {
     "srm1453_slab": {"run": ld("srm1453.run.json")["run"],
       "verdict": {"id": r_pass["id"], "outcome": r_pass["outcome"], "fail_drill": r_fail["outcome"], "indeterminate_drill": r_ind["outcome"], "unmeasured_terms": r_pass["unmeasured_terms"]},
       "errors": {"heat_rate_rel": srm_rel, "stationary_residual_norm": psrm["stationary.residual_norm"][0]}},
+    "two_mass_chain": {"runs": {m: ld(f"tmc_{m}.run.json")["run"] for m in ("modal", "stationary", "transient", "half")}, "added_as_file_only": True,
+      "errors": {"modal_max": tm_err_modal, "stationary_max": tm_err_stat, "transient_x_m": max(tm_full[:2]), "half_step_x_m": max(tm_half[:2]),
+                 "half_step_error_ratio": list(tm_ratio), "energy_residual_j": wres(e_tt)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx"]},
 }
