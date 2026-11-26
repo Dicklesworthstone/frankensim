@@ -27,7 +27,7 @@ use fs_system::{
 };
 
 use super::codec::{AdmittedAssembly, AssemblyRequirement, BOX_AXES, ProbeStat, TargetEnvelope};
-use super::report::{EvaluatedProbe, RunTrace, evaluate_probes};
+use super::report::{EvaluatedProbe, RunTrace, UNIT_DIMS, evaluate_probes};
 use crate::import::json_string as js;
 use crate::json_read::JsonValue;
 use crate::solve::SolveRefusal;
@@ -55,19 +55,22 @@ fn req_refusal(detail: impl Into<String>) -> SolveRefusal {
 pub(crate) enum BudgetMode {
     Transient { energy_defect_j: Option<f64> },
     Stationary { residual_norm: Option<f64> },
+    Modal,
+    Harmonic,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BudgetRun {
+    Nominal,
+    HalfStep(Option<f64>),
+    TightSolver,
 }
 
 fn unit_dims(u: &str) -> Option<Dims> {
-    match u {
-        "K" => Some(Dims([0, 0, 0, 1, 0, 0])),
-        "m" => Some(Dims([1, 0, 0, 0, 0, 0])),
-        "m/s" => Some(Dims([1, 0, -1, 0, 0, 0])),
-        "s" => Some(Dims([0, 0, 1, 0, 0, 0])),
-        "W" => Some(Dims([2, 1, -3, 0, 0, 0])),
-        "Hz" | "rad/s" => Some(Dims([0, 0, -1, 0, 0, 0])),
-        "1" => Some(Dims::NONE),
-        _ => None,
+    if u == "Hz" {
+        return Some(Dims([0, 0, -1, 0, 0, 0]));
     }
+    UNIT_DIMS.iter().find(|(k, _)| *k == u).map(|(_, d)| *d)
 }
 
 fn probe_stat(vals: &[f64], stat: ProbeStat) -> Option<f64> {
@@ -100,17 +103,14 @@ fn roundoff_term(
         return nodata("no transient window-ledger energy defect retained");
     };
     let inp = adm.draft.input();
-    let ent = inp
-        .probes
-        .iter()
-        .find(|p| p.name == probe)
-        .and_then(|p| match &p.kind {
-            ProbeKind::Thermocouple { location, .. } => Some(*location),
-            ProbeKind::Timing { target, .. }
-            | ProbeKind::FieldQuantity { target, .. }
-            | ProbeKind::StrainGauge { target, .. } => Some(*target),
-            ProbeKind::Microphone { .. } => None,
-        });
+    let pdef = inp.probes.iter().find(|p| p.name == probe);
+    let ent = pdef.and_then(|p| match &p.kind {
+        ProbeKind::Thermocouple { location, .. } => Some(*location),
+        ProbeKind::Timing { target, .. }
+        | ProbeKind::FieldQuantity { target, .. }
+        | ProbeKind::StrainGauge { target, .. } => Some(*target),
+        ProbeKind::Microphone { .. } => None,
+    });
     let Some(ent) = ent else {
         return nodata("probe has no single target part");
     };
@@ -123,8 +123,19 @@ fn roundoff_term(
             .map(|p| p.value)
     };
     let hw = match unit {
-        "K" => par("heat_capacity").map(|c| de / c),
+        "K" => par("heat_capacity")
+            .or_else(|| Some(par("mass")? * par("specific_heat_capacity")?))
+            .map(|c| de / c),
         "m/s" => par("mass").map(|m| (2.0 * de / m).sqrt()),
+        "rad/s" => pdef
+            .and_then(|p| match &p.kind {
+                ProbeKind::FieldQuantity { quantity, .. } => quantity
+                    .name
+                    .strip_prefix("angular-velocity-")
+                    .and_then(|a| par(&format!("inertia_{a}"))),
+                _ => None,
+            })
+            .map(|i| (2.0 * de / i).sqrt()),
         "m" => inp
             .joints
             .iter()
@@ -434,11 +445,11 @@ fn sweep_corners<B, F>(
     labels: &[String],
     noms: &[(String, Dims, f64)],
     mut build: B,
-    run_transient: &mut F,
+    run_case: &mut F,
 ) -> Result<(Vec<f64>, String), String>
 where
     B: FnMut(usize) -> Result<LoweredSystem, String>,
-    F: FnMut(&mut LoweredSystem, Option<f64>) -> Result<RunTrace, SolveRefusal>,
+    F: FnMut(&mut LoweredSystem, BudgetRun) -> Result<RunTrace, SolveRefusal>,
 {
     if labels.is_empty() {
         return Err(empty.into());
@@ -449,8 +460,15 @@ where
     let (corners, mut md) = (1usize << labels.len(), vec![0.0f64; noms.len()]);
     for mask in 0..corners {
         let lbl = format!("{kind}_{mask}");
-        let meta = (kind, lbl.as_str(), acc.dt, acc.rel, acc.mono, None);
-        let vs = run_extra(acc, meta, || build(mask), run_transient)?;
+        let meta = (
+            kind,
+            lbl.as_str(),
+            acc.dt,
+            acc.rel,
+            acc.mono,
+            BudgetRun::Nominal,
+        );
+        let vs = run_extra(acc, meta, || build(mask), run_case)?;
         for (slot, (&(_, _, nom), v)) in md.iter_mut().zip(noms.iter().zip(vs)) {
             *slot = slot.max((v - nom).abs());
         }
@@ -746,6 +764,7 @@ fn assess_one(
 
 struct ExtraAcc<'a> {
     adm: &'a AdmittedAssembly,
+    reqs: &'a [&'a AssemblyRequirement],
     t0: Instant,
     consumed: f64,
     dt: f64,
@@ -757,15 +776,15 @@ struct ExtraAcc<'a> {
 
 fn run_extra<B, F>(
     acc: &mut ExtraAcc<'_>,
-    meta: (&str, &str, f64, f64, f64, Option<f64>),
+    meta: (&str, &str, f64, f64, f64, BudgetRun),
     build: B,
-    run_transient: &mut F,
+    run_case: &mut F,
 ) -> Result<Vec<f64>, String>
 where
     B: FnOnce() -> Result<LoweredSystem, String>,
-    F: FnMut(&mut LoweredSystem, Option<f64>) -> Result<RunTrace, SolveRefusal>,
+    F: FnMut(&mut LoweredSystem, BudgetRun) -> Result<RunTrace, SolveRefusal>,
 {
-    let (kind, label, dt_s, rel, mono, dt_ov) = meta;
+    let (kind, label, dt_s, rel, mono, run) = meta;
     let (cap, mkey) = (
         acc.adm.wall_budget_s,
         format!("driver.budget.{label}.wall_s"),
@@ -777,12 +796,12 @@ where
         } else {
             let st0 = Instant::now();
             let r = build().and_then(|mut ls| {
-                let tr = run_transient(&mut ls, dt_ov).map_err(|e| e.what)?;
+                let tr = run_case(&mut ls, run).map_err(|e| e.what)?;
                 let (_, _, ep) =
                     evaluate_probes(&acc.adm.draft.input().probes, &acc.adm.entity_names, &tr)
                         .map_err(|e| e.what)?;
-                let mut vals = Vec::with_capacity(acc.adm.requirements.len());
-                for rq in &acc.adm.requirements {
+                let mut vals = Vec::with_capacity(acc.reqs.len());
+                for rq in acc.reqs {
                     let v = ep
                         .iter()
                         .find(|p| p.name == rq.probe)
@@ -845,6 +864,7 @@ pub(crate) type BudgetEvalOut = (
 #[allow(clippy::too_many_lines)]
 pub(crate) fn evaluate_qoi_budgets<F>(
     adm: &AdmittedAssembly,
+    reqs: &[&AssemblyRequirement],
     probes: &[EvaluatedProbe],
     rec: Option<&LoweringReceipt>,
     mode: BudgetMode,
@@ -852,15 +872,20 @@ pub(crate) fn evaluate_qoi_budgets<F>(
     mut run_case: F,
 ) -> Result<BudgetEvalOut, SolveRefusal>
 where
-    F: FnMut(&mut LoweredSystem, Option<f64>) -> Result<RunTrace, SolveRefusal>,
+    F: FnMut(&mut LoweredSystem, BudgetRun) -> Result<RunTrace, SolveRefusal>,
 {
-    let reqs = &adm.requirements;
     let mut noms = Vec::with_capacity(reqs.len());
     for r in reqs {
         let p = probes
             .iter()
             .find(|p| p.name == r.probe)
             .ok_or_else(|| req_refusal(format!("probe `{}` missing", r.probe)))?;
+        if p.unit == "SI" {
+            return Err(req_refusal(format!(
+                "probe `{}` has no declared unit",
+                p.name
+            )));
+        }
         let d = unit_dims(&p.unit).ok_or_else(|| {
             req_refusal(format!("probe `{}` unit `{}` unsupported", p.name, p.unit))
         })?;
@@ -874,9 +899,13 @@ where
             .ok_or_else(|| req_refusal(format!("probe `{}` empty/non-finite", p.name)))?;
         noms.push((p.unit.clone(), d, nom));
     }
-    let dt = match adm.draft.input().time_plan.step_policy {
-        StepPolicy::Fixed { dt } => dt.value,
-        StepPolicy::Adaptive { dt_initial, .. } => dt_initial.value,
+    let dt = match mode {
+        BudgetMode::Transient { .. } => match adm.draft.input().time_plan.step_policy {
+            StepPolicy::Fixed { dt } => dt.value,
+            StepPolicy::Adaptive { dt_initial, .. } => dt_initial.value,
+        },
+        BudgetMode::Stationary { .. } => fs_system::StationaryConfig::default().probe_dt_s,
+        BudgetMode::Modal | BudgetMode::Harmonic => fs_system::LinearizeConfig::default().dt_s,
     };
     let (d_rel, d_mono) = (
         SolveConfig::default().relative_tolerance,
@@ -885,6 +914,7 @@ where
     let (t_rel, t_mono) = (d_rel * 1.0e-2, d_mono * 1.0e-1);
     let mut acc = ExtraAcc {
         adm,
+        reqs,
         t0: Instant::now(),
         consumed: consumed_wall_s,
         dt,
@@ -898,7 +928,13 @@ where
             .lower(&adm.draft, &adm.card_store)
             .map_err(|e| format!("{e}"))
     };
-    let half = if matches!(mode, BudgetMode::Transient { .. }) {
+    let all_exact_1d = matches!(mode, BudgetMode::Stationary { .. })
+        && reqs
+            .iter()
+            .all(|r| is_exact_one_d_conductance(adm, rec, &r.probe).is_some());
+    let half = if all_exact_1d {
+        None
+    } else {
         Some(run_extra(
             &mut acc,
             (
@@ -907,17 +943,22 @@ where
                 dt * 0.5,
                 d_rel,
                 d_mono,
-                Some(dt * 0.5),
+                BudgetRun::HalfStep(Some(dt * 0.5)),
             ),
             relower,
             &mut run_case,
         ))
-    } else {
-        None
     };
     let tight = run_extra(
         &mut acc,
-        ("solver_tight", "solver_tight", dt, t_rel, t_mono, None),
+        (
+            "solver_tight",
+            "solver_tight",
+            dt,
+            t_rel,
+            t_mono,
+            BudgetRun::TightSolver,
+        ),
         || tight_system(adm, t_rel, t_mono),
         &mut run_case,
     );
@@ -991,7 +1032,10 @@ where
             ),
             BudgetMode::Stationary { residual_norm } => {
                 let term = match residual_norm.filter(|v| v.is_finite() && *v >= 0.0) {
-                    Some(res) if unit == "W" => {
+                    Some(res)
+                        if unit == "W"
+                            && is_exact_one_d_conductance(adm, rec, &r.probe).is_some() =>
+                    {
                         let hw = res + 8.0 * f64::EPSILON * nom.abs();
                         (
                             TermValue::interval(0.0, hw).unwrap(),
@@ -1000,37 +1044,63 @@ where
                             ),
                         )
                     }
-                    _ => nodata("no stationary roundoff conversion for this probe"),
+                    _ => nodata("no verified stationary roundoff conversion for this probe"),
                 };
                 (term, "stationary-residual")
             }
+            BudgetMode::Modal | BudgetMode::Harmonic => (
+                nodata("no verified roundoff bound for modal/harmonic analysis"),
+                "linearised-analysis",
+            ),
         };
         let sol = match &tight {
             Ok(v) => (
                 TermValue::interval(0.0, (nom - v[i]).abs()).unwrap(),
-                format!("tightened solver (rel->{t_rel:.0e}, mono->{t_mono:.0e}, Estimated)"),
+                if matches!(mode, BudgetMode::Modal | BudgetMode::Harmonic) {
+                    format!(
+                        "tightened linearisation/solver (fd_eps*0.1, rel->{t_rel:.0e}, Estimated)"
+                    )
+                } else {
+                    format!("tightened solver (rel->{t_rel:.0e}, mono->{t_mono:.0e}, Estimated)")
+                },
             ),
             Err(w) => nodata(w),
         };
-        let (disc, disc_owner) = match &half {
-            Some(Ok(v)) => (
-                (
-                    TermValue::interval(0.0, 2.0 * (nom - v[i]).abs()).unwrap(),
-                    format!(
-                        "2*|stat(dt)-stat(dt/2)| for nominal dt={dt}s assuming order p>=1 (Estimated)"
-                    ),
+        let (disc, disc_owner) = if matches!(mode, BudgetMode::Stationary { .. })
+            && is_exact_one_d_conductance(adm, rec, &r.probe).is_some()
+        {
+            let msg = "no time discretisation; a single conductance is exact for 1-D steady conduction at the declared mean temperature";
+            (
+                (TermValue::negligible(msg).unwrap(), msg.into()),
+                "stationary-exact",
+            )
+        } else {
+            match &half {
+                Some(Ok(v)) => {
+                    let why = match mode {
+                        BudgetMode::Transient { .. } => format!(
+                            "2*|stat(dt)-stat(dt/2)| for nominal dt={dt}s assuming order p>=1 (Estimated)"
+                        ),
+                        BudgetMode::Stationary { .. } => {
+                            "2*|stat(probe_dt)-stat(probe_dt/2)| on stationary midpoint probe step (Estimated)".into()
+                        }
+                        BudgetMode::Modal | BudgetMode::Harmonic => {
+                            "2*|stat(dt)-stat(dt/2)| on implicit-midpoint linearisation probe step (Estimated)".into()
+                        }
+                    };
+                    (
+                        (
+                            TermValue::interval(0.0, 2.0 * (nom - v[i]).abs()).unwrap(),
+                            why,
+                        ),
+                        "step-halving",
+                    )
+                }
+                Some(Err(w)) => (nodata(w), "step-halving"),
+                None => (
+                    nodata("no discretisation estimate for this fidelity"),
+                    "step-halving",
                 ),
-                "step-halving",
-            ),
-            Some(Err(w)) => (nodata(w), "step-halving"),
-            None => {
-                let term = if is_exact_one_d_conductance(adm, rec, &r.probe).is_some() {
-                    let msg = "no time discretisation; a single conductance is exact for 1-D steady conduction at the declared mean temperature";
-                    (TermValue::negligible(msg).unwrap(), msg.into())
-                } else {
-                    nodata("no stationary discretisation estimate for this fidelity")
-                };
-                (term, "stationary-exact")
             }
         };
         let pick = |res: &Result<(Vec<f64>, String), String>| match res {
@@ -1278,6 +1348,7 @@ mod tests {
     fn assess_one_emits_pass_fail_and_indeterminate_via_evidence_budget() {
         let mk = |lim| AssemblyRequirement {
             id: "t_max".into(),
+            analysis: None,
             probe: "hot_temp".into(),
             stat: ProbeStat::Max,
             relation: RequirementRelation::AtMost,

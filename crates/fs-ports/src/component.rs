@@ -792,6 +792,18 @@ impl PortSpec {
         }
     }
 
+    /// SI dimensions of this port's input wire, when the carrier defines one.
+    #[must_use]
+    pub const fn input_dimensions(&self) -> Option<Dims> {
+        match (self.carrier, self.role) {
+            (Carrier::Power(k), PortRole::EffortIn) => Some(k.canonical_effort_dimensions()),
+            (Carrier::Power(k), PortRole::FlowIn) => Some(k.canonical_flow_dimensions()),
+            (Carrier::Heat, PortRole::EffortIn) => Some(Dims([0, 0, 0, 1, 0, 0])),
+            (Carrier::Heat, PortRole::FlowIn) => Some(Dims([2, 1, -3, 0, 0, 0])),
+            _ => None,
+        }
+    }
+
     /// Energy [J] that entered the owner through this port during a step of
     /// `dt_s`, from the port's own input and output coefficients.
     ///
@@ -1348,6 +1360,11 @@ pub trait Component {
 
     /// Ports in a stable order; index `i` is the same port in every call.
     fn ports(&self) -> &[PortSpec];
+
+    /// SI dimensions of this component's dynamic scalar state coordinate, when declared.
+    fn state_dimensions(&self) -> Option<Dims> {
+        None
+    }
 
     /// How the port map behaves.
     fn class(&self) -> Class;

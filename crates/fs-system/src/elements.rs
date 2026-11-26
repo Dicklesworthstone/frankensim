@@ -76,10 +76,11 @@ use std::sync::Arc;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
 use fs_ports::component::{
-    Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
-    StageResidual,
+    Carrier, Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal,
+    Receipt, StageResidual,
 };
 use fs_ports::{PortKind, StableId};
+use fs_qty::Dims;
 
 use crate::ledger::Sum;
 
@@ -220,6 +221,15 @@ fn port(name: &str, kind: Option<PortKind>, role: PortRole) -> PortSpec {
 
 fn heat(name: &str, role: PortRole) -> PortSpec {
     port(name, None, role)
+}
+
+fn integrated_flow_dims(p: &PortSpec) -> Option<Dims> {
+    match p.carrier() {
+        Carrier::Power(k) => k
+            .canonical_flow_dimensions()
+            .checked_plus(Dims([0, 0, 1, 0, 0, 0])),
+        _ => None,
+    }
 }
 
 fn positive(name: &'static str, value: f64) -> Result<f64, ElementError> {
@@ -738,6 +748,13 @@ impl Component for Mass {
         words.push(self.mass_kg.to_bits());
     }
 
+    fn state_dimensions(&self) -> Option<Dims> {
+        match self.ports[0].carrier() {
+            Carrier::Power(k) => Some(k.canonical_flow_dimensions()),
+            _ => None,
+        }
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -986,6 +1003,10 @@ impl Component for Storage {
         words.push(self.capacity.to_bits());
     }
 
+    fn state_dimensions(&self) -> Option<Dims> {
+        integrated_flow_dims(&self.ports[0])
+    }
+
     fn ports(&self) -> &[PortSpec] {
         &self.ports
     }
@@ -1226,6 +1247,10 @@ impl Component for Spring {
 
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.extend([self.stiffness_n_m.to_bits(), self.cubic_n_m3.to_bits()]);
+    }
+
+    fn state_dimensions(&self) -> Option<Dims> {
+        integrated_flow_dims(&self.ports[0])
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -2530,6 +2555,10 @@ impl Component for HeatCapacity {
 
     fn identity_words(&self, words: &mut Vec<u64>) {
         words.push(self.capacity_j_k.to_bits());
+    }
+
+    fn state_dimensions(&self) -> Option<Dims> {
+        Some(Dims([0, 0, 0, 1, 0, 0]))
     }
 
     fn ports(&self) -> &[PortSpec] {

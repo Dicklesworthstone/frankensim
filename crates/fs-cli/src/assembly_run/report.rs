@@ -35,6 +35,23 @@ const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const ANGULAR_VELOCITY: Dims = Dims([0, 0, -1, 0, 0, 0]);
 const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
 
+pub(crate) const UNIT_DIMS: &[(&str, Dims)] = &[
+    ("m", Dims([1, 0, 0, 0, 0, 0])),
+    ("m/s", Dims([1, 0, -1, 0, 0, 0])),
+    ("s", Dims([0, 0, 1, 0, 0, 0])),
+    ("K", Dims([0, 0, 0, 1, 0, 0])),
+    ("W", Dims([2, 1, -3, 0, 0, 0])),
+    ("rad/s", Dims([0, 0, -1, 0, 0, 0])),
+    ("1", Dims::NONE),
+    ("m/N", Dims([0, -1, 2, 0, 0, 0])),
+    ("m/(N*s)", Dims([0, -1, 1, 0, 0, 0])),
+    ("K/W", Dims([-2, -1, 3, 1, 0, 0])),
+];
+
+pub(crate) fn dims_to_unit(d: Dims) -> Option<&'static str> {
+    UNIT_DIMS.iter().find(|(_, x)| *x == d).map(|(u, _)| *u)
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntitySample {
     pub(crate) position_m: Option<f64>,
@@ -52,8 +69,9 @@ pub(crate) struct RunTrace {
     pub(crate) entities: BTreeMap<String, Vec<EntitySample>>,
     pub(crate) modal_modes: Vec<(f64, f64, f64)>,
     pub(crate) harmonic_points: Vec<(f64, f64, f64)>,
+    pub(crate) harmonic_unit: String,
     pub(crate) stationary_norm: Option<f64>,
-    pub(crate) stationary_state: Vec<(String, f64)>,
+    pub(crate) stationary_state: Vec<(String, f64, String)>,
 }
 
 /// A trace sample's six-number `motion` list, when it has one.
@@ -128,16 +146,21 @@ impl RunTrace {
             let _ = write!(out, "[{hz:.17e},{mag:.17e},{ph:.17e}]");
         }
         out.push(']');
+        if !self.harmonic_unit.is_empty() && self.harmonic_unit != "SI" {
+            let u = json_string(&self.harmonic_unit);
+            let _ = write!(out, ",\"harmonic_unit\":{u}");
+        }
         if let Some(res) = self.stationary_norm {
             let _ = write!(out, ",\"stationary_residual\":{res:.17e}");
         }
         if !self.stationary_state.is_empty() {
             out.push_str(",\"stationary_state\":[");
-            for (i, (label, val)) in self.stationary_state.iter().enumerate() {
+            for (i, (label, val, unit)) in self.stationary_state.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                let _ = write!(out, "[{},{val:.17e}]", json_string(label));
+                let (jl, ju) = (json_string(label), json_string(unit));
+                let _ = write!(out, "[{jl},{val:.17e},{ju}]");
             }
             out.push(']');
         }
@@ -197,7 +220,14 @@ impl RunTrace {
                 a.iter()
                     .filter_map(|row| {
                         let r = row.as_array()?;
-                        Some((r.first()?.as_str()?.to_string(), r.get(1)?.as_f64()?))
+                        Some((
+                            r.first()?.as_str()?.to_string(),
+                            r.get(1)?.as_f64()?,
+                            r.get(2)
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("SI")
+                                .to_string(),
+                        ))
                     })
                     .collect()
             })
@@ -215,6 +245,7 @@ impl RunTrace {
             entities,
             modal_modes: parse_triples("modal_modes"),
             harmonic_points: parse_triples("harmonic_points"),
+            harmonic_unit: root.str_field("harmonic_unit").unwrap_or("SI").to_string(),
             stationary_norm: root.f64_field("stationary_residual"),
             stationary_state,
         })
@@ -481,10 +512,15 @@ pub(crate) fn evaluate_probes(
             trace.modal_modes.iter().map(|m| m.2).collect(),
         ));
     } else if trace.analysis == "harmonic" {
+        let u = if trace.harmonic_unit.is_empty() {
+            "SI"
+        } else {
+            &trace.harmonic_unit
+        };
         evaluated.push(make_probe(
             "harmonic.transfer_magnitude",
             "harmonic-response",
-            "SI",
+            u,
             trace.harmonic_points.iter().map(|p| p.1).collect(),
         ));
     } else if let Some(res) = trace.stationary_norm {
@@ -494,11 +530,11 @@ pub(crate) fn evaluate_probes(
             "SI",
             vec![res],
         ));
-        for (label, val) in &trace.stationary_state {
+        for (label, val, unit) in &trace.stationary_state {
             evaluated.push(make_probe(
                 format!("stationary.state.{label}"),
                 "stationary-equilibrium",
-                "SI",
+                unit,
                 vec![*val],
             ));
         }
@@ -850,6 +886,7 @@ mod tests {
             entities: BTreeMap::from([("disc".to_owned(), vec![sample; 2])]),
             modal_modes: Vec::new(),
             harmonic_points: Vec::new(),
+            harmonic_unit: "SI".to_owned(),
             stationary_norm: None,
             stationary_state: Vec::new(),
         };

@@ -20,6 +20,7 @@ use fs_scenario::entity::ToleranceSource;
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
 use fs_system::CardStore;
 
+use super::AssemblyAnalysisMode;
 use crate::cards::{CardPackKind, CardPackSet};
 use crate::solve::SolveRefusal;
 use crate::stage_driver::staged_refusal;
@@ -51,6 +52,7 @@ impl ProbeStat {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AssemblyRequirement {
     pub(crate) id: String,
+    pub(crate) analysis: Option<AssemblyAnalysisMode>,
     pub(crate) probe: String,
     pub(crate) stat: ProbeStat,
     pub(crate) relation: RequirementRelation,
@@ -1121,7 +1123,19 @@ pub(crate) fn admit_assembly_source(
                     return Err(err(format!("duplicate or empty requirement `{id}`")));
                 }
                 let sc = format!("requirement `{id}`");
-                let kw = kwargs(&items[2..], &["probe", "stat", "relation", "limit"], &sc)?;
+                let kw = kwargs(
+                    &items[2..],
+                    &["analysis", "probe", "stat", "relation", "limit"],
+                    &sc,
+                )?;
+                let analysis = kw
+                    .get("analysis")
+                    .map(|n| {
+                        let s = as_sym(n, "analysis")?;
+                        AssemblyAnalysisMode::parse(s)
+                            .ok_or_else(|| err(format!("{sc} unsupported analysis `{s}`")))
+                    })
+                    .transpose()?;
                 let probe = as_str(req(&kw, "probe", &sc)?, "probe")?.to_string();
                 let stat = match as_sym(req(&kw, "stat", &sc)?, "stat")? {
                     "max" => ProbeStat::Max,
@@ -1134,9 +1148,12 @@ pub(crate) fn admit_assembly_source(
                     "at-least" => RequirementRelation::AtLeast,
                     o => return Err(err(format!("{sc} unsupported relation `{o}`"))),
                 };
-                let limit = as_qty(req(&kw, "limit", &sc)?, "limit")?;
+                let lim_n = req(&kw, "limit", &sc)?;
+                let limit = as_qty(lim_n, "limit")
+                    .or_else(|_| as_f64(lim_n, "limit").map(QtyAny::dimensionless))?;
                 requirements.push(AssemblyRequirement {
                     id,
+                    analysis,
                     probe,
                     stat,
                     relation,
@@ -1206,7 +1223,24 @@ pub(crate) fn admit_assembly_source(
     )
     .map_err(|e| err(format!("structural admission refused: {e}")))?;
     for r in &requirements {
-        if !draft.input().probes.iter().any(|p| p.name == r.probe) {
+        let ok = match r.analysis {
+            Some(AssemblyAnalysisMode::Modal) => matches!(
+                r.probe.as_str(),
+                "modal.natural_rad_s" | "modal.frequency_hz" | "modal.damping_ratio"
+            ),
+            Some(AssemblyAnalysisMode::Harmonic) => r.probe == "harmonic.transfer_magnitude",
+            Some(AssemblyAnalysisMode::Stationary) => {
+                r.probe == "stationary.residual_norm"
+                    || r.probe
+                        .strip_prefix("stationary.state.")
+                        .is_some_and(|s| !s.is_empty())
+                    || draft.input().probes.iter().any(|p| p.name == r.probe)
+            }
+            None | Some(AssemblyAnalysisMode::Transient) => {
+                draft.input().probes.iter().any(|p| p.name == r.probe)
+            }
+        };
+        if !ok {
             return Err(err(format!(
                 "requirement `{}` references unknown probe `{}`",
                 r.id, r.probe
@@ -1596,5 +1630,14 @@ mod tests {
         ] {
             assert!(slab(e, f).err().unwrap().what.contains(n));
         }
+        let reqs = admit(
+            ") (requirement \"m\" :analysis modal :probe \"modal.frequency_hz\" :stat min :relation at-least :limit 1Hz) \
+               (requirement \"h\" :analysis harmonic :probe \"harmonic.transfer_magnitude\" :stat max :relation at-most :limit 0.5s) \
+               (requirement \"s\" :analysis stationary :probe \"stationary.state.x\" :stat final :relation at-least :limit -1m",
+        )
+        .unwrap();
+        assert_eq!(reqs.requirements.len(), 3);
+        assert!(admit(") (requirement \"b\" :analysis bogus :probe \"modal.frequency_hz\" :stat min :relation at-least :limit 1Hz").is_err());
+        assert!(admit(") (requirement \"b\" :analysis modal :probe \"mass_pos\" :stat min :relation at-least :limit 1Hz").is_err());
     }
 }

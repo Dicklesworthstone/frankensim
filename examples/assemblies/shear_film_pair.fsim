@@ -41,4 +41,6 @@
     :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 100Hz)
   (probe "upper_cell_temp" :kind field-quantity :target "upper_cell"
     :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 100Hz)
+  ; declared limit (illustrative): lower cell stays below 294 K within the 288.15..298.15 K sensible-heat validity window
+  (requirement "cell_temp_limit" :probe "lower_cell_temp" :stat max :relation at-most :limit 294K)
 )

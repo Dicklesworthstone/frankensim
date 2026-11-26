@@ -1065,3 +1065,90 @@ fn srm1453_slab_stationary_matches_closed_form_and_refuses_transient() {
         "other-eps",
     );
 }
+
+#[test]
+fn stage3_mode_budgets_si_refusal_and_modal_param_sweep() {
+    use AssemblyAnalysisMode as Am;
+    let sb = include_bytes!(
+        "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+    );
+    let raw = RawCardPack {
+        kind: CardPackKind::Material,
+        source: "steel".into(),
+        bytes: sb.to_vec(),
+        expect: None,
+    };
+    let (steel, l) = (
+        CardPackSet::admit(vec![raw]).unwrap(),
+        Ledger::open(":memory:").unwrap(),
+    );
+    let run = |s: &[u8], p: &CardPackSet, m| {
+        run_assembly(
+            &l,
+            s,
+            p,
+            m,
+            &mut step_clock(0.1),
+            AssemblyCancelPlan::default(),
+        )
+    };
+    let qb_of = |s: &[u8], p: &CardPackSet, m| {
+        let id = SolveRunId::parse_hex(&run(s, p, m).unwrap().0.run).unwrap();
+        explain_assembly_run(&l, id)
+            .unwrap()
+            .qoi_budget_json
+            .unwrap()
+    };
+    let fo = include_bytes!("../../../examples/assemblies/forced_oscillator.fsim");
+    for (mode, id, unit) in [
+        (Am::Modal, "mode1_freq", "Hz"),
+        (Am::Harmonic, "harm_peak", "s"),
+        (Am::Stationary, "eq_extension", "m"),
+    ] {
+        let qb = qb_of(fo, &steel, mode);
+        let (a, b) = (format!("\"id\":\"{id}\""), format!("\"unit\":\"{unit}\""));
+        for k in [
+            a.as_str(),
+            b.as_str(),
+            "\"outcome\":\"indeterminate\"",
+            "\"kind\":\"roundoff\",\"state\":\"no-data\"",
+            "\"kind\":\"solver-algebraic\",\"state\":\"measured\"",
+            "\"kind\":\"discretization\",\"state\":\"measured\"",
+        ] {
+            assert!(qb.contains(k), "mode {mode:?} missing `{k}` in {qb}");
+        }
+    }
+    let fo_s = std::str::from_utf8(fo).unwrap();
+    let si = fo_s.replace(
+        "(requirement \"eq_extension\" :analysis stationary :probe \"stationary.state.joint.spring_damper.spring.state\" :stat final :relation at-least :limit -0.06m)",
+        "(requirement \"res_lim\" :analysis stationary :probe \"stationary.residual_norm\" :stat final :relation at-most :limit 1)",
+    );
+    for (src, pat) in [
+        (si, "probe `stationary.residual_norm` has no declared unit"),
+        (fo_s.replace("spring.state", "missing.state"), "missing"),
+    ] {
+        let w = run(src.as_bytes(), &steel, Am::Stationary)
+            .unwrap_err()
+            .what;
+        assert!(w.contains(pat), "expected `{pat}` in `{w}`");
+    }
+    let u = UncertaintyModel::RelativeHalfWidth {
+        fraction: 0.02,
+        confidence: 0.95,
+    };
+    let uc = claim_pack("steel-unc", "density", 7800.0, Dims([-3, 1, 0, 0, 0, 0]), u);
+    let unc = CardPackSet::admit(vec![uc]).unwrap();
+    let fu = fo_s.replace("steel-music-wire-ligo-p1400229", "steel-unc");
+    let qbu = qb_of(fu.as_bytes(), &unc, Am::Modal);
+    let tail = qbu
+        .split("\"kind\":\"parameters\",\"state\":\"measured\",\"value\":")
+        .nth(1)
+        .unwrap();
+    let pv: f64 = tail.split(',').next().unwrap().parse().unwrap();
+    let fd = |m: f64| {
+        let (wn, z) = ((200.0 / m).sqrt(), 4.0 / (2.0 * (200.0 * m).sqrt()));
+        wn * (1.0 - z * z).sqrt() / std::f64::consts::TAU
+    };
+    let ex = (fd(1.95 * 0.98) - fd(1.95)).abs();
+    assert!((pv - ex).abs() / ex < 1.0e-6, "pv={pv} ex={ex}");
+}

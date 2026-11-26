@@ -14,6 +14,7 @@ use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::component::{
     Class, Component, EndOfStep, LoadLine, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
 };
+use fs_qty::Dims;
 
 /// A value that is both printable and recoverable by its concrete type.
 trait DebugAny: Any + fmt::Debug {
@@ -90,6 +91,7 @@ impl fmt::Debug for OwnerError {
 /// Object-safe view of a component.
 pub(crate) trait Node {
     fn ports(&self) -> &[PortSpec];
+    fn state_dimensions(&self) -> Option<Dims>;
     fn class(&self) -> Class;
     fn end_of_step(&self, port: usize) -> EndOfStep;
     fn has_tangent(&self) -> bool;
@@ -251,6 +253,10 @@ macro_rules! mandatory_tier {
             self.0.ports()
         }
 
+        fn state_dimensions(&self) -> Option<Dims> {
+            self.0.state_dimensions()
+        }
+
         fn class(&self) -> Class {
             self.0.class()
         }
@@ -299,8 +305,13 @@ macro_rules! mandatory_tier {
                 .map_err(OwnerError::new)
         }
 
-        fn stored_carried_quantity(&self, state: &dyn Any, carried: usize) -> Result<Option<f64>, OwnerError> {
-            self.0.stored_carried_quantity(state_of::<C::State>(state)?, carried)
+        fn stored_carried_quantity(
+            &self,
+            state: &dyn Any,
+            carried: usize,
+        ) -> Result<Option<f64>, OwnerError> {
+            self.0
+                .stored_carried_quantity(state_of::<C::State>(state)?, carried)
                 .map_err(OwnerError::new)
         }
 
@@ -613,7 +624,6 @@ where
             )
             .map_err(OwnerError::new)
     }
-
 
     fn vjp(
         &self,

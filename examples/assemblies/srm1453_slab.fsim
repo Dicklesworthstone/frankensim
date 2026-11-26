@@ -22,6 +22,6 @@
   (envelope boundary-conditions :target "hot_face" :half-width 0.05K :source "declared apparatus tolerance (not measured)")
   (envelope boundary-conditions :target "cold_face" :half-width 0.05K :source "declared apparatus tolerance (not measured)")
   (envelope measurement :probe "slab_heat_rate" :half-width 0.005W :source "declared apparatus tolerance (not measured)")
-  (envelope model-form :probe "slab_heat_rate" :covered-by-source "NIST SP 260-175 Eq. (8) & Table 8 (k=2 expanded uncertainty)")
+  (envelope model-form :probe "slab_heat_rate" :covered-by-source "NIST SP 260-175 Eq. (17), sec. 7.2 (k=2 expanded uncertainty; lambda_exp budget Eq. (8), incl. imbalance dQ A1.3.2)")
   (requirement "slab_heat_limit" :probe "slab_heat_rate" :stat final :relation at-most :limit 3.35W)
 )

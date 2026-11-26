@@ -10,7 +10,8 @@ mod codec;
 mod report;
 
 use budget::{
-    BudgetMode, EvaluatedQoiBudget, QOI_BUDGET_KIND, attach_wall_metrics, evaluate_qoi_budgets,
+    BudgetMode, BudgetRun, EvaluatedQoiBudget, QOI_BUDGET_KIND, attach_wall_metrics,
+    evaluate_qoi_budgets,
 };
 
 use std::collections::BTreeMap;
@@ -25,6 +26,8 @@ use fs_exec::solver::{
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
+use fs_ports::component::PortSpec;
+use fs_qty::Dims;
 use fs_scenario::assembly::draft::{FidelityRung, PhysicsDomain, StepPolicy};
 use fs_system::elements::Motion;
 use fs_system::lowering::Observed;
@@ -36,7 +39,7 @@ use fs_system::{
 use self::codec::{AdmittedAssembly, admit_assembly_source};
 use self::report::{
     AssemblyReportInputs, EntitySample, EvaluatedProbe, PROBE_SERIES_KIND, RunTrace,
-    build_assembly_report, evaluate_probes,
+    build_assembly_report, dims_to_unit, evaluate_probes,
 };
 use crate::cards::{CardPackKind, CardPackSet, RawCardPack};
 use crate::import::json_string;
@@ -231,22 +234,26 @@ impl LegacySolverStateV1 for AssemblyStateEnvelope {
 }
 
 struct LoweredStateMap {
-    coords: Vec<(NodeId, bool, String)>, // (node, is_motion_velocity, label)
+    coords: Vec<(NodeId, bool, String, Option<Dims>)>,
 }
 impl LoweredStateMap {
     fn from_lowered(lowered: &LoweredSystem) -> Self {
         let mut coords = Vec::new();
         for (name, &node) in &lowered.node_map {
+            let dims = lowered.system.node_state_dimensions(node);
             if lowered.system.state::<Motion>(node).is_some() {
                 // `Motion::position_m` is an output integral absent from port laws;
                 // mapping only `velocity_m_s` keeps the state Jacobian nonsingular
                 // (matching `Mech2Map` / `ThermoMechMap` in `fs-system`).
-                coords.push((node, true, format!("{name}.velocity_m_s")));
+                coords.push((node, true, format!("{name}.velocity_m_s"), dims));
             } else if lowered.system.state::<f64>(node).is_some() {
-                coords.push((node, false, format!("{name}.state")));
+                coords.push((node, false, format!("{name}.state"), dims));
             }
         }
         Self { coords }
+    }
+    fn dims(&self, i: usize) -> Option<Dims> {
+        self.coords.get(i).and_then(|c| c.3)
     }
 }
 impl StateMap for LoweredStateMap {
@@ -259,7 +266,7 @@ impl StateMap for LoweredStateMap {
                 what: "state length mismatch",
             });
         }
-        for (slot, (node, is_motion, _)) in out.iter_mut().zip(&self.coords) {
+        for (slot, (node, is_motion, _, _)) in out.iter_mut().zip(&self.coords) {
             *slot = if *is_motion {
                 system
                     .state::<Motion>(*node)
@@ -281,7 +288,7 @@ impl StateMap for LoweredStateMap {
                 what: "state length mismatch",
             });
         }
-        for ((node, is_motion, _), &val) in self.coords.iter().zip(state) {
+        for ((node, is_motion, _, _), &val) in self.coords.iter().zip(state) {
             if *is_motion {
                 let mut motion = *system
                     .state::<Motion>(*node)
@@ -505,6 +512,7 @@ impl AssemblyPipeline<'_> {
                 entities,
                 modal_modes: Vec::new(),
                 harmonic_points: Vec::new(),
+                harmonic_unit: "SI".into(),
                 stationary_norm: None,
                 stationary_state: Vec::new(),
             },
@@ -513,8 +521,14 @@ impl AssemblyPipeline<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn run_non_transient(&self, lowered: &mut LoweredSystem) -> Result<RunTrace, SolveRefusal> {
+    fn run_non_transient_with(
+        &self,
+        lowered: &mut LoweredSystem,
+        dt_scale: f64,
+        tight: bool,
+    ) -> Result<RunTrace, SolveRefusal> {
         let smap = LoweredStateMap::from_lowered(lowered);
+        let mut harmonic_unit = "SI".to_string();
         let outcome = ArenaPool::new(ArenaConfig::default()).scope(|arena| {
             let cx = Cx::new(
                 &self.gate,
@@ -529,29 +543,56 @@ impl AssemblyPipeline<'_> {
                 ExecMode::Deterministic,
             );
             match self.analysis {
-                AssemblyAnalysisMode::Stationary => lowered.system.run_analysis(
-                    AnalysisRequest::Stationary {
-                        state_map: &smap,
-                        config: StationaryConfig {
-                            commit: true,
-                            ..StationaryConfig::default()
+                AssemblyAnalysisMode::Stationary => {
+                    let mut cfg = StationaryConfig {
+                        commit: true,
+                        ..StationaryConfig::default()
+                    };
+                    cfg.probe_dt_s *= dt_scale;
+                    if tight {
+                        cfg.absolute_tolerance *= 1.0e-2;
+                        cfg.monolithic.absolute_tolerance *= 1.0e-1;
+                    }
+                    lowered.system.run_analysis(
+                        AnalysisRequest::Stationary {
+                            state_map: &smap,
+                            config: cfg,
                         },
-                    },
-                    &cx,
-                ),
-                AssemblyAnalysisMode::Modal => lowered.system.run_analysis(
-                    AnalysisRequest::Modal {
-                        state_map: &smap,
-                        config: ModalConfig::default(),
-                    },
-                    &cx,
-                ),
+                        &cx,
+                    )
+                }
+                AssemblyAnalysisMode::Modal => {
+                    let mut cfg = ModalConfig::default();
+                    cfg.linearize.dt_s *= dt_scale;
+                    if tight {
+                        cfg.linearize.fd_eps *= 0.1;
+                    }
+                    lowered.system.run_analysis(
+                        AnalysisRequest::Modal {
+                            state_map: &smap,
+                            config: cfg,
+                        },
+                        &cx,
+                    )
+                }
                 AssemblyAnalysisMode::Harmonic => {
                     let inputs = lowered.system.boundary_channels();
                     if inputs.is_empty() {
                         return Err(AnalysisError::Invalid {
                             what: "no boundary channels available for harmonic response",
                         });
+                    }
+                    let in_d = lowered
+                        .system
+                        .port_spec(inputs[0].port)
+                        .and_then(PortSpec::input_dimensions);
+                    if let Some(u) = smap
+                        .dims(0)
+                        .zip(in_d)
+                        .and_then(|(o, i)| o.checked_minus(i))
+                        .and_then(dims_to_unit)
+                    {
+                        harmonic_unit = u.into();
                     }
                     let outputs: Vec<OutputChannel> =
                         (0..smap.dim()).map(OutputChannel::State).collect();
@@ -561,13 +602,18 @@ impl AssemblyPipeline<'_> {
                         self.admitted.harmonic_frequencies_hz.clone()
                     };
                     let omegas: Vec<f64> = hz.iter().map(|f| f * TAU).collect();
+                    let mut lcfg = LinearizeConfig::default();
+                    lcfg.dt_s *= dt_scale;
+                    if tight {
+                        lcfg.fd_eps *= 0.1;
+                    }
                     lowered.system.run_analysis(
                         AnalysisRequest::Harmonic {
                             state_map: &smap,
                             inputs: &inputs,
                             outputs: &outputs,
                             frequencies_rad_s: &omegas,
-                            config: LinearizeConfig::default(),
+                            config: lcfg,
                         },
                         &cx,
                     )
@@ -590,6 +636,7 @@ impl AssemblyPipeline<'_> {
             entities: BTreeMap::new(),
             modal_modes: Vec::new(),
             harmonic_points: Vec::new(),
+            harmonic_unit,
             stationary_norm: None,
             stationary_state: Vec::new(),
         };
@@ -612,7 +659,18 @@ impl AssemblyPipeline<'_> {
             }
             AnalysisOutcome::Stationary(s) => {
                 trace.stationary_norm = Some(s.residual_norm);
-                trace.stationary_state = smap.labels().into_iter().zip(s.state).collect();
+                trace.stationary_state = smap
+                    .coords
+                    .iter()
+                    .zip(s.state)
+                    .map(|(c, v)| {
+                        (
+                            c.2.clone(),
+                            v,
+                            c.3.and_then(dims_to_unit).unwrap_or("SI").into(),
+                        )
+                    })
+                    .collect();
                 for part in &self.admitted.draft.input().parts {
                     if let Some(Observed::HeatRate(q)) = lowered
                         .observers
@@ -876,7 +934,7 @@ impl StagePipeline for AssemblyPipeline<'_> {
                             Some(largest),
                         )
                     } else {
-                        let trace = self.run_non_transient(lowered)?;
+                        let trace = self.run_non_transient_with(lowered, 1.0, false)?;
                         let tb = trace.to_json().into_bytes();
                         let th = hash_bytes(&tb);
                         (
@@ -921,50 +979,60 @@ impl StagePipeline for AssemblyPipeline<'_> {
                 )?;
                 let series_artifact = side.artifact;
                 let mut side_artifacts = vec![side];
-                let want_budget = !self.admitted.requirements.is_empty()
-                    && (self.analysis == AssemblyAnalysisMode::Transient
-                        || (self.analysis == AssemblyAnalysisMode::Stationary
-                            && self
-                                .admitted
-                                .requirements
-                                .iter()
-                                .any(|r| probes.iter().any(|p| p.name == r.probe))));
-                let qoi_budget = if want_budget {
-                    let mode = if self.analysis == AssemblyAnalysisMode::Stationary {
-                        BudgetMode::Stationary {
-                            residual_norm: trace.stationary_norm,
+                let active_reqs: Vec<_> = self
+                    .admitted
+                    .requirements
+                    .iter()
+                    .filter(|r| match r.analysis {
+                        Some(m) => m == self.analysis,
+                        None => {
+                            self.analysis == AssemblyAnalysisMode::Transient
+                                || probes.iter().any(|p| p.name == r.probe)
                         }
-                    } else {
-                        let defect = ctx
-                            .energy_residual_j
-                            .map(f64::abs)
-                            .into_iter()
-                            .chain(ctx.largest_energy_defect_j.map(f64::abs))
-                            .reduce(f64::max);
-                        BudgetMode::Transient {
+                    })
+                    .collect();
+                let qoi_budget = if active_reqs.is_empty() {
+                    None
+                } else {
+                    use AssemblyAnalysisMode as Am;
+                    use BudgetRun as Br;
+                    let defect = ctx
+                        .energy_residual_j
+                        .map(f64::abs)
+                        .into_iter()
+                        .chain(ctx.largest_energy_defect_j.map(f64::abs))
+                        .reduce(f64::max);
+                    let mode = match self.analysis {
+                        Am::Transient => BudgetMode::Transient {
                             energy_defect_j: defect,
-                        }
+                        },
+                        Am::Stationary => BudgetMode::Stationary {
+                            residual_norm: trace.stationary_norm,
+                        },
+                        Am::Modal => BudgetMode::Modal,
+                        Am::Harmonic => BudgetMode::Harmonic,
                     };
                     let (qb, qs, bm) = evaluate_qoi_budgets(
                         self.admitted,
+                        &active_reqs,
                         &probes,
                         ctx.lowered.as_ref().map(|l| &l.receipt),
                         mode,
                         state.consumed_wall_s,
-                        |ls, dt| {
-                            if self.analysis == AssemblyAnalysisMode::Stationary {
-                                self.run_non_transient(ls)
-                            } else {
-                                self.run_transient_with(ls, dt).map(|(tr, _)| tr)
+                        |ls, run| match (self.analysis, run) {
+                            (Am::Transient, Br::HalfStep(d)) => {
+                                self.run_transient_with(ls, d).map(|(t, _)| t)
                             }
+                            (Am::Transient, _) => self.run_transient_with(ls, None).map(|(t, _)| t),
+                            (_, Br::HalfStep(_)) => self.run_non_transient_with(ls, 0.5, false),
+                            (_, Br::TightSolver) => self.run_non_transient_with(ls, 1.0, true),
+                            (_, Br::Nominal) => self.run_non_transient_with(ls, 1.0, false),
                         },
                     )?;
                     let qa = qs.artifact;
                     side_artifacts.push(qs);
                     ctx.pending_metrics.extend(bm);
                     Some((qa, qb))
-                } else {
-                    None
                 };
                 Ok(StageExecution {
                     receipt_json,

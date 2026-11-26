@@ -3345,6 +3345,18 @@ impl System {
         })
     }
 
+    /// Port specification of `port`, when `port` belongs to this system.
+    #[must_use]
+    pub fn port_spec(&self, port: PortRef) -> Option<&PortSpec> {
+        self.nodes.get(port.node)?.ports().get(port.port)
+    }
+
+    /// Declared SI dimensions of `node`'s dynamic scalar state coordinate, if any.
+    #[must_use]
+    pub fn node_state_dimensions(&self, node: NodeId) -> Option<fs_qty::Dims> {
+        self.nodes.get(node.0)?.state_dimensions()
+    }
+
     fn input_range(&self, port: PortRef) -> Range<usize> {
         let range = self.layouts[port.node].input_range(port.port);
         self.input_start[port.node] + range.start..self.input_start[port.node] + range.end
