@@ -1651,8 +1651,10 @@ boundary without widening it.
 - Canonical schema migration proves exact lineage binding and prevents public
   field forgery; it does not prove semantic equivalence between predecessor and
   target schemas or authorize automatic re-interpretation of legacy bytes.
-- No operator catalog or per-operator semantic versions — gp3.6; the
-  `IR_VERSION` constant covers the language only.
+- The operator catalog (`Catalog::builtin`, documented above) carries a
+  per-operator `semver` string and the catalog's own
+  `CATALOG_SCHEMA_VERSION`; `IR_VERSION` still covers the language only.
+  The catalog's continued expansion is the gp3.6 bead's.
 - JSON `\uXXXX` escapes decode scalar values and valid high/low surrogate
   pairs; isolated or malformed surrogates refuse with a structured error.
 - The verb table is v1-small (optimize-shape, simulate-pour); verbs are
