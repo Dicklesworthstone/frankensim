@@ -2722,19 +2722,15 @@ export function metresPerUv(g: THREE.BufferGeometry): number {
 }
 
 /**
- * The file's meshes, made ready to bind to a Staff's skeleton: positions (which the file may store quantized, undone
- * by its skin) carried to body space at the bind pose, normals to plain floats, bone indices renumbered by name.
- */
-/**
  * Tuck the skin under a garment, as a tailor would: skin the cloth covers moves as the cloth does, and skin deep under
  * it is dropped. A body's skin and its jacket are skinned to the bones separately, so where they differ a bowed head
  * or a bent back pushes the skin out through the cloth (the neck's base through the back of the collar). Skin under
  * the cloth (behind the nearest cloth corner's outward normal, or within `out` metres outside it) takes that corner's
  * bone weights and is set 4 mm under the cloth, both fading back within 0.3 to 1.2 cm of the cloth's open edges
- * (collar, cuffs, hem, front) so skin an opening shows stays and moves as it was; skin triangles all of whose corners are under the cloth and
- * more than `margin` from an open edge are dropped. The cloth's corners are welded by position first, so its texture
- * seams are not taken for edges. Both geometries in bind pose, skinIndex already in this rig's bone order. Returns
- * the skin corners retargeted and the triangles dropped.
+ * (collar, cuffs, hem, front) so skin an opening shows stays and moves as it was; skin past an opening is outside.
+ * Skin triangles all of whose corners are under the cloth and more than `margin` from an open edge are dropped. The
+ * cloth's corners are welded by position first, so its texture seams are not taken for edges. Both geometries in bind
+ * pose, skinIndex already in this rig's bone order. Returns the skin corners retargeted and the triangles dropped.
  */
 export function tuckUnder(skin: THREE.BufferGeometry, cover: THREE.BufferGeometry, margin = 0.03, out = 0.004): { moved: number; dropped: number } {
   /** Metres outside the cloth that skin far from its openings still counts as through it. */
@@ -2897,6 +2893,10 @@ export function tuckUnder(skin: THREE.BufferGeometry, cover: THREE.BufferGeometr
   return { moved, dropped };
 }
 
+/**
+ * The file's meshes, made ready to bind to a Staff's skeleton: positions (which the file may store quantized, undone
+ * by its skin) carried to body space at the bind pose, normals to plain floats, bone indices renumbered by name.
+ */
 function prepareDetailed(cohort: Cohort, gltf: GLTF): DetailedAsset {
   gltf.scene.updateMatrixWorld(true);
   const J = layout(cohort).J;

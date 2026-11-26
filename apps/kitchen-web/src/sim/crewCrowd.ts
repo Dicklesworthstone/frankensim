@@ -263,6 +263,9 @@ export interface CookDay {
   walk: number;
   work: number;
   pans: number;
+  /** Seconds standing while someone was in the way or walking out of someone's way, in the counted minutes (from
+   *  `from` on, as the pans are). */
+  lostCounted: number;
 }
 
 export interface CrowdRun {
@@ -356,7 +359,7 @@ export const CELL = 0.08;
 export const START_GAP_S = 7;
 /**
  * The mornings a setting is run for: the cooks starting this many seconds apart. One run's loss swings with when the
- * cooks happen to meet (eight cooks as built lose 13% to 23% across starts 4 to 11 s apart); three pooled hold to
+ * cooks happen to meet (eight cooks as built lose 13% to 18% across starts 4 to 11 s apart); three pooled hold to
  * within a few points. The middle one is the morning the figure plays.
  */
 export const MORNINGS: readonly number[] = [5, START_GAP_S, 9];
@@ -394,7 +397,7 @@ export function runCrowd(k: Kitchen, crew: number, seconds = RUN_S, from = FROM_
       readyK: startK + Math.round(DWELL.prep / DT),
       firstTryK: -1,
       blocked: false,
-      day: { cohort, legs: [], waitBody: 0, aside: 0, waitPlace: 0, walk: 0, work: DWELL.prep, pans: 0 },
+      day: { cohort, legs: [], waitBody: 0, aside: 0, waitPlace: 0, walk: 0, work: DWELL.prep, pans: 0, lostCounted: 0 },
     });
     claimed.set(prep, i);
   }
@@ -439,8 +442,10 @@ export function runCrowd(k: Kitchen, crew: number, seconds = RUN_S, from = FROM_
     const arrive = go * DT + walkS;
     const waited = (go - c.firstTryK) * DT;
     const blocked = c.blocked || go > c.readyK;
-    if (blocked) c.day.waitBody += waited;
-    else c.day.waitPlace += waited;
+    if (blocked) {
+      c.day.waitBody += waited;
+      c.day.lostCounted += Math.max(0, go - Math.max(c.firstTryK, fromK)) * DT;
+    } else c.day.waitPlace += waited;
     if (waited > 0 && blocked && go > fromK) waits.push([c.pose.x, c.pose.z, waited]);
     c.day.legs.push({
       ready: c.firstTryK * DT,
@@ -458,8 +463,10 @@ export function runCrowd(k: Kitchen, crew: number, seconds = RUN_S, from = FROM_
       arrive,
       blocked,
     });
-    if (kind === "aside") c.day.aside += walkS;
-    else {
+    if (kind === "aside") {
+      c.day.aside += walkS;
+      if (go >= fromK) c.day.lostCounted += walkS;
+    } else {
       c.day.walk += walkS;
       c.day.work += dwell;
     }
@@ -480,7 +487,8 @@ export function runCrowd(k: Kitchen, crew: number, seconds = RUN_S, from = FROM_
     const way = grid.findPath([c.pose.x, c.pose.z], [goal.x, goal.z], c.rPath);
     if (!way) return false;
     const inWay = (x: number, z: number, r: number) => toPolyline(way, x, z) < r + c.rPath + 0.05;
-    const idle = cooks.filter((q) => q !== c && q.readyK <= k0 && inWay(q.pose.x, q.pose.z, q.rWalk)).sort((a, b) => Math.hypot(a.pose.x - c.pose.x, a.pose.z - c.pose.z) - Math.hypot(b.pose.x - c.pose.x, b.pose.z - c.pose.z));
+    // Idle: done at their place now, or already waiting to go (a cook waiting has readyK at their next try, past k0).
+    const idle = cooks.filter((q) => q !== c && (q.readyK <= k0 || q.firstTryK >= 0) && inWay(q.pose.x, q.pose.z, q.rWalk)).sort((a, b) => Math.hypot(a.pose.x - c.pose.x, a.pose.z - c.pose.z) - Math.hypot(b.pose.x - c.pose.x, b.pose.z - c.pose.z));
     for (const y of idle) {
       const refuges = k.spots
         .map((s, i) => ({ i, p: stanceOf(k, s, y.rWalk) }))
@@ -580,6 +588,7 @@ export function runCrowd(k: Kitchen, crew: number, seconds = RUN_S, from = FROM_
       const w = (endK - c.firstTryK) * DT;
       if (c.blocked) {
         c.day.waitBody += w;
+        c.day.lostCounted += Math.max(0, endK - Math.max(c.firstTryK, fromK)) * DT;
         if (endK > fromK) waits.push([c.pose.x, c.pose.z, w]);
       } else c.day.waitPlace += w;
     }
@@ -611,7 +620,8 @@ export interface CrowdSet {
   ghosts: boolean;
   /** Pans packed in the counted spans of all the mornings, an hour. */
   perHour: number;
-  /** Seconds each cook spent, on average, waiting on someone in the way or stepping out of it, an hour. */
+  /** Seconds each cook spent, on average, waiting on someone in the way or stepping out of it, an hour (over the
+   *  same counted minutes as the pans). */
   waitPerHour: number;
   /** Where cooks stood while someone was in their way, all the mornings. */
   waits: [number, number, number][];
@@ -625,14 +635,14 @@ export function runMornings(k: Kitchen, crew: number, ghosts = false): CrowdSet 
   const runs = MORNINGS.map((st) => runCrowd(k, crew, RUN_S, FROM_S, ghosts, CELL, st));
   const pans = runs.reduce((a, r) => a + r.pans, 0);
   const span = runs.reduce((a, r) => a + (r.seconds - r.from), 0);
-  const waited = runs.reduce((a, r) => a + r.cooks.reduce((b, c) => b + c.waitBody + c.aside, 0), 0);
+  const waited = runs.reduce((a, r) => a + r.cooks.reduce((b, c) => b + c.lostCounted, 0), 0);
   const gaps = runs.map((r) => r.minGap).filter((g): g is number => g !== null);
   return {
     kitchen: k.key,
     crew,
     ghosts,
     perHour: (pans * 3600) / span,
-    waitPerHour: (waited * 3600) / (crew * runs.reduce((a, r) => a + r.seconds, 0)),
+    waitPerHour: (waited * 3600) / (crew * span),
     waits: runs.flatMap((r) => r.waits),
     minGap: gaps.length ? Math.min(...gaps) : null,
     gridlock: runs.some((r) => r.gridlock),

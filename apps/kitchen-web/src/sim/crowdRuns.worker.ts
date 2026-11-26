@@ -23,14 +23,17 @@ let busy = false;
 
 function pump(): void {
   if (busy) return;
-  const a = queue.shift();
-  if (!a) return;
-  const k = KITCHENS[a.kitchen];
-  if (!k) return pump();
   busy = true;
-  // A turn of the event loop first, so a newer list can take this one's place.
+  // A turn of the event loop first, so a newer list can take this one's place: the run is taken from the queue only
+  // then, skipping any a list posted meanwhile still named but that is done already (else it would run twice).
   setTimeout(() => {
-    const set = runMornings(k, a.crew, a.ghosts);
+    let a = queue.shift();
+    while (a && (done.has(keyOf(a)) || !KITCHENS[a.kitchen])) a = queue.shift();
+    if (!a) {
+      busy = false;
+      return;
+    }
+    const set = runMornings(KITCHENS[a.kitchen]!, a.crew, a.ghosts);
     done.add(keyOf(a));
     scope.postMessage({ ...a, set });
     busy = false;

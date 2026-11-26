@@ -641,14 +641,29 @@ function settle(s: MorningSettings, fresh: boolean, from: readonly number[] | nu
 /**
  * The morning for these settings: each dish cooked just in time for the van, moved earlier where that is late, but
  * never so early that it is past its best at lunch. When that misses the van, the same without the limit says what
- * making the van would cost; when that misses it too, everything started at 6:00. A plan that makes the van that way
- * with nothing past its best is the plan.
+ * making the van would cost; when that misses it too, every dish started earlier by the same added time, the least
+ * that makes the van (halved down to five minutes), if starting everything at 6:00 makes it at all. A plan that makes
+ * the van that way with nothing past its best is the plan.
  */
 export function planMorning(s: MorningSettings): Morning {
   const plan = settle(s, true);
   if (plan.late <= 0.5) return plan;
   let rush = settle(s, false, plan.shift);
-  if (rush.late > 0.5) rush = schedule(s, new Array<number>(SLOTS.length + 1).fill(SERVE), false);
+  if (rush.late > 0.5) {
+    const earlier = (add: number) => schedule(s, plan.shift.map((x) => Math.min(SERVE, x + add)), false);
+    rush = earlier(SERVE);
+    let lo = 0;
+    let hi = SERVE;
+    while (rush.late <= 0.5 && hi - lo > 5) {
+      const mid = Math.round((lo + hi) / 2);
+      const m = earlier(mid);
+      if (m.late > 0.5) lo = mid;
+      else {
+        hi = mid;
+        if (m.pastBest <= rush.pastBest) rush = m;
+      }
+    }
+  }
   if (rush.late > 0.5) return { ...plan, onTimePastBest: null };
   if (rush.pastBest === 0) return rush;
   return { ...plan, onTimePastBest: rush.pastBest };

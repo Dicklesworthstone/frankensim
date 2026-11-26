@@ -515,7 +515,7 @@ export function mountCrowdLab(root: HTMLElement): void {
     const equiv = perCook > 0 ? b.perHour / perCook : crew;
     const waitMin = b.waitPerHour / 60;
     setTile(tiles.pans, num(b.perHour), `${num(g.perHour)} with nobody in the way`);
-    setTile(tiles.lost, `${Math.round(lost * 100)}%`, `${crew} cook${crew === 1 ? "" : "s"} turn out what ${equiv.toFixed(1)} would`, null);
+    setTile(tiles.lost, `${Math.round(lost * 100)}%`, `${crew === 1 ? "1 cook turns" : `${crew} cooks turn`} out what ${equiv.toFixed(1)} would`, null);
     setTile(tiles.wait, `${waitMin.toFixed(1)} min`, "an hour, on someone in the way");
     if (o) {
       const dv = o.perHour - b.perHour;
@@ -529,9 +529,9 @@ export function mountCrowdLab(root: HTMLElement): void {
       if (o) {
         const og = runOf(other, crew, true);
         const ol = og && og.perHour > 0 ? Math.max(0, 1 - o.perHour / og.perHour) : null;
-        if (ol !== null) then = other === "moved" ? ` Pull the island back 18 in, leaving the hood where it is, and they lose ${Math.round(ol * 100)}%.` : ` As built, with the island 42 in from the line, they lose ${Math.round(ol * 100)}%.`;
+        if (ol !== null && !(lost < 0.005 && ol < 0.005)) then = other === "moved" ? ` Pull the island back 18 in, leaving the hood where it is, and they lose ${Math.round(ol * 100)}%.` : ` As built, with the island 42 in from the line, they lose ${Math.round(ol * 100)}%.`;
       }
-      statusEl.textContent = `${crew} cook${crew === 1 ? "" : "s"} turn out ${num(b.perHour)} pans an hour; with nobody ever in the way they would turn out ${num(g.perHour)}. ${lostTxt}.${then}`;
+      statusEl.textContent = `${crew === 1 ? "1 cook turns" : `${crew} cooks turn`} out ${num(b.perHour)} pans an hour; with nobody ever in the way they would turn out ${num(g.perHour)}. ${lostTxt}.${then}`;
       statusEl.dataset.state = lost > 0.08 ? "warn" : "ok";
     }
   }
@@ -596,6 +596,14 @@ export function mountCrowdLab(root: HTMLElement): void {
     inView = v;
     if (v && !worker) ask();
   });
+  // The runs take a while, in a worker: start them when the figure is within a screen of the view.
+  observeInView(
+    root,
+    (v) => {
+      if (v && !worker) ask();
+    },
+    "100% 0px",
+  );
   let clock = 0;
   let frozen: number | null = null;
   let last = performance.now();

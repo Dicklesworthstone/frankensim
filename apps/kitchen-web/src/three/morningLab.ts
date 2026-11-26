@@ -646,7 +646,9 @@ export function mountMorningLab(root: HTMLElement): void {
     set(tiles.hands, `${pct}%`, settings.ahead && m.aheadMin > 0 ? `${(m.aheadMin / 60).toFixed(1)} h moved to the day before` : `${(m.handsMin / 60).toFixed(1)} of ${((settings.cooks * span) / 60).toFixed(1)} crew-hours`, base ? Math.round((100 * m.handsMin) / (settings.cooks * span) - (100 * base.handsMin) / (settings.cooks * base.depart)) : null, " pts");
   }
 
+  let swapTimer = 0;
   function renderStatus(m: Morning): void {
+    window.clearTimeout(swapTimer);
     if (!statusEl) return;
     const dishes = menuDishes(settings.menu);
     const station = m.bottleneck === "range" ? "the range" : m.bottleneck === "oven" ? "the ovens" : m.bottleneck === "hands" ? "the cooks' hands" : "the table";
@@ -660,18 +662,23 @@ export function mountMorningLab(root: HTMLElement): void {
       const busy = Math.round(100 * m.use[m.bottleneck]);
       text = `The van leaves at ${clockOf(m.depart)}, ${fmtLate(m.late).toLowerCase()}, waiting on the ${lateDish.name.toLowerCase()}: ${station} ${m.bottleneck === "hands" ? "are" : "is"} busy ${busy}% of the 90 minutes before it leaves${m.bottleneck === "range" && settings.cooks > 2 ? ", and only two cooks fit at it" : ""}.`;
       if (m.onTimePastBest !== null && m.onTimePastBest > 0) text += ` Started early enough for 10:30, ${m.onTimePastBest.toLocaleString("en-US")} portions would be past their best by lunch.`;
-      // The one swap that gets the van away soonest, when one gets it away sooner.
-      let swap = -1;
-      let soonest = m.depart - 0.5;
-      SLOTS.forEach((_, k) => {
-        if (settings.menu & (1 << k)) return;
-        const depart = runFor({ ...settings, menu: settings.menu | (1 << k) }).depart;
-        if (depart < soonest) {
-          soonest = depart;
-          swap = k;
-        }
-      });
-      if (swap >= 0) text += ` Try ${SLOTS[swap]!.swap.name.toLowerCase()}.`;
+      // The one swap that gets the van away soonest, when one gets it away sooner: up to three more mornings to plan,
+      // so once the settings rest rather than on every step of the slider.
+      const said = text;
+      const s = { ...settings };
+      swapTimer = window.setTimeout(() => {
+        let swap = -1;
+        let soonest = m.depart - 0.5;
+        SLOTS.forEach((_, k) => {
+          if (s.menu & (1 << k)) return;
+          const depart = runFor({ ...s, menu: s.menu | (1 << k) }).depart;
+          if (depart < soonest) {
+            soonest = depart;
+            swap = k;
+          }
+        });
+        if (swap >= 0 && statusEl) statusEl.textContent = `${said} Try ${SLOTS[swap]!.swap.name.toLowerCase()}.`;
+      }, 250);
     }
     statusEl.textContent = text;
     statusEl.dataset.state = m.late <= 0.5 ? "ok" : m.late <= 30 ? "warn" : "danger";
