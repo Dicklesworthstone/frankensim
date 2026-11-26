@@ -10,7 +10,7 @@ import * as THREE from "three";
 import { BURNERS, DOOR, MENUS, OVENS, SERVE, SLOTS, TABLE_SPOTS, clockOf, madeIt, menuDishes, planMorning, type Crew, type Morning, type MorningSettings } from "../sim/cateringMorning";
 import type { LimitAsk, LimitScore } from "../sim/morningLimits.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { CARRIER, CARRIER_COLS, CARRIER_X0, END_HOLD_S, LINE_Z, MorningKitchen, OVEN_X0, RANGE, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec } from "./morningKitchen";
+import { CARRIER, CARRIER_COLS, CARRIER_X0, CUTOFF, END_HOLD_S, LINE_Z, MorningKitchen, OVEN_X0, RANGE, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec } from "./morningKitchen";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { backdrop, tilePlane } from "./weekLab";
 
@@ -274,7 +274,7 @@ export function mountMorningLab(root: HTMLElement): void {
     // The van's label: to the left of its line when a late departure's label takes the right, or near the edge.
     const vanR = m.late > 0.5 || xOf(DOOR) > X1 - 100;
     svg += `<line class="van" x1="${xOf(DOOR)}" x2="${xOf(DOOR)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl${vanR ? " r" : ""}" x="${xOf(DOOR) + (vanR ? -4 : 4)}" y="${y0 - 9}">Van due 10:30</text>`;
-    if (m.late > 0.5) svg += `<line class="van late" x1="${xOf(m.depart)}" x2="${xOf(m.depart)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl late${xOf(m.depart) > X1 - 90 ? " r" : ""}" x="${xOf(m.depart) + (xOf(m.depart) > X1 - 90 ? -4 : 4)}" y="${y0 - 9}">Leaves ${clockOf(m.depart)}</text>`;
+    if (m.late > 0.5) svg += `<line class="van late" x1="${xOf(m.depart)}" x2="${xOf(m.depart)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl late${xOf(m.depart) > X1 - 90 ? " r" : ""}" x="${xOf(m.depart) + (xOf(m.depart) > X1 - 90 ? -4 : 4)}" y="${y0 - 9}">${m.finished ? `Leaves ${clockOf(m.depart)}` : "Still waiting"}</text>`;
     svg += `<line class="cur" x1="${X0}" x2="${X0}" y1="${y0 - 6}" y2="${axisY + 2}"/></svg>`;
     const dishes = menuDishes(settings.menu);
     const keys = dishes.map((d, k) => `<span style="--k:${SLOT_COLOR[k]}">${d.name}</span>`).join("");
@@ -294,7 +294,8 @@ export function mountMorningLab(root: HTMLElement): void {
         }
       }
     };
-    set(tiles.van, clockOf(m.depart), fmtLate(m.late), base ? m.depart - base.depart : null, " min");
+    if (!m.finished) set(tiles.van, "Not yet", `still waiting at ${CUTOFF}`, null, " min");
+    else set(tiles.van, clockOf(m.depart), fmtLate(m.late), base?.finished ? m.depart - base.depart : null, " min");
     const cost = m.late > 0.5 ? m.onTimePastBest : 0;
     set(tiles.cost, cost === null ? "Can't" : cost.toLocaleString("en-US"), cost === null ? "not even starting at 6:00" : cost ? "portions past their best" : "nothing past its best", null, "");
     const span = m.depart;
@@ -316,7 +317,7 @@ export function mountMorningLab(root: HTMLElement): void {
       // The place packed last, the sides among them.
       const lateDish = dishes[m.lastPacked.indexOf(Math.max(...m.lastPacked))]!;
       const busy = Math.round(100 * m.use[m.bottleneck]);
-      text = `The van leaves at ${clockOf(m.depart)}, ${fmtLate(m.late).toLowerCase()}, waiting on the ${lateDish.name.toLowerCase()}: ${station} ${m.bottleneck === "hands" ? "are" : "is"} busy ${busy}% of the 90 minutes before it leaves${m.bottleneck === "range" && settings.cooks > 2 ? ", and only two cooks fit at it" : ""}.`;
+      text = `${m.finished ? `The van leaves at ${clockOf(m.depart)}, ${fmtLate(m.late).toLowerCase()}, waiting on` : `The van is still waiting at ${CUTOFF} for`} the ${lateDish.name.toLowerCase()}: ${station} ${m.bottleneck === "hands" ? "are" : "is"} busy ${busy}% of the 90 minutes before ${m.finished ? "it leaves" : CUTOFF}${m.bottleneck === "range" && settings.cooks > 2 ? ", and only two cooks fit at it" : ""}.`;
       if (m.onTimePastBest !== null && m.onTimePastBest > 0) text += ` Started early enough for 10:30, ${m.onTimePastBest.toLocaleString("en-US")} portions would be past their best by lunch.`;
       // The one swap that gets the van away soonest, when one gets it away sooner: up to three more mornings to plan,
       // so once the settings rest rather than on every step of the slider.
@@ -553,7 +554,7 @@ export function mountMorningLab(root: HTMLElement): void {
   function show(t: number, dt: number): void {
     const now = kitchen.show(t, dt);
     if (now.minute) {
-      const gone = t >= morning.depart;
+      const gone = morning.finished && t >= morning.depart;
       if (hudClock) {
         hudClock.textContent = clockOf(t);
         hudClock.dataset.kind = t > DOOR && !gone ? "late" : "";

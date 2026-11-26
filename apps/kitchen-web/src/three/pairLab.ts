@@ -14,7 +14,7 @@ import { DOOR, MENUS, SERVE, SLOTS, clockOf, menuDishes, type Crew, type Morning
 import type { PairAsk, PairDone } from "../sim/pairRuns.worker";
 import { FAR_DOOR, limitKey, planKey, travels, type PairPlan, type PairSettings } from "../sim/twoKitchens";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { CARRIER, CARRIER_COLS, CARRIER_X0, END_HOLD_S, LINE_Z, MORNING_PIECES, MorningKitchen, OVEN_X0, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec, type KitchenMoment } from "./morningKitchen";
+import { CARRIER, CARRIER_COLS, CARRIER_X0, CUTOFF, END_HOLD_S, LINE_Z, MORNING_PIECES, MorningKitchen, OVEN_X0, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, shortName, type CookSpec, type KitchenMoment } from "./morningKitchen";
 import type { Piece } from "./models/all";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { backdrop, tilePlane } from "./weekLab";
@@ -352,7 +352,7 @@ export function mountPairLab(root: HTMLElement): void {
       body += `<line class="van" x1="${xOf(g.door)}" x2="${xOf(g.door)}" y1="${top}" y2="${bottom}"/>`;
       if (late) body += `<rect class="late" x="${xOf(g.door)}" y="${top}" width="${(xOf(g.m.depart) - xOf(g.door)).toFixed(1)}" height="${bottom - top}"/><line class="van late" x1="${xOf(g.m.depart)}" x2="${xOf(g.m.depart)}" y1="${top}" y2="${bottom}"/>`;
       const vx = xOf(late ? g.m.depart : g.door);
-      body += `<text class="vanl r${late ? " late" : ""}" x="${(vx - 4).toFixed(1)}" y="${y + 13}">van ${clockOf(late ? g.m.depart : g.door)}</text>`;
+      body += `<text class="vanl r${late ? " late" : ""}" x="${(vx - 4).toFixed(1)}" y="${y + 13}">${g.m.finished ? `van ${clockOf(late ? g.m.depart : g.door)}` : "van still waiting"}</text>`;
       y = bottom + 10;
     }
     const axisY = y + 2;
@@ -363,7 +363,7 @@ export function mountPairLab(root: HTMLElement): void {
     for (let t = 0; t <= T1; t += 60) svg += `<line class="g v" x1="${xOf(t)}" x2="${xOf(t)}" y1="4" y2="${axisY}"/>${xOf(t) > X1 - 14 || t % every ? "" : `<text class="xa" x="${xOf(t)}" y="${axisY + 14}">${clockOf(t)}</text>`}`;
     svg += body;
     // Lunch, at the client.
-    svg += `<line class="lunch${p && p.lunchLate > 0.5 ? " late" : ""}" x1="${xOf(lunch)}" x2="${xOf(lunch)}" y1="4" y2="${axisY}"/><text class="lunchl${p && p.lunchLate > 0.5 ? " late" : ""}${xOf(lunch) > X1 - 70 ? " r" : ""}" x="${(xOf(lunch) + (xOf(lunch) > X1 - 70 ? -4 : 4)).toFixed(1)}" y="${axisY + 28}">lunch ${clockOf(lunch)}</text>`;
+    svg += `<line class="lunch${p && p.lunchLate > 0.5 ? " late" : ""}" x1="${xOf(lunch)}" x2="${xOf(lunch)}" y1="4" y2="${axisY}"/><text class="lunchl${p && p.lunchLate > 0.5 ? " late" : ""}${xOf(lunch) > X1 - 70 ? " r" : ""}" x="${(xOf(lunch) + (xOf(lunch) > X1 - 70 ? -4 : 4)).toFixed(1)}" y="${axisY + 28}">lunch ${p && !p.finished ? "after " : ""}${clockOf(lunch)}</text>`;
     if (stale) svg += `<text class="planning" x="${((X0 + X1) / 2).toFixed(1)}" y="${axisY / 2 + 4}">Planning…</text>`;
     svg += `<line class="cur" x1="${X0}" x2="${X0}" y1="4" y2="${axisY + 2}"/></svg>`;
     chartEl.innerHTML = svg;
@@ -380,8 +380,13 @@ export function mountPairLab(root: HTMLElement): void {
       const p = shown!;
       const other = mode === "both" ? r.alone : null;
       // Against the hub alone, when both kitchens are on screen and the hub alone does differently.
-      const lateText = (x: PairPlan) => (x.lunchLate > 0.5 ? fmtLate(x.lunchLate) : "On time");
-      const vans = p.far ? `vans at ${clockOf(p.far.depart)} and ${clockOf(p.hub.depart)}` : `the hub's van at ${clockOf(p.hub.depart)}`;
+      // A kitchen that does not pack everything by the cut-off has no van leaving, and lunch no time.
+      const lateText = (x: PairPlan) => (!x.finished ? `Not by ${CUTOFF}` : x.lunchLate > 0.5 ? fmtLate(x.lunchLate) : "On time");
+      const vans = !p.finished
+        ? `${p.hub.finished ? "the van across town" : "the hub's van"} not away by ${CUTOFF}`
+        : p.far
+          ? `vans at ${clockOf(p.far.depart)} and ${clockOf(p.hub.depart)}`
+          : `the hub's van at ${clockOf(p.hub.depart)}`;
       setTile(tiles.lunch, lateText(p), other && Math.abs(other.lunchLate - p.lunchLate) > 0.5 ? `the hub alone: ${lateText(other).toLowerCase()}` : vans);
       setTile(tiles.past, p.pastBest ? num(p.pastBest) : "None", other && other.pastBest !== p.pastBest ? `the hub alone: ${other.pastBest ? num(other.pastBest) : "none"}` : p.pastBest ? "portions, by lunch" : "every portion at its best");
       const there = p.there.reduce((a, b) => a + b, 0);
@@ -411,6 +416,7 @@ export function mountPairLab(root: HTMLElement): void {
     const p = shown!;
     const dishes = menuDishes(settings.menu);
     const outcome = (x: PairPlan) => {
+      if (!x.finished) return `not everything is packed by ${CUTOFF}, so no van leaves in time for lunch`;
       const bits: string[] = [];
       if (x.lunchLate > 0.5) bits.push(`lunch ${fmtLate(x.lunchLate).toLowerCase()}`);
       if (x.pastBest) bits.push(`${num(x.pastBest)} portions past their best`);
@@ -427,7 +433,7 @@ export function mountPairLab(root: HTMLElement): void {
         : "";
     let text: string;
     if (mode === "alone") {
-      text = `The hub alone: ${outcome(p)}, its van away at ${clockOf(p.hub.depart)}.`;
+      text = `The hub alone: ${outcome(p)}${p.finished ? `, its van away at ${clockOf(p.hub.depart)}` : ""}.`;
       if (!p.made && r.both.made) text += ` With the kitchen across town making ${listOf(movedOf(r.both))}, lunch is on time with every dish at its best.`;
     } else if (p.made) {
       text = moved.length
@@ -553,7 +559,7 @@ export function mountPairLab(root: HTMLElement): void {
     const p = shown;
     const note = (side: Side, m: Morning | null, door: number, k: KitchenMoment): [string, string] => {
       if (!m) return [p && side === "far" ? "Not drafted" : "Planning…", "idle"];
-      if (t >= m.depart) return [`Van gone at ${clockOf(m.depart)}`, m.late > 0.5 ? "late" : "held"];
+      if (m.finished && t >= m.depart) return [`Van gone at ${clockOf(m.depart)}`, m.late > 0.5 ? "late" : "held"];
       if (t >= door) return ["The van is waiting", "late"];
       if (k.hot === 0) return ["Only salad and bread", "idle"];
       return [`${k.packed} of ${k.hot} hot pans packed`, side === "hub" || k.packed > 0 ? "held" : "idle"];

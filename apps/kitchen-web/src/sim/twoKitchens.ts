@@ -40,6 +40,8 @@ export interface PairPlan {
   far: Morning | null;
   /** Both vans away on time and every portion at its best at lunch. */
   made: boolean;
+  /** Every kitchen drafted packs everything by the plan's cut-off (else its van never leaves, and lunch is not served). */
+  finished: boolean;
   /** How late lunch is: the later van's lateness, minutes. */
   lunchLate: number;
   /** Portions past their best at that lunch, per place and in all. */
@@ -104,6 +106,7 @@ export function planPair(s: PairSettings, parts: readonly number[], cache: PlanC
     hub,
     far,
     made: madeIt(hub) && (!far || madeIt(far)) && lunchLate <= 0.5 && pastBest === 0,
+    finished: hub.finished && (!far || far.finished),
     lunchLate,
     pastBestBySlot,
     pastBest,

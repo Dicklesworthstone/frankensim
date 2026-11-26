@@ -85,6 +85,8 @@ export const burnerAt = (k: number) => {
 export const rangeSideX = (side: number) => rangeX0(Math.floor(side / RANGE_PLACES)) + (RANGE.w * ((side % RANGE_PLACES) + 0.5)) / RANGE_PLACES;
 const tableX = (k: number) => TABLE.x0 + (TABLE.w * (k + 0.5)) / TABLE_SPOTS;
 export const ovenX = (o: number) => ovenX0(o) + OVEN.w / 2;
+/** When a morning the plan cannot finish is cut off: 4 pm. */
+export const CUTOFF = "4 pm";
 export const fmtLate = (m: number) => (m < 0.5 ? "On time" : m < 59.5 ? `${Math.round(m)} min late` : `${Math.floor(Math.round(m) / 60)} h ${String(Math.round(m) % 60).padStart(2, "0")} late`);
 export const shortName = (name: string) => name.replace(/^(Chicken|Mushroom|Baked|Carne asada|Roast chicken|Short rib) /, "").replace(/^./, (c) => c.toUpperCase());
 
@@ -98,7 +100,7 @@ interface Spot {
   z: number;
   yaw: number;
 }
-interface Act {
+export interface Act {
   t0: number;
   t1: number;
   spot: Spot;
@@ -107,12 +109,15 @@ interface Act {
   surf?: number;
   /** Nothing to do: stood where they last worked, or out of the way (clearIdle). */
   idle?: boolean;
+  /** The plan's cook whose work this is: the plan's cooks are alike, and swapTails hands work from one to another. */
+  who: number;
 }
 
 const SPOT_Z = { line: LINE_Z + 0.3, oven: LINE_Z + 0.5, table: TABLE_Z - 0.36 };
 
-/** What cook `c` is doing over the morning, in animation seconds: one act per stretch of the same work at one place. */
-function actsFor(m: Morning, c: number, endMin: number): Act[] {
+/** What cook `c` is doing over the morning, in animation seconds: one act per stretch of the same work at one place,
+ * however short (planActs folds the short ones in). */
+function rawActs(m: Morning, c: number, endMin: number): Act[] {
   const jobs = m.jobs.filter((j) => j.cook === c);
   const cuts = new Set<number>([0, endMin]);
   for (const j of jobs) {
@@ -130,7 +135,7 @@ function actsFor(m: Morning, c: number, endMin: number): Act[] {
     const on = jobs.filter((j) => j.t0 <= mid && j.t1 > mid);
     const whole = on.find((j) => j.hands >= 1 - 1e-9 && j.at !== "range");
     let act: Act;
-    if (whole) act = wholeAct(whole, a, b);
+    if (whole) act = wholeAct(whole, a, b, c);
     else if (on.length) {
       // Minding pots and pans on the range: stood at their half of it, working the front one; with only a pot on the
       // back row (minded, not stirred, and out of easy reach), watching it.
@@ -143,29 +148,108 @@ function actsFor(m: Morning, c: number, endMin: number): Act[] {
       act = {
         t0: a,
         t1: b,
+        who: c,
         spot: { key: `range:${side}`, x, z: SPOT_Z.line, yaw: Math.PI },
         work: front % RANGE_BURNERS >= 3 ? null : skillet ? "saute" : "stir",
         at: new THREE.Vector3(v.x, GRATE_Y + (skillet ? 0.03 : POT.h), v.z + (skillet ? 0 : 0.05)),
         surf: GRATE_Y,
       };
-    } else act = { t0: a, t1: b, spot: spot ?? { key: `table:${c % TABLE_SPOTS}`, x: tableX(c % TABLE_SPOTS), z: SPOT_Z.table, yaw: 0 }, work: null, idle: true };
+    } else act = { t0: a, t1: b, who: c, spot: spot ?? { key: `table:${c % TABLE_SPOTS}`, x: tableX(c % TABLE_SPOTS), z: SPOT_Z.table, yaw: 0 }, work: null, idle: true };
     spot = act.spot;
     const prev = acts[acts.length - 1];
     if (prev && prev.spot.key === act.spot.key && prev.work === act.work && !prev.idle === !act.idle) prev.t1 = b;
     else acts.push(act);
   }
-  // To animation seconds, and slivers merged into the longer stretch beside them, so no motion flickers.
   for (const x of acts) {
     x.t0 *= SEC_PER_MIN;
     x.t1 *= SEC_PER_MIN;
   }
+  return acts;
+}
+
+/** How near in time, seconds, two cooks' moves must start for swapTails to weigh handing their work over, and the
+ * least walking, metres, a hand-over must save. */
+const SWAP_S = 0.8;
+const SWAP_GAIN_M = 0.3;
+
+/**
+ * The plan's cooks are alike, so which of them does which job is free. Where two cooks would trade places, or one
+ * would walk to where the other is about to leave from (each setting off within SWAP_S of the other), each takes the
+ * other's work from then on instead, when that saves walking: fewer and shorter walks, and no two cooks passing
+ * through each other at a counter. The earliest first, each hand-over only where it puts no cook in another's place.
+ */
+function swapTails(acts: Act[][]): void {
+  const dist = (a: Spot, b: Spot) => Math.hypot(a.x - b.x, a.z - b.z);
+  /** Where a cook moving to act `i` is really going: past any stretch too short to count (the routine walks on by). */
+  const dest = (xs: Act[], i: number) => (xs.slice(i).find((x) => x.t1 - x.t0 >= MIN_ACT_S) ?? xs[i]!).spot;
+  /** Whether a cook other than `c` works at the place `key` between t0 and t1. */
+  const clash = (c: number, key: string, t0: number, t1: number) =>
+    t1 > t0 && acts.some((xs, d) => d !== c && xs.some((y) => !y.idle && y.spot.key === key && y.t0 < t1 && y.t1 > t0));
+  let from = -Infinity;
+  for (let guard = 0; guard < 4000; guard++) {
+    // Each cook's moves after `from`: [cook, index of the act moved to, when].
+    const moves: [number, number, number][] = [];
+    acts.forEach((xs, c) => {
+      for (let i = 1; i < xs.length; i++) if (xs[i]!.spot.key !== xs[i - 1]!.spot.key && xs[i]!.t0 > from) moves.push([c, i, xs[i]!.t0]);
+    });
+    moves.sort((u, v) => u[2] - v[2]);
+    let done = false;
+    for (const [a, i, ta] of moves) {
+      const A = acts[a]!;
+      let best: { b: number; j: number; gain: number } | null = null;
+      for (const [b, j, tb] of moves) {
+        if (b === a || Math.abs(tb - ta) > SWAP_S) continue;
+        const B = acts[b]!;
+        const [pa, qa, pb, qb] = [A[i - 1]!.spot, A[i]!.spot, B[j - 1]!.spot, B[j]!.spot];
+        const [ga, gb] = [dest(A, i), dest(B, j)];
+        const gain = dist(pa, ga) + dist(pb, gb) - dist(pa, gb) - dist(pb, ga);
+        if (gain < SWAP_GAIN_M || (best && gain <= best.gain)) continue;
+        // Each tail starts when the head before it ends: the first act of each moves by tb - ta, and must still be there.
+        if (B[j]!.t1 - ta < 0.1 || A[i]!.t1 - tb < 0.1) continue;
+        // The cook who now sets off first reaches their new place early: not while someone else works there.
+        if (ta < tb ? clash(a, qb.key, ta, tb) : clash(b, qa.key, tb, ta)) continue;
+        best = { b, j, gain };
+      }
+      if (!best) continue;
+      const B = acts[best.b]!;
+      const tb = B[best.j]!.t0;
+      const tailA = A.splice(i);
+      const tailB = B.splice(best.j);
+      tailB[0]!.t0 = ta;
+      tailA[0]!.t0 = tb;
+      // Until the other sets off too, the cook who sets off first stands in for the work handed over late, which no one
+      // is at yet (so each of the plan's cooks is on screen once at every moment: whoAt, for the pause badges).
+      if (ta < tb) tailB.unshift({ ...tailB[0]!, t1: tb, who: tailA[0]!.who });
+      if (tb < ta) tailA.unshift({ ...tailA[0]!, t1: ta, who: tailB[0]!.who });
+      if (ta < tb) tailB[1]!.t0 = tb;
+      if (tb < ta) tailA[1]!.t0 = ta;
+      A.push(...tailB);
+      B.push(...tailA);
+      from = Math.min(ta, tb);
+      done = true;
+      break;
+    }
+    if (!done) break;
+  }
+}
+
+/**
+ * Short stretches folded into one beside them, so no motion flickers: into one at the same place if there is one (only
+ * the work changes and the cook stays put), else the longer; never into a place another cook works at meanwhile
+ * (`taken`), where the cook kept on would stand in them. With neither free, the short stretch stays.
+ */
+function smoothActs(acts: Act[], taken: (key: string, t0: number, t1: number) => boolean): Act[] {
+  const free = (y: Act | undefined, x: Act): y is Act => !!y && (!!y.idle || !taken(y.spot.key, x.t0, x.t1));
+  const longer = (u: Act, v: Act) => (v.t1 - v.t0 > u.t1 - u.t0 ? v : u);
   for (let pass = 0; pass < 4; pass++)
     for (let k = 0; k < acts.length; k++) {
       const x = acts[k]!;
       if (x.t1 - x.t0 >= MIN_ACT_S || acts.length < 2) continue;
-      const p = acts[k - 1];
-      const n = acts[k + 1];
-      const into = !p ? n! : !n ? p : p.t1 - p.t0 >= n.t1 - n.t0 ? p : n;
+      const side = [acts[k - 1], acts[k + 1]];
+      const same = side.filter((y): y is Act => free(y, x) && y.spot.key === x.spot.key);
+      const pool = same.length ? same : side.filter((y): y is Act => free(y, x));
+      if (!pool.length) continue;
+      const into = pool.reduce(longer);
       into.t0 = Math.min(into.t0, x.t0);
       into.t1 = Math.max(into.t1, x.t1);
       acts.splice(k, 1);
@@ -182,40 +266,58 @@ function actsFor(m: Morning, c: number, endMin: number): Act[] {
   return acts;
 }
 
+/** Every cook's acts for the morning (the first `crew`), short stretches folded in one cook after another, each kept
+ * out of the places the others work at; then work handed between cooks to save them trading places, and the idle
+ * stretches moved out of the way. */
+export function planActs(m: Morning, crew: number, endMin: number): Act[][] {
+  const acts = Array.from({ length: crew }, (_, c) => rawActs(m, c, endMin));
+  for (let c = 0; c < crew; c++) acts[c] = smoothActs(acts[c]!, (key, t0, t1) => acts.some((xs, d) => d !== c && xs.some((y) => !y.idle && y.spot.key === key && y.t0 < t1 && y.t1 > t0)));
+  swapTails(acts);
+  clearIdle(acts);
+  return acts;
+}
+
 /** How close two cooks may stand, metres between their places, and how far an idle cook steps back into the aisle. */
 const CLEAR = 0.55;
 const ASIDE = 0.55;
+/** The middle of the aisle between the line and the table: walks to and from the waiting places go along it, and a
+ * walk between counters can bow out through it. */
+const AISLE_Z = 0.16;
+/** Where idle cooks wait when there is no room by their place: off the left end of the table, facing the line, one
+ * behind another. */
+const benchSpot = (i: number): Spot => ({ key: `bench:${i}~`, x: TABLE.x0 - 0.45, z: TABLE_Z + 0.25 + 0.6 * i, yaw: Math.PI });
+const BENCH = 4;
+/** Seconds either side of an idle stretch its place must be clear for: the walks there and away start early. */
+const IDLE_PAD_S = 3;
 /**
- * Each idle stretch whose place another cook stands or works within reach of meanwhile moves out of the way: back from
- * the counter into the aisle, and along it as far as it takes to be clear of every other cook then (the first idle
- * stretches placed first, each clear of those placed before it).
+ * Each idle stretch whose place another cook stands or works within reach of meanwhile (or a walk either side of it)
+ * moves out of the way, wherever is first clear of every other cook then: from the line, back into the aisle and along
+ * it; from the table, whose back is to the line's places, straight to a waiting place off the end of the table; else
+ * there too. The first idle stretches are placed first, each clear of those placed before it.
  */
 function clearIdle(acts: Act[][]): void {
   const near = (a: Spot, b: Spot) => Math.hypot(a.x - b.x, a.z - b.z) < CLEAR;
   acts.forEach((mine, c) => {
     for (const a of mine) {
       if (!a.idle) continue;
-      const others = acts.flatMap((xs, d) => (d === c ? [] : xs.filter((x) => x.t0 < a.t1 && x.t1 > a.t0).map((x) => x.spot)));
+      const others = acts.flatMap((xs, d) => (d === c ? [] : xs.filter((x) => x.t0 < a.t1 + IDLE_PAD_S && x.t1 > a.t0 - IDLE_PAD_S).map((x) => x.spot)));
       if (!others.some((o) => near(o, a.spot))) continue;
       const back = a.spot.yaw === 0 ? -ASIDE : ASIDE;
-      for (const dx of [0, -0.6, 0.6, -1.2, 1.2]) {
-        const s: Spot = { key: `${a.spot.key}~${dx}`, x: a.spot.x + dx, z: a.spot.z + back, yaw: a.spot.yaw };
-        if (!others.some((o) => near(o, s))) {
-          a.spot = s;
-          break;
-        }
-      }
+      const near1: Spot[] = (a.spot.yaw === 0 ? [] : [0, -0.6, 0.6, -1.2, 1.2]).map((dx) => ({ key: `${a.spot.key}~${dx}`, x: a.spot.x + dx, z: a.spot.z + back, yaw: a.spot.yaw }));
+      const spot = [...near1, ...Array.from({ length: BENCH }, (_, i) => benchSpot(i))].find((s) => !others.some((o) => near(o, s)));
+      if (spot) a.spot = spot;
     }
   });
 }
 
-function wholeAct(j: Job, a: number, b: number): Act {
+function wholeAct(j: Job, a: number, b: number, who: number): Act {
   if (j.at === "table") {
     const x = tableX(j.spot);
     const pack = j.kind === "pack";
     return {
       t0: a,
       t1: b,
+      who,
       spot: { key: `table:${j.spot}`, x, z: SPOT_Z.table, yaw: 0 },
       work: pack ? "plate" : "chop",
       at: new THREE.Vector3(x, TABLE.h + (pack ? 0.07 : BOARD.h), TABLE_Z + 0.27),
@@ -226,6 +328,7 @@ function wholeAct(j: Job, a: number, b: number): Act {
   return {
     t0: a,
     t1: b,
+    who,
     spot: { key: `oven:${j.spot}`, x, z: SPOT_Z.oven, yaw: Math.PI },
     work: "place",
     at: new THREE.Vector3(ovenX(j.spot), 1.02, LINE_Z - 0.18),
@@ -236,7 +339,8 @@ function wholeAct(j: Job, a: number, b: number): Act {
 export interface CookRig {
   st: Staff;
   routine: Routine | null;
-  walks: Map<string, number>;
+  /** Each move between two places, planned once: its footsteps and how long it takes. */
+  walks: Map<string, Routine>;
   /** The cook's own tools, made the first time they are wanted, and the one in the right hand. */
   tools: Map<ToolKind, THREE.Object3D>;
   held: ToolKind | null;
@@ -247,9 +351,24 @@ const TOOL_FOR: Partial<Record<WorkKind, ToolKind>> = { stir: "ladle", saute: "s
 
 /** How a cook gets from one place to another: a few short steps sideways along the same counter, else a walk that
  * comes in square to the counter (through a point a stride in front of it), so it ends facing the work. */
-function moveSteps(a: Spot, b: Spot): RoutineStep[] {
+function moveSteps(a: Spot, b: Spot, bow = false): RoutineStep[] {
   const along = Math.abs(a.yaw - b.yaw) < 1e-6 && Math.abs(a.z - b.z) < 0.15 && Math.abs(a.x - b.x) < 0.62;
   if (along) return [{ kind: "shuffle", to: [b.x, b.z] }];
+  // To or from a waiting place off the end of the table (clearIdle): along the aisle, clear of the table's corner; from
+  // one waiting place to the next, a step or two.
+  if (a.key.startsWith("bench:") && b.key.startsWith("bench:")) return [{ kind: "shuffle", to: [b.x, b.z] }];
+  if (b.key.startsWith("bench:"))
+    return [
+      { kind: "walk", path: [[b.x, AISLE_Z], [b.x, b.z]], speed: 1.0 },
+      { kind: "turn", yaw: b.yaw },
+    ];
+  if (a.key.startsWith("bench:")) {
+    const back = b.yaw === 0 ? -0.38 : 0.38;
+    return [
+      { kind: "walk", path: [[a.x, AISLE_Z], [b.x, b.z + back], [b.x, b.z]], speed: 1.0 },
+      { kind: "turn", yaw: b.yaw },
+    ];
+  }
   // Out of the way and back (clearIdle): a step or two back from the counter, else straight there, still facing it.
   if (a.key.includes("~") || b.key.includes("~")) {
     if (Math.abs(a.yaw - b.yaw) < 1e-6 && Math.hypot(a.x - b.x, a.z - b.z) <= 0.8) return [{ kind: "shuffle", to: [b.x, b.z] }];
@@ -259,62 +378,163 @@ function moveSteps(a: Spot, b: Spot): RoutineStep[] {
     ];
   }
   const back = b.yaw === 0 ? -0.38 : 0.38;
+  // Bowed: out through the middle of the aisle, clear of the cooks working along the counters at either side.
+  const via: [number, number][] = bow ? [[(a.x + b.x) / 2, AISLE_Z]] : [];
   return [
-    { kind: "walk", path: [[b.x, b.z + back], [b.x, b.z]], speed: 1.0 },
+    { kind: "walk", path: [...via, [b.x, b.z + back], [b.x, b.z]], speed: 1.0 },
     { kind: "turn", yaw: b.yaw },
   ];
 }
+
+/** Whether a move can bow out into the aisle: between two counters' places, more than a few steps apart. */
+const bowable = (a: Spot, b: Spot) => !a.key.includes("~") && !b.key.includes("~") && Math.hypot(a.x - b.x, a.z - b.z) > 0.8;
+/** How near, metres between where they stand, a cook on the move may come to another, and the longest a cook waits
+ * at their place for the way to clear before setting off. */
+const PASS = 0.45;
+const WAIT_MAX_S = 1.2;
+/** The least of a stretch, seconds, worth walking to: a cook who would arrive with less of it left stays put. */
+const REACH_S = 0.6;
 
 /** The cook's routine for the acts, square with the morning's clock: each move starts early enough to arrive on time
  * when there is time for it, and eats into the stretch it moves to when there is not. Built twice: the first build
  * measures each move from where it really starts (its stepTimes), the second lays the stretches out with those.
  * `need`: how long the morning and the walk back to the first place take, for the loop to cover. */
-function routineFor(rig: CookRig, acts: Act[], loopS: number): { routine: Routine; need: number } {
+export function routineFor(rig: CookRig, acts: Act[], loopS: number, others?: (t: number) => readonly { x: number; z: number }[]): { routine: Routine; need: number } {
   const first = acts[0]!.spot;
-  const guess = (a: Spot, b: Spot) => {
-    const k = `${a.key}>${b.key}`;
-    let w = rig.walks.get(k);
-    if (w === undefined) {
-      w = new Routine(rig.st, { x: a.x, z: a.z, yaw: a.yaw }, moveSteps(a, b), false).duration;
-      rig.walks.set(k, w);
+  const moveOf = (a: Spot, b: Spot, bow = false) => {
+    const k = `${a.key}>${b.key}${bow ? "~bow" : ""}`;
+    let r = rig.walks.get(k);
+    if (!r) {
+      r = new Routine(rig.st, { x: a.x, z: a.z, yaw: a.yaw }, moveSteps(a, b, bow), false);
+      rig.walks.set(k, r);
     }
-    return w;
+    return r;
   };
-  const lay = (moveS: (i: number, a: Spot, b: Spot) => number) => {
+  const guess = (a: Spot, b: Spot, bow = false) => moveOf(a, b, bow).duration;
+  /** The way to go and how long to stand first, for a move that could start at `from(bow)` (a bowed way is longer, so
+   * sets off sooner), so it comes near no one (`others`: where the other cooks are at a moment): straight, else bowed
+   * out into the aisle; at once, else after a wait in tenths of a second up to WAIT_MAX_S; the first clear, else the
+   * one least in someone's way. */
+  const clearWay = (a: Spot, b: Spot, from: (bow: boolean) => number) => {
+    if (!others) return { bow: false, wait: 0 };
+    const bows = bowable(a, b) ? [false, true] : [false];
+    let best = { bow: false, wait: 0 };
+    let least = Infinity;
+    for (let d = 0; d <= WAIT_MAX_S + 1e-9; d += 0.1)
+      for (const bow of bows) {
+        const r = moveOf(a, b, bow);
+        let hit = 0;
+        for (let u = 0; u <= r.duration; u += 0.1) {
+          const p = r.rootAt(u);
+          for (const o of others(from(bow) + d + u)) if (Math.hypot(o.x - p.x, o.z - p.z) < PASS) hit++;
+        }
+        if (hit < least) {
+          best = { bow, wait: d };
+          least = hit;
+        }
+        if (hit === 0) return best;
+      }
+    return best;
+  };
+  /** How much of the stretch from u0 to u1 someone else stands within reach of the place `s` (tenths of a second). */
+  const crowd = (s: Spot, u0: number, u1: number) => {
+    let hit = 0;
+    if (others) for (let u = u0; u < u1; u += 0.1) for (const o of others(u)) if (Math.hypot(o.x - s.x, o.z - s.z) < PASS) hit++;
+    return hit;
+  };
+  const lay = (moveS: (i: number, a: Spot, b: Spot, bow: boolean) => number, skip?: ReadonlySet<number>) => {
     const steps: RoutineStep[] = [];
+    /** The stretches left out: too far behind to reach their place before they end (or, laid out again, those left
+     * out the first time, so each move is the same move both times). */
+    const skipped = new Set<number>();
+    /** Each move's way: bowed out into the aisle or not. */
+    const bows: boolean[] = [];
     /** Each move's first step index and its step count. */
     const moves: [number, number][] = [];
     let cur = first;
     let t = 0;
     const go = (to: Spot, notBefore: number) => {
-      const w = moveS(moves.length, cur, to);
-      const start = Math.max(t, notBefore - w);
+      const from = (bow: boolean) => Math.max(t, notBefore - moveS(moves.length, cur, to, bow));
+      const way = clearWay(cur, to, from);
+      const w = moveS(moves.length, cur, to, way.bow);
+      const start = from(way.bow) + way.wait;
       if (start > t + 0.02) steps.push({ kind: "stand", duration: start - t });
-      const ms = moveSteps(cur, to);
+      const ms = moveSteps(cur, to, way.bow);
+      bows.push(way.bow);
       moves.push([steps.length, ms.length]);
       steps.push(...ms);
       t = start + w;
       cur = to;
     };
-    for (const a of acts) {
-      if (a.spot.key !== cur.key) go(a.spot, a.t0);
+    /** Whether the stretch before was left out, so the place this cook stands may be someone else's by now. */
+    let behind = false;
+    acts.forEach((a, ai) => {
+      if (a.spot.key !== cur.key) {
+        // A cook behind the clock (a walk longer than the stretch before it) does not chase a stretch they would reach
+        // only as it ends: they go on to the next, rather than fall further behind with every walk; at once, to wait
+        // there, when that is clearer of the others than where they stand.
+        const w = moveS(moves.length, cur, a.spot, false);
+        const late = skip ? skip.has(ai) : ai < acts.length - 1 && Math.max(t, a.t0 - w) + w > a.t1 - REACH_S;
+        if (late) {
+          skipped.add(ai);
+          behind = true;
+          return;
+        }
+        go(a.spot, behind && crowd(a.spot, t + w, a.t0) < crowd(cur, t, a.t0 - w) ? t + w : a.t0);
+      }
+      behind = false;
       const d = a.t1 - t;
       if (d > 0.05) {
         steps.push(a.work ? { kind: "work", work: a.work, duration: d, opts: { at: a.at, surfaceY: a.surf } } : { kind: "stand", duration: d });
         t = a.t1;
       }
-    }
+    });
     if (cur.key !== first.key) go(first, loopS - 0.3);
     const need = t + 0.3;
     steps.push({ kind: "stand", duration: Math.max(0.1, loopS - t) });
-    return { steps, moves, need };
+    return { steps, moves, need, bows, skipped };
   };
   const start = { x: first.x, z: first.z, yaw: first.yaw };
-  const one = lay((_, a, b) => guess(a, b));
+  const one = lay((_, a, b, bow) => guess(a, b, bow));
   const r1 = new Routine(rig.st, start, one.steps, true);
   const real = one.moves.map(([i, n]) => r1.stepTimes[i + n]! - r1.stepTimes[i]!);
-  const two = lay((i, a, b) => real[i] ?? guess(a, b));
+  const two = lay((i, a, b, bow) => (one.bows[i] === bow ? real[i] : undefined) ?? guess(a, b, bow), one.skipped);
   return { routine: new Routine(rig.st, start, two.steps, true), need: two.need };
+}
+
+/**
+ * Every cook's routine for their acts (none for a cook without acts), one cook after another, each move held back
+ * until the way is clear of the cooks laid out before (where their routines have them) and the cooks still to come
+ * (where their acts have them). Laid out again, longer, when a walk back to the start runs past the loop. Returns the
+ * loop's length.
+ */
+export function planRoutines(rigs: CookRig[], acts: Act[][], loopS: number): number {
+  const spotAt = (xs: Act[], t: number) => (xs.find((x) => x.t0 <= t && x.t1 > t) ?? xs[xs.length - 1]!).spot;
+  for (let pass = 0; pass < 2; pass++) {
+    let need = 0;
+    rigs.forEach((k, i) => {
+      const a = acts[i] ?? [];
+      if (!a.length) {
+        k.routine = null;
+        return;
+      }
+      const others = (t: number) => {
+        const out: { x: number; z: number }[] = [];
+        rigs.forEach((o, j) => {
+          const xs = acts[j];
+          if (j === i || !xs?.length) return;
+          out.push(j < i && o.routine ? o.routine.rootAt(t) : spotAt(xs, ((t % loopS) + loopS) % loopS));
+        });
+        return out;
+      };
+      const r = routineFor(k, a, loopS, others);
+      k.routine = r.routine;
+      need = Math.max(need, r.need);
+    });
+    if (need <= loopS + 1e-6) break;
+    loopS = need;
+  }
+  return loopS;
 }
 
 /* ------------------------------------------------------------------------------------------------------------ */
@@ -350,6 +570,8 @@ export class MorningKitchen {
   private morning: Morning | null = null;
   /** The hot pans in the order they are packed (the sides go cold, in boxes, not in the carriers). */
   private hotPans: number[] = [];
+  /** Each cook's acts this morning. */
+  private acts: Act[][] = [];
   private lastMinute = -1;
   private packed = 0;
   private readonly ovens: Model[];
@@ -516,25 +738,16 @@ export class MorningKitchen {
     if (m) for (const b of m.batches) if (b.slot < SLOTS.length) for (let p = 0; p < b.pans; p++) this.hotPans.push(b.packed);
     this.hotPans.sort((a, b) => a - b);
     this.lastMinute = -1;
-    const acts = this.cooks.map((_, i) => (m && i < crew ? actsFor(m, i, endMin) : []));
-    clearIdle(acts);
-    for (let pass = 0; pass < 2; pass++) {
-      let need = 0;
-      this.cooks.forEach((k, i) => {
-        k.st.group.visible = !!m && i < crew;
-        const a = acts[i]!;
-        if (!a.length) {
-          k.routine = null;
-          return;
-        }
-        const r = routineFor(k, a, loopS);
-        k.routine = r.routine;
-        need = Math.max(need, r.need);
-      });
-      if (need <= loopS + 1e-6) break;
-      loopS = need;
-    }
-    return loopS;
+    const planned = m ? planActs(m, Math.min(crew, this.cooks.length), endMin) : [];
+    this.acts = this.cooks.map((_, i) => planned[i] ?? []);
+    this.cooks.forEach((k, i) => (k.st.group.visible = !!m && i < crew));
+    return planRoutines(this.cooks, this.acts, loopS);
+  }
+
+  /** Which of the plan's cooks cook `i` stands in for at loop time `t` (they hand work to one another: swapTails). */
+  whoAt(i: number, t: number): number {
+    const xs = this.acts[i] ?? [];
+    return (xs.find((x) => x.t0 <= t && x.t1 > t) ?? xs[xs.length - 1])?.who ?? i;
   }
 
   /** Pose each cook at loop time `at`, the tool for their work in the right hand (none walking or standing). */
@@ -603,7 +816,8 @@ export class MorningKitchen {
       ov.hooks.tick?.(t, dt, heat[o]!);
     }
     // The carriers out of the door once the van has gone.
-    const gone = this.rollOut && morning ? Math.max(0, t - morning.depart) * SEC_PER_MIN : 0;
+    // A morning the plan does not finish has no van leaving: the carriers stay.
+    const gone = this.rollOut && morning?.finished ? Math.max(0, t - morning.depart) * SEC_PER_MIN : 0;
     const roll = Math.min(1, gone / ROLL_S);
     this.stack.position.x = ROLL_M * roll * roll * (3 - 2 * roll);
     this.stack.visible = roll < 1;

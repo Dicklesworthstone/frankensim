@@ -1,7 +1,7 @@
 /**
  * Buy one thing (chapter 07, fourth figure): the morning's kitchen with room at the ends of its line for a third combi
- * and a second six-burner range, and a fourth cook to hire. Each purchase rolls in along the line (or walks in) and
- * the morning is planned again with it (planMorning, run in a worker; sim/buyOne.ts).
+ * and a second six-burner range, and a fourth cook to hire. Bought equipment rolls in along the line, a cook hired
+ * joins the crew, and the morning is planned again with it (planMorning, run in a worker; sim/buyOne.ts).
  *
  * The floor in front of a station glows red while every place at it is taken: both combis running, both halves of
  * the range worked (or all six burners lit), all three table places. A cook with nothing to do while work waits for
@@ -13,7 +13,7 @@ import { DOOR, KIT, MENUS, RANGE_BURNERS, RANGE_PLACES, SLOTS, TABLE_SPOTS, cloc
 import { BUYS, buyKey, limitKey, planKey, type Buy, type KitSettings } from "../sim/buyOne";
 import type { KitAsk, KitDone } from "../sim/kitRuns.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { CARRIER, CARRIER_COLS, CARRIER_X0, END_HOLD_S, LINE_Z, MorningKitchen, OVEN, RANGE, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, kitchenPieces, ovenX, ovenX0, rangeSideX, rangeX0, type CookSpec, type KitchenMoment } from "./morningKitchen";
+import { CARRIER, CARRIER_COLS, CARRIER_X0, CUTOFF, END_HOLD_S, LINE_Z, MorningKitchen, OVEN, RANGE, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, kitchenPieces, ovenX, ovenX0, rangeSideX, rangeX0, type CookSpec, type KitchenMoment } from "./morningKitchen";
 import type { Piece } from "./models/all";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { backdrop, tilePlane } from "./weekLab";
@@ -35,11 +35,17 @@ const COOKS: CookSpec[] = [
 type Kind = "oven" | "range" | "table" | "hands";
 const KIND_NAME: Record<Kind, string> = { oven: "The combis", range: "The range", table: "The table", hands: "The cooks" };
 const KIND_IS: Record<Kind, string> = { oven: "are", range: "is", table: "is", hands: "are" };
+/** The name of a kind, and its verb, for a kitchen with `ranges` ranges. */
+const kindName = (kind: Kind, ranges: number) => (kind === "range" && ranges > 1 ? "The ranges" : KIND_NAME[kind]);
+const kindIs = (kind: Kind, ranges: number) => (kind === "range" && ranges > 1 ? "are" : KIND_IS[kind]);
 /** What full means for each: every place taken, or for the cooks, every one at work. */
 const KIND_FULL: Record<Kind, string> = { oven: "full", range: "full", table: "full", hands: "all busy" };
 const WAIT_FOR: Record<Station, string> = { oven: "a combi", range: "a place at the range", table: "a place at the table" };
+const waitFor = (at: Station, ranges: number) => (at === "range" && ranges > 1 ? "a place at a range" : WAIT_FOR[at]);
 const BUY_NAME: Record<keyof Buy, string> = { combi: "a third combi", range: "a second range", cook: "a fourth cook" };
 const BUY_SHORT: Record<keyof Buy, string> = { combi: "the combi", range: "the range", cook: "the cook" };
+/** For the ladder's row of what is bought now, short enough for its label column. */
+const BUY_WORD: Record<keyof Buy, string> = { combi: "combi", range: "range", cook: "cook" };
 const BUY_KEYS = ["combi", "range", "cook"] as const;
 const num = (v: number) => Math.round(v).toLocaleString("en-US");
 /** "a", "a and b", "a, b and c". */
@@ -403,7 +409,8 @@ export function mountKitLab(root: HTMLElement): void {
     const stale = !ready();
     const W = Math.max(300, Math.round(chartEl.clientWidth - 2 * 12));
     const narrow = W < 480;
-    X0 = narrow ? 92 : 132;
+    // Room for "Range places · 4" in the 10.5 px mono labels.
+    X0 = narrow ? 112 : 132;
     X1 = W - 8;
     const m = shown?.m ?? null;
     // On to half an hour past the van, and further while its "Leaves" label would not fit beside its line.
@@ -454,7 +461,7 @@ export function mountKitLab(root: HTMLElement): void {
     // The van.
     const vanR = (m?.late ?? 0) > 0.5 || xOf(DOOR) > X1 - 100;
     svg += `<line class="van" x1="${xOf(DOOR)}" x2="${xOf(DOOR)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl${vanR ? " r" : ""}" x="${xOf(DOOR) + (vanR ? -4 : 4)}" y="${y0 - 9}">Van due 10:30</text>`;
-    if (m && m.late > 0.5) svg += `<line class="van late" x1="${xOf(m.depart)}" x2="${xOf(m.depart)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl late" x="${xOf(m.depart) + 4}" y="${y0 - 9}">Leaves ${clockOf(m.depart)}</text>`;
+    if (m && m.late > 0.5) svg += `<line class="van late" x1="${xOf(m.depart)}" x2="${xOf(m.depart)}" y1="${y0 - 8}" y2="${axisY}"/><text class="vanl late" x="${xOf(m.depart) + 4}" y="${y0 - 9}">${m.finished ? `Leaves ${clockOf(m.depart)}` : "Still waiting"}</text>`;
     if (stale) svg += `<text class="planning" x="${((X0 + X1) / 2).toFixed(1)}" y="${(y0 + axisY) / 2 + 4}">Planning…</text>`;
     svg += `<line class="cur" x1="${X0}" x2="${X0}" y1="${y0 - 6}" y2="${axisY + 2}"/></svg>`;
     chartEl.innerHTML = svg;
@@ -473,7 +480,7 @@ export function mountKitLab(root: HTMLElement): void {
     if (!ks.length) return "As built";
     if (ks.length === 1) return `+ ${BUY_NAME[ks[0]!]}`;
     if (ks.length === 3) return "+ all three";
-    return `+ ${listOf(ks)}`;
+    return `+ ${listOf(ks.map((k) => BUY_WORD[k]))}`;
   };
   function renderLadder(): void {
     if (!ladderEl) return;
@@ -548,6 +555,12 @@ export function mountKitLab(root: HTMLElement): void {
   /* Tiles and status: the plan on screen, against the kitchen as built. */
   /** Over the hour before the van: the share of minutes each station was full, and the cook-minutes spent waiting
    * for room, by the station waited for. */
+  /** "waiting for a combi", or "mostly waiting for a combi" when some of the minutes were for another station. */
+  const waitingFor = (wait: Record<Station, number>, ranges: number) => {
+    const at = (Object.keys(wait) as Station[]).reduce((a, b) => (wait[b] > wait[a] ? b : a), "oven" as Station);
+    const total = wait.oven + wait.range + wait.table;
+    return `${wait[at] < total - 0.5 ? "mostly " : ""}waiting for ${waitFor(at, ranges)}`;
+  };
   const lastHour = () => {
     const m = shown!.m;
     const kit = kitOf(m.settings);
@@ -568,16 +581,18 @@ export function mountKitLab(root: HTMLElement): void {
     else if (ready()) {
       const { m, built } = shown;
       const any = bought(settings).length > 0;
-      const d = Math.round(m.depart - built.depart);
-      setTile(tiles.van, clockOf(m.depart), m.late > 0.5 ? fmtLate(m.late).toLowerCase() : m.pastBest ? `${num(m.pastBest)} portions past their best` : "on time, every portion at its best", any && d !== 0 ? `${d > 0 ? "+" : "−"}${Math.abs(d)} min` : null, d < 0);
+      // Between the clocks as shown, so the difference reads off them.
+      const d = Math.round(m.depart) - Math.round(built.depart);
+      // A morning not finished by the cut-off has no departure to show, nor to measure another from.
+      if (!m.finished) setTile(tiles.van, "Not yet", `still waiting at ${CUTOFF}, some dishes not packed`);
+      else setTile(tiles.van, clockOf(m.depart), m.late > 0.5 ? fmtLate(m.late).toLowerCase() : m.pastBest ? `${num(m.pastBest)} portions past their best` : "on time, every portion at its best", any && d !== 0 && built.finished ? `${d > 0 ? "+" : "−"}${Math.abs(d)} min` : null, d < 0);
       const { share, wait } = lastHour();
       const top = (Object.keys(share) as Kind[]).reduce((a, b) => (share[b] > share[a] + 1e-9 ? b : a), "oven" as Kind);
       if (share[top] < 0.25) setTile(tiles.full, "None", "no station full for long");
-      else setTile(tiles.full, KIND_NAME[top], `${KIND_FULL[top]} ${Math.round(100 * share[top])}% of the hour`);
-      const at = (Object.keys(wait) as Station[]).reduce((a, b) => (wait[b] > wait[a] ? b : a), "oven" as Station);
+      else setTile(tiles.full, kindName(top, kitOf(m.settings).ranges), `${KIND_FULL[top]} ${Math.round(100 * share[top])}% of the hour`);
       const total = wait.oven + wait.range + wait.table;
       if (total < 0.5) setTile(tiles.wait, "None", "no cook stood waiting for room");
-      else setTile(tiles.wait, `${num(total)} min`, `cooks free, waiting for ${WAIT_FOR[at]}`);
+      else setTile(tiles.wait, `${num(total)} min`, `all cooks, last hour, ${waitingFor(wait, kitOf(m.settings).ranges)}`);
     }
     const v = limitOf(settings.menu, settings);
     const b0 = limitOf(settings.menu, BUYS[0]!);
@@ -601,17 +616,20 @@ export function mountKitLab(root: HTMLElement): void {
     const { m, built } = shown!;
     const ks = bought(settings);
     const made = madeIt(m);
-    const outcome = (x: Morning) => (x.late > 0.5 ? `the van leaves at ${clockOf(x.depart)}, ${fmtLate(x.late).toLowerCase()}` : x.pastBest ? `the van leaves at 10:30 with ${num(x.pastBest)} portions past their best` : "the van leaves at 10:30 with every portion at its best");
+    const outcome = (x: Morning) => (!x.finished ? `the van is still waiting at ${CUTOFF}, some dishes not yet packed` : x.late > 0.5 ? `the van leaves at ${clockOf(x.depart)}, ${fmtLate(x.late).toLowerCase()}` : x.pastBest ? `the van leaves at 10:30 with ${num(x.pastBest)} portions past their best` : "the van leaves at 10:30 with every portion at its best");
     const { share, wait } = lastHour();
     const top = (Object.keys(share) as Kind[]).reduce((a, b) => (share[b] > share[a] + 1e-9 ? b : a), "oven" as Kind);
-    const fullText = share[top] >= 0.25 ? `${KIND_NAME[top].replace(/^The/, "the")} ${KIND_IS[top]} ${KIND_FULL[top]} ${Math.round(100 * share[top])}% of the last hour` : "";
-    const waitAt = (Object.keys(wait) as Station[]).reduce((a, b) => (wait[b] > wait[a] ? b : a), "oven" as Station);
-    const waiting = wait[waitAt] >= 1 ? `, and cooks stand free ${num(wait.oven + wait.range + wait.table)} min of it, waiting for ${WAIT_FOR[waitAt]}` : "";
+    const ranges = kitOf(m.settings).ranges;
+    const fullText = share[top] >= 0.25 ? `${kindName(top, ranges).replace(/^The/, "the")} ${kindIs(top, ranges)} ${KIND_FULL[top]} ${Math.round(100 * share[top])}% of the last hour` : "";
+    // Minutes summed over the cooks: three cooks free for half the hour stand free 90 minutes between them.
+    const total = wait.oven + wait.range + wait.table;
+    const waiting = total >= 1 ? `, and the cooks stand free ${num(total)} minutes between them, ${waitingFor(wait, ranges)}` : "";
     let text = `${outcome(m).replace(/^./, (c) => c.toUpperCase())}.`;
     if (!made && fullText) text = `${text.slice(0, -1)}: ${fullText}${waiting}.`;
     if (ks.length && built !== m) {
       const was = outcome(built);
-      text += madeIt(built) === made && Math.abs(built.depart - m.depart) < 0.5 && built.pastBest === m.pastBest ? ` As built, the same: ${listOf(ks.map((k) => BUY_NAME[k]))} ${ks.length > 1 ? "buy" : "buys"} nothing for this order.` : ` As built, ${was}.`;
+      const same = built.finished && m.finished && madeIt(built) === made && Math.abs(built.depart - m.depart) < 0.5 && built.pastBest === m.pastBest;
+      text += !built.finished && !m.finished ? ` As built, the van is still waiting at ${CUTOFF} too.` : same ? ` As built, the same: ${listOf(ks.map((k) => BUY_NAME[k]))} ${ks.length > 1 ? "buy" : "buys"} nothing for this order.` : ` As built, ${was}.`;
     }
     // What would help: the one purchase that raises the most meals most, from the ladder.
     const v0 = limitOf(settings.menu, BUYS[0]!);
@@ -735,7 +753,7 @@ export function mountKitLab(root: HTMLElement): void {
     let kind = "idle";
     const k = Math.floor(t);
     if (!m || !fill) note = "Planning…";
-    else if (t >= m.depart) {
+    else if (t >= m.depart && m.finished) {
       note = `Van gone at ${clockOf(m.depart)}`;
       kind = m.late > 0.5 ? "late" : "held";
     } else if (t >= DOOR) {
@@ -743,13 +761,13 @@ export function mountKitLab(root: HTMLElement): void {
       kind = "late";
     } else if (k < fill.n && fill.waiting[k]! > 0) {
       const n = fill.waiting[k]!;
-      note = `${n === 1 ? "A cook" : `${n} cooks`} waiting for ${WAIT_FOR[fill.waitAt[k]!]}`;
+      note = `${n === 1 ? "A cook" : `${n} cooks`} waiting for ${waitFor(fill.waitAt[k]!, kitOf(m.settings).ranges)}`;
       kind = "wait";
     } else {
       const kit = kitOf(m.settings);
       const full = (["oven", "range", "table"] as Kind[]).filter((x) => fullAt(fill!, kit, m.settings.cooks, x, k));
       if (full.length) {
-        note = `${listOf(full.map((x) => KIND_NAME[x].replace(/^The /, "")))} full`.replace(/^./, (c) => c.toUpperCase());
+        note = `${listOf(full.map((x) => kindName(x, kit.ranges).replace(/^The /, "")))} full`.replace(/^./, (c) => c.toUpperCase());
         kind = "full";
       }
     }
@@ -784,7 +802,7 @@ export function mountKitLab(root: HTMLElement): void {
     const waits = m ? m.waits.filter((w) => w.t0 <= t && w.t1 > t) : [];
     kitchen.cooks.forEach((c, i) => {
       const b = badges[i]!;
-      const on = c.st.group.visible && !!c.routine && waits.some((w) => w.cooks.includes(i));
+      const on = c.st.group.visible && !!c.routine && waits.some((w) => w.cooks.includes(kitchen.whoAt(i, loopT)));
       b.visible = on;
       if (on) {
         const at = c.routine!.rootAt(loopT);
