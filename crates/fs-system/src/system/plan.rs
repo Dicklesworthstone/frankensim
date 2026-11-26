@@ -84,7 +84,7 @@ pub enum TearStrategy {
     /// tiny dense solve of width `active_outputs`.
     LoadLineWoodbury,
     /// Monolithic Newton–Krylov solve over internal [`fs_ports::component::StageResidual`]
-    /// unknowns via `fs-solver`.
+    /// unknowns and interface inputs via `fs-solver`.
     MonolithicStageResidual,
     /// Derivative-free fixed-point iteration with dynamic Aitken or vector
     /// IQN-ILS acceleration over the block's algebraic unknowns.
@@ -213,7 +213,7 @@ pub struct BlockPlan {
     pub total_unknowns: usize,
     /// Number of torn unknowns solved simultaneously (for interface tearing
     /// strategies `<= total_unknowns`; for [`TearStrategy::MonolithicStageResidual`]
-    /// equals `stage_unknowns`).
+    /// equals `stage_unknowns + total_unknowns`).
     pub kept_unknowns: usize,
     /// Number of copy/follower unknowns eliminated by forward substitution.
     pub substituted_count: usize,
@@ -369,16 +369,7 @@ impl ExecutionPlan {
                 let _ = writeln!(out, "    load_line_node={ln}");
             }
             if block.looped {
-                if block.tear_strategy == TearStrategy::MonolithicStageResidual
-                    && block.stage_unknowns == 0
-                {
-                    let _ = writeln!(
-                        out,
-                        "    tear_variables=[] [missing StageResidual tier; step will refuse]"
-                    );
-                } else {
-                    let _ = writeln!(out, "    tear_variables={:?}", block.tear_variables);
-                }
+                let _ = writeln!(out, "    tear_variables={:?}", block.tear_variables);
             }
             let _ = writeln!(
                 out,
@@ -884,14 +875,20 @@ impl System {
                         )
                     }
                     TearStrategy::MonolithicStageResidual => {
-                        let mut tear_vars = Vec::with_capacity(stage_unknowns);
+                        let mut tear_vars = Vec::with_capacity(stage_unknowns + total_unknowns);
                         for &n in &block.nodes {
                             let nz = self.nodes[n].stage_unknowns();
                             for k in 0..nz {
                                 tear_vars.push(format!("{}.z[{k}]", self.names[n]));
                             }
                         }
-                        (stage_unknowns, 0, tear_vars, Vec::new())
+                        tear_vars.extend(
+                            block
+                                .unknowns
+                                .iter()
+                                .map(|&idx| self.scalar_input_label(idx)),
+                        );
+                        (stage_unknowns + total_unknowns, 0, tear_vars, Vec::new())
                     }
                     TearStrategy::FixedPointAccelerated => {
                         let tear_vars: Vec<String> = block
@@ -1299,11 +1296,11 @@ fn estimate_block_cost(
             }
         }
         TearStrategy::MonolithicStageResidual => {
-            let nz = stage_unknowns as u64;
+            let n = (stage_unknowns as u64).saturating_add(total_unknowns as u64);
             BlockCostEstimate {
                 estimated_evals_per_step: nodes.saturating_mul(6),
                 estimated_dense_flops_per_factor: 0,
-                estimated_substitution_flops_per_solve: 4_u64.saturating_mul(nz),
+                estimated_substitution_flops_per_solve: 4_u64.saturating_mul(n),
                 preallocated_workspace_bytes,
             }
         }

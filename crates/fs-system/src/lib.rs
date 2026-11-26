@@ -44,9 +44,11 @@
 //! blocks by a Newton iteration on their interface inputs, using each
 //! component's port tangent when it offers one and a forward difference
 //! otherwise; the inputs that are copies are substituted and the ones that
-//! close the loops are eliminated together. It has no
-//! multirate stepping or monolithic solve through `StageResidual`. Durable
-//! snapshots require every component to supply a native state codec.
+//! close the loops are eliminated together. Blocks whose owners all offer
+//! `StageResidual` can instead solve their internal and interface equations
+//! together, including owners with no internal unknowns. Multirate stepping
+//! uses explicitly configured rate groups. Durable snapshots require every
+//! component to supply a native state codec.
 //! Step-doubling error control uses an explicitly supplied state
 //! norm and convergence order. The remaining work is in beads `.5.3`, `.5.5` and
 //! `.5.7` to `.5.10` of `frankensim-rc-1109-root-3gc12`.

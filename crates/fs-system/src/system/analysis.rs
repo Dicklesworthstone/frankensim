@@ -1422,16 +1422,10 @@ impl System {
         let mut x0 = vec![0.0_f64; n];
         state_map.read(self, &mut x0)?;
 
-        // Use monolithic StageResidual solve on looped blocks whenever every
-        // looped node declares at least one stage unknown.
-        let all_looped_have_unknowns = self.blocks.iter().filter(|b| b.looped()).all(|b| {
-            b.nodes
-                .iter()
-                .all(|&node| self.nodes[node].stage_unknowns() > 0)
-        });
-        if all_looped_have_unknowns {
-            self.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(config.monolithic));
-        }
+        // Capability admission above covers every owner, including algebraic
+        // ones whose residual has no internal unknowns. Their port equations
+        // remain part of the same monolithic solve.
+        self.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(config.monolithic));
 
         struct StationaryState<'a, S: StateMap + ?Sized> {
             system: RefCell<&'a mut System>,
@@ -1615,9 +1609,7 @@ impl System {
         // Capture equilibrium port values at the converged operating state.
         self.restore(&checkpoint)?;
         state_map.write(self, &sol.x)?;
-        if all_looped_have_unknowns {
-            self.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(config.monolithic));
-        }
+        self.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(config.monolithic));
         let step_res = self.step(config.probe_dt_s, cx);
         self.set_solver_policy(saved_policy);
         step_res?;

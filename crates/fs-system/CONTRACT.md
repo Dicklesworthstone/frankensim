@@ -8,6 +8,22 @@
 > network. The crate's own `elements` are ideal lumped elements, and
 > `frankensim system <scene.json>` runs devices made of them from a data file.
 
+## Algebraic owners in monolithic composition
+
+A registered `StageResidual` owner may declare zero internal unknowns.
+Its residual and stage vectors are empty, but its output equations still
+participate in the coupled interface solve, and its acceptance receipt is
+audited before atomic publication. Automatic tier selection and an explicit
+monolithic policy both admit these owners, including wholly algebraic loops.
+Stationary analysis uses its configured monolithic solver after tier admission
+even when a loop mixes stateful and algebraic owners.
+
+A monolithic execution plan reports both the internal stage unknowns and the
+retained interface inputs in its solve dimension and variable names. The
+shared residual conformance check also covers zero-unknown owners: output
+derivatives, cancellation, acceptance and conservation remain checked.
+Regression coverage is in `tests/driver_modes_and_store.rs`.
+
 ## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
 
 The seven default lumped elements used by `LoweringRegistry::with_kernel_defaults`

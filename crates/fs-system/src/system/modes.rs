@@ -35,7 +35,7 @@ impl System {
         let all_stage = !nodes.is_empty()
             && nodes
                 .iter()
-                .all(|&n| self.nodes[n].has_stage_residual() && self.nodes[n].stage_unknowns() > 0);
+                .all(|&n| self.nodes[n].has_stage_residual());
         let any_tangent = nodes.iter().any(|&n| self.nodes[n].has_tangent());
         match self.solver_policy {
             BlockSolverPolicy::Auto => {
@@ -316,10 +316,10 @@ impl System {
     ) -> Result<Result<u32, f64>, SystemError> {
         let mode = BlockSolveMode::MonolithicNewtonKrylov;
         for &node in nodes {
-            if !self.nodes[node].has_stage_residual() || self.nodes[node].stage_unknowns() == 0 {
+            if !self.nodes[node].has_stage_residual() {
                 return Err(SystemError::Unsupported {
                     node: self.names[node].clone(),
-                    needs: "StageResidual with at least one unknown for monolithic Newton-Krylov",
+                    needs: "StageResidual for monolithic Newton-Krylov",
                 });
             }
         }
@@ -335,6 +335,9 @@ impl System {
         }
 
         // Partition monolithic state X = [z_0, ..., z_{k-1}, u_0, ..., u_{m-1}].
+        // Algebraic owners have empty z/r slices, but their outputs still enter
+        // the interface equations and their accepted receipts still enter the
+        // ordinary audit. Even when n_z is zero, a loop has interface unknowns.
         let mut z_offsets = Vec::with_capacity(nodes.len() + 1);
         z_offsets.push(0_usize);
         for &node in nodes {

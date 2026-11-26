@@ -557,7 +557,8 @@ unrepresentable transfers, and compensated cancellation at extreme scales.
 
 `component::conformance::check_stage_residual` checks the optional
 `StageResidual` tier at one operating point and converged stage unknowns
-`z_solution`: layout/vector lengths (`unknowns() > 0`), finite `initial_guess`,
+`z_solution`: layout/vector lengths (including zero internal unknowns for
+algebraic owners), finite `initial_guess`,
 cancellation polling on `residual`, vanishing residual and output agreement
 with `propose` at `z_solution`, `accept` state equality with `propose` plus
 `audit_step` and `admit`, central-difference `jvp_z` verification of both

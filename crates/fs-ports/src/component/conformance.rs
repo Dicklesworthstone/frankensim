@@ -1403,7 +1403,8 @@ where
 /// stage unknowns `z_solution`.
 ///
 /// Covered:
-/// 1. Layout and vector lengths (`inputs`, `z_solution` of length `unknowns() > 0`).
+/// 1. Layout and vector lengths (`inputs`, `z_solution` of length `unknowns()`,
+///    including zero for algebraic owners).
 /// 2. `initial_guess` fills a finite starting vector.
 /// 3. `residual` polls `cx` and refuses under a cancelled context.
 /// 4. At `z_solution`, `residual` vanishes within `absolute_tolerance` and its
@@ -1442,12 +1443,6 @@ where
         }));
     }
     let n_z = component.unknowns();
-    if n_z == 0 {
-        return Err(law(
-            "StageResidual exposes at least one unknown",
-            "unknowns() returned 0".to_owned(),
-        ));
-    }
     if z_solution.len() != n_z {
         return Err(Failure::Contract(ContractViolation::VectorLength {
             vector: "z",

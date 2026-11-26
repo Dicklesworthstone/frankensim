@@ -18,6 +18,7 @@ use fs_exec::solver::snapshot_v2::{
     SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProvenanceIdV2, SnapshotRngCounterIdV2,
 };
 use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
+use fs_ports::component::conformance::{Case, Failure, check_stage_residual};
 use fs_ports::component::{
     Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
 };
@@ -456,7 +457,8 @@ impl StageResidual for StageDuffingSpring {
     }
 }
 
-/// Viscous damper with heat outlet implementing Component + PortTangent + StageResidual.
+/// Viscous damper with heat outlet and no internal stage unknowns. Its
+/// algebraic force and heat still close the coupled interface equations.
 struct StageDamper {
     c: f64,
     ports: [PortSpec; 3],
@@ -562,17 +564,16 @@ impl PortTangent for StageDamper {
 
 impl StageResidual for StageDamper {
     fn unknowns(&self) -> usize {
-        1
+        0
     }
 
     fn initial_guess(
         &self,
         (): &(),
         _dt_s: f64,
-        inputs: &[f64],
-        z: &mut [f64],
+        _inputs: &[f64],
+        _z: &mut [f64],
     ) -> Result<(), StageOwnerRefusal> {
-        z[0] = self.c * (inputs[0] - inputs[1]);
         Ok(())
     }
 
@@ -581,8 +582,8 @@ impl StageResidual for StageDamper {
         (): &(),
         _dt_s: f64,
         inputs: &[f64],
-        z: &[f64],
-        r: &mut [f64],
+        _z: &[f64],
+        _r: &mut [f64],
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), StageOwnerRefusal> {
@@ -592,10 +593,10 @@ impl StageResidual for StageDamper {
         if !(t_k.is_finite() && t_k > 0.0) {
             return Err(StageOwnerRefusal(3));
         }
-        r[0] = z[0] - self.c * dv;
-        outputs[0] = z[0];
-        outputs[1] = -z[0];
-        outputs[2] = -z[0] * dv;
+        let force = self.c * dv;
+        outputs[0] = force;
+        outputs[1] = -force;
+        outputs[2] = -force * dv;
         Ok(())
     }
 
@@ -603,19 +604,15 @@ impl StageResidual for StageDamper {
         &self,
         (): &(),
         _dt_s: f64,
-        inputs: &[f64],
+        _inputs: &[f64],
         _z: &[f64],
-        dz: &[f64],
-        dr: &mut [f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
         d_outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), StageOwnerRefusal> {
         cx.checkpoint().map_err(|_| StageOwnerRefusal(999))?;
-        let dv = inputs[0] - inputs[1];
-        dr[0] = dz[0];
-        d_outputs[0] = dz[0];
-        d_outputs[1] = -dz[0];
-        d_outputs[2] = -dz[0] * dv;
+        d_outputs.fill(0.0);
         Ok(())
     }
 
@@ -623,16 +620,14 @@ impl StageResidual for StageDamper {
         &self,
         (): &(),
         _dt_s: f64,
-        inputs: &[f64],
+        _inputs: &[f64],
         _z: &[f64],
-        bar_r: &[f64],
-        bar_outputs: &[f64],
-        bar_z: &mut [f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), StageOwnerRefusal> {
         cx.checkpoint().map_err(|_| StageOwnerRefusal(999))?;
-        let dv = inputs[0] - inputs[1];
-        bar_z[0] = bar_r[0] + bar_outputs[0] - bar_outputs[1] - dv * bar_outputs[2];
         Ok(())
     }
 
@@ -641,12 +636,12 @@ impl StageResidual for StageDamper {
         (): &(),
         dt_s: f64,
         inputs: &[f64],
-        z: &[f64],
+        _z: &[f64],
         (): &mut (),
     ) -> Result<Receipt, StageOwnerRefusal> {
         let dv = inputs[0] - inputs[1];
         let t_k = inputs[2];
-        let diss_j = dt_s * z[0] * dv;
+        let diss_j = dt_s * self.c * dv * dv;
         Ok(Receipt {
             stored_change_j: 0.0,
             dissipated_j: diss_j,
@@ -881,6 +876,255 @@ fn build_five_component_chain() -> (System, [NodeId; 5]) {
     let mut sys = b.seal().unwrap();
     assert!(sys.guess(dh, &[300.0]));
     (sys, [m1, s1, m2, d, body])
+}
+
+/// An algebraic signal relation. The accepted counter lets the test detect
+/// publication of an algebraic owner's candidate after a later refusal.
+struct AlgebraicSignal {
+    gain: f64,
+    offset: f64,
+    ports: [PortSpec; 2],
+    fault: Rc<Cell<u8>>,
+}
+
+impl AlgebraicSignal {
+    fn new(gain: f64, offset: f64) -> Self {
+        Self {
+            gain,
+            offset,
+            ports: [
+                PortSpec::signal_in(id("in"), NonZeroUsize::MIN),
+                PortSpec::signal_out(id("out"), NonZeroUsize::MIN),
+            ],
+            fault: Rc::new(Cell::new(0)),
+        }
+    }
+}
+
+impl Component for AlgebraicSignal {
+    type State = usize;
+    type Error = StageOwnerRefusal;
+
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn class(&self) -> Class {
+        Class::ExactLinear
+    }
+
+    fn stored_energy_j(&self, _state: &usize) -> Result<f64, Self::Error> {
+        Ok(0.0)
+    }
+
+    fn propose(
+        &self,
+        old: &usize,
+        _dt_s: f64,
+        inputs: &[f64],
+        new: &mut usize,
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Proposal, Self::Error> {
+        cx.checkpoint().map_err(|_| StageOwnerRefusal(999))?;
+        *new = old + 1;
+        outputs[0] = self.offset + self.gain * inputs[0];
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+impl StageResidual for AlgebraicSignal {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &usize,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        old: &usize,
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        if self.fault.get() == 1 {
+            return Err(StageOwnerRefusal(42));
+        }
+        if self.fault.get() == 3 {
+            cx.cancel_gate().request();
+        }
+        let mut candidate = *old;
+        self.propose(old, dt_s, inputs, &mut candidate, outputs, cx)?;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &usize,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        cx.checkpoint().map_err(|_| StageOwnerRefusal(999))?;
+        d_outputs.fill(if self.fault.get() == 4 { 1.0 } else { 0.0 });
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &usize,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        cx.checkpoint().map_err(|_| StageOwnerRefusal(999))
+    }
+
+    fn accept(
+        &self,
+        old: &usize,
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        new: &mut usize,
+    ) -> Result<Receipt, Self::Error> {
+        if self.fault.get() == 2 {
+            return Err(StageOwnerRefusal(84));
+        }
+        *new = old + 1;
+        Ok(Receipt::lossless(0.0, 0.0))
+    }
+}
+
+#[test]
+fn zero_unknown_stage_conformance_checks_outputs_and_acceptance() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        check_stage_residual(
+            &Damper::new(3.0).unwrap(),
+            &Case {
+                state: &(),
+                stale: &(),
+                dt_s: 0.01,
+                inputs: &[0.8, -0.4, 300.0],
+            },
+            &[],
+            1.0e-7,
+            1.0e-12,
+            cx,
+        )
+        .expect("native zero-unknown damper conforms");
+
+        let signal = AlgebraicSignal::new(0.25, 1.0);
+        let case = Case {
+            state: &10,
+            stale: &99,
+            dt_s: 0.01,
+            inputs: &[2.0],
+        };
+        check_stage_residual(&signal, &case, &[], 1.0e-7, 1.0e-12, cx)
+            .expect("algebraic owner with an accepted counter conforms");
+        signal.fault.set(4);
+        assert!(matches!(
+            check_stage_residual(&signal, &case, &[], 1.0e-7, 1.0e-12, cx),
+            Err(Failure::Law {
+                law: "jvp_z output derivative matches finite differences",
+                ..
+            })
+        ));
+    });
+}
+
+#[test]
+fn monolithic_all_algebraic_loop_solves_and_refuses_atomically() {
+    let policies = [
+        BlockSolverPolicy::Auto,
+        BlockSolverPolicy::ByTier {
+            fixed_point: FixedPointMethod::IqnIls(IqnIlsConfig::default()),
+            monolithic: MonolithicConfig::default(),
+        },
+        BlockSolverPolicy::MonolithicNewtonKrylov(MonolithicConfig::default()),
+    ];
+    for policy in policies {
+        let mut b = SystemBuilder::new();
+        let a = b
+            .add_with_stage_residual("a", AlgebraicSignal::new(0.25, 1.0), 10)
+            .unwrap();
+        let signal_b = AlgebraicSignal::new(0.5, 2.0);
+        let fault = Rc::clone(&signal_b.fault);
+        let other = b.add_with_stage_residual("b", signal_b, 20).unwrap();
+        let ao = b.port(a, "out").unwrap();
+        let bo = b.port(other, "out").unwrap();
+        b.signal(ao, b.port(other, "in").unwrap()).unwrap();
+        b.signal(bo, b.port(a, "in").unwrap()).unwrap();
+        let mut sys = b.seal().unwrap();
+        sys.set_solver_policy(policy);
+        assert_eq!(
+            sys.block_modes(),
+            vec![BlockSolveMode::MonolithicNewtonKrylov]
+        );
+        let plan = sys.execution_plan();
+        assert_eq!(plan.blocks[0].stage_unknowns, 0);
+        assert_eq!(plan.blocks[0].kept_unknowns, 2);
+        assert_eq!(plan.blocks[0].tear_variables.len(), 2);
+        assert!(!plan.explain().contains("missing StageResidual"));
+
+        for code in 1..=3 {
+            fault.set(code);
+            let gate = CancelGate::new_clock_free();
+            let err = with_cx(&gate, |cx| sys.step(0.01, cx)).expect_err("injected refusal");
+            match (code, err) {
+                (1 | 2, SystemError::Component { node, error, .. }) => {
+                    assert_eq!(node, "b");
+                    let expected = if code == 1 { 42 } else { 84 };
+                    assert_eq!(
+                        error.downcast_ref::<StageOwnerRefusal>(),
+                        Some(&StageOwnerRefusal(expected))
+                    );
+                }
+                (3, SystemError::Cancelled) => {}
+                (_, other) => panic!("incorrect refusal: {other:?}"),
+            }
+            assert_eq!(*sys.state::<usize>(a).unwrap(), 10);
+            assert_eq!(*sys.state::<usize>(other).unwrap(), 20);
+            assert_eq!(sys.steps(), 0);
+            assert_eq!(sys.time_s(), 0.0);
+            assert_eq!(sys.last_output(ao), &[0.0]);
+            assert_eq!(sys.last_output(bo), &[0.0]);
+            assert_eq!(sys.ledger().energy_residual_j(), 0.0);
+        }
+
+        fault.set(0);
+        let gate = CancelGate::new_clock_free();
+        with_cx(&gate, |cx| sys.step(0.01, cx)).expect("clean retry");
+        // Independent solution of y_a = 1 + y_b/4, y_b = 2 + y_a/2.
+        assert!((sys.last_output(ao)[0] - 12.0 / 7.0).abs() < 1.0e-13);
+        assert!((sys.last_output(bo)[0] - 20.0 / 7.0).abs() < 1.0e-13);
+        assert_eq!(*sys.state::<usize>(a).unwrap(), 11);
+        assert_eq!(*sys.state::<usize>(other).unwrap(), 21);
+        assert_eq!(sys.steps(), 1);
+        assert_eq!(sys.last_receipts().len(), 2);
+        assert_eq!(sys.ledger().energy_residual_j(), 0.0);
+    }
 }
 
 #[test]
