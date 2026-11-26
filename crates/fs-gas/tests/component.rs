@@ -1976,3 +1976,146 @@ fn state_charter_describes_both_closed_and_streaming_codecs() {
     let open = streaming(ref_mix.clone());
     assert_eq!(encoded(&open, &ref_mix).unwrap().len(), 6 + 2);
 }
+
+#[test]
+fn n2_material_card_pack_matches_seed_v1_records_bit_for_bit_and_builds_cavity() {
+    use fs_gas::component::parcel_from_material_card;
+    use fs_matdb::NormalizedMaterialCardPack;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bytes = std::fs::read(
+        root.join("examples/assemblies/packs/nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk"),
+    )
+    .expect("generated N2 material-card pack must exist");
+    let pack = NormalizedMaterialCardPack::from_bytes(&bytes).expect("pack must decode");
+    let card = pack.card();
+    let id = card.id();
+    assert_eq!((id.chemistry.as_str(), id.phase.as_str()), ("N2", "gas"));
+    assert_eq!((id.process.as_str(), id.revision), ("dilute-ideal-gas", 0));
+    assert_eq!(card.claims().claims_ordered().count(), 3);
+
+    // 1. Seed `nitrogen` (species.tsv): molar mass, normalization receipt, elemental reference.
+    let sp_tsv =
+        std::fs::read_to_string(root.join("data/matdb/seed-v1/nitrogen/species.tsv")).unwrap();
+    let sp: Vec<&str> = sp_tsv
+        .lines()
+        .find(|l| l.starts_with("species\t"))
+        .unwrap()
+        .split('\t')
+        .collect();
+    assert_eq!((sp[1], sp[3]), ("N2", "g/mol"));
+    let (want_mm, want_ref_p) = (
+        sp[2].parse::<f64>().unwrap() * 1.0e-3,
+        sp[6].parse::<f64>().unwrap() * 1.0e3,
+    );
+    let (mm_id, mm) = card
+        .claims()
+        .claims_ordered()
+        .find(|(_, c)| c.key.name() == "molar_mass")
+        .expect("molar_mass claim from seed `nitrogen`");
+    let PropertyValue::Scalar { value: got_mm, .. } = mm.value else {
+        panic!("scalar molar_mass")
+    };
+    assert_eq!(got_mm.to_bits(), want_mm.to_bits());
+    assert_eq!(mm.uncertainty, UncertaintyModel::Unstated);
+    let eref = format!("[elemental_reference={}]", sp[8]);
+    assert!(mm.provenance.source.contains(&eref));
+    let id_tag = format!("{mm_id:?}");
+    assert!(pack.claims_pack().normalizations().iter().any(|n| {
+        n.source_basis() == "g/mol"
+            && n.scale().to_bits() == 1.0e-3_f64.to_bits()
+            && format!("{:?}", n.target()).contains(&id_tag)
+    }));
+
+    // 2. Seed `nitrogen-nasa9-mcbride2002` (nasa9.tsv): both regions, bounds, ref_p, a0..a8.
+    let n9_tsv = std::fs::read_to_string(
+        root.join("data/matdb/seed-v1/nitrogen-nasa9-mcbride2002/nasa9.tsv"),
+    )
+    .unwrap();
+    let mut regions: BTreeMap<&str, (f64, f64, f64, BTreeMap<&str, f64>)> = BTreeMap::new();
+    for cols in n9_tsv.lines().map(|l| l.split('\t').collect::<Vec<_>>()) {
+        match cols.first().copied() {
+            Some("region") => {
+                let (lo, hi) = (cols[3].parse().unwrap(), cols[4].parse().unwrap());
+                regions.insert(cols[2], (lo, hi, cols[6].parse().unwrap(), BTreeMap::new()));
+            }
+            Some("coefficient") => {
+                let v = cols[4].parse().unwrap();
+                regions.get_mut(cols[2]).unwrap().3.insert(cols[3], v);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(card.models().len(), regions.len());
+    for (name, (lo, hi, ref_p, coeffs)) in &regions {
+        assert_eq!(ref_p.to_bits(), want_ref_p.to_bits());
+        let m = card
+            .models()
+            .iter()
+            .find(|m| m.validity.bound("T") == Some((*lo, *hi)))
+            .unwrap_or_else(|| panic!("missing NASA-9 region `{name}`"));
+        assert_eq!(m.law.0, NASA9_LAW_ID_V1);
+        let rp = m.parameters["reference_pressure"].value;
+        assert_eq!(rp.to_bits(), ref_p.to_bits());
+        for (k, v) in coeffs {
+            assert_eq!(m.parameters[*k].value.to_bits(), v.to_bits());
+        }
+    }
+
+    // 3. Seed `nitrogen-transport-lemmon2004` (properties.tsv): knots & Unstated uncertainty.
+    let tr_tsv = std::fs::read_to_string(
+        root.join("data/matdb/seed-v1/nitrogen-transport-lemmon2004/properties.tsv"),
+    )
+    .unwrap();
+    let mut checked = 0usize;
+    for line in tr_tsv.lines().filter(|l| l.starts_with("curve\t")) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let prop = cols[3];
+        let want: Vec<(f64, f64)> = cols[7]
+            .split(',')
+            .map(|p| {
+                let (t, v) = p.split_once(':').unwrap();
+                (t.parse().unwrap(), v.parse().unwrap())
+            })
+            .collect();
+        let (_, c) = card
+            .claims()
+            .claims_ordered()
+            .find(|(_, c)| c.key.name() == prop)
+            .expect("transport claim from nitrogen-transport-lemmon2004");
+        assert_eq!(c.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(c.validity.bound("temperature"), Some((200.0, 1000.0)));
+        assert_eq!(c.validity.bound("pressure"), Some((75_000.0, 101_325.0)));
+        let PropertyValue::Curve { knots, .. } = &c.value else {
+            panic!("curve `{prop}`")
+        };
+        assert_eq!(knots.len(), want.len());
+        for ((gt, gv), (wt, wv)) in knots.iter().zip(&want) {
+            assert_eq!((gt.to_bits(), gv.to_bits()), (wt.to_bits(), wv.to_bits()));
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 2);
+
+    // 4. Construct ClosedGasParcel + insulated GasCavity from the card; refuse wrong phase.
+    let tk = quantity(QuantityKind::AbsoluteTemperature);
+    let pk = quantity(QuantityKind::Pressure);
+    let pt = QueryPoint::new()
+        .with_quantity("temperature", tk, 300.0)
+        .unwrap()
+        .with_quantity("pressure", pk, 90_000.0)
+        .unwrap();
+    let parcel = parcel_from_material_card(card, pt.clone(), 1.0e-3).expect("card parcel");
+    let cav = GasCavity::new(parcel.clone(), controls()).unwrap();
+    assert_eq!(cav.insulated().unwrap().class(), Class::Monotone1d);
+    let st = parcel.state().state();
+    assert_eq!(st.temperature.to_bits(), 300.0_f64.to_bits());
+    assert_eq!(st.pressure.to_bits(), 90_000.0_f64.to_bits());
+    let mut bad_id = id.clone();
+    bad_id.phase = "solid".into();
+    let bad =
+        MaterialCard::assemble(bad_id, card.claims().clone(), card.models().to_vec()).unwrap();
+    assert!(parcel_from_material_card(&bad, pt, 1.0e-3).is_err());
+}

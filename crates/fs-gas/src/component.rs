@@ -950,3 +950,108 @@ impl PortTangent for GasCavity {
         Ok(())
     }
 }
+
+/// Build a pure-species [`ClosedGasParcel`] from a single [`fs_matdb::MaterialCard`]
+/// carrying a `molar_mass` claim (with `[elemental_reference=...]` provenance),
+/// NASA-9 constitutive model cards (`nasa9-standard-state` v1), and transport claims.
+///
+/// # Errors
+/// Refuses missing or ambiguous species metadata, NASA-9 cards, or out-of-domain states.
+pub fn parcel_from_material_card(
+    card: &fs_matdb::MaterialCard,
+    point: fs_matdb::QueryPoint,
+    volume_m3: f64,
+) -> Result<ClosedGasParcel, GasEnergyError> {
+    use fs_matdb::PropertyValue;
+    use fs_material::state_point::MaterialPropertySelection;
+    use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGasModel};
+    use fs_qty::Pressure;
+    use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+    use fs_thermochem::{
+        Composition, CompositionBasis, ElementalReferenceIdV1, NASA9_LAW_ID_V1, Nasa9RegionV1,
+        Nasa9StandardStateModelV1, ReferenceEquationOfStateV1, StandardStateConventionV1,
+        StandardStatePhaseV1,
+    };
+
+    if card.id().phase != "gas" {
+        return Err(invalid("gas cavity material card must declare phase `gas`"));
+    }
+    let species = SpeciesId::new(&card.id().chemistry)
+        .map_err(|_| invalid("gas cavity material card chemistry is not a valid SpeciesId"))?;
+    let mut molar_claims = card
+        .claims()
+        .claims_ordered()
+        .filter(|(_, c)| c.key.name() == "molar_mass" && c.key.dims() == MolarMass::DIMS);
+    let (_, molar_claim) = molar_claims
+        .next()
+        .ok_or_else(|| invalid("gas cavity material card has no molar_mass claim"))?;
+    if molar_claims.next().is_some() {
+        return Err(invalid(
+            "gas cavity material card has multiple molar_mass claims",
+        ));
+    }
+    let PropertyValue::Scalar {
+        value: molar_mass, ..
+    } = molar_claim.value
+    else {
+        return Err(invalid("gas cavity molar_mass claim must be a scalar"));
+    };
+    let elem = molar_claim
+        .provenance
+        .source
+        .split_once("[elemental_reference=")
+        .and_then(|(_, rest)| rest.split_once(']').map(|(id, _)| id))
+        .ok_or_else(|| invalid("molar_mass provenance missing [elemental_reference=...]"))?;
+    let elemental_ref = ElementalReferenceIdV1::new(elem)
+        .map_err(|_| invalid("invalid elemental_reference in molar_mass provenance"))?;
+    let mut regions: Vec<Nasa9RegionV1> = card
+        .models()
+        .iter()
+        .filter(|m| m.law.0 == NASA9_LAW_ID_V1)
+        .cloned()
+        .map(Nasa9RegionV1::from_card)
+        .collect::<Result<_, _>>()
+        .map_err(|_| invalid("invalid NASA-9 constitutive model card on material card"))?;
+    if regions.is_empty() {
+        return Err(invalid(
+            "gas cavity material card has no NASA-9 model cards",
+        ));
+    }
+    regions.sort_by(|a, b| {
+        a.temperature_min()
+            .value()
+            .total_cmp(&b.temperature_min().value())
+    });
+    let ref_p = regions[0]
+        .card()
+        .parameters
+        .get("reference_pressure")
+        .filter(|p| p.dims == Pressure::DIMS)
+        .map(|p| p.value)
+        .ok_or_else(|| invalid("NASA-9 region missing reference_pressure [Pa]"))?;
+    let convention = StandardStateConventionV1::new(
+        StandardStatePhaseV1::Gas,
+        ReferenceEquationOfStateV1::IdealGas,
+        Pressure::new(ref_p),
+        elemental_ref,
+    )
+    .map_err(|_| invalid("invalid ideal-gas standard-state convention"))?;
+    let thermo = Nasa9StandardStateModelV1::new(
+        species.clone(),
+        MolarMass::new(molar_mass),
+        convention,
+        regions,
+    )
+    .map_err(|_| invalid("NASA-9 species construction refused"))?;
+    let comp = Composition::new(CompositionBasis::MoleFraction, vec![1.0])
+        .map_err(|_| invalid("pure-species mole composition refused"))?;
+    let mixture = FrozenIdealGasMixtureModelV1::new(vec![thermo], comp)
+        .map_err(|_| invalid("frozen ideal-gas mixture construction refused"))?;
+    let transport = SpeciesTransportMaterial {
+        species,
+        material: card.clone(),
+        selection: MaterialPropertySelection::SingleClaimOnly,
+    };
+    let model = ThermochemicalGasModel::new(mixture, vec![transport], None)?;
+    ClosedGasParcel::new(model, point, volume_m3)
+}

@@ -700,15 +700,22 @@ struct ComponentMeta {
 
 /// Compile a strict source manifest twice and publish one verified new artifact.
 pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String> {
-    let (manifest_path, output_path, material_state, source_inputs_path, models_path) = match parse_cli(root, args) {
-        Ok(paths) => paths,
-        Err(error) => {
-            print_refusal_decisions(&error, Some(cli_input_hash(args)));
-            return Err(error.to_string());
-        }
+    let (manifest_path, output_path, material_state, source_inputs_path, models_path, species_path) =
+        match parse_cli(root, args) {
+            Ok(paths) => paths,
+            Err(error) => {
+                print_refusal_decisions(&error, Some(cli_input_hash(args)));
+                return Err(error.to_string());
+            }
+        };
+    let bind = |output| {
+        bind_material_state(
+            output,
+            material_state.as_ref(),
+            models_path.as_deref(),
+            species_path.as_deref(),
+        )
     };
-    let bind =
-        |output| bind_material_state(output, material_state.as_ref(), models_path.as_deref());
     let mut first = match compile_manifest(&manifest_path).and_then(bind) {
         Ok(output) => output,
         Err(error) => {
@@ -814,11 +821,13 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
 }
 
 /// Opt-in transport envelope; the source compiler and its claims stay unchanged.
-/// `models` names a constitutive-v1 source manifest whose models the card carries.
+/// `models` names a model-pack manifest and `species` a species-v1 manifest
+/// whose molar mass and standard-state reference the card carries.
 fn bind_material_state(
     output: CompileOutput,
     state: Option<&MaterialStateId>,
     models: Option<&Path>,
+    species: Option<&Path>,
 ) -> Result<CompileOutput, CompileError> {
     let Some(state) = state else {
         return Ok(output);
@@ -836,7 +845,7 @@ fn bind_material_state(
             .with_input_hash(source_hash)
             .with_prior_decisions(decisions.clone())
     };
-    let CompiledPack::Material(claims) = pack else {
+    let CompiledPack::Material(mut claims) = pack else {
         return Err(refuse(
             "material_state_requires_material",
             "--material-state accepts material property packs; interface, model and species artifacts require their original envelopes".to_string(),
@@ -850,12 +859,24 @@ fn bind_material_state(
         None => None,
         Some(CompiledPack::Model(pack)) => Some(pack),
         Some(_) => {
-            let detail = "--models names a constitutive-v1 model source manifest".to_string();
+            let detail = "--models names a model source manifest".to_string();
             return Err(refuse("models_require_model_source", detail));
         }
     };
-    // One row per bound model, so the build's own receipt says what went into the card.
     let mut bound = Vec::new();
+    if let Some(species_path) = species {
+        let CompiledPack::Species(sp) = compile_manifest(species_path)?.pack else {
+            return Err(refuse(
+                "species_require_species_source",
+                "--species names a species-v1 source manifest".into(),
+            ));
+        };
+        let (rebuilt, row) = merge_species_claims(&claims, &sp, state, models.as_ref())
+            .map_err(|(code, detail)| refuse(code, detail))?;
+        claims = rebuilt;
+        bound.push(row);
+    }
+    // One row per bound model, so the build's own receipt says what went into the card.
     if let Some(pack) = &models {
         for model in pack.models() {
             let (law, source) = (&model.law.0, pack.pack_id());
@@ -899,11 +920,118 @@ fn bind_material_state(
     })
 }
 
-/// Manifest, output, material state, source-input export and model manifest.
+fn merge_species_claims(
+    claims: &NormalizedPack,
+    sp: &NormalizedSpeciesPack,
+    state: &MaterialStateId,
+    models: Option<&NormalizedModelPack>,
+) -> Result<(NormalizedPack, Decision), (&'static str, String)> {
+    let a = sp.association();
+    if a.species().as_str() != state.chemistry
+        || a.standard_state_phase() != "gas"
+        || a.reference_eos() != "ideal-gas"
+    {
+        return Err((
+            "species_state_mismatch",
+            "species identity/convention must match --material-state gas ideal-gas".into(),
+        ));
+    }
+    let rp_mismatch = models.is_some_and(|mp| {
+        mp.pack_id() != a.species().as_str()
+            || mp.models().iter().any(|m| {
+                m.law.0 == NASA9_LAW_ID
+                    && m.parameters
+                        .get("reference_pressure")
+                        .map(|p| p.value.to_bits())
+                        != Some(a.reference_pressure().to_bits())
+            })
+    });
+    if rp_mismatch {
+        return Err((
+            "species_model_mismatch",
+            "--species id and reference pressure must match --models".into(),
+        ));
+    }
+    if claims
+        .claims()
+        .claims_ordered()
+        .any(|(_, c)| c.key.name() == "molar_mass")
+    {
+        return Err((
+            "duplicate_molar_mass_claim",
+            "material manifest already carries a molar_mass claim".into(),
+        ));
+    }
+    let mut set = claims.claims().clone();
+    let src = format!(
+        "{} [elemental_reference={}]",
+        a.provenance().source,
+        a.elemental_reference()
+    );
+    let claim_id = set
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("molar_mass", SPECIES_MOLAR_MASS_DIMS),
+            value: PropertyValue::Scalar {
+                value: a.molar_mass(),
+                dims: SPECIES_MOLAR_MASS_DIMS,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: src,
+                license: a.provenance().license.clone(),
+                artifact: Some(sp.content_hash()),
+            },
+        })
+        .map_err(|e| ("species_claim_refused", e.to_string()))?;
+    let mut norms = claims.normalizations().to_vec();
+    if let Some(n) = sp
+        .normalizations()
+        .iter()
+        .find(|n| n.target() == SpeciesNormalizationTarget::MolarMass)
+    {
+        norms.push(NormalizationReceipt::new(
+            NormalizationTarget::ClaimValue(StatisticMember::scalar(claim_id)),
+            n.source_literal(),
+            n.dims(),
+            n.scale(),
+            n.offset(),
+            n.source_basis(),
+            MATDB_PACK_TARGET_BASIS,
+            None,
+            None,
+        ));
+    }
+    let rebuilt = NormalizedPack::new(
+        claims.pack_id(),
+        claims.compiler(),
+        claims.source_artifact(),
+        claims.redistribution_terms(),
+        set,
+        claims.joint_statistics().to_vec(),
+        norms,
+    )
+    .map_err(|e| ("species_pack_rebuild_failed", e.to_string()))?;
+    let msg = format!("bound {} ({})", a.species(), a.elemental_reference());
+    Ok((
+        rebuilt,
+        Decision::admit(
+            format!("species:{}", a.species()),
+            "bound_species_source",
+            msg,
+            Some(sp.source_artifact()),
+        ),
+    ))
+}
+
+/// Manifest, output, material state, source-input export, model and species manifests.
 type CliPaths = (
     PathBuf,
     PathBuf,
     Option<MaterialStateId>,
+    Option<PathBuf>,
     Option<PathBuf>,
     Option<PathBuf>,
 );
@@ -914,6 +1042,7 @@ fn parse_cli(root: &Path, args: &[String]) -> Result<CliPaths, CompileError> {
     let mut material_state = None;
     let mut source_inputs = None;
     let mut models = None;
+    let mut species = None;
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
@@ -977,11 +1106,14 @@ fn parse_cli(root: &Path, args: &[String]) -> Result<CliPaths, CompileError> {
             "--out" => &mut output,
             "--source-inputs" => &mut source_inputs,
             "--models" => &mut models,
+            "--species" => &mut species,
             _ => {
                 return Err(CompileError::new(
                     "invalid_cli",
                     "arguments",
-                    format!("unknown option {option:?}; expected --manifest, --out, --material-state, --source-inputs, or --models"),
+                    format!(
+                        "unknown option {option:?}; expected --manifest, --out, --material-state, --source-inputs, --models, or --species"
+                    ),
                 ));
             }
         };
@@ -1015,14 +1147,28 @@ fn parse_cli(root: &Path, args: &[String]) -> Result<CliPaths, CompileError> {
         return Err(CompileError::new("invalid_cli", "arguments",
             "source-input export, manifest and pack output paths must differ"));
     }
-    if models.is_some() && material_state.is_none() {
+    if (models.is_some() || species.is_some()) && material_state.is_none() {
         return Err(CompileError::new(
             "invalid_cli",
             "arguments",
-            "--models binds models to a named card and requires --material-state",
+            "--models/--species bind to a named card and require --material-state",
         ));
     }
-    Ok((manifest, output, material_state, source_inputs, models))
+    if species.as_ref().is_some_and(|p| p == &output) {
+        return Err(CompileError::new(
+            "invalid_cli",
+            "arguments",
+            "species manifest and output paths must differ",
+        ));
+    }
+    Ok((
+        manifest,
+        output,
+        material_state,
+        source_inputs,
+        models,
+        species,
+    ))
 }
 
 /// Exact editable UTF-8 inputs for the existing portable experiment boundary.
@@ -8936,7 +9082,8 @@ mod tests {
         assert!(!inputs.contains(&directory.display().to_string()));
         let state = MaterialStateId { chemistry: "authored-composite".into(),
             phase: "solid".into(), process: "original-specimen".into(), revision: 0 };
-        let card = bind_material_state(compiled, Some(&state), None).expect("explicit identity");
+        let card =
+            bind_material_state(compiled, Some(&state), None, None).expect("explicit identity");
         assert_eq!(source_inputs_json(&manifest_path, card.pack.source_artifact()).unwrap(), inputs);
         // A later edit cannot be exported as the input of an earlier compiled pack.
         fs::write(directory.join("source.tsv"), source_text + "\n").expect("source edit");
@@ -8950,9 +9097,9 @@ mod tests {
         let root = Path::new("/original-project");
         let args = ["--manifest", "manifest.tsv", "--out", "new.pack",
             "--source-inputs", "original-inputs.json"].map(str::to_string);
-        let (manifest, pack, state, inputs, models) =
+        let (manifest, pack, state, inputs, models, species) =
             parse_cli(root, &args).expect("distinct paths");
-        assert!(models.is_none());
+        assert!(models.is_none() && species.is_none());
         assert_eq!(manifest, root.join("manifest.tsv"));
         assert_eq!(pack, root.join("new.pack"));
         assert!(state.is_none());
@@ -8983,7 +9130,7 @@ mod tests {
         };
         let bind = |names: &Path| {
             let material = compile_manifest(&material).unwrap();
-            let bound = bind_material_state(material, Some(&state), Some(names));
+            let bound = bind_material_state(material, Some(&state), Some(names), None);
             bound.map_err(|error| error.code)
         };
         let bound = bind(&models).expect("a model source binds");
