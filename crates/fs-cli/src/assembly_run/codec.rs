@@ -8,10 +8,11 @@ use fs_ir::ast::{CountUnit, Node, NodeKind};
 use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInterfaceDecl,
-    DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget, FidelityPolicy,
-    FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain, PrimitiveShape,
-    ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, TimeHistory, TimePlan, TimingEdge,
+    DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
+    DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
+    FidelityPolicy, FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain,
+    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, TimeHistory,
+    TimePlan, TimingEdge,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
@@ -110,6 +111,55 @@ fn as_vec3(n: &Node, w: &str) -> Result<[f64; 3], SolveRefusal> {
         return Err(err(format!("{w} must have 3 elements")));
     }
     Ok([as_f64(&v[0], w)?, as_f64(&v[1], w)?, as_f64(&v[2], w)?])
+}
+fn as_qty3(n: &Node, w: &str) -> Result<[QtyAny; 3], SolveRefusal> {
+    let v = as_list(n, w)?;
+    if v.len() != 3 {
+        return Err(err(format!("{w} must have 3 elements")));
+    }
+    Ok([as_qty(&v[0], w)?, as_qty(&v[1], w)?, as_qty(&v[2], w)?])
+}
+fn as_quat4(n: &Node, w: &str) -> Result<[f64; 4], SolveRefusal> {
+    let v = as_list(n, w)?;
+    if v.len() != 4 {
+        return Err(err(format!("{w} must have 4 elements")));
+    }
+    Ok([
+        as_f64(&v[0], w)?,
+        as_f64(&v[1], w)?,
+        as_f64(&v[2], w)?,
+        as_f64(&v[3], w)?,
+    ])
+}
+fn parse_initial(n: &Node, part_scope: &str) -> Result<DraftInitialState, SolveRefusal> {
+    let scope = format!("{part_scope} :initial");
+    let kw = kwargs(
+        as_list(n, &scope)?,
+        &[
+            "position",
+            "orientation",
+            "linear-velocity",
+            "angular-velocity",
+            "temperature",
+        ],
+        &scope,
+    )?;
+    Ok(DraftInitialState {
+        position: as_qty3(req(&kw, "position", &scope)?, "initial.position")?,
+        orientation: as_quat4(req(&kw, "orientation", &scope)?, "initial.orientation")?,
+        linear_velocity: as_qty3(
+            req(&kw, "linear-velocity", &scope)?,
+            "initial.linear-velocity",
+        )?,
+        angular_velocity: as_qty3(
+            req(&kw, "angular-velocity", &scope)?,
+            "initial.angular-velocity",
+        )?,
+        temperature: kw
+            .get("temperature")
+            .map(|t| as_qty(t, "initial.temperature"))
+            .transpose()?,
+    })
 }
 
 fn kwargs<'a>(
@@ -523,6 +573,7 @@ pub(crate) fn admit_assembly_source(
                         "query-temp",
                         "physics",
                         "fidelity",
+                        "initial",
                     ],
                     &scope,
                 )?;
@@ -574,6 +625,10 @@ pub(crate) fn admit_assembly_source(
                 if as_sym(req(&kw, "fidelity", &scope)?, "fidelity")? != "lumped" {
                     return Err(err(format!("{scope} only :fidelity lumped is supported")));
                 }
+                let initial = kw
+                    .get("initial")
+                    .map(|n| parse_initial(n, &scope))
+                    .transpose()?;
                 parts.push(DraftPartDecl {
                     name: pname,
                     entity,
@@ -590,7 +645,7 @@ pub(crate) fn admit_assembly_source(
                         },
                     },
                     uncertainty: Vec::new(),
-                    initial: None,
+                    initial,
                 });
             }
             "joint" => {
@@ -823,4 +878,134 @@ pub(crate) fn admit_assembly_source(
         harmonic_frequencies_hz: harm_hz,
         modal_max_modes: modal_max,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+
+    fn admit(attrs: &str) -> Result<AdmittedAssembly, SolveRefusal> {
+        let src = format!(
+            "(assembly \"init_check\" (version 1) (units \"SI\") (seed 0x1) \
+             (versions (constellation \"2026-07\") (workspace \"pkg-1c\")) \
+             (budget (wall 60s) (mem 64MiB)) \
+             (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) \
+             (reference-state unloaded) (environment earth-lab-air) \
+             (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz) \
+             (part \"rotor\" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) \
+             :physics (mechanics thermal) :fidelity lumped {attrs}))\n"
+        );
+        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        admit_assembly_source(src.as_bytes(), &packs)
+    }
+
+    #[test]
+    fn part_initial_round_trips_sexpr_and_json_with_rad_per_s_and_optional_temp() {
+        let q = QtyAny::new;
+        let full = ":initial (:position (0.1m -0.2m 0.05m) :orientation (0.6 0.0 0.8 0.0) \
+                    :linear-velocity (1.5m/s 0m/s -0.5m/s) \
+                    :angular-velocity (0rad/s -2.5rad/s 120rad/s) :temperature 320K)";
+        let expected = DraftInitialState {
+            position: [q(0.1, LENGTH), q(-0.2, LENGTH), q(0.05, LENGTH)],
+            orientation: [0.6, 0.0, 0.8, 0.0],
+            linear_velocity: [q(1.5, VELOCITY), q(0.0, VELOCITY), q(-0.5, VELOCITY)],
+            angular_velocity: [q(0.0, FREQUENCY), q(-2.5, FREQUENCY), q(120.0, FREQUENCY)],
+            temperature: Some(q(320.0, TEMPERATURE)),
+        };
+        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        let a1 = admit(full).expect("full :initial admits");
+        let init1 = a1.draft.input().parts[0].initial.as_ref().unwrap();
+        assert_eq!(init1, &expected);
+        assert_eq!(init1.angular_velocity[2].dims, FREQUENCY);
+
+        let a2 = admit_assembly_source(&a1.canonical_source, &packs).unwrap();
+        assert_eq!(a2.draft.input().parts[0].initial.as_ref(), Some(&expected));
+
+        let ast = fs_ir::sexpr::parse(std::str::from_utf8(&a1.canonical_source).unwrap()).unwrap();
+        let json = fs_ir::json::print_checked(&ast).unwrap();
+        let a3 = admit_assembly_source(json.as_bytes(), &packs).unwrap();
+        assert_eq!(a3.draft.input().parts[0].initial.as_ref(), Some(&expected));
+
+        let no_temp = full.replace(" :temperature 320K", "");
+        let a4 = admit(&no_temp).expect("omitted :temperature admits");
+        let want_no_temp = DraftInitialState {
+            temperature: None,
+            ..expected
+        };
+        assert_eq!(
+            a4.draft.input().parts[0].initial.as_ref(),
+            Some(&want_no_temp)
+        );
+        assert_eq!(admit("").unwrap().draft.input().parts[0].initial, None);
+    }
+
+    #[test]
+    fn part_initial_refusals_report_shape_and_admission_item_names() {
+        let base = ":position (0m 0m 0m) :orientation (1 0 0 0) \
+                    :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)";
+        let rep = |old: &str, new: &str| format!(":initial ({})", base.replace(old, new));
+        let cases = [
+            (
+                rep("(1 0 0 0)", "(2.0 0.0 0.0 0.0)"),
+                "part:rotor.initial.orientation",
+            ),
+            (
+                format!(":initial ({base} :temperature 0K)"),
+                "part:rotor.initial.temperature",
+            ),
+            (
+                rep("(0m 0m 0m)", "(1K 0m 0m)"),
+                "part:rotor.initial.position[0]",
+            ),
+            (
+                rep("(0m/s 0m/s 0m/s)", "(1m 0m/s 0m/s)"),
+                "part:rotor.initial.linear_velocity[0]",
+            ),
+            (
+                rep("(0rad/s 0rad/s 0rad/s)", "(0rad/s 1K 0rad/s)"),
+                "part:rotor.initial.angular_velocity[1]",
+            ),
+            (
+                format!(":initial ({base} :temperature 1m)"),
+                "part:rotor.initial.temperature",
+            ),
+            (
+                rep("(0m 0m 0m)", "(0m 0m)"),
+                "initial.position must have 3 elements",
+            ),
+            (
+                rep("(1 0 0 0)", "(1 0 0)"),
+                "initial.orientation must have 4 elements",
+            ),
+            (
+                rep("(1 0 0 0)", "(1 \"x\" 0 0)"),
+                "expected finite number for initial.orientation",
+            ),
+            (
+                rep(":linear-velocity (0m/s 0m/s 0m/s) ", ""),
+                "missing `:linear-velocity`",
+            ),
+            (
+                format!(":initial ({base} :bogus 1m)"),
+                "rejects unknown keyword `:bogus`",
+            ),
+            (
+                format!(":initial ({base}) :initial ({base})"),
+                "repeats `:initial`",
+            ),
+        ];
+        for (attrs, needle) in cases {
+            let Err(r) = admit(&attrs) else {
+                panic!("expected refusal for `{attrs}`");
+            };
+            assert_eq!((r.code, r.stage), ("cli-assembly-admit", Some("admit")));
+            assert!(
+                r.what.contains(needle),
+                "got `{}` without `{needle}`",
+                r.what
+            );
+        }
+    }
 }
