@@ -12,13 +12,15 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QtyAny, QuantitySpec};
 use fs_scenario::assembly::draft::{
-    DraftGeometrySource, DraftPartKind, FidelityErrorBudget, PhysicsDomain, PrimitiveShape,
+    DraftGeometrySource, DraftInterfaceKind, DraftPartKind, FidelityErrorBudget, PhysicsDomain,
+    PrimitiveShape,
 };
 
-use super::Scoped;
+use super::{Scoped, owning_part};
 use crate::lowering::{
-    AREA_DIMS, ConstitutiveModelRef, FidelityRungKind, LoweredPartOutput, LoweringError,
-    LoweringGraph, LoweringRegistry, PartLoweringContext, PartLoweringKey, TEMPERATURE_DIMS,
+    AREA_DIMS, ConstitutiveModelRef, FidelityRungKind, InterfaceKindTag, InterfaceLoweringContext,
+    InterfaceLoweringKey, LoweredInterfaceOutput, LoweredPartOutput, LoweringError, LoweringGraph,
+    LoweringRegistry, PISTON_FACE_FAMILY, PartLoweringContext, PartLoweringKey, TEMPERATURE_DIMS,
     VOLUME_DIMS,
 };
 
@@ -28,13 +30,17 @@ const NASA9_LAW: &str = "nasa9-standard-state";
 /// Minimum inversion tolerance [J/kg], above the ~5e-11 J/kg ULP of `c_v * T`.
 const MIN_TOL_J_KG: f64 = 1.0e-9;
 
-/// Register the gas-cavity part constructors.
+/// Register the gas-cavity part constructors and the piston-face interface constructor.
 pub(crate) fn register(registry: &mut LoweringRegistry) {
     let f = PhysicsDomain::Fluid;
     for (d, iso) in [(vec![f], true), (vec![f, PhysicsDomain::Thermal], false)] {
         let k = PartLoweringKey::new(DraftPartKind::Cavity, d, FidelityRungKind::Lumped);
         registry.register_part(k, move |ctx, g| lower_cavity(ctx, g, iso));
     }
+    registry.register_interface(
+        InterfaceLoweringKey::new(InterfaceKindTag::PistonFace, PISTON_FACE_FAMILY),
+        lower_piston_face,
+    );
 }
 
 fn lower_cavity(
@@ -211,6 +217,77 @@ fn nasa9_band(
         return Err(it.invalid("gas card has no valid overlapping temperature band containing T0"));
     }
     Ok((lo, hi))
+}
+
+fn lower_piston_face(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+) -> Result<LoweredInterfaceOutput, LoweringError> {
+    let mut it = Scoped::new("interface", &ctx.interface.name);
+    let DraftInterfaceKind::PistonFace { state } = &ctx.interface.kind else {
+        return Err(it.invalid("expected PistonFace interface"));
+    };
+    let (mut area_opt, mut sign_opt) = (None, None);
+    for (k, q) in state {
+        match k.name.as_str() {
+            "area" if area_opt.is_none() => area_opt = Some(*q),
+            "sign" if sign_opt.is_none() => sign_opt = Some(*q),
+            "area" | "sign" => return Err(it.invalid(format!("duplicate `{}`", k.name))),
+            other => return Err(it.invalid(format!("unknown piston-face parameter `{other}`"))),
+        }
+    }
+    let inp = ctx.draft.input();
+    let (cat, fa, fb) = (
+        &inp.catalog,
+        ctx.interface.feature_a,
+        ctx.interface.feature_b,
+    );
+    let port = |e, n| graph.resolve_entity_port(cat, e, n);
+    let (mech, press, cav) = match (
+        port(fa, "mechanics"),
+        port(fb, "pressure"),
+        port(fb, "mechanics"),
+        port(fa, "pressure"),
+    ) {
+        (Some(m), Some(p), None, None) => (m, p, fb),
+        (None, None, Some(m), Some(p)) => (m, p, fa),
+        _ => return Err(it.invalid("piston-face requires `mechanics` and `pressure` ports")),
+    };
+    let area = if let Some(q) = area_opt {
+        if !(q.dims == AREA_DIMS && q.value.is_finite() && q.value > 0.0) {
+            return Err(it.invalid("piston-face `area` must be positive [m^2]"));
+        }
+        it.declare("state.area", q);
+        q.value
+    } else {
+        let part = owning_part(inp, cav)
+            .map(|i| &inp.parts[i])
+            .ok_or_else(|| it.invalid("missing cavity part"))?;
+        let DraftGeometrySource::Primitive(PrimitiveShape::Cylinder { radius, .. }) =
+            &part.geometry
+        else {
+            return Err(it.invalid("piston-face without `area` requires cylinder cavity"));
+        };
+        if !(radius.value.is_finite() && radius.value > 0.0) {
+            return Err(it.invalid("cavity cylinder radius must be positive finite"));
+        }
+        let a = PI * radius.value * radius.value;
+        it.derive(part, "area", a, AREA_DIMS, "pi*r^2");
+        a
+    };
+    let sign = match sign_opt {
+        Some(q) if q.dims == Dims::NONE && q.value.abs().total_cmp(&1.0).is_eq() => {
+            it.declare("state.sign", q);
+            q.value
+        }
+        Some(_) => return Err(it.invalid("piston-face `sign` must be +1 or -1")),
+        None => {
+            it.declare("default_sign", QtyAny::dimensionless(1.0));
+            1.0
+        }
+    };
+    graph.attach_common_flow(mech, press, sign * area);
+    Ok(it.interface_output(None))
 }
 
 #[cfg(test)]

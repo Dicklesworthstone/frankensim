@@ -547,6 +547,12 @@ pub enum DraftInterfaceKind {
     /// cell at `feature_b` sets the temperature-dependent law of the interface
     /// that the part owning `feature_a` carries.
     TemperatureSource,
+    /// Mechanical-to-fluid piston face coupling a translating body's velocity
+    /// to a gas cavity's compression flow through the bore area; no card.
+    PistonFace {
+        /// Optional face `area` [m^2] and dimensionless `sign` (`+1` or `-1`).
+        state: Vec<(ParameterKey, QtyAny)>,
+    },
 }
 
 /// Interface binding two surface/region features through a card-backed law.
@@ -1911,7 +1917,8 @@ impl DraftAssembly {
                     }
                     check_params(state, &format!("{scope}.state"))?;
                 }
-                DraftInterfaceKind::HeatRoute { state } => {
+                DraftInterfaceKind::HeatRoute { state }
+                | DraftInterfaceKind::PistonFace { state } => {
                     check_params(state, &format!("{scope}.state"))?;
                 }
                 DraftInterfaceKind::ShearFilm { third_body, state } => {

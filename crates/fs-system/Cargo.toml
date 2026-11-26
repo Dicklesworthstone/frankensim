@@ -62,6 +62,10 @@ name = "relaxation_network_slice"
 required-features = ["slices"]
 
 [[test]]
+name = "gas_cavity_slice"
+required-features = ["slices"]
+
+[[test]]
 name = "modal_structure_slice"
 required-features = ["modal-slices"]
 

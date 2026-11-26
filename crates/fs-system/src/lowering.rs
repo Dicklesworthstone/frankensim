@@ -69,6 +69,8 @@ pub const HEAT_ROUTE_FAMILY: &str = "heat-route";
 pub const SHEAR_FILM_FAMILY: &str = "shear-film";
 /// Dispatch family of a card-less [`DraftInterfaceKind::TemperatureSource`].
 pub const TEMPERATURE_SOURCE_FAMILY: &str = "temperature-source";
+/// Dispatch family of a card-less [`DraftInterfaceKind::PistonFace`].
+pub const PISTON_FACE_FAMILY: &str = "piston-face";
 
 /// BLAKE3 domain for parametric geometry fingerprints minted during lowering.
 pub const LOWERING_GEOMETRY_HASH_DOMAIN: &str = "org.frankensim.fs-system.lowering.geometry.v1";
@@ -256,6 +258,8 @@ pub enum InterfaceKindTag {
     HeatRoute,
     /// Card-less temperature source.
     TemperatureSource,
+    /// Card-less mechanical-to-fluid piston face.
+    PistonFace,
 }
 
 impl InterfaceKindTag {
@@ -270,6 +274,7 @@ impl InterfaceKindTag {
             Self::ElectricalContact => "electrical_contact",
             Self::HeatRoute => "heat_route",
             Self::TemperatureSource => "temperature_source",
+            Self::PistonFace => "piston_face",
         }
     }
 }
@@ -286,6 +291,7 @@ impl From<&DraftInterfaceKind> for InterfaceKindTag {
             DraftInterfaceKind::ElectricalContact { .. } => Self::ElectricalContact,
             DraftInterfaceKind::HeatRoute { .. } => Self::HeatRoute,
             DraftInterfaceKind::TemperatureSource => Self::TemperatureSource,
+            DraftInterfaceKind::PistonFace { .. } => Self::PistonFace,
         }
     }
 }
@@ -3195,6 +3201,12 @@ impl LoweringRegistry {
                     DraftInterfaceKind::TemperatureSource => (
                         None,
                         TEMPERATURE_SOURCE_FAMILY.to_owned(),
+                        ResolvedInterfaceCard::None,
+                        None,
+                    ),
+                    DraftInterfaceKind::PistonFace { .. } => (
+                        None,
+                        PISTON_FACE_FAMILY.to_owned(),
                         ResolvedInterfaceCard::None,
                         None,
                     ),
