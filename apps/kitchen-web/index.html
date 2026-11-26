@@ -1146,7 +1146,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
               <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
               <p class="kicker">
-                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning.
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning. Or add one more combi, range or cook, and see which one moves the limit.
               </p>
             </div>
             <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -1347,6 +1347,70 @@
               <div>
                 <code class="formula">cooked ≥ 11:30 − holding time<br />cooked ≤ the van − packing<br />lunch = the later van + its drive</code>
                 <p class="model">Model: <code>bestPair</code> on <code>planMorning</code>, the morning above, run for each kitchen with its own van.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal kt-fig" id="kit">
+            <header class="fig-head">
+              <p class="todo">Buy one thing, then see if the limit moves</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage kt-stage" data-kit-stage>
+                <canvas data-kit-canvas tabindex="0" aria-label="The morning's kitchen with room at both ends of its line: a third combi oven rolls in at the left end when it is bought, a second six-burner range at the right end, and a fourth cook joins the crew. The floor in front of a station glows red while every place at it is taken, and a cook with free hands while work waits for room wears a pause badge. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud mo-hud kt-hud" aria-hidden="true"><b data-kt-hud-clock>6:00</b><span data-kt-hud-pans>…</span><em data-kt-hud-note>…</em></div>
+                <p class="wk-legend rs-legend kt-legend" aria-hidden="true"><span class="full">Red floor: every place at a station taken</span><span class="wait">Pause badge: a cook free, waiting for room</span><span class="unit">1 carrier = 6 hot pans</span></p>
+              </div>
+              <div class="lab kt-lab">
+                <div class="lab-view">
+                  <div class="rs-chart kt-chart" data-kit-chart role="img" aria-label="Minute by minute from 6:00 until the van leaves: how many of the combis, the range places and the table places are in use, how many cooks are at work and how many stand free waiting for room, with every stretch where a station is full in red"></div>
+                  <p class="wk-keys kt-keys" aria-hidden="true"><span class="use">In use</span><span class="full">Full: every place taken</span><span class="wait">Cooks free, waiting for room</span></p>
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>The van leaves</span><b><i data-kt-van>…</i><em data-kt-van-d hidden></em></b><small data-kt-van-s>…</small></div>
+                    <div class="wk-tile"><span>Most meals by 10:30</span><b><i data-kt-limit>…</i><em data-kt-limit-d hidden></em></b><small data-kt-limit-s>…</small></div>
+                    <div class="wk-tile"><span>Full in the last hour</span><b><i data-kt-full>…</i></b><small data-kt-full-s>…</small></div>
+                    <div class="wk-tile"><span>Waiting for room</span><b><i data-kt-wait>…</i></b><small data-kt-wait-s>…</small></div>
+                  </div>
+                  <div class="rs-map-wrap">
+                    <p class="rs-map-head"><b>What each purchase buys</b><span class="wk-keys rs-map-keys mo-ladder-keys"><span class="today">Most meals on the 10:30 van, all at their best</span><span class="order">This order</span></span></p>
+                    <div class="mo-ladder-box" data-kit-ladder role="img" aria-label="For the menu on screen, the most meals that make the 10:30 van with every portion at its best: as built, with a third combi, with a second range, with a fourth cook, and with everything bought now"></div>
+                    <p class="rs-map-note" data-kit-ladder-note></p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">Buy for the station that is full.</p>
+                  <div class="field">
+                    <p class="micro">Add to the kitchen · press again to take it out</p>
+                    <div class="seg fill kt-buy" role="group" aria-label="Add to the kitchen">
+                      <button type="button" data-kt-buy="combi" aria-pressed="false">A third combi</button>
+                      <button type="button" data-kt-buy="range" aria-pressed="false">A second range</button>
+                      <button type="button" data-kt-buy="cook" aria-pressed="false">A fourth cook</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish holds · where it cooks · press to swap</p>
+                    <ul class="wk-menu kt-menu" data-kt-menu></ul>
+                  </div>
+                  <label class="range"><span><b>Meals on the van</b><output data-kt-meals-val>1,400 meals</output></span><input type="range" min="50" max="2000" step="10" value="1400" data-kt-meals aria-label="Meals on the van" /></label>
+                  <div class="status" data-kt-status data-state="warn">Planning the morning…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="kit-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>This is the kitchen above, planned the same way, with three cooks and the van at 10:30. A third combi stands at the left end of the line and works like the other two: one dish to a program, up to ten pans. A second six-burner range stands at the right end with room for two more cooks, one at each half, and a cook minding pans stays at the range they started at until those pans are done. A fourth cook works like the other three. The worktable and its three places stay as they are.</p>
+                <p>A station is full while every place at it is taken: every combi running or waiting to be unloaded, both halves of every range worked or all its burners lit, all three table places in use. A cook waits for room when their hands are free and work is ready that could start but for room at its station. The chart counts both, minute by minute, and the tiles sum them over the hour before the van leaves.</p>
+                <p>For the menu on screen, the most meals is found for the kitchen as built and for every choice of purchases: the gap between an order that makes the van with every portion at its best and one that doesn't is halved until they are ten meals apart.</p>
+              </div>
+              <div>
+                <code class="formula">full = every place at the station taken<br />waiting = hands free, work ready, no room</code>
+                <p class="model">Model: <code>planMorning</code> with the combis, ranges and crew bought, and <code>morningLimit</code> for the most meals.</p>
               </div>
                 </div>
               </details>

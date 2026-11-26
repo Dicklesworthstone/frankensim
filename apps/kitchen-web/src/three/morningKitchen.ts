@@ -9,10 +9,12 @@
  *     `rollOut`) roll out of the door when the van leaves;
  *   - the cooks walk to each station the plan sends them to and work there for its minutes, merged into stretches
  *     of at least a second of animation: a kinematic illustration (people.ts Routines).
- * The morning figure shows one kitchen; the two-kitchen figure two, the second across town.
+ * The morning figure shows one kitchen; the two-kitchen figure two, the second across town. Built with a bigger `kit`
+ * it has room for a third combi (at the line's left end) and a second range (at its right end), which roll in along
+ * the line when `setKit` buys them and out again when it does not.
  */
 import * as THREE from "three";
-import { BURNERS, OVENS, SLOTS, TABLE_SPOTS, menuDishes, type Job, type Morning } from "../sim/cateringMorning";
+import { KIT, RANGE_BURNERS, RANGE_PLACES, SLOTS, TABLE_SPOTS, menuDishes, type Job, type Kit, type Morning } from "../sim/cateringMorning";
 import { makeTool, type ToolKind } from "./heroKitchen";
 import { buildFixture, type Model, type Piece } from "./models/all";
 import { Routine, makeStaff, type Cohort, type RoutineStep, type Staff, type WorkKind } from "./models/people";
@@ -44,18 +46,18 @@ export const CARRIER_COLS = 3;
 const CARRIER_HIGH = 3;
 /** Hot pans to a carrier, as the van's carriers are loaded. */
 export const PER_CARRIER = 6;
-/** The pieces a kitchen builds, for main.ts to build ahead. */
-export const MORNING_PIECES: readonly Piece[] = [
-  [OVEN.id, OVEN, 2],
-  [OVEN.id, OVEN, 2],
-  [RANGE.id, RANGE, 2],
+/** The pieces a kitchen with room for this much equipment builds, for main.ts to build ahead. */
+export const kitchenPieces = (room: Kit): Piece[] => [
+  ...Array.from({ length: room.ovens }, (): Piece => [OVEN.id, OVEN, 2]),
+  ...Array.from({ length: room.ranges }, (): Piece => [RANGE.id, RANGE, 2]),
   [TABLE.id, TABLE, 2],
-  ...Array.from({ length: BURNERS }, (): Piece => [POT.id, POT, 1]),
-  ...Array.from({ length: BURNERS }, (): Piece => [SKILLET.id, SKILLET, 1]),
+  ...Array.from({ length: room.ranges * RANGE_BURNERS }, (): Piece => [POT.id, POT, 1]),
+  ...Array.from({ length: room.ranges * RANGE_BURNERS }, (): Piece => [SKILLET.id, SKILLET, 1]),
   ...Array.from({ length: TABLE_SPOTS }, (): Piece => [BOARD.id, BOARD, 1]),
   ...Array.from({ length: TABLE_SPOTS }, (): Piece => [HPAN.id, HPAN, 2]),
   [CARRIER.id, CARRIER, 1],
 ];
+export const MORNING_PIECES: readonly Piece[] = kitchenPieces(KIT);
 
 /** A cook on shift: their build and their look. */
 export interface CookSpec {
@@ -67,9 +69,22 @@ export interface CookSpec {
 /** Each menu place's colour (the chicken, the starch, the third dish, the sides), on the charts and their keys. */
 export const SLOT_COLOR = ["#f2b134", "#5ec8f2", "#e0905f", "#86d39b"] as const;
 
-const burnerAt = (k: number) => ({ x: RANGE.x0 + BURNER_X[k % 3]!, z: LINE_Z - BURNER_Z[k >= 3 ? 1 : 0]! });
+/** The gap between two pieces side by side on the line. */
+const LINE_GAP = 0.033;
+/** Where each combi's left side stands: the two as built, then any more to their left. */
+export const ovenX0 = (o: number) => (o < OVEN_X0.length ? OVEN_X0[o]! : OVEN_X0[0] - (o - OVEN_X0.length + 1) * (OVEN.w + LINE_GAP));
+/** Where each range's left side stands: the one as built, then any more to its right. */
+export const rangeX0 = (r: number) => RANGE.x0 + r * (RANGE.w + LINE_GAP);
+/** Burner k: range k / 6, then front row (0..2) and back row (3..5) of that range, left to right. */
+export const burnerAt = (k: number) => {
+  const r = Math.floor(k / RANGE_BURNERS);
+  const l = k % RANGE_BURNERS;
+  return { x: rangeX0(r) + BURNER_X[l % 3]!, z: LINE_Z - BURNER_Z[l >= 3 ? 1 : 0]! };
+};
+/** Where a cook stands at a range half (0 and 1 the first range's left and right, 2 and 3 the second's). */
+export const rangeSideX = (side: number) => rangeX0(Math.floor(side / RANGE_PLACES)) + (RANGE.w * ((side % RANGE_PLACES) + 0.5)) / RANGE_PLACES;
 const tableX = (k: number) => TABLE.x0 + (TABLE.w * (k + 0.5)) / TABLE_SPOTS;
-const ovenX = (o: number) => OVEN_X0[o]! + OVEN.w / 2;
+export const ovenX = (o: number) => ovenX0(o) + OVEN.w / 2;
 export const fmtLate = (m: number) => (m < 0.5 ? "On time" : m < 59.5 ? `${Math.round(m)} min late` : `${Math.floor(Math.round(m) / 60)} h ${String(Math.round(m) % 60).padStart(2, "0")} late`);
 export const shortName = (name: string) => name.replace(/^(Chicken|Mushroom|Baked|Carne asada|Roast chicken|Short rib) /, "").replace(/^./, (c) => c.toUpperCase());
 
@@ -90,6 +105,8 @@ interface Act {
   work: WorkKind | null;
   at?: THREE.Vector3;
   surf?: number;
+  /** Nothing to do: stood where they last worked, or out of the way (clearIdle). */
+  idle?: boolean;
 }
 
 const SPOT_Z = { line: LINE_Z + 0.3, oven: LINE_Z + 0.5, table: TABLE_Z - 0.36 };
@@ -119,22 +136,22 @@ function actsFor(m: Morning, c: number, endMin: number): Act[] {
       // back row (minded, not stirred, and out of easy reach), watching it.
       const ks = on.map((j) => j.spot);
       const side = on[0]!.side ?? 0;
-      const x = RANGE.x0 + (RANGE.w * (side + 0.5)) / 2;
-      const front = ks.find((k) => k < 3) ?? ks[0]!;
+      const x = rangeSideX(side);
+      const front = ks.find((k) => k % RANGE_BURNERS < 3) ?? ks[0]!;
       const skillet = on.some((j) => m.burns.some((u) => u.burner === j.spot && u.t0 <= mid && u.t1 > mid && u.vessel === "skillet"));
       const v = burnerAt(front);
       act = {
         t0: a,
         t1: b,
         spot: { key: `range:${side}`, x, z: SPOT_Z.line, yaw: Math.PI },
-        work: front >= 3 ? null : skillet ? "saute" : "stir",
+        work: front % RANGE_BURNERS >= 3 ? null : skillet ? "saute" : "stir",
         at: new THREE.Vector3(v.x, GRATE_Y + (skillet ? 0.03 : POT.h), v.z + (skillet ? 0 : 0.05)),
         surf: GRATE_Y,
       };
-    } else act = { t0: a, t1: b, spot: spot ?? { key: `table:${c % TABLE_SPOTS}`, x: tableX(c % TABLE_SPOTS), z: SPOT_Z.table, yaw: 0 }, work: null };
+    } else act = { t0: a, t1: b, spot: spot ?? { key: `table:${c % TABLE_SPOTS}`, x: tableX(c % TABLE_SPOTS), z: SPOT_Z.table, yaw: 0 }, work: null, idle: true };
     spot = act.spot;
     const prev = acts[acts.length - 1];
-    if (prev && prev.spot.key === act.spot.key && prev.work === act.work) prev.t1 = b;
+    if (prev && prev.spot.key === act.spot.key && prev.work === act.work && !prev.idle === !act.idle) prev.t1 = b;
     else acts.push(act);
   }
   // To animation seconds, and slivers merged into the longer stretch beside them, so no motion flickers.
@@ -157,12 +174,39 @@ function actsFor(m: Morning, c: number, endMin: number): Act[] {
   for (let k = acts.length - 1; k > 0; k--) {
     const p = acts[k - 1]!;
     const x = acts[k]!;
-    if (p.spot.key === x.spot.key && p.work === x.work) {
+    if (p.spot.key === x.spot.key && p.work === x.work && !p.idle === !x.idle) {
       p.t1 = x.t1;
       acts.splice(k, 1);
     }
   }
   return acts;
+}
+
+/** How close two cooks may stand, metres between their places, and how far an idle cook steps back into the aisle. */
+const CLEAR = 0.55;
+const ASIDE = 0.55;
+/**
+ * Each idle stretch whose place another cook stands or works within reach of meanwhile moves out of the way: back from
+ * the counter into the aisle, and along it as far as it takes to be clear of every other cook then (the first idle
+ * stretches placed first, each clear of those placed before it).
+ */
+function clearIdle(acts: Act[][]): void {
+  const near = (a: Spot, b: Spot) => Math.hypot(a.x - b.x, a.z - b.z) < CLEAR;
+  acts.forEach((mine, c) => {
+    for (const a of mine) {
+      if (!a.idle) continue;
+      const others = acts.flatMap((xs, d) => (d === c ? [] : xs.filter((x) => x.t0 < a.t1 && x.t1 > a.t0).map((x) => x.spot)));
+      if (!others.some((o) => near(o, a.spot))) continue;
+      const back = a.spot.yaw === 0 ? -ASIDE : ASIDE;
+      for (const dx of [0, -0.6, 0.6, -1.2, 1.2]) {
+        const s: Spot = { key: `${a.spot.key}~${dx}`, x: a.spot.x + dx, z: a.spot.z + back, yaw: a.spot.yaw };
+        if (!others.some((o) => near(o, s))) {
+          a.spot = s;
+          break;
+        }
+      }
+    }
+  });
 }
 
 function wholeAct(j: Job, a: number, b: number): Act {
@@ -206,6 +250,14 @@ const TOOL_FOR: Partial<Record<WorkKind, ToolKind>> = { stir: "ladle", saute: "s
 function moveSteps(a: Spot, b: Spot): RoutineStep[] {
   const along = Math.abs(a.yaw - b.yaw) < 1e-6 && Math.abs(a.z - b.z) < 0.15 && Math.abs(a.x - b.x) < 0.62;
   if (along) return [{ kind: "shuffle", to: [b.x, b.z] }];
+  // Out of the way and back (clearIdle): a step or two back from the counter, else straight there, still facing it.
+  if (a.key.includes("~") || b.key.includes("~")) {
+    if (Math.abs(a.yaw - b.yaw) < 1e-6 && Math.hypot(a.x - b.x, a.z - b.z) <= 0.8) return [{ kind: "shuffle", to: [b.x, b.z] }];
+    return [
+      { kind: "walk", path: [[b.x, b.z]], speed: 1.0 },
+      { kind: "turn", yaw: b.yaw },
+    ];
+  }
   const back = b.yaw === 0 ? -0.38 : 0.38;
   return [
     { kind: "walk", path: [[b.x, b.z + back], [b.x, b.z]], speed: 1.0 },
@@ -272,6 +324,9 @@ function routineFor(rig: CookRig, acts: Act[], loopS: number): { routine: Routin
 /** How far the carriers roll out of the door when the van leaves, metres, and in how many animation seconds. */
 const ROLL_M = 3;
 const ROLL_S = 2.4;
+/** How far a piece of equipment bought rolls in along the line, metres, and in how many (real) seconds. */
+const ROLL_IN_M = 3.2;
+const ROLL_IN_S = 1.4;
 /** The roll in morning minutes: a loop must run at least this long past a van that rolls out, or it stops midway. */
 export const ROLL_MIN = ROLL_S / SEC_PER_MIN;
 
@@ -298,7 +353,11 @@ export class MorningKitchen {
   private lastMinute = -1;
   private packed = 0;
   private readonly ovens: Model[];
-  private readonly range: Model;
+  private readonly ranges: Model[];
+  /** The equipment in use, and each piece's roll into place (0 off the line's end, 1 in place). */
+  private kit: Kit = KIT;
+  private readonly ovenIn: number[];
+  private readonly rangeIn: number[];
   private readonly pots: Model[] = [];
   private readonly skillets: THREE.Group[] = [];
   private readonly boards: THREE.Group[] = [];
@@ -307,27 +366,35 @@ export class MorningKitchen {
   private readonly carriers: THREE.Object3D[] = [];
   /** The carriers' stack, which rolls out of the door when the van leaves. */
   private readonly stack = new THREE.Group();
-  private readonly door = [0, 0];
-  private readonly heat = [0, 0];
+  private readonly door: number[];
+  private readonly heat: number[];
   /** The burners whose skillet a cook holds: each cook holding one, the front skillet among their range jobs now. */
   private readonly inHand = new Set<number>();
 
-  constructor(specs: readonly CookSpec[]) {
+  /** `room`: the most equipment it can show (as built unless more is given); `setKit` says how much is in. */
+  constructor(specs: readonly CookSpec[], room: Kit = KIT) {
     const add = (o: THREE.Object3D) => this.group.add(o);
 
-    /* The line: two combis and the range. */
-    this.ovens = OVEN_X0.map((x0) => {
+    /* The line: the combis and the range (two and one as built). */
+    this.ovens = Array.from({ length: room.ovens }, (_, o) => {
       const m = buildFixture(OVEN.id, OVEN, 2);
-      add(place(m, x0, LINE_Z, true));
+      add(place(m, ovenX0(o), LINE_Z, true));
       return m;
     });
-    this.range = buildFixture(RANGE.id, RANGE, 2);
-    add(place(this.range, RANGE.x0, LINE_Z, true));
-    this.range.hooks.flames?.setAll?.(0);
+    this.ranges = Array.from({ length: room.ranges }, (_, r) => {
+      const m = buildFixture(RANGE.id, RANGE, 2);
+      add(place(m, rangeX0(r), LINE_Z, true));
+      m.hooks.flames?.setAll?.(0);
+      return m;
+    });
+    this.door = this.ovens.map(() => 0);
+    this.heat = this.ovens.map(() => 0);
+    this.ovenIn = this.ovens.map((_, o) => (o < KIT.ovens ? 1 : 0));
+    this.rangeIn = this.ranges.map((_, r) => (r < KIT.ranges ? 1 : 0));
 
     /* A pot and a skillet for each burner, shown while the plan has one there. Skillets on the back burners turn their
      * handles back and out, clear of the pans in front. */
-    for (let k = 0; k < BURNERS; k++) {
+    for (let k = 0; k < room.ranges * RANGE_BURNERS; k++) {
       const b = burnerAt(k);
       const pot = buildFixture(POT.id, POT, 1);
       pot.group.position.set(b.x - POT.w / 2, GRATE_Y + 0.0006, b.z + POT.d / 2);
@@ -341,7 +408,8 @@ export class MorningKitchen {
       sk.group.position.set(-SKILLET.w / 2, 0, SKILLET.d - SKILLET.w / 2);
       pivot.add(sk.group);
       pivot.position.set(b.x, GRATE_Y + 0.0006, b.z);
-      pivot.rotation.y = k < 3 ? 0 : k % 3 === 2 ? (3 * Math.PI) / 4 : (-3 * Math.PI) / 4;
+      const l = k % RANGE_BURNERS;
+      pivot.rotation.y = l < 3 ? 0 : l % 3 === 2 ? (3 * Math.PI) / 4 : (-3 * Math.PI) / 4;
       pivot.visible = false;
       add(pivot);
       this.skillets.push(pivot);
@@ -391,6 +459,46 @@ export class MorningKitchen {
     });
   }
 
+  /** The equipment in use: pieces past it roll out along the line, and pieces in it roll in (at once when `now`). */
+  setKit(kit: Kit, now = false): void {
+    this.kit = { ovens: Math.min(kit.ovens, this.ovens.length), ranges: Math.min(kit.ranges, this.ranges.length) };
+    if (now) {
+      this.ovenIn.forEach((_, o) => (this.ovenIn[o] = o < this.kit.ovens ? 1 : 0));
+      this.rangeIn.forEach((_, r) => (this.rangeIn[r] = r < this.kit.ranges ? 1 : 0));
+      this.roll(0);
+    }
+  }
+
+  /** Each piece bought or not a step `dt` (animation seconds) further along its roll; a piece out of the kitchen is
+   * off the line's end, and hidden. Returns whether anything is still rolling. */
+  private roll(dt: number): boolean {
+    let moving = false;
+    const step = (cur: number, want: number) => {
+      const next = want > cur ? Math.min(want, cur + dt / ROLL_IN_S) : Math.max(want, cur - dt / ROLL_IN_S);
+      if (next !== want) moving = true;
+      return next;
+    };
+    const ease = (f: number) => f * f * (3 - 2 * f);
+    this.ovens.forEach((m, o) => {
+      if (o < KIT.ovens) return;
+      const f = (this.ovenIn[o] = step(this.ovenIn[o]!, o < this.kit.ovens ? 1 : 0));
+      m.group.position.x = ovenX0(o) - ROLL_IN_M * (1 - ease(f));
+      m.group.visible = f > 0;
+    });
+    this.ranges.forEach((m, r) => {
+      if (r < KIT.ranges) return;
+      const f = (this.rangeIn[r] = step(this.rangeIn[r]!, r < this.kit.ranges ? 1 : 0));
+      m.group.position.x = rangeX0(r) + ROLL_IN_M * (1 - ease(f));
+      m.group.visible = f > 0;
+    });
+    return moving;
+  }
+
+  /** How far each combi and each range is into place (1: in place; 0: out of the kitchen). */
+  inPlace(): { ovens: readonly number[]; ranges: readonly number[] } {
+    return { ovens: this.ovenIn, ranges: this.rangeIn };
+  }
+
   private carrierSlot(k: number): THREE.Vector3 {
     const col = Math.floor(k / CARRIER_HIGH);
     return new THREE.Vector3(CARRIER_X0 + col * (CARRIER.w + 0.03) + CARRIER.w, (k % CARRIER_HIGH) * (CARRIER.h + 0.002), TABLE_Z);
@@ -409,6 +517,7 @@ export class MorningKitchen {
     this.hotPans.sort((a, b) => a - b);
     this.lastMinute = -1;
     const acts = this.cooks.map((_, i) => (m && i < crew ? actsFor(m, i, endMin) : []));
+    clearIdle(acts);
     for (let pass = 0; pass < 2; pass++) {
       let need = 0;
       this.cooks.forEach((k, i) => {
@@ -448,35 +557,39 @@ export class MorningKitchen {
   /** The kitchen at minute `t` of the morning, `dt` animation seconds after the last call. */
   show(t: number, dt: number): KitchenMoment {
     const morning = this.morning;
-    const { range, ovens, pots, skillets, inHand, door, heat } = this;
+    const { ranges, ovens, pots, skillets, inHand, door, heat } = this;
+    if (this.ovens.length > KIT.ovens || this.ranges.length > KIT.ranges) this.roll(dt);
     inHand.clear();
     if (morning)
       this.cooks.forEach((k, c) => {
         if (k.held !== "skillet") return;
-        const j = morning.jobs.find((x) => x.cook === c && x.at === "range" && x.spot < 3 && x.t0 <= t && x.t1 > t && morning.burns.some((u) => u.burner === x.spot && u.t0 <= t && u.t1 > t && u.vessel === "skillet"));
+        const j = morning.jobs.find((x) => x.cook === c && x.at === "range" && x.spot % RANGE_BURNERS < 3 && x.t0 <= t && x.t1 > t && morning.burns.some((u) => u.burner === x.spot && u.t0 <= t && u.t1 > t && u.vessel === "skillet"));
         if (j) inHand.add(j.spot);
       });
     // Burners: the vessel on each, its flame lit while it cooks.
     let burning = 0;
-    for (let k = 0; k < BURNERS; k++) {
+    for (let k = 0; k < pots.length; k++) {
       const b = morning?.burns.find((u) => u.burner === k && u.t0 <= t && u.t1 > t);
       if (b) burning++;
       const pot = pots[k]!;
       const sk = skillets[k]!;
-      pot.group.visible = !!b && b.vessel === "pot";
+      // Nothing cooks on a range still rolling into place.
+      const r = Math.floor(k / RANGE_BURNERS);
+      const on = b && this.rangeIn[r]! >= 1 ? b : undefined;
+      pot.group.visible = !!on && on.vessel === "pot";
       // Risotto and cheese sauce are stirred: no lid. A skillet in a cook's hand is not on the grate as well.
       const lid = pot.joints.get("pot_lid_lift");
       if (lid) lid.visible = false;
-      sk.visible = !!b && b.vessel === "skillet" && !inHand.has(k);
-      range.hooks.flames?.setFlow(k, b ? (b.vessel === "pot" ? 0.55 : 0.8) : 0);
+      sk.visible = !!on && on.vessel === "skillet" && !inHand.has(k);
+      ranges[r]!.hooks.flames?.setFlow(k % RANGE_BURNERS, on ? (on.vessel === "pot" ? 0.55 : 0.8) : 0);
       if (pot.group.visible) {
         pot.hooks.set?.("boil", 0.6);
         pot.hooks.tick?.(t, dt, 0.6);
       }
     }
-    range.hooks.tick?.(t, dt, 0.5);
+    for (const r of ranges) r.hooks.tick?.(t, dt, 0.5);
     // Ovens: the door open to load and unload, the program running between.
-    for (let o = 0; o < OVENS; o++) {
+    for (let o = 0; o < ovens.length; o++) {
       const l = morning?.loads.find((x) => x.oven === o && x.t0 <= t && x.t3 > t);
       const open = l && (t < l.t1 || t >= l.tu) ? 1 : 0;
       const run = l && t >= l.t1 && t < l.t2 ? 1 : 0;

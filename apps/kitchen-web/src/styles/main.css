@@ -3515,3 +3515,116 @@ button.wk-dish[aria-pressed="true"] {
     white-space: nowrap;
   }
 }
+
+/* Buy one thing (chapter 07, fourth figure): the kitchen with room for a third combi and a second range, how full
+ * each station is minute by minute, and what each purchase buys. */
+.kt-stage {
+  aspect-ratio: 16 / 9;
+  margin-bottom: 1.6rem;
+}
+.kt-hud {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  max-width: calc(100% - 1.8rem);
+}
+.kt-hud em[hidden] {
+  display: none;
+}
+.kt-hud em[data-kind="late"] {
+  color: #fecdd3;
+  background: rgb(251 113 133 / 0.22);
+}
+.kt-hud em[data-kind="full"] {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.24);
+}
+.kt-hud em[data-kind="wait"] {
+  color: #fde68a;
+  background: rgb(251 191 36 / 0.2);
+}
+.kt-legend .full,
+.kt-keys .full {
+  --k: #ef4444;
+}
+.kt-legend .wait,
+.kt-keys .wait {
+  --k: #fbbf24;
+}
+.kt-keys .use {
+  --k: color-mix(in srgb, var(--chapter) 55%, transparent);
+}
+.kt-keys {
+  margin: 0.45rem 0 1rem;
+}
+.kt-svg .use {
+  fill: color-mix(in srgb, var(--chapter) 55%, transparent);
+}
+.kt-svg .full {
+  fill: #ef4444;
+  fill-opacity: 0.85;
+}
+.kt-svg .wait {
+  fill: #fbbf24;
+  fill-opacity: 0.9;
+}
+.kt-svg.stale > :not(.planning) {
+  opacity: 0.4;
+}
+.kt-svg .planning {
+  text-anchor: middle;
+  font-size: 12px;
+  fill: var(--text);
+}
+.kt-lab .wk-tile b {
+  font-size: 1.12rem;
+  white-space: nowrap;
+}
+.kt-lab .wk-tiles {
+  transition: opacity 0.2s;
+}
+.kt-lab .wk-tiles[data-stale] {
+  opacity: 0.45;
+}
+.kt-ladder .other {
+  fill: rgb(255 255 255 / 0.24);
+}
+.kt-ladder .vals {
+  pointer-events: none;
+}
+.kt-ladder .vals text {
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+.kt-ladder .up {
+  fill: var(--ok);
+}
+.kt-ladder .nil,
+.kt-ladder .pend {
+  fill: var(--faint);
+}
+.kt-menu .wk-dish em {
+  min-width: 9.5em;
+  text-align: center;
+}
+.kt-menu .wk-dish em[data-at="range"] {
+  color: #fed7aa;
+  background: rgb(251 146 60 / 0.16);
+}
+.kt-menu .wk-dish em[data-at="oven"] {
+  color: #bfe9fb;
+  background: rgb(94 200 242 / 0.16);
+}
+.kt-menu .wk-dish em[data-at="both"] {
+  color: #e9d5ff;
+  background: rgb(192 132 252 / 0.16);
+}
+@media (max-width: 599px) {
+  .kt-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .kt-legend .unit {
+    display: none;
+  }
+}

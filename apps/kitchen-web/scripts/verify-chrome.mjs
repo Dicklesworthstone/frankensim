@@ -4,7 +4,7 @@
  *
  * Verifies:
  *   - ZERO console errors, ZERO uncaught page errors, ZERO failed network fetches (404/500)
- *   - ALL 14 WebGL canvases (13 figures; the two-kitchen figure has two) render non-blank frames (pixel variance > 0)
+ *   - ALL 15 WebGL canvases (14 figures; the two-kitchen figure has two) render non-blank frames (pixel variance > 0)
  *   - Each of the 5 hero kitchens builds cleanly, within the draw-call ceiling (DRAW_CEILING, shadow pass included)
  *   - Clicking "Deglaze 120 mL Wine" drops T_pan and increases vapor_released_g
  *   - The delivery box's fast estimate answers in range (quoting its measured error) and refuses out of range
@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -181,6 +181,7 @@ async function main() {
       "[data-morning-canvas]",
       "[data-crowd-canvas]",
       '[data-pair-canvas="hub"]',
+      "[data-kit-canvas]",
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -522,6 +523,38 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-pair.png");
       }
 
+      if (sid === "kit") {
+        // As set on arrival (every swap, 1,400 meals, nothing bought): late, the combis full. A third combi rolls in
+        // and makes the van; a second range buys nothing; the ladder raises the most meals for the combi only.
+        const info = () => page.$eval("[data-kit-stage]", (el) => el.kit.info());
+        const status = () => page.$eval("[data-kt-status]", (el) => el.textContent || "");
+        const settle = () =>
+          page.waitForFunction(() => {
+            const i = document.querySelector("[data-kit-stage]")?.kit?.info();
+            return i?.ready && Object.values(i.limits).every((v) => v !== null);
+          }, { timeout: 90000 });
+        await settle();
+        const built = await info();
+        console.log(`[verify-chrome] Buy one thing: ${JSON.stringify({ depart: built.depart, limits: built.limits })} | ${(await status()).slice(0, 90)}`);
+        if (built.made !== false || !/combis are full/.test(await status())) throw new Error(`Buy one thing: the kitchen as built did not miss the van on the combis: ${JSON.stringify(built)}`);
+        if (!(built.limits["100"] > built.limits["000"]) || built.limits["010"] !== built.limits["000"]) throw new Error(`Buy one thing: the limits do not favour the combi: ${JSON.stringify(built.limits)}`);
+        await page.click('[data-kt-buy="combi"]');
+        await settle();
+        await sleep(1800);
+        const combi = await info();
+        if (!combi.made || combi.kit.ovens !== 3 || combi.inPlace.ovens[2] !== 1) throw new Error(`Buy one thing: a third combi did not roll in and make the van: ${JSON.stringify(combi)}`);
+        await page.click('[data-kt-buy="combi"]');
+        await page.click('[data-kt-buy="range"]');
+        await settle();
+        const range = await status();
+        console.log(`[verify-chrome] Buy one thing, a second range: ${range.slice(0, 120)}`);
+        if (!/buys nothing/.test(range)) throw new Error(`Buy one thing: the second range's status does not say it buys nothing: ${range}`);
+        await page.click('[data-kt-buy="range"]');
+        await settle();
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-kit.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-kit.png");
+      }
+
       if (sid === "morning") {
         // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
         // must say which, and the worker must post every menu's limit, cooked today and ahead.
@@ -548,9 +581,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 14 WebGL canvases (13 figures; the two-kitchen figure has two) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 15 WebGL canvases (14 figures; the two-kitchen figure has two) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -565,6 +598,7 @@ async function main() {
         "[data-morning-canvas]",
         "[data-crowd-canvas]",
         '[data-pair-canvas="hub"]',
+        "[data-kit-canvas]",
         '[data-pair-canvas="far"]',
       ];
       ids.push("pair-far");
@@ -573,7 +607,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 14 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 15 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -611,7 +645,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 14/14 WebGL live, 0px overflow)!");
+    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 15/15 WebGL live, 0px overflow)!");
   } finally {
     await browser.close();
     server.close();

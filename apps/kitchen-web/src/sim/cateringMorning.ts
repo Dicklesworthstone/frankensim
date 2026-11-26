@@ -32,10 +32,19 @@ export const SERVE = 330;
 export const HORIZON = 600;
 export const BURNERS = 6;
 export const OVENS = 2;
+/** Burners on one six-burner range. */
+export const RANGE_BURNERS = 6;
 export const OVEN_PANS = 10;
 export const TABLE_SPOTS = 3;
 /** Cooks who can work the 36-inch range at once, shoulder to shoulder: one at its left half, one at its right. */
 export const RANGE_PLACES = 2;
+/** The kitchen's hot line: its 10-pan combis and its six-burner ranges (each with room for two cooks). */
+export interface Kit {
+  ovens: number;
+  ranges: number;
+}
+/** The kitchen as built: two combis and one range. */
+export const KIT: Kit = { ovens: OVENS, ranges: BURNERS / RANGE_BURNERS };
 /** The most minutes before just in time a dish's cooking is started, however well it holds. */
 export const EARLY = 90;
 
@@ -179,10 +188,14 @@ export interface MorningSettings {
   /** This kitchen's portions of each place (the sides last), when another kitchen cooks the rest; else each place's
    *  share of the meals (portionsFor). */
   portions?: readonly number[];
+  /** The equipment, when not as built (KIT). */
+  kit?: Kit;
 }
 
 /** When the van leaves for these settings. */
 export const doorOf = (s: MorningSettings): number => s.door ?? DOOR;
+/** The equipment for these settings. */
+export const kitOf = (s: MorningSettings): Kit => s.kit ?? KIT;
 
 /** One stretch of a cook's work. */
 export interface Job {
@@ -190,7 +203,8 @@ export interface Job {
   /** The batch's number in the morning. */
   batch: number;
   at: Station;
-  /** The burner, the oven or the table place it is at; on the range, the half of it the cook stands at. */
+  /** The burner, the oven or the table place it is at; on the range, the half of it the cook stands at (with a second
+   *  range, 2 and 3 are its halves; burners 6 to 11 are its own). */
   spot: number;
   side?: number;
   /** The menu place (0..2) whose dish it is. */
@@ -223,6 +237,14 @@ export interface Load {
   tu: number;
   t3: number;
 }
+/** A stretch in which cooks stood free while work was ready for a station with no room left: no burner or place at
+ * a range, no oven free, no table place. `at`: the station of the most pressing work waiting. */
+export interface Wait {
+  t0: number;
+  t1: number;
+  cooks: number[];
+  at: Station;
+}
 export interface BatchOut {
   slot: number;
   portions: number;
@@ -240,6 +262,7 @@ export interface Morning {
   jobs: Job[];
   burns: Burn[];
   loads: Load[];
+  waits: Wait[];
   batches: BatchOut[];
   /** The van leaves when the last pan is packed, at its time (10:30) at the soonest; `late` is how far past it. */
   depart: number;
@@ -347,6 +370,8 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     const sh = shift[b.slot] ?? 0;
     b.release = Math.max(0, fresh ? Math.max(floor, soon - sh) : Math.max(floor, soon) - sh);
   }
+  const kit = kitOf(s);
+  const nBurners = kit.ranges * RANGE_BURNERS;
   const tail = (b: Batch) => {
     let m = 0;
     for (let j = b.next; j < b.stages.length; j++) m += stageMin(b.stages[j]!, b);
@@ -356,18 +381,24 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
   const spare = new Array<number>(s.cooks).fill(1);
   /** Where each cook last worked: the station, and on the range the burner column (0..2). */
   const where: { at: Station | null; col: number; spot: number }[] = Array.from({ length: s.cooks }, (_, c) => ({ at: null, col: c % 3, spot: c % TABLE_SPOTS }));
-  const burner: (Batch | null)[] = new Array(BURNERS).fill(null);
-  /** The cook at each half of the range (-1: free), and the pans each cook has on it. */
-  const place: number[] = new Array(RANGE_PLACES).fill(-1);
+  const burner: (Batch | null)[] = new Array(nBurners).fill(null);
+  /** The cook at each half of each range (-1: free), and the pans each cook has on it. */
+  const place: number[] = new Array(kit.ranges * RANGE_PLACES).fill(-1);
   const onRange = new Array<number>(s.cooks).fill(0);
+  /** A burner free on range r. */
+  const rangeFree = (r: number) => {
+    for (let k = r * RANGE_BURNERS; k < (r + 1) * RANGE_BURNERS; k++) if (!burner[k]) return true;
+    return false;
+  };
   const table: boolean[] = new Array(TABLE_SPOTS).fill(false);
   type Oven = { phase: "idle" | "load" | "run" | "wait" | "unload"; load: Load | null; batches: Batch[]; stage: Stage | null; until: number };
-  const ovens: Oven[] = Array.from({ length: OVENS }, () => ({ phase: "idle", load: null, batches: [], stage: null, until: 0 }));
+  const ovens: Oven[] = Array.from({ length: kit.ovens }, () => ({ phase: "idle", load: null, batches: [], stage: null, until: 0 }));
   type Run = { end: number; done: () => void };
   const running: Run[] = [];
   const jobs: Job[] = [];
   const burns: Burn[] = [];
   const loads: Load[] = [];
+  const waits: Wait[] = [];
   let handsMin = 0;
 
   const pickCook = (need: number, at: Station, prefer: (c: number) => number): number => {
@@ -422,24 +453,29 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     }
     if (st.at === "range") {
       const hands = st.hands ?? 1;
-      if (!burner.includes(null)) return false;
-      // Only two cooks fit at the range: one there already, minding a pan, takes the second beside it; a new one
-      // comes only to a free half.
-      const free = place.indexOf(-1);
-      const c = pickCook(hands, "range", (k) => (place.includes(k) ? -5 : free < 0 ? Infinity : 0));
-      if (c < 0 || (!place.includes(c) && free < 0)) return false;
+      // Only two cooks fit at a range: one there already, minding a pan, takes the second beside it on the same range;
+      // a new one comes only to a free half of a range with a burner free.
+      let free = -1;
+      for (let p = 0; p < place.length && free < 0; p++) if (place[p] === -1 && rangeFree(Math.floor(p / RANGE_PLACES))) free = p;
+      const c = pickCook(hands, "range", (k) => {
+        const p = place.indexOf(k);
+        return p >= 0 ? (rangeFree(Math.floor(p / RANGE_PLACES)) ? -5 : Infinity) : free < 0 ? Infinity : 0;
+      });
+      if (c < 0) return false;
       if (!place.includes(c)) place[free] = c;
       const side = place.indexOf(c);
+      const r0 = Math.floor(side / RANGE_PLACES) * RANGE_BURNERS;
+      const half = side % RANGE_PLACES;
       let bi = -1;
       let bd = Infinity;
-      for (let k = 0; k < BURNERS; k++) {
+      for (let k = r0; k < r0 + RANGE_BURNERS; k++) {
         if (burner[k]) continue;
         // On the cook's half (the middle column between them); what is worked all the time (a skillet, a pot stirred
         // throughout) to the front row, in reach, and a pot only minded to the back.
-        const col = k % 3;
-        const back = k >= 3;
+        const col = (k - r0) % 3;
+        const back = k - r0 >= 3;
         const front = (st.vessel ?? "pot") === "skillet" || hands >= 1;
-        const dist = (side === 0 ? col : 2 - col) + (front ? (back ? 0.6 : 0) : back ? 0 : 0.3);
+        const dist = (half === 0 ? col : 2 - col) + (front ? (back ? 0.6 : 0) : back ? 0 : 0.3);
         if (dist < bd) {
           bd = dist;
           bi = k;
@@ -540,6 +576,14 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     return true;
   };
 
+  /** The stages that could start now, the most pressing first: food just off the heat is panned up first, then the
+   * stage with the most work still behind it. */
+  const hot = (b: Batch) => (b.next > 0 && b.stages[b.next - 1]!.at !== "table" ? 1 : 0);
+  const readyNow = (t: number) =>
+    batches
+      .filter((b) => !b.busy && b.next < b.stages.length && b.ready <= t + EPS && !(b.next === b.firstCook && b.release > t + EPS))
+      .sort((a, b) => hot(b) - hot(a) || tail(b) - tail(a) || a.slot - b.slot || a.i - b.i);
+
   let t = 0;
   let finished = false;
   for (let guard = 0; guard < 200000; guard++) {
@@ -549,11 +593,8 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     // Start what can: ovens waiting to be unloaded first, then the ready stages, least time to spare first.
     for (let again = true; again; ) {
       again = false;
-      for (let o = 0; o < OVENS; o++) if (ovens[o]!.phase === "wait" && tryUnload(o, t)) again = true;
-      const ready = batches.filter((b) => !b.busy && b.next < b.stages.length && b.ready <= t + EPS && !(b.next === b.firstCook && b.release > t + EPS));
-      // Food just off the heat is panned up first, then the stage with the most work still behind it.
-      const hot = (b: Batch) => (b.next > 0 && b.stages[b.next - 1]!.at !== "table" ? 1 : 0);
-      ready.sort((a, b) => hot(b) - hot(a) || tail(b) - tail(a) || a.slot - b.slot || a.i - b.i);
+      for (let o = 0; o < kit.ovens; o++) if (ovens[o]!.phase === "wait" && tryUnload(o, t)) again = true;
+      const ready = readyNow(t);
       for (const b of ready)
         if (tryStart(b, t)) {
           again = true;
@@ -569,6 +610,18 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     for (const r of running) next = Math.min(next, r.end);
     for (const b of batches) if (!b.busy && b.next === b.firstCook && b.release > t + EPS) next = Math.min(next, b.release);
     if (!Number.isFinite(next) || next > HORIZON) break;
+    // Cooks with their hands free while work is ready: none of it could start, so it waits for room at its station.
+    const idle: number[] = [];
+    for (let c = 0; c < s.cooks; c++) if (spare[c]! > 1 - EPS) idle.push(c);
+    if (idle.length && next > t + EPS) {
+      const stuck = readyNow(t);
+      if (stuck.length) {
+        const at = stuck[0]!.stages[stuck[0]!.next]!.at;
+        const w = waits[waits.length - 1];
+        if (w && Math.abs(w.t1 - t) < EPS && w.at === at && w.cooks.join() === idle.join()) w.t1 = next;
+        else waits.push({ t0: t, t1: next, cooks: idle, at });
+      }
+    }
     t = Math.max(t, next);
   }
 
@@ -607,7 +660,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     handMin += over(j.t0, j.t1) * j.hands;
     if (j.at === "table") tableMin += over(j.t0, j.t1);
   }
-  const use = { range: burnerMin / (BURNERS * 90), oven: ovenMin / (OVENS * 90), hands: handMin / (s.cooks * 90), table: tableMin / (TABLE_SPOTS * 90) };
+  const use = { range: burnerMin / (nBurners * 90), oven: ovenMin / (kit.ovens * 90), hands: handMin / (s.cooks * 90), table: tableMin / (TABLE_SPOTS * 90) };
   const bottleneck = (Object.keys(use) as (keyof typeof use)[]).reduce((a, b) => (use[b] > use[a] + EPS ? b : a), "range" as keyof typeof use);
 
   return {
@@ -616,6 +669,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     jobs,
     burns,
     loads,
+    waits,
     batches: batches.map((b, i) => ({ slot: b.slot, portions: b.portions, pans: packPans[i]!, cooked: b.cooked, packed: b.packed })),
     depart,
     late,
