@@ -1,8 +1,8 @@
 /**
  * Start the pan foods', the knife's and the wine label's texel layers (foodTexels.ts) in a worker as the page loads, so
  * the hero kitchen's first hotel pan and knife and the stove's bottle find them made instead of spending the main
- * thread on them. If no
- * worker can make them, or one is late, the builders make them themselves: the same arrays either way.
+ * thread on them. If no worker can make them, or one is late, the builders make them themselves: the same arrays
+ * either way.
  */
 import { provideKnifeTexels, provideLabelPaper, providePanFoodTexels } from "./foodTexels";
 import type { FoodTexelsReply } from "./foodTexels.worker";

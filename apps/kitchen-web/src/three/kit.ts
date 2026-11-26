@@ -31,7 +31,7 @@ const ownGl = new WeakMap<object, THREE.WebGLRenderer>();
 const EACH = typeof location !== "undefined" && new URLSearchParams(location.search).get("gl") === "each";
 /**
  * three reads each shader program's logs and link status back the first time it draws with it, to report a failed
- * compile: four calls a program that each wait on the GPU process. The built page skips them (as three advises for
+ * compile: four calls per program, each waiting on the GPU process. The built page skips them (as three advises for
  * production); development, and `?shaders=check` (scripts/verify-chrome.mjs), keep them.
  */
 const CHECK_SHADERS = import.meta.env.DEV || (typeof location !== "undefined" && new URLSearchParams(location.search).get("shaders") === "check");
@@ -259,11 +259,15 @@ function compileSettled(renderer: THREE.WebGLRenderer, scene: THREE.Object3D, ca
       if (materials.size === 0 || performance.now() - t0 > giveUpMs) resolve();
       else setTimeout(check, 10);
     };
-    // Without the extension, asking whether a program is ready waits for it: give the driver a moment first.
+    // Without the extension three counts every program ready at once, and its first draw waits for the link: give the
+    // driver a moment's start first, as three's does.
     if (renderer.extensions.has("KHR_parallel_shader_compile")) check();
     else setTimeout(check, 10);
   });
 }
+
+/** How long a compile may hold a view's draw (ShaderGate). */
+const GATE_MS = 4000;
 
 export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera): ShaderGate {
   let pending = 0;
@@ -272,8 +276,8 @@ export function shaderGate(renderer: THREE.WebGLRenderer, camera: THREE.Camera):
     ready: () => pending === 0,
     refresh(scene) {
       pending++;
-      const compiled = compileSettled(renderer, scene, camera, 4000).catch(() => undefined);
-      const timeout = new Promise((r) => setTimeout(r, 4000));
+      const compiled = compileSettled(renderer, scene, camera, GATE_MS).catch(() => undefined);
+      const timeout = new Promise((r) => setTimeout(r, GATE_MS));
       return Promise.race([compiled, timeout]).then(() => {
         if (--pending > 0) return;
         const fns = [...queued.values()];
