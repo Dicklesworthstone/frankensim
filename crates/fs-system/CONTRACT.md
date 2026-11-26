@@ -105,7 +105,13 @@ constructors:
   card picks the path: a model-bearing card on a thermal-only `Solid` moves
   that part from the kernel's lumped lowering to the timeline. A
   `thermal-boundary` interface from a cell's face to a face of a stationary
-  `DrivenBody` frame is the cell's exchange with the ambient. A cell outside
+  `DrivenBody` frame is the cell's exchange with the ambient. A
+  `thermal-contact` between two cells on a `thermal-contact-resistance` or
+  `thermal-conductance` card covers a whole box face of each at its `:area`:
+  `G = A / (d_a/k_a + d_b/k_b + R'')`, `d` half the side normal to that face
+  and each `k` the card's held `thermal_conductivity` (explicit scheme only;
+  no third body). The kernel's lumped contact is the card-only `d -> 0` form.
+  A cell outside
   the product law's `T` band is refused at lowering or stops the run; nothing
   clamps. The time plan's `scheme` is the timeline's; the mechanical owners
   run beside any scheme. Under `backward-euler` or `sdirk2` the cells step on

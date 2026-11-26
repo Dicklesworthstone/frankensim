@@ -704,6 +704,88 @@ fn product_law_cells_step_implicitly_on_the_cards_conductivity_held_for_the_run(
 }
 
 #[test]
+fn a_contact_between_cells_is_its_cards_resistance_in_series_with_their_bulk() {
+    use TimeScheme::{BackwardEuler, Explicit};
+    let cell = |k: Option<f64>| {
+        let mut values = vec![("density", 2.0, DENSITY)];
+        values.push(("specific_heat_capacity", 500.0, SPECIFIC_HEAT));
+        values.extend(k.map(|k| ("thermal_conductivity", k, Dims([1, 1, -3, -1, 0, 0]))));
+        let datum = [("datum_temperature", 0.0, TEMPERATURE)];
+        material(&values, vec![model(SENSIBLE_HEAT_LAW, &datum)])
+    };
+    let lower = |draft: &DraftAssembly, cards: &CardStore| {
+        let mut registry = LoweringRegistry::with_kernel_defaults();
+        register_owner_defaults(&mut registry);
+        registry.lower(draft, cards)
+    };
+    let family = "thermal-contact-resistance";
+    let r = "area-specific-thermal-contact-resistance";
+    let joined = |k_a, area, scheme, third_body: Option<ThirdBodyDecl>| {
+        let (draft, mut cards) = pairing([cell(k_a), cell(Some(100.0))], 2.0);
+        let card = interface_card(family, &[(r, 1e-3, Dims([0, -1, 3, 1, 0, 0]))]);
+        let law_card = cards.insert_interface(family, card).unwrap();
+        // The joint is bed0, from cell0's face, on to cell1's face (bed1's).
+        let mut joint = draft.input().interfaces[2].clone();
+        let (a, b) = (joint.feature_a, draft.input().interfaces[3].feature_a);
+        let mut input = under(&draft, scheme, scheme != Explicit).input().clone();
+        let entity =
+            EntityDeclaration::interface(input.root, "joint", InterfacePair::ordered(a, b));
+        let entity = input.catalog.declare(entity).unwrap();
+        (joint.name, joint.entity, joint.feature_b) = ("joint".to_owned(), entity, b);
+        let state = vec![(ParameterKey::new("area", AREA), QtyAny::new(area, AREA))];
+        joint.kind = DraftInterfaceKind::ThermalContact {
+            law_card,
+            third_body,
+            state,
+        };
+        input.interfaces.push(joint);
+        let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+        lower(&DraftAssembly::admit(input, &scenario).unwrap(), &cards)
+    };
+    let film = ThirdBodyDecl {
+        material_card: hash_bytes(b"paste"),
+        film_thickness: QtyAny::new(1e-4, LENGTH),
+        query_point: Vec::new(),
+    };
+    let k = Some(200.0);
+    for (k_a, area, scheme, third_body, want) in [
+        (None, 1.0, Explicit, None, "conductivity of `cell0`"),
+        (k, 0.5, Explicit, None, "covers a whole box face"),
+        (k, 1.0, Explicit, Some(film), "third body"),
+        (k, 1.0, BackwardEuler, None, "no implicit form yet"),
+    ] {
+        let why = joined(k_a, area, scheme, third_body).err().unwrap();
+        assert!(why.to_string().contains(want), "{why}");
+    }
+    let mut lowered = joined(k, 1.0, Explicit, None).unwrap();
+    let receipts = lowered.receipt.interfaces.iter();
+    let joint = receipts.filter(|r| r.interface_name == "joint");
+    let sources: Vec<_> = joint.flat_map(|r| &r.parameter_sources).collect();
+    let value = |name: &str| sources.iter().find(|p| p.parameter == name).unwrap().value;
+    let bulk = [value("a.bulk_resistance"), value("b.bulk_resistance")];
+    let want = [0.5 / 200.0, 0.5 / 100.0].map(f64::to_bits); // d = half of each 1 m box
+    assert_eq!(bulk.map(f64::to_bits), want);
+    let g = 1.0 / (bulk[0] + bulk[1] + value("contact_resistance"));
+    assert_eq!(value("contact_conductance").to_bits(), g.to_bits());
+    let id = lowered.node_map["thermal-timeline"];
+    let timeline = lowered.system.state::<TimelineState<'static>>(id).unwrap();
+    let links = timeline.simulation().links();
+    let link = links.values().next().filter(|_| links.len() == 1).unwrap();
+    assert_eq!((link.area_m2, link.conductance_w_k), (1.0, g));
+    // The same cells without the joint: the contact narrows their difference.
+    let (draft, cards) = pairing([cell(k), cell(Some(100.0))], 2.0);
+    let mut apart = lower(&draft, &cards).unwrap();
+    let gap = [&mut lowered, &mut apart].map(|run| {
+        run_counting(&mut run.system, 0.5);
+        let [t0, t1] = temperature_bits(&run.system, run.node_map["thermal-timeline"]);
+        let residual = run.system.ledger().energy_residual_j();
+        assert!(residual.abs() <= 1e-11, "{residual:e} J");
+        (f64::from_bits(t0) - f64::from_bits(t1)).abs()
+    });
+    assert!(gap[0] < gap[1], "{gap:?} K");
+}
+
+#[test]
 fn the_product_laws_band_refuses_a_cell_outside_it_and_never_clamps() {
     // The cells start at the 300 K ambient.
     let lower = |lo: f64, hi: f64| {

@@ -12,7 +12,9 @@
 //! `thermal-boundary` interface from the cell's face to a face of a
 //! stationary frame (a `DrivenBody` part) gives its surface exchange at ambient (`convection_coefficient`, `reservoir_area`
 //! and `reservoir_conductance` on its card); without one it exchanges
-//! nothing. A constant source on its [`HEAT_SOURCE_PORT`] is its applied
+//! nothing. A `thermal-contact` between two cells is a link: its card's `R''`
+//! in series with each cell's bulk conduction to the contact face.
+//! A constant source on its [`HEAT_SOURCE_PORT`] is its applied
 //! heat. The timeline steps at most the time plan's step, checks energy to
 //! the cells' shared absolute tolerance, and sends boundary heat through its
 //! `environment` port to a sink of that name.
@@ -27,6 +29,7 @@ use fs_matdb::{ConstitutiveModelCard, MaterialCard};
 use fs_mbd::Vec3;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::MaterialRef;
+use fs_scenario::assembly::draft::DraftInterfaceKind;
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftPartDecl, DraftPartKind, PhysicsDomain,
     PrimitiveShape, SourceTarget, StepPolicy, TimeHistory, TimeScheme,
@@ -42,6 +45,7 @@ use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
 };
+use fs_thermal::enthalpy::{ThermalLink, series_contact_conductance_w_k};
 
 use super::{
     Scoped, THERMAL_BOUNDARY_FAMILY, family_entry, of_family, owning_part, query_env, slot,
@@ -53,6 +57,7 @@ use crate::lowering::{
     ProvenanceRecorder, SourceLoweringReceipt, TEMPERATURE_DIMS, VOLUME_DIMS,
     record_time_history_provenance,
 };
+use crate::lowering::{CONTACT_RESISTANCE_DIMS, LENGTH_DIMS, query_thermal_conductance};
 use crate::{NodeId, RouteTemperature, System, heat_sink};
 
 /// Group name of the thermal timeline.
@@ -63,6 +68,8 @@ pub const SENSIBLE_HEAT_LAW: &str = "sensible-heat";
 /// The port of a cell its applied heat source targets.
 pub const HEAT_SOURCE_PORT: &str = "heat_source";
 const TIMELINE: &str = "thermal-timeline";
+/// Card families of a contact between two cells: a resistance, a conductance.
+const CONTACT_FAMILIES: [&str; 2] = ["thermal-contact-resistance", "thermal-conductance"];
 const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
 const SPECIFIC_HEAT: Dims = Dims([2, 0, -2, -1, 0, 0]);
 const HEAT_TRANSFER: Dims = Dims([0, 1, -3, -1, 0, 0]);
@@ -317,8 +324,8 @@ fn is_cell(laws: &CaloricLaws, cards: &CardStore, part: &DraftPartDecl) -> bool 
         && card.is_some_and(|card| laws.model(card.models()).is_some())
 }
 
-/// The cells, their boundary interfaces and their heat sources, as one
-/// selection.
+/// The cells, their boundary interfaces, the contacts between them and their
+/// heat sources, as one selection.
 #[allow(clippy::unnecessary_wraps)] // Signature required by GroupSelector.
 fn select(
     laws: &CaloricLaws,
@@ -330,6 +337,15 @@ fn select(
     selection.parts = (0..input.parts.len())
         .filter(|&i| is_cell(laws, cards, &input.parts[i]))
         .collect();
+    let cell = |end| owning_part(input, end).is_some_and(|part| selection.parts.contains(&part));
+    for family in CONTACT_FAMILIES {
+        for index in of_family(draft, cards, family).interfaces {
+            let iface = &input.interfaces[index];
+            if cell(iface.feature_a) && cell(iface.feature_b) {
+                selection.interfaces.push(index);
+            }
+        }
+    }
     let heats_a_cell = |target: &SourceTarget| match target {
         SourceTarget::Port { entity, port } if port == HEAT_SOURCE_PORT => {
             owning_part(input, *entity).is_some_and(|part| selection.parts.contains(&part))
@@ -356,6 +372,7 @@ fn lower(
     let ambient_k = input.environment.base.ambient_temperature.value;
     let mut out = LoweredGroupOutput::default();
     let boundaries = boundaries(ctx, &mut out)?;
+    let contacts = contacts(ctx, &mut out)?;
     let sources = sources(ctx, &mut out)?;
     let first = &input.parts[ctx.selection.parts[0]];
     let budget = &first.fidelity.error_budget;
@@ -414,13 +431,14 @@ fn lower(
         cell_laws.push((MaterialId(cell as u64), caloric.law));
         out.parts.push(it.part(TIMELINE));
     }
-    let cells = cell_laws.len();
+    let (cells, links) = (cell_laws.len(), contacts.len());
+    schedule.extend(contacts);
     let fail =
         |err: &dyn std::fmt::Debug| Scoped::new("node", TIMELINE).invalid(format!("{err:?}"));
     let limits = DepositionBudget {
         max_cells: cells,
-        max_links: cells,
-        max_events: cells,
+        max_links: cells + links,
+        max_events: cells + links,
         max_substeps: work,
     };
     let simulation = DepositionSimulation::new_shared(schedule, &cell_laws, limits);
@@ -444,12 +462,8 @@ fn lower(
     if environment {
         let port = graph.port(node, "environment")?;
         let sink = heat_sink("environment", ambient_k).map_err(|err| fail(&err))?;
-        graph.add_heat_route(
-            port,
-            Vec::new(),
-            Some(sink),
-            RouteTemperature::Fixed(ambient_k),
-        );
+        let temperature = RouteTemperature::Fixed(ambient_k);
+        graph.add_heat_route(port, Vec::new(), Some(sink), temperature);
     }
     Ok(out)
 }
@@ -518,6 +532,9 @@ fn boundaries(
     let mut boundaries = BTreeMap::new();
     for &index in &ctx.selection.interfaces {
         let iface = &input.interfaces[index];
+        let Some(card) = family_entry(ctx.cards, iface, THERMAL_BOUNDARY_FAMILY) else {
+            continue; // A contact between cells: `contacts`.
+        };
         let mut it = Scoped::new("interface", &iface.name);
         if input.time_plan.scheme != TimeScheme::Explicit {
             return Err(it.invalid("a thermal boundary has no implicit form yet"));
@@ -533,8 +550,6 @@ fn boundaries(
             [None, Some(cell)] if frame(iface.feature_a) => cell,
             _ => return Err(it.invalid("a thermal boundary joins a cell to a `DrivenBody` frame")),
         };
-        let card = family_entry(ctx.cards, iface, THERMAL_BOUNDARY_FAMILY);
-        let card = card.ok_or_else(|| it.invalid("not a thermal-boundary interface"))?;
         let exchange = [
             it.interface(ctx, card, "convection_coefficient", HEAT_TRANSFER)?,
             it.interface(ctx, card, "reservoir_area", AREA)?,
@@ -548,6 +563,101 @@ fn boundaries(
         out.interfaces.push(it.interface_output(Some(TIMELINE)));
     }
     Ok(boundaries)
+}
+
+/// Each contact between two cells, as a link from the start: the card's
+/// `R''` at `:area` in series with each cell's bulk conduction from its centre
+/// to the contact face, `G = A / (d_a/k_a + d_b/k_b + R'')`, each `k` held.
+fn contacts(
+    ctx: &GroupLoweringContext<'_>,
+    out: &mut LoweredGroupOutput,
+) -> Result<Vec<TimedEvent>, LoweringError> {
+    let input = ctx.draft.input();
+    let mut links = Vec::new();
+    for &index in &ctx.selection.interfaces {
+        let iface = &input.interfaces[index];
+        let card = CONTACT_FAMILIES.map(|family| family_entry(ctx.cards, iface, family));
+        let (resistance, Some((entry, state))) = (card[0].is_some(), card[0].or(card[1])) else {
+            continue;
+        };
+        let mut it = Scoped::new("interface", &iface.name);
+        if input.time_plan.scheme != TimeScheme::Explicit {
+            return Err(it.invalid("a thermal contact has no implicit form yet"));
+        }
+        let DraftInterfaceKind::ThermalContact { third_body, .. } = &iface.kind else {
+            continue;
+        };
+        if third_body.is_some() {
+            return Err(it.invalid("a thermal contact with a third body has no owner form"));
+        }
+        let area = state.iter().find(|(key, _)| key.name == "area");
+        let Some(&(_, area)) = area.filter(|(_, q)| q.dims == AREA && q.value > 0.0) else {
+            return Err(it.invalid("a thermal contact needs a positive :area [m^2]"));
+        };
+        let (env, item, area) = (query_env(ctx), it.item.clone(), area.value);
+        let g = query_thermal_conductance(&item, &mut it.r, entry, state, resistance, env)?;
+        if !resistance {
+            it.r.record_declared_field("area", area, AREA, &item, "state.area");
+        }
+        let (r, why) = (area / g, "A / thermal_conductance");
+        it.r.record_declared_field("contact_resistance", r, CONTACT_RESISTANCE_DIMS, &item, why);
+        let mut ends = [(CellId(0), 0.0, 0.0); 2];
+        for (side, end) in [iface.feature_a, iface.feature_b].into_iter().enumerate() {
+            let name = ["a", "b"][side];
+            let cell = slot(input, &ctx.selection.parts, end);
+            let cell = cell.ok_or_else(|| it.invalid("a contact joins two cells"))?;
+            let part = &input.parts[ctx.selection.parts[cell]];
+            let DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, ly, lz }) = part.geometry
+            else {
+                return Err(it.invalid("a cell is a box"));
+            };
+            let Some(d) = half_depth([lx, ly, lz].map(|side| side.value), area) else {
+                let why = format!("`{}`: a contact covers a whole box face", part.name);
+                return Err(it.invalid(why));
+            };
+            let held = format!("{name}.thermal_conductivity.held");
+            let (k, material) = ("thermal_conductivity", &part.materials[0]);
+            let at = format!("{item}: the conductivity of `{}`", part.name);
+            let (k, _) =
+                it.r.query_material_property(&at, ctx.cards, material, k, &held, env)?;
+            if !(k.dims == CONDUCTIVITY && k.value > 0.0) {
+                return Err(it.invalid(format!("`{}` needs a positive {held}", part.name)));
+            }
+            let (half, rule) = (format!("{name}.half_distance"), "half the normal side");
+            it.derive(part, &half, d, LENGTH_DIMS, rule);
+            let bulk = format!("{name}.bulk_resistance");
+            it.r.record_declared_field(bulk, d / k.value, CONTACT_RESISTANCE_DIMS, &item, "d / k");
+            ends[side] = (CellId(cell as u64), d, k.value);
+        }
+        let [(a, d_a, k_a), (b, d_b, k_b)] = ends;
+        let g = series_contact_conductance_w_k(area, [d_a, d_b], [k_a, k_b], r);
+        let g = g.map_err(|err| it.invalid(format!("{err:?}")))?;
+        let why = "A / (d_a/k_a + d_b/k_b + R'')";
+        it.r.record_declared_field("contact_conductance", g, CONDUCTANCE_DIMS, &item, why);
+        let link = ThermalLink {
+            id: index as u64,
+            a,
+            b,
+            area_m2: area,
+            conductance_w_k: g,
+        };
+        links.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(link),
+        });
+        out.interfaces.push(it.interface_output(Some(TIMELINE)));
+    }
+    Ok(links)
+}
+
+/// Half the side of a box of sides `sides` normal to its face of area `area`.
+/// Faces of equal area have equal normal sides (a face is the volume over its
+/// normal side), so it is unique. The match is to 1e-9 relative: a declared
+/// area is one decimal, a face the product of two (0.05 x 0.05 != 0.0025).
+fn half_depth([x, y, z]: [f64; 3], area: f64) -> Option<f64> {
+    let faces = [(y * z, x), (z * x, y), (x * y, z)];
+    let matches = |(face, _): &(f64, f64)| (face - area).abs() <= 1e-9 * area;
+    faces.into_iter().find(matches).map(|(_, side)| 0.5 * side)
 }
 
 /// Each source's cell and constant power.

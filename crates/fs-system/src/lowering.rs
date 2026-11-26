@@ -4552,14 +4552,16 @@ fn lower_involute_gear_mesh(
     })
 }
 
-fn query_thermal_conductance(
+/// A `thermal-conductance` card's G [W/K], or `A/R''` of a resistance card at
+/// `:area`, recorded in `rec`: the kernel's card-only lumped contact.
+pub(crate) fn query_thermal_conductance(
     scope: &str,
-    ctx: &InterfaceLoweringContext<'_>,
+    rec: &mut ProvenanceRecorder,
     entry: &InterfaceCardEntry,
     state: &[(fs_scenario::assembly::ParameterKey, fs_qty::QtyAny)],
     resistance_law: bool,
-) -> Result<(f64, ProvenanceRecorder), LoweringError> {
-    let mut rec = ProvenanceRecorder::default();
+    env: MatDbQueryEnv,
+) -> Result<f64, LoweringError> {
     let inv = |d: &str| LoweringError::Invalid {
         item: scope.to_owned(),
         detail: d.to_owned(),
@@ -4575,10 +4577,10 @@ fn query_thermal_conductance(
         (None, "thermal_conductance")
     };
     let s = rec
-        .query_interface_property(scope, entry, state, prop, prop, ctx.query_env())?
+        .query_interface_property(scope, entry, state, prop, prop, env)?
         .0;
     let Some(a) = area else {
-        return Ok((s.value, rec));
+        return Ok(s.value);
     };
     let g = a / s.value;
     if s.dims != CONTACT_RESISTANCE_DIMS || s.value <= 0.0 || !g.is_finite() {
@@ -4586,7 +4588,7 @@ fn query_thermal_conductance(
     }
     rec.record_declared_field("area", a, AREA_DIMS, scope, "state.area");
     rec.record_declared_field("thermal_conductance", g, CONDUCTANCE_DIMS, scope, "A/R''");
-    Ok((g, rec))
+    Ok(g)
 }
 
 fn lower_thermal_interface(
@@ -4607,8 +4609,9 @@ fn lower_thermal_interface(
         } => (state.as_slice(), third_body.as_ref()),
         _ => (&[][..], None),
     };
-    let (mut g_eff, mut recorder) =
-        query_thermal_conductance(&scope, ctx, entry, state, resistance_law)?;
+    let (mut recorder, env) = (ProvenanceRecorder::default(), ctx.query_env());
+    let mut g_eff =
+        query_thermal_conductance(&scope, &mut recorder, entry, state, resistance_law, env)?;
     if let Some(tb) = third_body {
         // Optional third-body TIM contributes series thermal resistance when
         // thermal_conductivity is present on the third-body card.
