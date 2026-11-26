@@ -34,6 +34,10 @@
     />
     <meta name="twitter:image" content="https://frankensim.org/kitchen-lab/og-card.png" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <!-- The text faces' Latin files, fetched alongside the stylesheet: found only by the first layout, they arrived after
+         it and the whole page was laid out again in its new type. -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2" />
     <script>
       document.documentElement.classList.add("js");
       // If the page's module never starts (a failed download, an old browser), show the text it would have revealed.
