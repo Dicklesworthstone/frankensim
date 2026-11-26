@@ -411,7 +411,10 @@ fn lower(
                 Boundary {
                     ambient_k,
                     htc_w_m2_k,
-                    reservoir: Some(reservoir),
+                    // fs-thermal's implicit graph refuses an unbound `Some`
+                    // reservoir; a zero one, all `boundaries` admits there,
+                    // exchanges nothing.
+                    reservoir: (scheme == TimeScheme::Explicit).then_some(reservoir),
                     source_w,
                 }
             }
@@ -543,9 +546,6 @@ fn boundaries(
             continue; // A contact between cells: `contacts`.
         };
         let mut it = Scoped::new("interface", &iface.name);
-        if input.time_plan.scheme != TimeScheme::Explicit {
-            return Err(it.invalid("a thermal boundary has no implicit form yet"));
-        }
         let ends =
             [iface.feature_a, iface.feature_b].map(|end| slot(input, &ctx.selection.parts, end));
         let frame = |end| {
@@ -562,6 +562,12 @@ fn boundaries(
             it.interface(ctx, card, "reservoir_area", AREA)?,
             it.interface(ctx, card, "reservoir_conductance", CONDUCTANCE_DIMS)?,
         ];
+        let implicit = input.time_plan.scheme != TimeScheme::Explicit;
+        if implicit && (exchange[1] != 0.0 || exchange[2] != 0.0) {
+            let why =
+                "an implicit thermal boundary's reservoir needs fs-thermal's reservoir binding";
+            return Err(it.invalid(why));
+        }
         let ambient = input.environment.base.ambient_temperature;
         it.declare_on("environment", "base.ambient_temperature", ambient);
         if boundaries.insert(cell, exchange).is_some() {

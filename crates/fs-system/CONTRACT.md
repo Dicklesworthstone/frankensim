@@ -106,6 +106,9 @@ constructors:
   that part from the kernel's lumped lowering to the timeline. A
   `thermal-boundary` interface from a cell's face to a face of a stationary
   `DrivenBody` frame is the cell's exchange with the ambient. A
+  `thermal-boundary` applies the card's total coefficients to the cell's
+  lumped temperature (no centre-to-face term, i.e. Biot ≪ 1), unlike a
+  `thermal-contact`. A
   `thermal-contact` between two cells on a `thermal-contact-resistance` or
   `thermal-conductance` card covers a whole box face of each at its `:area`:
   `G = A / (d_a/k_a + d_b/k_b + R'')`, `d` half the side normal to that face
@@ -117,11 +120,13 @@ constructors:
   run beside any scheme. Under `backward-euler` or `sdirk2` the cells step on
   fs-thermal's implicit conduction graph, with the step, tolerance and work
   limits above and the graph's other controls at their defaults. A contact
-  is a graph link with the same `d` and `R''`. Each law
+  is a graph link with the same `d` and `R''`; a boundary keeps the card's
+  `h`, and one with a reservoir (fs-thermal's graph binds each) is refused
+  by name. Each law
   gives its implicit form; the product law's needs its `T` band and the
   card's `thermal_conductivity`, read at the declared query point and held
-  for the run (`thermal_conductivity.held`). A law without one, and a
-  `thermal-boundary`, are refused by name.
+  for the run (`thermal_conductivity.held`). A law without one is refused
+  by name.
 - Loss routes: a card-less `HeatRoute` interface (bookkeeping, not a material
   interface) from a part that exactly one bushing joins to a cell carries its
   declared fraction of that bushing's heat. The rest goes to a sink named

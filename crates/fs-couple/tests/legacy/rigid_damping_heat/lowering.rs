@@ -423,8 +423,7 @@ pub(crate) fn lower(draft: &DraftAssembly, cards: &CardStore) -> LoweredSystem {
     registry.lower(draft, cards).unwrap()
 }
 
-/// `draft` under `scheme`, without its beds when `drop_beds`: a thermal
-/// boundary has no implicit form yet (39298).
+/// `draft` under `scheme`, without its beds when `drop_beds`.
 pub(crate) fn under(draft: &DraftAssembly, scheme: TimeScheme, drop_beds: bool) -> DraftAssembly {
     let mut input = draft.input().clone();
     input.time_plan.scheme = scheme;
@@ -665,7 +664,6 @@ fn product_law_cells_step_implicitly_on_the_cards_conductivity_held_for_the_run(
     for (cell, drop_beds, want) in [
         (&card(None, true), true, "thermal_conductivity"),
         (&card(Some(200.0), false), true, "`T` validity band"),
-        (&good, false, "thermal boundary has no implicit form"),
     ] {
         let refused = lower(cell, TimeScheme::BackwardEuler, drop_beds);
         let why = refused.err().unwrap();
@@ -810,6 +808,79 @@ fn a_contact_between_cells_is_its_cards_resistance_in_series_with_their_bulk() {
         assert!(narrower, "{scheme:?}: the link carries heat: {d:?} K");
         let residual = implicit.system.ledger().energy_residual_j();
         assert!(residual.abs() <= 1e-11, "{scheme:?}: {residual:e} J");
+    }
+}
+
+#[test]
+fn an_implicit_boundary_is_its_cards_total_coefficients_on_the_lumped_cell() {
+    use TimeScheme::{BackwardEuler, Sdirk2};
+    let mut values = vec![("density", 2.0, DENSITY)];
+    values.push(("specific_heat_capacity", 500.0, SPECIFIC_HEAT));
+    values.push(("thermal_conductivity", 200.0, Dims([1, 1, -3, -1, 0, 0])));
+    let datum = [("datum_temperature", 0.0, TEMPERATURE)];
+    let mut law = model(SENSIBLE_HEAT_LAW, &datum);
+    law.validity = ValidityDomain::unconstrained().with("T", 250.0, 400.0);
+    let cell = material(&values, vec![law]);
+    let (draft, mut cards) = pairing([cell.clone(), cell], 2.0);
+    // Fixture values, not measured: h 10 W/(m^2 K) on each 1 m cube cell's
+    // 6 m^2 with no reservoir, so G = 60 W/K; and the same with a reservoir.
+    let family = THERMAL_BOUNDARY_FAMILY;
+    let mut insert = |area, g| {
+        let mut exchange = vec![("convection_coefficient", 10.0, HEAT_TRANSFER)];
+        exchange.push(("reservoir_area", area, AREA));
+        exchange.push(("reservoir_conductance", g, CONDUCTANCE));
+        let card = cards.insert_interface(family, interface_card(family, &exchange));
+        card.unwrap()
+    };
+    let (bed, reservoir) = (insert(0.0, 0.0), insert(0.1, 5.0));
+    let lower = |scheme, card: Option<fs_blake3::ContentHash>| {
+        let mut input = under(&draft, scheme, card.is_none()).input().clone();
+        for iface in &mut input.interfaces {
+            if let DraftInterfaceKind::ThermalContact { law_card, .. } = &mut iface.kind {
+                *law_card = card.unwrap();
+            }
+        }
+        let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+        let mut registry = LoweringRegistry::with_kernel_defaults();
+        register_owner_defaults(&mut registry);
+        registry.lower(&DraftAssembly::admit(input, &scenario).unwrap(), &cards)
+    };
+    let why = lower(BackwardEuler, Some(reservoir)).err().unwrap();
+    assert!(why.to_string().contains("reservoir binding"), "{why}");
+    // Each cell's rise above the 300 K ambient at the steps' ends, and the
+    // heat the `environment` sink received.
+    let run = |scheme, beds: bool| {
+        let mut lowered = lower(scheme, beds.then_some(bed)).unwrap();
+        let at = lowered.node_map["thermal-timeline"];
+        let rise = [0.0, 0.125, 0.25, 0.375, 0.5].map(|t| {
+            run_counting(&mut lowered.system, t);
+            temperature_bits(&lowered.system, at).map(|bits| f64::from_bits(bits) - 300.0)
+        });
+        let ledger = lowered.system.ledger();
+        let residual = ledger.energy_residual_j();
+        assert!(residual.abs() <= 1e-11, "{scheme:?}: {residual:e} J");
+        (rise, sink(ledger, "environment"))
+    };
+    // The cells' heat does not depend on their temperatures, so on each
+    // backward-euler step a cell's rise R with its bed and R' without obey
+    // R+ (1 + G dt / C) - R = R'+ - R', with dt = 0.125 s and C = 1000 J/K.
+    let (free, free_out) = run(BackwardEuler, false);
+    let z = 60.0 * 0.125 / 1000.0;
+    for scheme in [BackwardEuler, Sdirk2] {
+        let (rise, out) = run(scheme, true);
+        for c in [0, 1] {
+            let (with, without) = (rise.map(|r| r[c]), free.map(|r| r[c]));
+            for (r, f) in with.windows(2).zip(without.windows(2)) {
+                let defect = r[1] * (1.0 + z) - r[0] - (f[1] - f[0]);
+                let held = scheme != BackwardEuler || defect.abs() <= 1e-11;
+                assert!(held, "cell{c}: {defect:e} K");
+            }
+            assert!(with[4] < without[4], "{scheme:?}: cell{c} {with:?} K");
+        }
+        // What the beds took from the cells is the environment's.
+        let lost = 1000.0 * (free[4][0] - rise[4][0] + free[4][1] - rise[4][1]);
+        let at_port = (out - free_out - lost).abs() <= 1e-9;
+        assert!(at_port, "{scheme:?}: {out} J - {free_out} J, not {lost} J");
     }
 }
 

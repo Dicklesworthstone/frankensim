@@ -197,8 +197,8 @@ fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
 
 /// The oracle's timeline and cells under `scheme`. The implicit one is a twin
 /// of the timeline in `…reproduces_the_implicit_memory_candidate`, from the
-/// same constructors, but its cells have no beds, because a `thermal-boundary`
-/// refuses under an implicit scheme (39298): no reservoirs and no links. Its
+/// same constructors, but its cells have no beds, which carry nothing in this
+/// fixture: no reservoirs and no links. Its
 /// controls are fs-thermal's defaults with the pairing's step, absolute
 /// tolerance and work (39298 Q3).
 fn oracle_timeline(
