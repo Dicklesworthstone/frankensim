@@ -192,8 +192,11 @@ pub(crate) fn fixture_laws() -> CaloricLaws {
                 };
                 let t = request.temperature_k - 300.0;
                 let specific_energy_j_kg = law.a * t + 0.5 * law.b * t * t;
+                // The fixture law is its own implicit form (k 1000 W/(m K)).
+                let law = Rc::new(law);
                 Ok(CaloricCell {
-                    law: Rc::new(law),
+                    law: Rc::<Caloric>::clone(&law),
+                    implicit: Some(law),
                     specific_energy_j_kg,
                 })
             },
@@ -420,6 +423,18 @@ pub(crate) fn lower(draft: &DraftAssembly, cards: &CardStore) -> LoweredSystem {
     registry.lower(draft, cards).unwrap()
 }
 
+/// `draft` under `scheme`, without its beds when `drop_beds`: a thermal
+/// boundary has no implicit form yet (39298).
+pub(crate) fn under(draft: &DraftAssembly, scheme: TimeScheme, drop_beds: bool) -> DraftAssembly {
+    let mut input = draft.input().clone();
+    input.time_plan.scheme = scheme;
+    if drop_beds {
+        input.interfaces.retain(|i| !i.name.starts_with("bed"));
+    }
+    let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
+    DraftAssembly::admit(input, &scenario).unwrap()
+}
+
 /// The first `N` parts' mass properties as the lowering recorded them.
 pub(crate) fn lowered_mass<const N: usize>(lowered: &LoweredSystem) -> [MassProperties; N] {
     core::array::from_fn(|b| {
@@ -628,20 +643,63 @@ fn cells_on_the_product_law_lower_with_their_card_receipts() {
 }
 
 #[test]
-fn an_implicit_scheme_refuses_by_name_while_only_explicit_lowers() {
-    let (draft, cards) = pairing(fixture_cards(static_laws()), 2.0);
-    for (scheme, name) in [
-        (TimeScheme::BackwardEuler, "backward-euler"),
-        (TimeScheme::Sdirk2, "sdirk2"),
-    ] {
-        let mut input = draft.input().clone();
-        input.time_plan.scheme = scheme;
-        let scenario = Scenario::new("pairing", 112, input.environment.base.clone());
-        let draft = DraftAssembly::admit(input, &scenario).unwrap();
+fn product_law_cells_step_implicitly_on_the_cards_conductivity_held_for_the_run() {
+    let card = |k: Option<f64>, band: bool| {
+        let datum = [("datum_temperature", 0.0, TEMPERATURE)];
+        let mut law = model(SENSIBLE_HEAT_LAW, &datum);
+        if band {
+            law.validity = ValidityDomain::unconstrained().with("T", 250.0, 400.0);
+        }
+        let mut values = vec![("density", 2.0, DENSITY)];
+        values.push(("specific_heat_capacity", 500.0, SPECIFIC_HEAT));
+        values.extend(k.map(|k| ("thermal_conductivity", k, Dims([1, 1, -3, -1, 0, 0]))));
+        material(&values, vec![law])
+    };
+    let lower = |cell: &MaterialCard, scheme, drop_beds| {
+        let (draft, cards) = pairing([cell.clone(), cell.clone()], 2.0);
         let mut registry = LoweringRegistry::with_kernel_defaults();
-        register_owners(&mut registry, fixture_laws());
-        let why = registry.lower(&draft, &cards).err().unwrap().to_string();
-        assert!(why.contains(&format!("implicit scheme `{name}`")), "{why}");
+        register_owner_defaults(&mut registry);
+        registry.lower(&under(&draft, scheme, drop_beds), &cards)
+    };
+    let good = card(Some(200.0), true);
+    for (cell, drop_beds, want) in [
+        (&card(None, true), true, "thermal_conductivity"),
+        (&card(Some(200.0), false), true, "`T` validity band"),
+        (&good, false, "thermal boundary has no implicit form"),
+    ] {
+        let refused = lower(cell, TimeScheme::BackwardEuler, drop_beds);
+        let why = refused.err().unwrap();
+        assert!(why.to_string().contains(want), "{why}");
+    }
+    // Cells without links or beds store exactly the heat they are given, so
+    // on the same steps the explicit timeline is the oracle of both schemes.
+    let run = |scheme| {
+        let mut lowered = lower(&good, scheme, true).unwrap();
+        let (intervals, _) = run_counting(&mut lowered.system, 0.5);
+        let id = lowered.node_map["thermal-timeline"];
+        let cells = temperature_bits(&lowered.system, id).map(f64::from_bits);
+        (intervals, cells, lowered)
+    };
+    let (steps, explicit, _) = run(TimeScheme::Explicit);
+    for scheme in [TimeScheme::BackwardEuler, TimeScheme::Sdirk2] {
+        let (intervals, cells, lowered) = run(scheme);
+        assert_eq!(intervals, steps, "{scheme:?}");
+        let receipts = &lowered.receipt.components;
+        let sources = receipts.iter().flat_map(|c| &c.parameter_sources);
+        let name = "thermal_conductivity.held";
+        let held: Vec<_> = sources.filter(|p| p.parameter == name).collect();
+        assert_eq!(held.len(), 2, "{scheme:?}: one per cell");
+        for p in held {
+            let claim = matches!(p.source, ParameterSource::MatDbClaim { .. });
+            assert!(claim, "{scheme:?}: {p:?}");
+        }
+        for (t, want) in cells.into_iter().zip(explicit) {
+            assert!((t - want).abs() <= 1e-9, "{scheme:?}: {t} K, not {want} K");
+        }
+        let ledger = lowered.system.ledger();
+        let stored = node(ledger, "thermal-timeline").stored_change_j.value();
+        let (residual, bound) = (ledger.energy_residual_j(), 1e-11 * stored);
+        assert!(residual.abs() <= bound, "{scheme:?}: {residual:e} J");
     }
 }
 

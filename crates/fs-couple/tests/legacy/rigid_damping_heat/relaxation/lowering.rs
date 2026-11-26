@@ -10,14 +10,16 @@
 use super::*;
 use crate::graph::lowering::{
     fixture_cards, fixture_laws, interface_card, lower, lowered_mass, observe, pairing,
-    temperature_bits,
+    temperature_bits, under,
 };
 use crate::graph::with_cx;
 use fs_exec::CancelGate;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::Scenario;
 use fs_scenario::assembly::ParameterKey;
-use fs_scenario::assembly::draft::{DraftAssembly, DraftAssemblyInput, DraftInterfaceKind};
+use fs_scenario::assembly::draft::{
+    DraftAssembly, DraftAssemblyInput, DraftInterfaceKind, TimeScheme,
+};
 use fs_system::lowering::Observed;
 use fs_system::lowering::owners::{RELAXATION_BUSHING_FAMILY, register_owners};
 use fs_system::{CardStore, Ledger, LoweringRegistry};
@@ -115,11 +117,17 @@ fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
     let mass: [MassProperties; 2] = lowered_mass(&lower(&draft, &cards));
     fixture.bodies.properties[..2].copy_from_slice(&mass);
     let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
-    let (heat, controls) = (thermal(laws, false, true), memory_controls());
-    for target_s in [0.25, 0.3] {
-        let case = format!("to {target_s} s");
-        let timeline = ThermalTimeline::new(vec![CellId(0), CellId(1)], true, controls.thermal);
-        let timeline = timeline.unwrap();
+    let controls = memory_controls();
+    // Under an implicit scheme the draft drops its beds (`oracle_timeline`).
+    for (scheme, target_s) in [
+        (TimeScheme::Explicit, 0.25),
+        (TimeScheme::Explicit, 0.3),
+        (TimeScheme::BackwardEuler, 0.3),
+        (TimeScheme::Sdirk2, 0.3),
+    ] {
+        let case = format!("{scheme:?} to {target_s} s");
+        let draft = under(&draft, scheme, scheme != TimeScheme::Explicit);
+        let (timeline, heat) = oracle_timeline(laws, scheme);
         let graph = memory_graph(&fixture, controls.mechanical, timeline, &heat, None, None);
         let (mut oracle, network, cells) = graph;
         let mut lowered = lower(&draft, &cards);
@@ -185,6 +193,67 @@ fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
         let want = [v.x, v.y, v.z].map(f64::to_bits);
         assert_eq!(velocity_m_s.map(f64::to_bits), want, "{case}");
     }
+}
+
+/// The oracle's timeline and cells under `scheme`. The implicit one is a twin
+/// of the timeline in `…reproduces_the_implicit_memory_candidate`, from the
+/// same constructors, but its cells have no beds, because a `thermal-boundary`
+/// refuses under an implicit scheme (39298): no reservoirs and no links. Its
+/// controls are fs-thermal's defaults with the pairing's step, absolute
+/// tolerance and work (39298 Q3).
+fn oracle_timeline(
+    laws: &'static [Caloric; 2],
+    scheme: TimeScheme,
+) -> (ThermalTimeline<'static>, DepositionSimulation<'static>) {
+    let cells = vec![CellId(0), CellId(1)];
+    let scheme = match scheme {
+        TimeScheme::Explicit => {
+            let timeline = ThermalTimeline::new(cells, true, memory_controls().thermal);
+            return (timeline.unwrap(), thermal(laws, false, true));
+        }
+        TimeScheme::BackwardEuler => ImplicitScheme::BackwardEuler,
+        TimeScheme::Sdirk2 => ImplicitScheme::Sdirk2,
+    };
+    let mut schedule = vec![birth(0, 0.0, 0.0), birth(1, 0.0, 0.0)];
+    for event in &mut schedule {
+        if let Event::Birth(cell) = &mut event.event {
+            cell.boundary.reservoir = None;
+        }
+    }
+    let heat = DepositionSimulation::new(
+        schedule,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        budget(),
+    )
+    .unwrap()
+    .advance_to(0.0, config().thermal, || Ok(()))
+    .unwrap()
+    .0;
+    let observer = ConductionObserver::new(
+        &heat,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        &[],
+        &[],
+        || Ok(()),
+    )
+    .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &heat,
+        &observer,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let controls = ImplicitConductionControls {
+        maximum_dt_s: 0.125,
+        maximum_steps: 10_000,
+        cell_tolerance_j: 1e-10,
+        total_tolerance_j: 1e-10,
+        ..ImplicitConductionControls::default()
+    };
+    let timeline = ThermalTimeline::implicit(cells, graph, controls, scheme);
+    (timeline.unwrap(), heat)
 }
 
 #[test]

@@ -108,8 +108,13 @@ constructors:
   `DrivenBody` frame is the cell's exchange with the ambient. A cell outside
   the product law's `T` band is refused at lowering or stops the run; nothing
   clamps. The time plan's `scheme` is the timeline's; the mechanical owners
-  run beside any scheme. Only `explicit` lowers so far, and an implicit
-  scheme is refused by name.
+  run beside any scheme. Under `backward-euler` or `sdirk2` the cells step on
+  fs-thermal's implicit conduction graph, with the step, tolerance and work
+  limits above and the graph's other controls at their defaults. Each law
+  gives its implicit form; the product law's needs its `T` band and the
+  card's `thermal_conductivity`, read at the declared query point and held
+  for the run (`thermal_conductivity.held`). A law without one, and a
+  `thermal-boundary`, are refused by name.
 - Loss routes: a card-less `HeatRoute` interface (bookkeeping, not a material
   interface) from a part that exactly one bushing joins to a cell carries its
   declared fraction of that bushing's heat. The rest goes to a sink named

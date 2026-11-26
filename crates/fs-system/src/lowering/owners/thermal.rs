@@ -16,6 +16,9 @@
 //! heat. The timeline steps at most the time plan's step, checks energy to
 //! the cells' shared absolute tolerance, and sends boundary heat through its
 //! `environment` port to a sink of that name.
+//!
+//! Under an implicit scheme it steps on fs-thermal's implicit conduction
+//! graph, on each law's implicit form (the crate's CONTRACT.md has the rules).
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -29,7 +32,12 @@ use fs_scenario::assembly::draft::{
     PrimitiveShape, SourceTarget, StepPolicy, TimeHistory, TimeScheme,
 };
 use fs_scenario::entity::EntityId;
-use fs_thermal::component::{ThermalTimeline, TimelineState};
+use fs_thermal::component::{ImplicitScheme, ThermalTimeline, TimelineState};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
+    ImplicitConductionLinearControls, ImplicitConductionState,
+};
+use fs_thermal::enthalpy::conduction::{ConductionObserver, ConductivityLaw};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
@@ -58,6 +66,7 @@ const TIMELINE: &str = "thermal-timeline";
 const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
 const SPECIFIC_HEAT: Dims = Dims([2, 0, -2, -1, 0, 0]);
 const HEAT_TRANSFER: Dims = Dims([0, 1, -3, -1, 0, 0]);
+const CONDUCTIVITY: Dims = Dims([1, 1, -3, -1, 0, 0]);
 const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
 
 /// What a caloric-law factory is asked for: the law of one cell's material,
@@ -75,15 +84,26 @@ pub struct CaloricRequest<'a> {
     pub env: MatDbQueryEnv,
     /// The cell's initial temperature [K].
     pub temperature_k: f64,
+    /// Whether the timeline steps implicitly, so needs the law's implicit form.
+    pub implicit: bool,
 }
 
 /// A cell's caloric law and its initial specific energy [J/kg].
 pub struct CaloricCell {
     /// The law, held by the timeline itself.
     pub law: Rc<dyn ThermalLaw>,
+    /// The same law object's implicit form, if it has one (fs-thermal's graph
+    /// matches it to `law` by address); an implicit timeline needs it.
+    pub implicit: Option<Rc<dyn ImplicitCaloricLaw>>,
     /// Specific energy at the initial temperature, on the law's own datum.
     pub specific_energy_j_kg: f64,
 }
+
+/// A caloric law with its implicit conduction form, as one object: the
+/// implicit graph matches a law to the simulation's by address.
+pub trait ImplicitCaloricLaw: ImplicitConductionLaw + ConductivityLaw + ThermalLaw {}
+
+impl<T: ImplicitConductionLaw + ConductivityLaw + ThermalLaw> ImplicitCaloricLaw for T {}
 
 type Factory =
     Box<dyn Fn(&CaloricRequest<'_>, &mut ProvenanceRecorder) -> Result<CaloricCell, LoweringError>>;
@@ -136,6 +156,8 @@ struct SensibleHeat {
     c_j_kg_k: f64,
     datum_k: f64,
     band: Option<(f64, f64)>,
+    /// Conductivity [W/(m K)], held for the run; only an implicit cell has it.
+    k_w_m_k: Option<f64>,
 }
 
 impl ThermalLaw for SensibleHeat {
@@ -160,6 +182,42 @@ impl ThermalLaw for SensibleHeat {
     ) -> Result<Option<f64>, DepositionError> {
         let ratio = self.temperature_k(end)? / self.temperature_k(initial)?;
         Ok(Some(self.c_j_kg_k * ratio.ln()))
+    }
+}
+
+impl ConductivityLaw for SensibleHeat {
+    fn conductivity_w_m_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        self.temperature_k(specific_h_j_kg)?;
+        self.k_w_m_k.ok_or(DepositionError::MaterialDomain)
+    }
+}
+
+impl ImplicitConductionLaw for SensibleHeat {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self
+    }
+
+    fn conductivity_law(&self) -> &dyn ConductivityLaw {
+        self
+    }
+
+    /// The band's ends (an implicit cell has a band; without one, NaN, which
+    /// fs-thermal refuses).
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
+        let (lo, hi) = self.band.unwrap_or((f64::NAN, f64::NAN));
+        [lo, hi].map(|t| self.c_j_kg_k * (t - self.datum_k))
+    }
+
+    fn state_at_specific_enthalpy(
+        &self,
+        specific_h_j_kg: f64,
+    ) -> Result<ImplicitConductionState, DepositionError> {
+        Ok(ImplicitConductionState {
+            temperature_k: self.temperature_k(specific_h_j_kg)?,
+            temperature_slope_kg_k_j: 1.0 / self.c_j_kg_k,
+            conductivity_w_m_k: self.conductivity_w_m_k(specific_h_j_kg)?,
+            conductivity_slope_kg_w_m_k_j: 0.0,
+        })
     }
 }
 
@@ -206,13 +264,34 @@ fn sensible_heat(
             });
         }
     }
+    let refuse = |detail: &str| LoweringError::Invalid {
+        item: item.to_owned(),
+        detail: detail.to_owned(),
+    };
+    let k_w_m_k = if request.implicit {
+        if band.is_none() {
+            return Err(refuse("an implicit cell needs the law's `T` validity band"));
+        }
+        let (name, held) = ("thermal_conductivity", "thermal_conductivity.held");
+        let (k, _) = r.query_material_property(item, cards, material, name, held, env)?;
+        if !(k.dims == CONDUCTIVITY && k.value > 0.0) {
+            return Err(refuse("needs a positive thermal_conductivity [W/(m K)]"));
+        }
+        Some(k.value)
+    } else {
+        None
+    };
     let (c_j_kg_k, datum_k) = (c.value, datum.value);
+    let law = Rc::new(SensibleHeat {
+        c_j_kg_k,
+        datum_k,
+        band,
+        k_w_m_k,
+    });
+    let implicit = Rc::clone(&law) as Rc<dyn ImplicitCaloricLaw>;
     Ok(CaloricCell {
-        law: Rc::new(SensibleHeat {
-            c_j_kg_k,
-            datum_k,
-            band,
-        }),
+        implicit: request.implicit.then_some(implicit),
+        law,
         specific_energy_j_kg: c_j_kg_k * (request.temperature_k - datum_k),
     })
 }
@@ -292,8 +371,8 @@ fn lower(
     let Some(work) = work else {
         return Err(Scoped::new("part", &first.name).invalid("a timeline needs max_work_units"));
     };
-    explicit_only(input.time_plan.scheme, first)?;
-    let (mut schedule, mut cell_laws) = (Vec::new(), Vec::new());
+    let scheme = input.time_plan.scheme;
+    let (mut schedule, mut cell_laws, mut implicit) = (Vec::new(), Vec::new(), Vec::new());
     for (cell, &index) in ctx.selection.parts.iter().enumerate() {
         let part = &input.parts[index];
         let mut it = Scoped::new("part", &part.name);
@@ -326,12 +405,13 @@ fn lower(
                 source_w,
             },
         };
-        let (born, law) = new_cell(laws, ctx, &mut it, part, cell as u64, boundary)?;
+        let (born, caloric) = new_cell(laws, ctx, &mut it, part, cell as u64, boundary)?;
         schedule.push(TimedEvent {
             time_s: 0.0,
             event: Event::Birth(born),
         });
-        cell_laws.push((MaterialId(cell as u64), law));
+        implicit.extend(caloric.implicit.map(|law| (MaterialId(cell as u64), law)));
+        cell_laws.push((MaterialId(cell as u64), caloric.law));
         out.parts.push(it.part(TIMELINE));
     }
     let cells = cell_laws.len();
@@ -346,9 +426,10 @@ fn lower(
     let simulation = DepositionSimulation::new_shared(schedule, &cell_laws, limits);
     let simulation = simulation.and_then(|start| start.advance_to(0.0, config, || Ok(())));
     let simulation = simulation.map_err(|err| fail(&err))?.0;
-    let environment = !boundaries.is_empty() || !sources.is_empty();
-    let ids = (0..cells as u64).map(CellId).collect();
-    let timeline = ThermalTimeline::new(ids, environment, config).map_err(|err| fail(&err))?;
+    // An implicit timeline always has its `environment` port.
+    let environment =
+        scheme != TimeScheme::Explicit || !boundaries.is_empty() || !sources.is_empty();
+    let timeline = timeline(&simulation, &implicit, environment, config, work, scheme)?;
     let start = timeline.start(&simulation).map_err(|err| fail(&err))?;
     let node = graph.add(TIMELINE, Some(first.entity), timeline, start)?;
     for (cell, &index) in ctx.selection.parts.iter().enumerate() {
@@ -373,16 +454,47 @@ fn lower(
     Ok(out)
 }
 
-/// The timeline lowers only the explicit scheme so far: an implicit one is
-/// refused by name.
-fn explicit_only(scheme: TimeScheme, first: &DraftPartDecl) -> Result<(), LoweringError> {
-    let name = match scheme {
-        TimeScheme::Explicit => return Ok(()),
-        TimeScheme::BackwardEuler => "backward-euler",
-        TimeScheme::Sdirk2 => "sdirk2",
+/// The cells' timeline under the plan's `scheme`. An implicit one steps on
+/// fs-thermal's implicit conduction graph of the laws' implicit forms,
+/// without links, with the plan's step, the cells' absolute tolerance and
+/// work, and the graph's other controls at their defaults.
+fn timeline(
+    simulation: &DepositionSimulation<'static>,
+    laws: &[(MaterialId, Rc<dyn ImplicitCaloricLaw>)],
+    environment: bool,
+    config: StepConfig,
+    work: usize,
+    scheme: TimeScheme,
+) -> Result<ThermalTimeline<'static>, LoweringError> {
+    let fail =
+        |err: &dyn std::fmt::Debug| Scoped::new("node", TIMELINE).invalid(format!("{err:?}"));
+    let ids = simulation.cells().keys().copied().collect();
+    let scheme = match scheme {
+        TimeScheme::Explicit => {
+            return ThermalTimeline::new(ids, environment, config).map_err(|err| fail(&err));
+        }
+        TimeScheme::BackwardEuler => ImplicitScheme::BackwardEuler,
+        TimeScheme::Sdirk2 => ImplicitScheme::Sdirk2,
     };
-    let why = format!("implicit scheme `{name}`: only `explicit` is lowered so far");
-    Err(Scoped::new("part", &first.name).invalid(why))
+    let (mut conducting, mut stepping) = (Vec::new(), Vec::new());
+    for (id, law) in laws {
+        conducting.push((*id, Rc::clone(law) as Rc<dyn ConductivityLaw>));
+        stepping.push((*id, Rc::clone(law) as Rc<dyn ImplicitConductionLaw>));
+    }
+    let ok = || Ok(());
+    let observer = ConductionObserver::new_shared(simulation, &conducting, &[], &[], ok);
+    let observer = observer.map_err(|err| fail(&err))?;
+    let linear = ImplicitConductionLinearControls::default();
+    let graph = ImplicitConductionGraph::new_shared(simulation, &observer, &stepping, linear, ok);
+    let controls = ImplicitConductionControls {
+        maximum_dt_s: config.max_dt_s,
+        maximum_steps: work,
+        cell_tolerance_j: config.energy_tolerance_j,
+        total_tolerance_j: config.energy_tolerance_j,
+        ..ImplicitConductionControls::default()
+    };
+    let graph = graph.map_err(|err| fail(&err))?;
+    ThermalTimeline::implicit(ids, graph, controls, scheme).map_err(|err| fail(&err))
 }
 
 /// Registers cell `cell`'s reader for probes: its temperature, from its slot in
@@ -407,6 +519,9 @@ fn boundaries(
     for &index in &ctx.selection.interfaces {
         let iface = &input.interfaces[index];
         let mut it = Scoped::new("interface", &iface.name);
+        if input.time_plan.scheme != TimeScheme::Explicit {
+            return Err(it.invalid("a thermal boundary has no implicit form yet"));
+        }
         let ends =
             [iface.feature_a, iface.feature_b].map(|end| slot(input, &ctx.selection.parts, end));
         let frame = |end| {
@@ -474,7 +589,7 @@ fn new_cell(
     part: &DraftPartDecl,
     id: u64,
     boundary: Boundary,
-) -> Result<(DepositedCell, Rc<dyn ThermalLaw>), LoweringError> {
+) -> Result<(DepositedCell, CaloricCell), LoweringError> {
     let ambient = ctx.draft.input().environment.base.ambient_temperature;
     let initial = part
         .initial
@@ -515,6 +630,7 @@ fn new_cell(
     );
     it.derive(part, "mass", mass, MASS_DIMS, "mass = density * volume");
     let (item, env, temperature_k) = (it.item.as_str(), query_env(ctx), temperature.value);
+    let implicit = ctx.draft.input().time_plan.scheme != TimeScheme::Explicit;
     let request = CaloricRequest {
         item,
         cards: ctx.cards,
@@ -522,8 +638,12 @@ fn new_cell(
         model,
         env,
         temperature_k,
+        implicit,
     };
     let caloric = factory(&request, &mut it.r)?;
+    if implicit && caloric.implicit.is_none() {
+        return Err(it.invalid("its caloric law has no implicit form"));
+    }
     let half = pose
         .orientation()
         .rotate_body_to_world(Vec3::new(0.5 * x, 0.0, 0.0));
@@ -544,7 +664,7 @@ fn new_cell(
         geometry,
         boundary,
     };
-    Ok((cell, caloric.law))
+    Ok((cell, caloric))
 }
 
 #[cfg(test)]
@@ -557,6 +677,7 @@ mod tests {
             c_j_kg_k: 500.0,
             datum_k: 0.0,
             band: None,
+            k_w_m_k: None,
         };
         assert_eq!(
             law.temperature_k(500.0 * 300.0).unwrap().to_bits(),
