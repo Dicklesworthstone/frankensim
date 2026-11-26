@@ -3016,6 +3016,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-gas",
  "fs-la",
  "fs-matdb",
  "fs-material",

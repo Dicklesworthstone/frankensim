@@ -33,6 +33,7 @@ use super::{
 };
 use crate::{HeatSink, PortRef, RouteTemperature, heat_sink};
 
+pub mod gas;
 pub mod mbd;
 pub mod thermal;
 
@@ -65,6 +66,7 @@ pub fn register_owner_defaults(registry: &mut LoweringRegistry) {
 pub fn register_owners(registry: &mut LoweringRegistry, caloric: thermal::CaloricLaws) {
     registry.register_group(mbd::GROUP, mbd::select, mbd::lower);
     thermal::register(registry, caloric);
+    gas::register(registry);
     registry.register_group(LOSS_ROUTES, select_loss_routes, lower_loss_routes);
 }
 

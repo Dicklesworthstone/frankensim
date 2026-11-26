@@ -4920,3 +4920,8 @@ with `MultirateError::SplitLoadLineBlock`).
   window phase error on strongly coupled oscillators; refine the macro window
   alongside local clocks.
 
+## Gas cavity owner lowering (`owners::gas`, bead `frankensim-rc-1109-root-3gc12.6.2`)
+
+Under `slices`, `fs-system` depends optionally on `fs-gas` (`component`) to lower `Cavity` parts
+(`{Fluid}` insulated or `{Fluid, Thermal}`) to `GasCavity`. `fs-gas` retains a `[dev-dependencies]`
+edge on `fs-system` (L3 dev-only cycle; non-dev deps acyclic). No hidden ambient force is attached.

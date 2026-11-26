@@ -928,6 +928,7 @@ fn merge_species_claims(
 ) -> Result<(NormalizedPack, Decision), (&'static str, String)> {
     let a = sp.association();
     if a.species().as_str() != state.chemistry
+        || state.phase != "gas"
         || a.standard_state_phase() != "gas"
         || a.reference_eos() != "ideal-gas"
     {
@@ -9152,6 +9153,55 @@ mod tests {
         let card = Some(bound.pack.content_hash());
         assert_eq!(rows, [("model:sensible-heat", Some(source), card)]);
         assert_eq!(bind(&material).unwrap_err(), "models_require_model_source");
+    }
+
+    #[test]
+    fn species_option_binds_and_refuses_invalid_source_state_model_and_duplicate_molar_mass() {
+        let f = |p, s| write_fixture(&manifest(p, true), s).0;
+        let mat = f(MATERIAL_PROFILE, SOURCE);
+        let sp_m = manifest(SPECIES_PROFILE, true).replace("fixture-alloy-x", "N2");
+        let sp_s = "frankensim.species-source.v1\nspecies\tN2\t28.01340\tg/mol\tgas\tideal-gas\t100\tkPa\tNASA-ref\n";
+        let sp = write_fixture(&sp_m, sp_s).0;
+        let n2 = write_fixture(&nasa9_manifest("N2"), NASA9_SOURCE).0;
+        let bad_p = NASA9_SOURCE
+            .replace("100\tkPa", "200\tkPa")
+            .replace("100000\tPa", "200000\tPa");
+        let bad = write_fixture(&nasa9_manifest("N2"), &bad_p).0;
+        let dup_s = format!(
+            "{SOURCE}scalar\tmm\tcoupon\tmolar_mass\t28.0134\tg/mol\tconstant\nuncertainty\tmm\tunstated\t-\t-\t-\t-\n"
+        );
+        let dup = f(MATERIAL_PROFILE, &dup_s);
+        let run = |m: &Path, c: &str, p: &str, md: &Path, s: &Path| {
+            let st = MaterialStateId {
+                chemistry: c.into(),
+                phase: p.into(),
+                process: "seed-v1".into(),
+                revision: 0,
+            };
+            bind_material_state(compile_manifest(m).unwrap(), Some(&st), Some(md), Some(s))
+        };
+        let ok = run(&mat, "N2", "gas", &n2, &sp).unwrap();
+        assert!(
+            ok.decisions
+                .iter()
+                .any(|d| d.reason_code == "bound_species_source")
+        );
+        for (m, c, p, md, s, code) in [
+            (
+                &mat,
+                "N2",
+                "gas",
+                &n2,
+                &mat,
+                "species_require_species_source",
+            ),
+            (&mat, "O2", "gas", &n2, &sp, "species_state_mismatch"),
+            (&mat, "N2", "solid", &n2, &sp, "species_state_mismatch"),
+            (&mat, "N2", "gas", &bad, &sp, "species_model_mismatch"),
+            (&dup, "N2", "gas", &n2, &sp, "duplicate_molar_mass_claim"),
+        ] {
+            assert_eq!(run(m, c, p, md, s).unwrap_err().code, code);
+        }
     }
 
     #[test]
