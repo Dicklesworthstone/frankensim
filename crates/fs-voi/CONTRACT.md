@@ -128,3 +128,28 @@ lower-cost/action-id tie law.
   the unknown. Missing comparable models remain `Unpriced`.
 - `reduction` is the fractional uncertainty cut an action achieves; calibrating
   it from real action outcomes is later work.
+
+## Discrete model selection and measurement value
+
+`finite::value_now` maximizes the supplied expected utility over all actions.
+`finite::evsi` enumerates all possible outcomes of one declared measurement.
+For each outcome it returns its marginal probability and the action to take
+after observing it. Ties select the lowest action index. An impossible outcome
+has probability zero and no posterior action. Utilities may be negative.
+Measurement cost is supplied in utility units and is subtracted once to form
+the net value. EVSI and EVPI are gross gains.
+
+Finite semantics v1 accepts 1–256 hypotheses, actions and outcomes per axis.
+Every prior and conditional likelihood row must have finite entries in [0,1]
+and total mass within 1e-12 of one. Admitted rows are normalized. A missing
+row, nonfinite utility, negative or nonfinite cost, or numerical range
+failure returns a typed refusal. This synchronous evaluator uses bounded
+scratch space linear in the number of hypotheses and outcomes.
+
+The calculation compares actions by their weighted utility differences.
+Summing gains over the current action avoids subtracting large common utility
+levels. An unchanged decision gains exactly zero. A policy that achieves the
+best payoff in every possible underlying state receives the perfect-information
+value. The finite sum uses floating-point arithmetic; the returned gross gain
+is bounded by EVPI. This version has its own semantics number and leaves the
+Gaussian estimators and their stopping policy intact.

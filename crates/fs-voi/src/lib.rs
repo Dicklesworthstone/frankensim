@@ -32,6 +32,9 @@
 //! strict `fs-math` exponential, and the requirement adapter depends only on
 //! lower-layer types.
 
+/// Exact enumeration for decisions over discrete hypotheses and test outcomes.
+pub mod finite;
+
 /// Full-menu, outcome-integrated decision value for correlated Gaussian sensing.
 pub mod knowledge_gradient;
 
