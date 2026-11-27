@@ -25,6 +25,7 @@ const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
 const SPECIFIC_HEAT: Dims = Dims([2, 0, -2, -1, 0, 0]);
 const MODULUS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const CONDUCTANCE: Dims = Dims([2, 1, -3, -1, 0, 0]); // W/K
+const CONDUCTIVITY: Dims = Dims([1, 1, -3, -1, 0, 0]); // W/(m K)
 
 fn prov(src: &str) -> Provenance {
     Provenance {
@@ -1544,6 +1545,67 @@ fn dry_friction_fsim_stick_slip_and_refusals() {
         let msg = run_dry_fsim(&ledger, &packs, &bad).unwrap_err();
         assert!(msg.contains(want), "expected `{want}` in: {msg}");
     }
+}
+
+/// A material pack `pack-<chem>` that also claims a thermal conductivity, as an effusivity
+/// heat partition needs (`e = sqrt(k rho cp)`).
+fn conductive_pack(chem: &str, rho: f64, cp: f64, k: f64) -> RawCardPack {
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, chem);
+    for (name, value, dims, src) in [
+        ("density", rho, DENSITY, "asm-rho"),
+        ("specific_heat_capacity", cp, SPECIFIC_HEAT, "asm-cp"),
+        ("thermal_conductivity", k, CONDUCTIVITY, "asm-k"),
+        ("youngs_modulus", 200.0e9, MODULUS, "asm-e"),
+    ] {
+        claims
+            .insert_claim(claim(name, value, dims, obs, src))
+            .unwrap();
+    }
+    pack_from_claims(chem, claims)
+}
+
+#[test]
+fn dry_friction_fsim_effusivity_heat_partition() {
+    let ((ra, ca, ka), (rb, cb, kb)) = ((8000.0, 500.0, 16.0), (7850.0, 486.0, 50.0));
+    let packs = CardPackSet::admit(vec![
+        conductive_pack("eff-a", ra, ca, ka),
+        conductive_pack("eff-b", rb, cb, kb),
+        dry_friction_pack("dry-good", "S355-ground", Some(0.5), 0.3),
+    ])
+    .unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let src = r#"(assembly "dry_effusivity" (version 1) (units "SI") (seed 0x45)
+  (versions (constellation "2026-07") (workspace "test-v1")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 101325Pa)
+  (time-plan :horizon 0.6s :dt 0.002s :sample-rate 500Hz)
+  (part "a" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) :material "eff-a" :query-temp 300K :physics (mechanics thermal) :fidelity lumped :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (1m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s) :temperature 300K))
+  (part "b" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) :material "eff-b" :query-temp 300K :physics (mechanics thermal) :fidelity lumped :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s) :temperature 300K))
+  (interface "pad" :kind mechanical-contact :a "a" :b "b" :card "S355-ground" :family "dry-friction" :normal-force 40N :heat-partition-effusivity 1)
+  (probe "a_temp" :kind field-quantity :target "a" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 500Hz)
+  (probe "b_temp" :kind field-quantity :target "b" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 500Hz))"#;
+    let id = SolveRunId::parse_hex(&run_dry_fsim(&ledger, &packs, src).unwrap()).unwrap();
+    let exp = explain_assembly_run(&ledger, id).unwrap();
+    let pj = exp.probe_series_json.as_deref();
+    let (ta, tb) = (
+        *extract_probe_values(pj, "a_temp").last().unwrap(),
+        *extract_probe_values(pj, "b_temp").last().unwrap(),
+    );
+    // Heat stored per body is rho cp V (T - T0); the common volume cancels in the share.
+    let (dua, dub) = (ra * ca * (ta - 300.0), rb * cb * (tb - 300.0));
+    let (ea, eb) = ((ka * ra * ca).sqrt(), (kb * rb * cb).sqrt());
+    let share = dua / (dua + dub);
+    assert!(dua > 0.0 && dub > 0.0, "a {ta} K, b {tb} K");
+    assert!((share - ea / (ea + eb)).abs() <= 1e-8, "share {share}");
+    let rcpt = exp.lowering_receipt_json.as_deref().unwrap();
+    assert!(rcpt.contains("model: effusivity partition") && rcpt.contains("heat_partition_b"));
+    let both = src.replace(
+        ":heat-partition-effusivity 1",
+        ":heat-partition-effusivity 1 :heat-partition-a 0.5",
+    );
+    let msg = run_dry_fsim(&ledger, &packs, &both).unwrap_err();
+    assert!(msg.contains("cannot set both"), "got: {msg}");
 }
 
 #[test]

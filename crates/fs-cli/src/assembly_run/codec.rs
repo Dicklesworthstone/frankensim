@@ -1060,6 +1060,7 @@ pub(crate) fn admit_assembly_source(
                         "sign",
                         "normal-force",
                         "heat-partition-a",
+                        "heat-partition-effusivity",
                         "initial-slip",
                         "query-at",
                     ],
@@ -1125,6 +1126,7 @@ pub(crate) fn admit_assembly_source(
                     ("fraction", "fraction"),
                     ("sign", "sign"),
                     ("heat-partition-a", "heat_partition_a"),
+                    ("heat-partition-effusivity", "heat_partition_effusivity"),
                 ] {
                     if let Some(n) = kw.get(flag) {
                         let val = QtyAny::dimensionless(as_f64(n, flag)?);
@@ -1183,6 +1185,7 @@ pub(crate) fn admit_assembly_source(
                     "memory",
                     "normal-force",
                     "heat-partition-a",
+                    "heat-partition-effusivity",
                     "initial-slip",
                     "query-at",
                 ] {

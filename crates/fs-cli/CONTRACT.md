@@ -81,8 +81,10 @@ CANCELLED=130}` table):
     or `eq` (the equilibrium spring) and `<axis>` one of `x`, `y`, `z` (m) or
     `rx`, `ry`, `rz` (rad), each key once.
   - `:normal-force <force>`, `:heat-partition-a <fraction>`,
-    `:initial-slip <velocity>`, and `:query-at (<axis> <value> ...)` on a
-    `mechanical-contact` populate `normal_force`, `heat_partition_a`,
+    `:heat-partition-effusivity 1`, `:initial-slip <velocity>`, and
+    `:query-at (<axis> <value> ...)` on a `mechanical-contact` populate
+    `normal_force`, `heat_partition_a`, `heat_partition_effusivity` (fs-system's
+    opt-in effusivity heat partition between two thermal bodies),
     `initial_slip`, and extra card validity coordinates (each refused by name
     on other interface kinds or on duplicate `:query-at` keys).
   - `(table (<time> <value>) (<time> <value>) ...)` in a source's `:history`
