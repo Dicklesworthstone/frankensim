@@ -457,3 +457,27 @@ test('text allowance is UTF-8 bytes and typed weights are transported numericall
   assert.throws(() => createPianoEngine(Engine, 48000, { scaleCsv: exact + 'x' }), /256 KiB/);
   assert.equal(calls.length, 1);
 });
+
+test('a supplied soundboard keeps its exact bytes across native preparation and clock choices', () => {
+  const { Engine, calls } = recording();
+  const whole = new Uint8Array([1, 2, 3, 4]);
+  for (const boardBytes of [whole.buffer, whole.subarray(1, 3)]) {
+    const expected = Array.from(new Uint8Array(boardBytes));
+    for (const [preparation, method] of [[{}, 'board'], [{ substeps: 2 }, 'board-rate'],
+      [{ scaleCsv: scale }, 'prepared'], [{ gas: '293.15 101325 0' }, 'atmosphere']]) {
+      createPianoEngine(Engine, 48000, { boardBytes, ...preparation });
+      const [kind, , bytes] = calls.at(-1);
+      assert.equal(kind, method);
+      assert.deepEqual(Array.from(bytes), expected);
+    }
+  }
+  const before = calls.length;
+  for (const options of [{ boardBytes: null }, { boardBytes: new Uint8Array() },
+    { boardBytes: whole, boardCoordinates: 'auto' }, { boardBytes: whole, boardCoordinates: 16 },
+    { boardBytes: new Uint8Array(64 * 1024 * 1024 + 1) }]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, options), /boardBytes/);
+  }
+  assert.equal(calls.length, before);
+  Engine.withBoard = () => { throw new Error('not a live-piano board file'); };
+  assert.throws(() => createPianoEngine(Engine, 48000, { boardBytes: whole }), /not a live-piano board/);
+});

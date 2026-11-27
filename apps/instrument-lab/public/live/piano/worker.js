@@ -41,7 +41,7 @@
 //   {type:'error', code:'refused'|'engine'|'worker_error', message, id?, command?}
 import init, { PianoEngine } from './engine.js';
 import { chooseBoard, fetchBoard } from './boards.js';
-import { createPianoEngine } from './engine-factory.js';
+import { createPianoEngine, suppliedBoard } from './engine-factory.js';
 
 const CHUNK = 128;
 
@@ -326,12 +326,13 @@ async function start(message) {
   if (engineOptions.governor !== undefined) governor = Boolean(engineOptions.governor);
   await init(message.wasmUrl ? { module_or_path: message.wasmUrl } : undefined);
   let chosen = null; // the pick's copy from before its timing, in a new engine's state (see chooseBoard)
-  if (engineOptions.boardCoordinates === 'auto') {
+  boardBytes = suppliedBoard(engineOptions);
+  if (!boardBytes && engineOptions.boardCoordinates === 'auto') {
     const pick = await chooseBoard({ make: (bytes) => makeEngine({ ...engineOptions, boardCoordinates: 0 }, bytes),
       target: Number(engineOptions.minRealtime) || 1.4 });
     chosen = pick.engine;
     boardBytes = pick.bytes;
-  } else if (Number(engineOptions.boardCoordinates) > 32) {
+  } else if (!boardBytes && Number(engineOptions.boardCoordinates) > 32) {
     boardBytes = await fetchBoard(Number(engineOptions.boardCoordinates));
   }
   // the same options and board as the copy (an older wasm without copy() builds it again)

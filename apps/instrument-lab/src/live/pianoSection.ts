@@ -231,6 +231,14 @@ export class LivePianoSection {
         <p class="small lp-note-text">Starting downloads FrankenSim's reduced piano engine as WebAssembly (about 700&nbsp;kB
           compressed, the Model&nbsp;D soundboard included) and assembles all 88 keys from the published string scale.
           The piano starts silent and at rest.</p>
+        <details class="evidence" style="width:100%;text-align:left">
+          <summary>Choose a soundboard</summary>
+          <div class="evidence-body field">
+            <label for="${id}-board-file">Soundboard file from <code>gen_board</code> (.bin, up to 64 MiB)</label>
+            <input id="${id}-board-file" class="lp-board-file" type="file" accept=".bin">
+            <p class="small muted">Leave empty to select a board automatically for this device.</p>
+          </div>
+        </details>
         <details class="evidence lp-materials" style="width:100%;text-align:left">
           <summary>Choose string materials</summary>
           <div class="evidence-body">
@@ -459,6 +467,7 @@ export class LivePianoSection {
     host.replaceChildren();
     // the board this device chose at Start (0 before Start: the text then gives the range)
     const board = info ? info.boardCoordinates : 0;
+    const supplied = info && q<HTMLInputElement>(this.root, '.lp-board-file').files?.length;
     const exact = info ? info.boardExactLowModes : 0;
     // Capabilities come from the loaded engine, including older engines without a bank.
     const bank = info?.silentBankHz ?? 0;
@@ -486,7 +495,7 @@ export class LivePianoSection {
         !info ? 'The loaded engine reports its silent-string band when it starts.' : bank > 0
           ? `Every other string is on the bridge too: its partials up to ${bank} Hz (${bankModes.toLocaleString('en-US')} of them) move as the bridge drives them, each with its damper and its string losses, and the rest of it is a quasi-static chord (mass and tension). A struck key takes over its partials as they are and returns them when quiet.`
           : 'Every other string stays attached as a quasi-static chord (its mass and tension load the bridge); a key becomes dynamic at its strike and returns to rest when quiet.',
-        board
+        supplied ? `The selected soundboard supplies all ${board} coordinates, including ${exact} exact low modes. Its source description is shown below.` : board
           ? `One shared soundboard: ${board} coordinates of the Model D board, on the 16-division mesh of the graded offline renders, with its full damping matrix: ${exact} exact modes, plus the ${board - exact} shapes that best reproduce every key's bridge response from there up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). This is the largest board this device computed fast enough when you pressed Start (32 to 128).`
           : 'One shared soundboard: a reduction of the Model D board on the 16-division mesh of the graded offline renders, with its full damping matrix: exact low modes, plus the shapes that best reproduce every key\'s bridge response up to 8 kHz (a proper orthogonal decomposition of the 0–2400 Hz slice). It has 32 to 128 coordinates, the largest this device computes fast enough, chosen when you press Start.',
         'The published hammer shank (rigid rotation plus bending) and RT-0425\'s published felt law: its stiffness on each string of the unison and its rate loss R_H, contact solved implicitly every step.',
@@ -521,7 +530,7 @@ export class LivePianoSection {
     };
     body.append(
       chips('Published', 'pub', ['RT-0425 string scale, 84 keys', 'RT-0425 hammer mass, exponent, stiffness, dissipation', ...(materials ? [] : ['RT-0425 string losses']), 'RT-0425 bridge coupling points', 'Model D dimensions', 'Model D board drawing (Boutillon et al.)', 'Hammer shank geometry (Chabassier & Durufle)']),
-      chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', 'Board damping 1.5 %', 'Rib and bridge widths']),
+      chips('Estimated', 'est', ['4 end keys of the scale', 'Unison detune 0.8 cents', 'Damper pads, 0.4 N s/m', ...(!supplied ? ['Board damping 1.5 %'] : []), 'Rib and bridge widths']),
       chips('Not modelled live', 'not', [...(!info ? [] : bank > 0 ? [`Silent strings above ${bank} Hz`] : ['Silent-string resonance', 'Silent-string damper loss']), ...(!board ? ['Board beyond what the device affords'] : board < 128 ? [`Board above ${board} coordinates`] : []), 'Action beyond the shank', 'Room, lid, case']),
     );
     if (info) {
@@ -694,6 +703,7 @@ export class LivePianoSection {
   private syncMaterialControls(): void {
     const enabled = q<HTMLInputElement>(this.root, '.lp-material-enabled');
     enabled.disabled = this.starting || this.client !== null;
+    q<HTMLInputElement>(this.root, '.lp-board-file').disabled = enabled.disabled;
     q<HTMLFieldSetElement>(this.root, '.lp-material-fields').disabled = enabled.disabled || !enabled.checked;
   }
 
@@ -740,12 +750,17 @@ export class LivePianoSection {
     status.textContent = 'Starting the audio clock…';
     try {
       const ctx = await resumeContext();
-      const stringMaterials = await this.readStringMaterials();
+      const file = q<HTMLInputElement>(this.root, '.lp-board-file').files?.[0];
+      if (file && (!file.size || file.size > 64 * 1024 * 1024)) {
+        throw new RangeError('Choose a nonempty soundboard file of at most 64 MiB.');
+      }
+      const [boardBytes, stringMaterials] = await Promise.all([file?.arrayBuffer(), this.readStringMaterials()]);
       if (this.disposed) return;
-      status.textContent = 'Loading the engine, assembling 88 keys and timing the soundboards this device can afford…';
+      status.textContent = boardBytes ? 'Loading the selected soundboard and assembling 88 keys…'
+        : 'Loading the engine, assembling 88 keys and timing the soundboards this device can afford…';
       // the largest soundboard this device computes 1.4x faster than real time (public/live/piano/boards.js);
       // the load governor lowers the string-mode budget if playing gets heavier than the probe
-      const client = await LivePianoClient.create(ctx, { boardCoordinates: 'auto',
+      const client = await LivePianoClient.create(ctx, { ...(boardBytes ? { boardBytes } : { boardCoordinates: 'auto' as const }),
         ...(stringMaterials ? { stringMaterials } : {}) });
       if (this.disposed) {
         client.dispose();

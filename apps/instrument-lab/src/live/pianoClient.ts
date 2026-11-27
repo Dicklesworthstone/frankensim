@@ -276,6 +276,8 @@ export interface PianoEngineOptions {
    * 'auto' = the largest board this device computes `minRealtime` (default 1.4) times faster than real time.
    */
   boardCoordinates?: number | 'auto';
+  /** Complete gen_board file. Omit boardCoordinates or use 0. Probes and playback use the same board. */
+  boardBytes?: ArrayBuffer | Uint8Array;
   minRealtime?: number;
   courseModeBudget?: number;
   maxDynamicModes?: number;

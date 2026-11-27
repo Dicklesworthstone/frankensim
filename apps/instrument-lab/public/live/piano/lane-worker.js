@@ -42,7 +42,7 @@
 //   {type:'error', message}
 import init, { PianoEngine } from './engine.js';
 import { createLane } from '../lane.js';
-import { createPianoEngine } from './engine-factory.js';
+import { createPianoEngine, suppliedBoard } from './engine-factory.js';
 import { BOARD_SIZES, FIXED_COST, capFor, chooseQuality, fetchBoard, probeSustained } from './boards.js';
 
 let engine = null;
@@ -153,17 +153,19 @@ self.onmessage = async (event) => {
       // kept as it is.
       const target = m.minRealtime || 1.3;
       const asked = Number(o.boardCoordinates) || 0;
-      let bytes = asked > 32 ? await fetchBoard(asked) : null;
+      const supplied = suppliedBoard(o);
+      const fixedBoard = supplied !== null || asked !== 0;
+      let bytes = supplied ?? (asked > 32 ? await fetchBoard(asked) : null);
       let coords = asked;
-      const pick = await chooseQuality({ make: asked ? (_b, _c, k) => make(bytes, coords, k) : make, target, sizes: asked ? [] : BOARD_SIZES,
+      const pick = await chooseQuality({ make: fixedBoard ? (_b, _c, k) => make(bytes, coords, k) : make, target, sizes: fixedBoard ? [] : BOARD_SIZES,
         floor: Number(o.maxDynamicModes) > 0 ? Infinity : START_FLOOR_MODES });
-      if (!asked) ({ bytes, coordinates: coords } = pick);
+      if (!fixedBoard) ({ bytes, coordinates: coords } = pick);
       let { cap, realtime } = pick;
       // the old last resort, 16 exact low modes, only when even the embedded board at the floor cap
       // runs below real time. It starts at the cap its own full-cap probe predicts for `target`
       // (capFor with its fixed share, not below the start floor, no second timing), not at the full
       // cap the governor would spend its first seconds walking down from
-      if (!asked && !bytes && cap <= START_FLOOR_MODES && realtime < 1) {
+      if (!fixedBoard && !bytes && cap <= START_FLOOR_MODES && realtime < 1) {
         pick.engine?.free();
         pick.engine = null;
         coords = 16;

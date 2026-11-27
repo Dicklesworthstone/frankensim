@@ -360,3 +360,18 @@ built WASM in Node, `stretchTuning: { concertAHz: 440 }` prepares 88 courses
 through 76 octave pairs (largest weighted RMS mismatch 4.5e-13 Hz) and plays
 finite output, as does 442 Hz with 2x. No new numerical solver, filter,
 dependency, lockfile or workflow is introduced. Listening remains outstanding.
+
+## Audition a generated soundboard
+
+Before starting the live piano, open **Choose a soundboard** and select the
+`.bin` written by `examples/gen_board.rs`. The keyboard and soundboard view
+use the file's coordinates, bridge projections and damping. The engine
+reports the source description stored in the file. With the chooser empty,
+the live piano selects a board according to the device's measured speed.
+
+Programmatic callers can pass the file as `boardBytes` in `LivePianoClient`
+or a scheduled `PianoLane`'s engine options. Supply an `ArrayBuffer` or
+`Uint8Array` of at most 64 MiB and omit `boardCoordinates`. For example,
+`LivePianoClient.create(context, { boardBytes: await file.arrayBuffer() })`.
+A scheduled lane times its string-mode budget on the selected board. A board
+format the loaded engine cannot read produces the engine's startup error.

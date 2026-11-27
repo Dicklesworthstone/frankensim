@@ -2,7 +2,22 @@
 // This chooses an existing WASM constructor, never a JavaScript audio resampler.
 import { gasSourcePacket } from '../gas-sources.js';
 
+// Rust reads the board format. Preserve the visible bytes of typed-array subviews.
+export function suppliedBoard(options) {
+  if (options.boardBytes === undefined) return null;
+  if (options.boardCoordinates !== undefined && options.boardCoordinates !== 0) {
+    throw new RangeError('boardBytes supplies the complete board; omit boardCoordinates or use 0');
+  }
+  const bytes = options.boardBytes instanceof ArrayBuffer ? new Uint8Array(options.boardBytes) : options.boardBytes;
+  if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+      || !bytes.byteLength || bytes.byteLength > 64 * 1024 * 1024) {
+    throw new RangeError('boardBytes must be a nonempty board file of at most 64 MiB');
+  }
+  return bytes;
+}
+
 export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null) {
+  bytes = suppliedBoard(options) ?? bytes;
   const substeps = options.substeps === undefined ? 1 : Number(options.substeps);
   if (![1, 2, 4].includes(substeps) || !Number.isInteger(sampleRate)
       || sampleRate < 8000 || sampleRate * substeps > 192000) {
