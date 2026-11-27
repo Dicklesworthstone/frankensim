@@ -26,10 +26,10 @@ Regression coverage is in `tests/driver_modes_and_store.rs`.
 
 ## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
 
-Thirteen lumped elements implement `fs_ports::component::StageResidual`:
+Fourteen lumped elements implement `fs_ports::component::StageResidual`:
 
 - Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`, `Storage`.
-- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`, `ControlledSource`, `AffineSignal`.
+- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`, `ControlledSource`, `AffineSignal`, `SignalSource`.
 
 The dual laws support common-effort networks with the same source clocks,
 work, heat and entropy accounts as their ordinary proposal path. A publishing
@@ -4355,11 +4355,23 @@ authored schedule. Its compensated `SignalClock` has a native codec, and every
 waveform is bound into the problem identity. These are zero-power signals;
 gains, units, filtering, saturation and stability remain authored choices.
 
+`SignalSource` also offers a zero-unknown `StageResidual`. Residual trials keep
+sampling the accepted start time; only acceptance advances the compensated
+clock. Native proposals, residual evaluation, acceptance and tangent actions
+share interval admission. Native steps crossing a table knot still shorten;
+residual and tangent calls crossing it refuse. Explicitly register both
+optional tiers to admit authored-reference graphs to stationary analysis. A
+zero-input source remains an ordered transient block, and this tier makes no
+claim that a time-varying reference has a time-independent equilibrium.
+
 `tests/sampled_controller.rs` compares controller recurrence, sample-and-hold
 behavior and physical capacitor work against independent calculations, checks
 analytic transpose actions, and exercises refusal, cancellation and replay.
 `tests/signal_source.rs` checks point sampling, table event clipping, codec
-identity and refusal without publication. It also checks held-command jumps,
+identity, residual conformance and refusal without publication. Its production
+reference/feedback/actuator/mass graph recovers a constant reference's known
+stationary setpoint and restores motion, source accounts, clocks, ledger and
+step count after noncommitting analysis. It also checks held-command jumps,
 interval means, distinct interpolation identities and a switched force's
 trajectory and physical work against piecewise constant-acceleration formulas,
 including checkpoint replay. `feedback_control --sampled-pi`

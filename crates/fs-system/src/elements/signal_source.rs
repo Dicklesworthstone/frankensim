@@ -5,7 +5,9 @@ use core::num::NonZeroUsize;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
-use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 
 use super::{ElementError, Waveform, finite, positive};
 use crate::ledger::Sum;
@@ -125,19 +127,25 @@ impl SignalSource {
         Ok(PreparedStep::Advance(next))
     }
 
-    fn admit_tangent(
+    fn admit_stage(
         &self,
         old: &SignalClock,
         dt_s: f64,
         inputs: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<(), ElementError> {
+    ) -> Result<SignalClock, ElementError> {
         match self.prepare_step(old, dt_s, inputs, cx)? {
-            PreparedStep::Advance(_) => Ok(()),
+            PreparedStep::Advance(next) => Ok(next),
             PreparedStep::Shorten(_) => Err(ElementError::Parameter {
-                name: "signal source tangent step crosses next event [s]",
+                name: "signal source step crosses next event [s]",
                 value: dt_s,
             }),
+        }
+    }
+
+    fn publish_outputs(&self, old: &SignalClock, outputs: &mut [f64]) {
+        for (index, output) in outputs.iter_mut().enumerate() {
+            *output = self.waveforms[index].value_at(old.time_s());
         }
     }
 }
@@ -240,11 +248,116 @@ impl Component for SignalSource {
         };
         // All arithmetic has been admitted; publication evaluates those same
         // deterministic values, with no allocation or second state.
-        for (index, output) in outputs.iter_mut().enumerate() {
-            *output = self.waveforms[index].value_at(old.time_s());
-        }
+        self.publish_outputs(old, outputs);
         *new = next;
         Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+// The clock is accepted bookkeeping, not an internal solve unknown. Reference
+// values remain frozen at the accepted start time during every stage trial.
+impl StageResidual for SignalSource {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        old: &SignalClock,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        extent("signal source stage width", z.len(), 0)?;
+        self.validate(old, dt_s, inputs)
+    }
+
+    fn residual(
+        &self,
+        old: &SignalClock,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        extent("signal source stage width", z.len(), 0)?;
+        extent("signal source residual width", r.len(), 0)?;
+        extent(
+            "signal source output width",
+            outputs.len(),
+            self.waveforms.len(),
+        )?;
+        self.admit_stage(old, dt_s, inputs, cx)?;
+        self.publish_outputs(old, outputs);
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        old: &SignalClock,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        extent("signal source stage width", z.len(), 0)?;
+        extent("signal source stage direction width", dz.len(), 0)?;
+        extent("signal source residual direction width", dr.len(), 0)?;
+        extent(
+            "signal source output direction width",
+            d_outputs.len(),
+            self.waveforms.len(),
+        )?;
+        self.admit_stage(old, dt_s, inputs, cx)?;
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        old: &SignalClock,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        extent("signal source stage width", z.len(), 0)?;
+        extent("signal source residual covector width", bar_r.len(), 0)?;
+        extent("signal source stage covector width", bar_z.len(), 0)?;
+        extent(
+            "signal source output covector width",
+            bar_outputs.len(),
+            self.waveforms.len(),
+        )?;
+        super::inputs_finite(bar_outputs)?;
+        self.admit_stage(old, dt_s, inputs, cx).map(|_| ())
+    }
+
+    fn accept(
+        &self,
+        old: &SignalClock,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut SignalClock,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ElementError> {
+        cx.checkpoint()?;
+        extent("signal source stage width", z.len(), 0)?;
+        let next = self.admit_stage(old, dt_s, inputs, cx)?;
+        *new = next;
+        Ok(Receipt::lossless(0.0, 0.0))
     }
 }
 
@@ -265,7 +378,7 @@ impl PortTangent for SignalSource {
             d_outputs.len(),
             self.waveforms.len(),
         )?;
-        self.admit_tangent(old, dt_s, inputs, cx)?;
+        self.admit_stage(old, dt_s, inputs, cx)?;
         d_outputs.fill(0.0);
         Ok(())
     }
@@ -287,6 +400,6 @@ impl PortTangent for SignalSource {
         )?;
         extent("signal source input covector width", bar_inputs.len(), 0)?;
         super::inputs_finite(bar_outputs)?;
-        self.admit_tangent(old, dt_s, inputs, cx)
+        self.admit_stage(old, dt_s, inputs, cx).map(|_| ())
     }
 }

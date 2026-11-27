@@ -1,14 +1,16 @@
-//! Point-sampled references retain their timing and identity through replay.
+//! G0/G2/G4/G5: point-sampled references retain their timing and identity through replay.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Component, PortTangent, Proposal};
-use fs_system::SystemBuilder;
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
+use fs_ports::component::{Component, PortTangent, Proposal, StageResidual};
+use fs_system::{AnalysisError, NodeId, StateMap, StationaryConfig, System, SystemBuilder};
 use fs_system::elements::{
-    ControlledSource, ElementError, Mass, Motion, SignalClock, SignalSource, SourceAccount,
-    Waveform,
+    AffineSignal, ControlledSource, ElementError, Mass, Motion, SignalClock, SignalSource,
+    SourceAccount, Waveform,
 };
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -57,6 +59,7 @@ fn vector_references_are_point_samples_independent_of_trial_duration() {
                 .unwrap();
             assert_eq!(state.time_s(), 0.25 + dt_s);
             check_port_tangent(&source, &case, 1e-6, 1e-9, cx).unwrap();
+            check_stage_residual(&source, &case, &[], 1e-6, 1e-9, cx).unwrap();
         }
     });
 }
@@ -133,9 +136,25 @@ fn invalid_calls_and_cancellation_publish_no_clock_or_output() {
                     .propose(&old, dt, inputs, &mut new, &mut out, cx)
                     .is_err()
             );
+            assert!(
+                source
+                    .residual(&old, dt, inputs, &[], &mut [], &mut out, cx)
+                    .is_err()
+            );
+            assert!(source.accept(&old, dt, inputs, &[], &mut new, cx).is_err());
             assert_eq!(new, stale);
             assert_eq!(out, [91.0]);
         }
+        let mut new = stale;
+        let mut out = [91.0];
+        assert!(
+            source
+                .residual(&old, 0.1, &[], &[0.0], &mut [], &mut out, cx)
+                .is_err()
+        );
+        assert!(source.accept(&old, 0.1, &[], &[0.0], &mut new, cx).is_err());
+        assert_eq!(new, stale);
+        assert_eq!(out, [91.0]);
         gate.request();
         let mut new = stale;
         let mut out = [91.0];
@@ -147,13 +166,21 @@ fn invalid_calls_and_cancellation_publish_no_clock_or_output() {
             source.jvp(&old, 0.1, &[], &[], &mut out, cx),
             Err(ElementError::Cancelled)
         );
+        assert_eq!(
+            source.residual(&old, 0.1, &[], &[], &mut [], &mut out, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            source.accept(&old, 0.1, &[], &[], &mut new, cx),
+            Err(ElementError::Cancelled)
+        );
         assert_eq!(new, stale);
         assert_eq!(out, [91.0]);
     });
 }
 
 #[test]
-fn tangents_refuse_intervals_whose_primal_cannot_advance_or_sample() {
+fn optional_tiers_refuse_intervals_whose_primal_cannot_advance_or_sample() {
     let constant = SignalSource::new(vec![Waveform::constant(2.0).unwrap()]).unwrap();
     let stuck = constant.decode_state(&[1.0_f64.to_bits(), 0]).unwrap();
     let table = SignalSource::new(vec![
@@ -184,6 +211,18 @@ fn tangents_refuse_intervals_whose_primal_cannot_advance_or_sample() {
             assert!(source.jvp(&old, dt_s, &[], &[], &mut output, cx).is_err());
             assert_eq!(output, [91.0]);
             assert!(source.vjp(&old, dt_s, &[], &[1.0], &mut [], cx).is_err());
+            assert!(
+                source
+                    .residual(&old, dt_s, &[], &[], &mut [], &mut output, cx)
+                    .is_err()
+            );
+            assert!(
+                source
+                    .accept(&old, dt_s, &[], &[], &mut new, cx)
+                    .is_err()
+            );
+            assert_eq!(new, SignalClock::default());
+            assert_eq!(output, [91.0]);
         }
     });
 }
@@ -259,6 +298,7 @@ fn held_table_admission_and_identity_keep_the_interpolation_law_explicit() {
         };
         check_component(&hold, &case, cx).unwrap();
         check_port_tangent(&hold, &case, 1e-6, 1e-9, cx).unwrap();
+        check_stage_residual(&hold, &case, &[], 1e-6, 1e-9, cx).unwrap();
     });
 }
 
@@ -319,5 +359,117 @@ fn held_commands_resolve_jumps_and_drive_replayable_physical_work() {
             assert!(system.ledger().energy_residual_j().abs() < 1e-13);
             system.restore(&checkpoint).unwrap();
         }
+    });
+}
+
+struct MotionCoordinates(NodeId);
+
+impl StateMap for MotionCoordinates {
+    fn dim(&self) -> usize {
+        2
+    }
+
+    fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
+        let state = system.state::<Motion>(self.0).ok_or(AnalysisError::Invalid {
+            what: "missing feedback body state",
+        })?;
+        out.copy_from_slice(&[state.position_m, state.velocity_m_s]);
+        Ok(())
+    }
+
+    fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
+        system.set_accepted_state(
+            self.0,
+            Motion {
+                position_m: state[0],
+                velocity_m_s: state[1],
+            },
+        )?;
+        Ok(())
+    }
+}
+
+#[test]
+fn authored_reference_allows_stationary_feedback_without_advancing_clocks() {
+    const TARGET: f64 = 1.75;
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent_and_stage_residual(
+            "body",
+            Mass::new(2.0).unwrap().publishing(),
+            Motion {
+                position_m: 0.25,
+                velocity_m_s: -0.5,
+            },
+        )
+        .unwrap();
+    let drive = builder
+        .add_with_tangent_and_stage_residual(
+            "drive",
+            ControlledSource::effort(PortKind::MechanicalForceVelocity),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let control = builder
+        .add_with_tangent_and_stage_residual(
+            "control",
+            AffineSignal::new(3, 1, vec![4.0, -4.0, -3.0], vec![0.0]).unwrap(),
+            (),
+        )
+        .unwrap();
+    let reference = builder
+        .add_with_tangent_and_stage_residual(
+            "reference",
+            SignalSource::new(vec![Waveform::constant(TARGET).unwrap()]).unwrap(),
+            SignalClock::default(),
+        )
+        .unwrap();
+    builder
+        .bond(
+            builder.port(body, "p").unwrap(),
+            builder.port(drive, "p").unwrap(),
+        )
+        .unwrap();
+    for (from_node, from_port, to_node, to_port) in [
+        (body, "position", control, "input1"),
+        (body, "velocity", control, "input2"),
+        (reference, "output", control, "input0"),
+        (control, "output", drive, "command"),
+    ] {
+        builder
+            .signal(
+                builder.port(from_node, from_port).unwrap(),
+                builder.port(to_node, to_port).unwrap(),
+            )
+            .unwrap();
+    }
+    let mut system = builder.seal().unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        system.step(0.125, cx).unwrap();
+        let old_motion = *system.state::<Motion>(body).unwrap();
+        let old_drive = *system.state::<SourceAccount>(drive).unwrap();
+        let old_clock = *system.state::<SignalClock>(reference).unwrap();
+        let old_ledger = system.ledger().clone();
+        let checkpoint = system.checkpoint().unwrap();
+        let solution = system
+            .solve_stationary(
+                &MotionCoordinates(body),
+                StationaryConfig {
+                    probe_dt_s: 0.1,
+                    ..StationaryConfig::default()
+                },
+                cx,
+            )
+            .unwrap();
+        // F = 4 * (TARGET - x) - 3 * v; a stationary mass has F = v = 0.
+        assert!((solution.state[0] - TARGET).abs() < 1e-8);
+        assert!(solution.state[1].abs() < 1e-8);
+        assert!(solution.residual_norm <= 1e-10);
+        assert_eq!(system.state::<Motion>(body), Some(&old_motion));
+        assert_eq!(system.state::<SourceAccount>(drive), Some(&old_drive));
+        assert_eq!(system.state::<SignalClock>(reference), Some(&old_clock));
+        assert_eq!(system.ledger(), &old_ledger);
+        assert_eq!(system.time_s(), checkpoint.time_s());
+        assert_eq!(system.steps(), checkpoint.steps());
     });
 }
