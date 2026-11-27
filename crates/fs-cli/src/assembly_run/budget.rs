@@ -372,7 +372,9 @@ fn lower_corner(
             | DraftInterfaceKind::HeatRoute { .. }
             | DraftInterfaceKind::ShearFilm { .. }
             | DraftInterfaceKind::TemperatureSource
-            | DraftInterfaceKind::PistonFace { .. } => continue,
+            | DraftInterfaceKind::PistonFace { .. }
+            | DraftInterfaceKind::HertzContact { .. }
+            | DraftInterfaceKind::NormalLoad => continue,
         };
         let old = *lc;
         if let Some(&h) = remap.get(&(old, true)) {

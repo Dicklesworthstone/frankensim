@@ -1434,3 +1434,50 @@ fn a_part_initial_state_admits_and_refuses_its_bad_fields_by_name() {
         item("temperature")
     );
 }
+
+#[test]
+fn hertz_contact_and_normal_load_admission_checks_every_state_key() {
+    let sc = Scenario::new("draft-hertz", 112, Environment::earth_lab());
+    let base = build_mechanical_watch(&sc).input().clone();
+    let kv = |n: &str, v, d| (ParameterKey::new(n, d), QtyAny::new(v, d));
+    let check = |state: Vec<(ParameterKey, QtyAny)>| {
+        let mut inp = base.clone();
+        inp.interfaces[0].kind = DraftInterfaceKind::NormalLoad;
+        inp.interfaces[1].kind = DraftInterfaceKind::HertzContact { state };
+        DraftAssembly::admit(inp, &sc)
+    };
+    let ok = vec![
+        kv("maximum_force", 1.0e4, FORCE),
+        kv("maximum_penetration", 1.0e-3, LENGTH),
+        kv("gap", 0.0, LENGTH),
+        kv("initial_closure", 1.0e-6, LENGTH),
+    ];
+    let adm = check(ok.clone()).expect("elastic hertz + normal_load");
+    assert!(adm.round_trip(&sc).is_ok());
+    let mut lossy = ok;
+    lossy.push(kv("restitution", 0.7, Dims::NONE));
+    lossy.push(kv("approach_speed", 0.2, VELOCITY));
+    assert!(check(lossy).is_ok());
+    let f_ok = || kv("maximum_force", 1.0e4, FORCE);
+    let p_ok = || kv("maximum_penetration", 1.0e-3, LENGTH);
+    let (e_ok, v_ok) = (
+        || kv("restitution", 0.7, Dims::NONE),
+        || kv("approach_speed", 0.2, VELOCITY),
+    );
+    for state in [
+        vec![p_ok()],
+        vec![f_ok()],
+        vec![kv("maximum_force", 0.0, FORCE), p_ok()],
+        vec![f_ok(), kv("maximum_penetration", -1.0, LENGTH)],
+        vec![f_ok(), p_ok(), kv("gap", f64::NAN, LENGTH)],
+        vec![f_ok(), p_ok(), e_ok()],
+        vec![f_ok(), p_ok(), v_ok()],
+        vec![f_ok(), p_ok(), kv("restitution", 1.2, Dims::NONE), v_ok()],
+        vec![f_ok(), p_ok(), kv("restitution", 0.0, Dims::NONE), v_ok()],
+        vec![kv("maximum_force", 1.0e4, LENGTH), p_ok()],
+        vec![f_ok(), p_ok(), kv("unknown_key", 1.0, Dims::NONE)],
+    ] {
+        let err = check(state).unwrap_err();
+        assert!(err.item.contains("swiss_lever_escapement"), "{err}");
+    }
+}

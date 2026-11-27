@@ -71,6 +71,10 @@ pub const SHEAR_FILM_FAMILY: &str = "shear-film";
 pub const TEMPERATURE_SOURCE_FAMILY: &str = "temperature-source";
 /// Dispatch family of a card-less [`DraftInterfaceKind::PistonFace`].
 pub const PISTON_FACE_FAMILY: &str = "piston-face";
+/// Dispatch family of a card-less [`DraftInterfaceKind::HertzContact`].
+pub const HERTZ_CONTACT_FAMILY: &str = "hertz-contact";
+/// Dispatch family of a card-less [`DraftInterfaceKind::NormalLoad`].
+pub const NORMAL_LOAD_FAMILY: &str = "normal-load";
 
 /// BLAKE3 domain for parametric geometry fingerprints minted during lowering.
 pub const LOWERING_GEOMETRY_HASH_DOMAIN: &str = "org.frankensim.fs-system.lowering.geometry.v1";
@@ -99,9 +103,9 @@ const TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const FREQUENCY_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
-const FORCE_DIMS: Dims = Dims([1, 1, -2, 0, 0, 0]);
-const VELOCITY_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
-const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+pub(crate) const FORCE_DIMS: Dims = Dims([1, 1, -2, 0, 0, 0]);
+pub(crate) const VELOCITY_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
+pub(crate) const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 
 // ============================================================================
 // Registry Keys
@@ -263,6 +267,10 @@ pub enum InterfaceKindTag {
     TemperatureSource,
     /// Card-less mechanical-to-fluid piston face.
     PistonFace,
+    /// Card-less normal Hertzian contact.
+    HertzContact,
+    /// Card-less normal-load signal link.
+    NormalLoad,
 }
 
 impl InterfaceKindTag {
@@ -278,6 +286,8 @@ impl InterfaceKindTag {
             Self::HeatRoute => "heat_route",
             Self::TemperatureSource => "temperature_source",
             Self::PistonFace => "piston_face",
+            Self::HertzContact => "hertz_contact",
+            Self::NormalLoad => "normal_load",
         }
     }
 }
@@ -295,6 +305,8 @@ impl From<&DraftInterfaceKind> for InterfaceKindTag {
             DraftInterfaceKind::HeatRoute { .. } => Self::HeatRoute,
             DraftInterfaceKind::TemperatureSource => Self::TemperatureSource,
             DraftInterfaceKind::PistonFace { .. } => Self::PistonFace,
+            DraftInterfaceKind::HertzContact { .. } => Self::HertzContact,
+            DraftInterfaceKind::NormalLoad => Self::NormalLoad,
         }
     }
 }
@@ -1645,6 +1657,7 @@ pub struct LoweringGraph {
     boundary_zero_ports: BTreeSet<PortRef>,
     ground_entities: BTreeSet<EntityId>,
     initial_guesses: BTreeMap<PortRef, Vec<f64>>,
+    deferred_signals: Vec<(EntityId, &'static str, EntityId, &'static str, String)>,
     observers: BTreeMap<EntityId, Observer>,
     consumed_sources: BTreeMap<usize, SourceLoweringReceipt>,
 }
@@ -1663,6 +1676,7 @@ impl LoweringGraph {
             boundary_zero_ports: BTreeSet::new(),
             ground_entities: BTreeSet::new(),
             initial_guesses: BTreeMap::new(),
+            deferred_signals: Vec::new(),
             observers: BTreeMap::new(),
             consumed_sources: BTreeMap::new(),
         }
@@ -1794,6 +1808,17 @@ impl LoweringGraph {
     /// Propagates [`AdmissionError`].
     pub fn connect_signal(&mut self, from: PortRef, to: PortRef) -> Result<(), LoweringError> {
         Ok(self.builder.signal(from, to)?)
+    }
+
+    /// Defer a signal link between two entity-exposed ports until sealing.
+    pub fn connect_entity_signal(
+        &mut self,
+        from: (EntityId, &'static str),
+        to: (EntityId, &'static str),
+        item: impl Into<String>,
+    ) {
+        self.deferred_signals
+            .push((from.0, from.1, to.0, to.1, item.into()));
     }
 
     fn register_node_meta(
@@ -1984,6 +2009,19 @@ impl LoweringGraph {
                 port,
                 Box::new(|_t_s: f64, _dt_s: f64, out: &mut [f64]| out.fill(0.0)),
             )?;
+        }
+        for (fe, fp, te, tp, item) in self.deferred_signals {
+            let get = |e, p: &str, it| {
+                self.entity_ports.get(&(e, p.to_owned())).copied().ok_or(
+                    LoweringError::MissingPort {
+                        item: it,
+                        entity: e,
+                        port: p.to_owned(),
+                    },
+                )
+            };
+            self.builder
+                .signal(get(fe, fp, item.clone())?, get(te, tp, item)?)?;
         }
         let mut system = self.builder.seal()?;
         // Seed positive ambient temperature starting guesses for looped heat
@@ -3246,12 +3284,16 @@ impl LoweringRegistry {
                         ResolvedInterfaceCard::None,
                         None,
                     ),
-                    DraftInterfaceKind::PistonFace { .. } => (
-                        None,
-                        PISTON_FACE_FAMILY.to_owned(),
-                        ResolvedInterfaceCard::None,
-                        None,
-                    ),
+                    DraftInterfaceKind::PistonFace { .. }
+                    | DraftInterfaceKind::HertzContact { .. }
+                    | DraftInterfaceKind::NormalLoad => {
+                        let fam = match &iface.kind {
+                            DraftInterfaceKind::PistonFace { .. } => PISTON_FACE_FAMILY,
+                            DraftInterfaceKind::HertzContact { .. } => HERTZ_CONTACT_FAMILY,
+                            _ => NORMAL_LOAD_FAMILY,
+                        };
+                        (None, fam.to_owned(), ResolvedInterfaceCard::None, None)
+                    }
                 };
             let key = InterfaceLoweringKey::new(kind_tag, card_family.clone());
             let ctor = self.interfaces.get(&key).ok_or_else(|| {
@@ -3957,6 +3999,10 @@ pub fn register_kernel_defaults(registry: &mut LoweringRegistry) {
     registry.register_interface(
         InterfaceLoweringKey::new(InterfaceKindTag::PowerPort, "power-bond"),
         lower_power_bond_interface,
+    );
+    registry.register_interface(
+        InterfaceLoweringKey::new(InterfaceKindTag::NormalLoad, NORMAL_LOAD_FAMILY),
+        lower_normal_load,
     );
 
     // 8. AcousticAssembly family entries (Do 5).
@@ -5198,7 +5244,7 @@ fn dry_friction_query_mu(
     ctx: &InterfaceLoweringContext<'_>,
     entry: &InterfaceCardEntry,
     state: &[(ParameterKey, QtyAny)],
-    (normal_n, v_rel0, t_init): (f64, f64, f64),
+    (normal_n, v_rel0, t_init, live_normal): (f64, f64, f64, bool),
     (scope, rec): (&str, &mut ProvenanceRecorder),
 ) -> Result<(f64, f64), LoweringError> {
     let inv = |d: String| LoweringError::Invalid {
@@ -5217,9 +5263,18 @@ fn dry_friction_query_mu(
     };
     let mut q_state: Vec<_> = state
         .iter()
-        .filter(|(k, _)| !matches!(k.name.as_str(), "heat_partition_a" | "initial_slip"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.name.as_str(),
+                "heat_partition_a" | "initial_slip" | "reference_normal_force"
+            )
+        })
         .cloned()
         .collect();
+    if live_normal {
+        let key = ParameterKey::new("normal_force", FORCE_DIMS);
+        q_state.push((key, QtyAny::new(normal_n, FORCE_DIMS)));
+    }
     let (s_prop, k_prop) = (
         "static-friction-coefficient",
         "kinetic-friction-coefficient",
@@ -5243,8 +5298,16 @@ fn dry_friction_query_mu(
         }
     }
     let held = "held: mu does not follow the interface's live state (one-way)";
+    let (n_key, n_src) = if live_normal {
+        (
+            "reference_normal_force",
+            "held: mu queried at reference_normal_force; live normal load comes from Hertz contact and can leave card normal_force validity",
+        )
+    } else {
+        ("normal_force", "state.normal_force")
+    };
     for (k, v, d, f) in [
-        ("normal_force", normal_n, FORCE_DIMS, "state.normal_force"),
+        (n_key, normal_n, FORCE_DIMS, n_src),
         (
             "initial_relative_velocity_m_s",
             v_rel0,
@@ -5336,6 +5399,72 @@ fn dry_friction_end_state(
     Ok((t_init, v_rel0, slip))
 }
 
+fn iface_for_feature(
+    inp: &fs_scenario::assembly::draft::DraftAssemblyInput,
+    feat: EntityId,
+    pred: impl Fn(&DraftInterfaceDecl) -> bool,
+) -> Option<EntityId> {
+    let mut d = inp
+        .interfaces
+        .iter()
+        .filter(|i| pred(i) && (i.feature_a == feat || i.feature_b == feat));
+    match (d.next(), d.next()) {
+        (Some(one), None) => return Some(one.entity),
+        (Some(_), Some(_)) => return None,
+        _ => {}
+    }
+    let part = owning_part_decl(inp, feat)?.entity;
+    let on = |e| owning_part_decl(inp, e).map(|p| p.entity) == Some(part);
+    let mut b = inp
+        .interfaces
+        .iter()
+        .filter(|i| pred(i) && (on(i.feature_a) || on(i.feature_b)));
+    match (b.next(), b.next()) {
+        (Some(one), None) => Some(one.entity),
+        _ => None,
+    }
+}
+
+fn dry_friction_normal(
+    ctx: &InterfaceLoweringContext<'_>,
+    state: &[(ParameterKey, QtyAny)],
+    scope: &str,
+) -> Result<(f64, bool), LoweringError> {
+    let inv = |d: &str| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d.to_owned(),
+    };
+    let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
+    let inp = ctx.draft.input();
+    let is_mc =
+        |i: &DraftInterfaceDecl| matches!(i.kind, DraftInterfaceKind::MechanicalContact { .. });
+    let nl = inp
+        .interfaces
+        .iter()
+        .filter(|i| {
+            i.kind == DraftInterfaceKind::NormalLoad
+                && iface_for_feature(inp, i.feature_a, is_mc) == Some(ctx.interface.entity)
+        })
+        .count();
+    if nl > 1 {
+        return Err(inv("dry-friction accepts at most one NormalLoad"));
+    }
+    let live = nl == 1;
+    let qn = match (find("normal_force"), find("reference_normal_force"), live) {
+        (Some(_), _, true) => return Err(inv("both normal_force and NormalLoad given")),
+        (None, _, false) => return Err(inv("requires normal_force [N] or NormalLoad")),
+        (Some(_), Some(_), false) => return Err(inv("reference_normal_force needs NormalLoad")),
+        (None, None, true) => return Err(inv("NormalLoad requires reference_normal_force [N]")),
+        (Some(q), None, false) | (None, Some(q), true) => q,
+    };
+    if !(qn.dims == FORCE_DIMS && qn.value.is_finite() && qn.value > 0.0) {
+        return Err(inv(
+            "normal_force / reference_normal_force must be positive [N]",
+        ));
+    }
+    Ok((qn.value, live))
+}
+
 fn lower_dry_friction_interface(
     ctx: &InterfaceLoweringContext<'_>,
     graph: &mut LoweringGraph,
@@ -5357,11 +5486,8 @@ fn lower_dry_friction_interface(
     if third_body.is_some() {
         return Err(inv("dry-friction refuses a third-body lubricant film"));
     }
+    let (normal_n, live_normal) = dry_friction_normal(ctx, state, &scope)?;
     let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
-    let normal_n = find("normal_force")
-        .filter(|q| q.dims == FORCE_DIMS && q.value.is_finite() && q.value > 0.0)
-        .map(|q| q.value)
-        .ok_or_else(|| inv("dry-friction requires positive normal_force [N]"))?;
     let beta = match find("heat_partition_a") {
         Some(q)
             if q.dims == Dims::NONE && q.value.is_finite() && (0.0..=1.0).contains(&q.value) =>
@@ -5377,14 +5503,18 @@ fn lower_dry_friction_interface(
         ctx,
         entry,
         state,
-        (normal_n, v_rel0, t_init),
+        (normal_n, v_rel0, t_init, live_normal),
         (&scope, &mut rec),
     )?;
-    let mut slider =
-        Slider::new(normal_n, mu_s, mu_k).map_err(|source| LoweringError::Element {
-            item: scope.clone(),
-            source,
-        })?;
+    let mut slider = if live_normal {
+        Slider::loaded_by_signal(mu_s, mu_k)
+    } else {
+        Slider::new(normal_n, mu_s, mu_k)
+    }
+    .map_err(|source| LoweringError::Element {
+        item: scope.clone(),
+        source,
+    })?;
     let input = ctx.draft.input();
     let (cat, root, fa, fb) = (
         &input.catalog,
@@ -5415,6 +5545,13 @@ fn lower_dry_friction_interface(
     }
     let node_name = format!("interface.{}", ctx.interface.name);
     let node = graph.add_on_line(&node_name, Some(ctx.interface.entity), slider, slip)?;
+    if live_normal {
+        graph.expose_port(
+            ctx.interface.entity,
+            "normal_n",
+            graph.port(node, "normal_n")?,
+        );
+    }
     for (feat, mport, _, sport, sp) in ends {
         attach_mech_endpoint(graph, cat, feat, root, graph.port(node, mport)?, &scope)?;
         if let Some(src) = sp {
@@ -5426,6 +5563,37 @@ fn lower_dry_friction_interface(
     let (property_receipts, parameter_sources) = rec.finish();
     Ok(LoweredInterfaceOutput {
         created_nodes: vec![node_name],
+        property_receipts,
+        parameter_sources,
+    })
+}
+
+fn lower_normal_load(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+) -> Result<LoweredInterfaceOutput, LoweringError> {
+    let scope = format!("interface:{}", ctx.interface.name);
+    let inp = ctx.draft.input();
+    let dst = iface_for_feature(inp, ctx.interface.feature_a, |i| {
+        matches!(i.kind, DraftInterfaceKind::MechanicalContact { .. })
+    });
+    let src = iface_for_feature(inp, ctx.interface.feature_b, |i| {
+        matches!(i.kind, DraftInterfaceKind::HertzContact { .. })
+    });
+    let (Some(dst), Some(src)) = (dst, src) else {
+        let detail = "NormalLoad needs one dry-friction (a) and one HertzContact (b)".into();
+        return Err(LoweringError::Invalid {
+            item: scope,
+            detail,
+        });
+    };
+    graph.connect_entity_signal((src, "reaction_n"), (dst, "normal_n"), &scope);
+    let mut rec = ProvenanceRecorder::default();
+    let src_tag = "signal: hertz reaction_n -> dry-friction normal_n";
+    rec.record_declared_field("normal_load_signal", 1.0, Dims::NONE, &scope, src_tag);
+    let (property_receipts, parameter_sources) = rec.finish();
+    Ok(LoweredInterfaceOutput {
+        created_nodes: Vec::new(),
         property_receipts,
         parameter_sources,
     })

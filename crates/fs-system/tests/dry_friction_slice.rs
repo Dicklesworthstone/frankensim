@@ -18,6 +18,7 @@ use fs_scenario::{
     EntityCatalog, EntityDeclaration, EntityId, Environment, FrameId, InterfacePair, Scenario,
 };
 use fs_system::elements::{Mass, Motion, Slider, SliderEnd, Slip, SourceAccount};
+use fs_system::lowering::InterfaceKindTag;
 use fs_system::{CardStore, LoweredSystem, LoweringError, LoweringRegistry, System, SystemBuilder};
 
 const L: Dims = Dims([1, 0, 0, 0, 0, 0]);
@@ -175,67 +176,27 @@ fn make_part(s: &Side, entity: EntityId) -> d::DraftPartDecl {
     }
 }
 
-fn lower_pair(
+type Built = (
+    Vec<d::JointDecl>,
+    Vec<d::DraftInterfaceDecl>,
+    Vec<d::SourceDecl>,
+);
+
+fn lower_draft_ifaces(
     (side_a, side_b): (&Side, &Side),
-    (card, third_body, state): (
-        ContentHash,
-        Option<d::ThirdBodyDecl>,
-        Vec<(ParameterKey, QtyAny)>,
-    ),
-    (spring_k, belt): (Option<f64>, Option<d::TimeHistory>),
     (dt, t_end): (f64, f64),
     cards: &CardStore,
+    build: impl FnOnce(&mut EntityCatalog, EntityId, [EntityId; 2]) -> Built,
 ) -> Result<LoweredSystem, LoweringError> {
     let mut cat = EntityCatalog::new();
-    let mut dec = |e| cat.declare(e).unwrap();
-    let root = dec(EntityDeclaration::assembly("p"));
-    let pa = dec(EntityDeclaration::part(root, side_a.0));
-    let pb = dec(EntityDeclaration::part(root, side_b.0));
-    let sa = dec(EntityDeclaration::surface(pa, "sa"));
-    let sb = dec(EntityDeclaration::surface(pb, "sb"));
-    let cid = dec(EntityDeclaration::interface(
-        root,
-        "pad",
-        InterfacePair::ordered(sa, sb),
-    ));
-    let mut joints = Vec::new();
-    if let Some(k) = spring_k {
-        joints.push(d::JointDecl {
-            name: "spring".into(),
-            parent: root,
-            child: pa,
-            frame: FrameId(0),
-            kind: d::JointKind::Prismatic,
-            axis: [1.0, 0.0, 0.0],
-            pitch: None,
-            limits: None,
-            damping: None,
-            stiffness: Some(QtyAny::new(k, Dims([0, 1, -2, 0, 0, 0]))),
-        });
-    }
-    let mut sources = Vec::new();
-    if let Some(history) = belt {
-        sources.push(d::SourceDecl {
-            name: "belt_v".into(),
-            target: d::SourceTarget::Port {
-                entity: pb,
-                port: "mechanics".into(),
-            },
-            history,
-        });
-    }
-    let kind = d::DraftInterfaceKind::MechanicalContact {
-        law_card: card,
-        third_body,
-        state,
-    };
-    let iface = d::DraftInterfaceDecl {
-        name: "pad".into(),
-        entity: cid,
-        feature_a: sa,
-        feature_b: sb,
-        kind,
-    };
+    let root = cat.declare(EntityDeclaration::assembly("p")).unwrap();
+    let pa = cat
+        .declare(EntityDeclaration::part(root, side_a.0))
+        .unwrap();
+    let pb = cat
+        .declare(EntityDeclaration::part(root, side_b.0))
+        .unwrap();
+    let (joints, interfaces, sources) = build(&mut cat, root, [pa, pb]);
     let mut env = d::DraftEnvironment::earth_lab_air();
     env.base.ambient_temperature = QtyAny::new(300.0, TEMP);
     let inp = d::DraftAssemblyInput {
@@ -255,7 +216,7 @@ fn lower_pair(
         parts: vec![make_part(side_a, pa), make_part(side_b, pb)],
         joints,
         gear_meshes: vec![],
-        interfaces: vec![iface],
+        interfaces,
         sources,
         controllers: vec![],
         probes: vec![],
@@ -263,6 +224,69 @@ fn lower_pair(
     let scen = Scenario::new("p", 42, Environment::earth_lab());
     LoweringRegistry::with_kernel_defaults()
         .lower(&d::DraftAssembly::admit(inp, &scen).unwrap(), cards)
+}
+
+fn lower_pair(
+    sides: (&Side, &Side),
+    (card, third_body, state): (
+        ContentHash,
+        Option<d::ThirdBodyDecl>,
+        Vec<(ParameterKey, QtyAny)>,
+    ),
+    (spring_k, belt): (Option<f64>, Option<d::TimeHistory>),
+    plan: (f64, f64),
+    cards: &CardStore,
+) -> Result<LoweredSystem, LoweringError> {
+    lower_draft_ifaces(sides, plan, cards, |cat, root, [pa, pb]| {
+        let sa = cat.declare(EntityDeclaration::surface(pa, "sa")).unwrap();
+        let sb = cat.declare(EntityDeclaration::surface(pb, "sb")).unwrap();
+        let cid = cat
+            .declare(EntityDeclaration::interface(
+                root,
+                "pad",
+                InterfacePair::ordered(sa, sb),
+            ))
+            .unwrap();
+        let joints = spring_k
+            .map(|k| d::JointDecl {
+                name: "spring".into(),
+                parent: root,
+                child: pa,
+                frame: FrameId(0),
+                kind: d::JointKind::Prismatic,
+                axis: [1.0, 0.0, 0.0],
+                pitch: None,
+                limits: None,
+                damping: None,
+                stiffness: Some(QtyAny::new(k, Dims([0, 1, -2, 0, 0, 0]))),
+            })
+            .into_iter()
+            .collect();
+        let sources = belt
+            .map(|history| d::SourceDecl {
+                name: "belt_v".into(),
+                target: d::SourceTarget::Port {
+                    entity: pb,
+                    port: "mechanics".into(),
+                },
+                history,
+            })
+            .into_iter()
+            .collect();
+        let kind = d::DraftInterfaceKind::MechanicalContact {
+            law_card: card,
+            third_body,
+            state,
+        };
+        let iface = d::DraftInterfaceDecl {
+            name: "pad".into(),
+            entity: cid,
+            feature_a: sa,
+            feature_b: sb,
+            kind,
+        };
+        (joints, vec![iface], sources)
+    })
 }
 
 fn run_stick_slip(
@@ -759,4 +783,97 @@ fn slider_identity_conformance_and_liftoff() {
             assert!((vel(&ss, ms) - v0).abs() <= 1.0e-14 && diss(&ss).to_bits() == q0.to_bits());
         }
     });
+}
+
+#[test]
+fn normal_load_and_hertz_lowering_refusals() {
+    let mut cards = CardStore::new();
+    let mat = cards.insert_material(unit_mat(1.0, 100.0));
+    let fc = cards
+        .insert_interface("dry-friction", friction_card(0.5, 0.3, 50.0, 5.0))
+        .unwrap();
+    let sa = ("a", d::DraftPartKind::RigidBody, mat, false, None);
+    let sb = ("b", d::DraftPartKind::DrivenBody, mat, false, None);
+    let hk = || d::DraftInterfaceKind::HertzContact {
+        state: vec![
+            kv("maximum_force", 1e4, F_DIM),
+            kv("maximum_penetration", 1e-3, L),
+        ],
+    };
+    let mc = |state| d::DraftInterfaceKind::MechanicalContact {
+        law_card: fc,
+        third_body: None,
+        state,
+    };
+    let s = |c: &mut EntityCatalog, p, n| c.declare(EntityDeclaration::surface(p, n)).unwrap();
+    let add = |c: &mut EntityCatalog, r, n: &str, (fa, fb), kind| {
+        let pair = InterfacePair::ordered(fa, fb);
+        let entity = c.declare(EntityDeclaration::interface(r, n, pair)).unwrap();
+        d::DraftInterfaceDecl {
+            name: n.into(),
+            entity,
+            feature_a: fa,
+            feature_b: fb,
+            kind,
+        }
+    };
+    let run = |mk: &dyn Fn(&mut EntityCatalog, EntityId, [EntityId; 2]) -> Vec<_>| {
+        lower_draft_ifaces((&sa, &sb), (1e-3, 1e-2), &cards, |c, r, ps| {
+            (vec![], mk(c, r, ps), vec![])
+        })
+        .err()
+        .expect("refusal")
+    };
+    let err = run(&|c, r, [pa, pb]| {
+        let pair = (s(c, pa, "sa"), s(c, pb, "sb"));
+        vec![add(c, r, "hertz", pair, hk())]
+    });
+    assert!(matches!(
+        err,
+        LoweringError::MissingInterfaceConstructor {
+            ref interface,
+            kind: InterfaceKindTag::HertzContact,
+            ref card_family,
+        } if interface == "hertz" && card_family == "hertz-contact"
+    ));
+    let n10 = || kv("normal_force", 10.0, F_DIM);
+    let err = run(&|c, r, [pa, pb]| {
+        let p1 = (s(c, pa, "a1"), s(c, pb, "b1"));
+        let p2 = (s(c, pa, "a2"), s(c, pb, "b2"));
+        let (so, sh, th) = (s(c, pa, "ao"), s(c, pa, "ah"), s(c, pb, "bh"));
+        vec![
+            add(c, r, "pad1", p1, mc(vec![n10()])),
+            add(c, r, "pad2", p2, mc(vec![n10()])),
+            add(c, r, "nload", (so, sh), d::DraftInterfaceKind::NormalLoad),
+            add(c, r, "hertz", (sh, th), hk()),
+        ]
+    });
+    assert!(
+        matches!(err, LoweringError::Invalid { ref item, .. } if item == "interface:nload"),
+        "{err}"
+    );
+    let r10 = || kv("reference_normal_force", 10.0, F_DIM);
+    for (p_st, with_nl, needle) in [
+        (vec![n10()], true, "both"),
+        (vec![], false, "requires"),
+        (vec![], true, "reference_normal_force"),
+        (vec![n10(), r10()], false, "reference_normal_force"),
+    ] {
+        let err = run(&|c, r, [pa, pb]| {
+            let (fa, fb) = (s(c, pa, "sa"), s(c, pb, "sb"));
+            let (sh, th) = (s(c, pa, "sh"), s(c, pb, "th"));
+            let mut v = vec![add(c, r, "pad", (fa, fb), mc(p_st.clone()))];
+            if with_nl {
+                let nl = d::DraftInterfaceKind::NormalLoad;
+                v.push(add(c, r, "nload", (fa, sh), nl));
+                v.push(add(c, r, "hertz", (sh, th), hk()));
+            }
+            v
+        });
+        assert!(
+            matches!(err, LoweringError::Invalid { ref item, ref detail }
+                if item == "interface:pad" && detail.contains(needle)),
+            "{err}"
+        );
+    }
 }

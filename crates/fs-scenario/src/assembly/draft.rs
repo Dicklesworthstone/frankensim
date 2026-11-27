@@ -41,6 +41,7 @@ const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const ACCEL: Dims = Dims([1, 0, -2, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const MAGNETIC_FIELD_TESLA: Dims = Dims([0, 1, -2, 0, -1, 0]);
 
 /// Extended physical part kinds covering mechanical, acoustic, thermal, fluid,
@@ -553,6 +554,13 @@ pub enum DraftInterfaceKind {
         /// Optional face `area` [m^2] and dimensionless `sign` (`+1` or `-1`).
         state: Vec<(ParameterKey, QtyAny)>,
     },
+    /// Card-less normal Hertzian contact lowered from elastic cards and curvatures.
+    HertzContact {
+        /// Contact ceilings and optional gap/closure/loss state.
+        state: Vec<(ParameterKey, QtyAny)>,
+    },
+    /// Card-less signal link from a normal contact (`feature_b`) to dry friction (`feature_a`).
+    NormalLoad,
 }
 
 /// Interface binding two surface/region features through a card-backed law.
@@ -1088,6 +1096,57 @@ fn check_params(params: &[(ParameterKey, QtyAny)], item: &str) -> Result<(), Dra
             ));
         }
         check_qty(*q, k.dims, &format!("{item}.{}", k.name), false, false)?;
+    }
+    Ok(())
+}
+
+fn check_hertz_state(
+    state: &[(ParameterKey, QtyAny)],
+    scope: &str,
+) -> Result<(), DraftAssemblyError> {
+    let (mut has_f, mut has_p, mut has_e, mut has_v) = (false, false, false, false);
+    for (k, q) in state {
+        let f = format!("{scope}.state.{}", k.name);
+        match k.name.as_str() {
+            "maximum_force" => {
+                check_qty(*q, FORCE, &f, true, false)?;
+                has_f = true;
+            }
+            "maximum_penetration" => {
+                check_qty(*q, LENGTH, &f, true, false)?;
+                has_p = true;
+            }
+            "gap" | "initial_closure" => check_qty(*q, LENGTH, &f, false, false)?,
+            "restitution" => {
+                check_qty(*q, Dims::NONE, &f, true, false)?;
+                if q.value > 1.0 {
+                    return Err(DraftAssemblyError::new(f, "restitution must be in (0, 1]"));
+                }
+                has_e = true;
+            }
+            "approach_speed" => {
+                check_qty(*q, VELOCITY, &f, true, false)?;
+                has_v = true;
+            }
+            other => {
+                return Err(DraftAssemblyError::new(
+                    f,
+                    format!("unknown hertz key '{other}'"),
+                ));
+            }
+        }
+    }
+    if !(has_f && has_p) {
+        return Err(DraftAssemblyError::new(
+            scope,
+            "missing maximum_force or maximum_penetration",
+        ));
+    }
+    if has_e != has_v {
+        return Err(DraftAssemblyError::new(
+            scope,
+            "restitution and approach_speed pair required",
+        ));
     }
     Ok(())
 }
@@ -1921,11 +1980,15 @@ impl DraftAssembly {
                 | DraftInterfaceKind::PistonFace { state } => {
                     check_params(state, &format!("{scope}.state"))?;
                 }
+                DraftInterfaceKind::HertzContact { state } => {
+                    check_params(state, &format!("{scope}.state"))?;
+                    check_hertz_state(state, &scope)?;
+                }
                 DraftInterfaceKind::ShearFilm { third_body, state } => {
                     check_third_body(third_body, &scope)?;
                     check_params(state, &format!("{scope}.state"))?;
                 }
-                DraftInterfaceKind::TemperatureSource => {}
+                DraftInterfaceKind::TemperatureSource | DraftInterfaceKind::NormalLoad => {}
             }
         }
 
