@@ -165,8 +165,17 @@ The groups override no kernel default, so a draft naming none of these
 families or laws lowers as before. A body's pose and motion come from the
 part's declared initial state (`DraftPartDecl.initial`), and a body without one
 is refused. A cell's temperature comes from the initial state, or the ambient
-when none is declared. fs-cli lowers every assembly through the kernel
-defaults plus these groups.
+when none is declared. The kernel's lumped defaults likewise honour
+`DraftPartDecl.initial` on 1-DOF `RigidBody` (x position/velocity, or z
+angular velocity for gear geometry, plus temperature when thermal) and lumped
+`Solid` (temperature), refusing any non-zero off-axis component or non-identity
+orientation by axis and value rather than ignoring it. A lumped `DrivenBody`
+without a mechanical source remains a stationary ground anchor; with one
+velocity source (`[1, 0, -1, 0, 0, 0]`) targeting its `mechanics` port it lowers
+to `FlowSource::publishing`, exposing `mechanics` and `span` and consuming that
+source receipt (wrong dimensions or duplicate sources refuse). `LoweringGraph`
+exposes `add_on_line` and `connect_signal` for non-smooth `LoadLine` components.
+fs-cli lowers every assembly through the kernel defaults plus these groups.
 
 fs-couple's `rigid_damping_heat` target keeps the hand-built graph as the
 oracle and lowers the same pairing declared as a draft. The lowered network,

@@ -36,7 +36,7 @@ use fs_ports::PortKind;
 use fs_ports::component::{Carrier, PortRole};
 use fs_qty::semantic::QuantityKind::{AbsoluteTemperature as AbsTemp, ThermalConductivity};
 use fs_qty::semantic::{SemanticType, ValueForm};
-use fs_qty::{Dims, QuantitySpec};
+use fs_qty::{Dims, QtyAny, QuantitySpec};
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
     DraftPartKind, FidelityRung, GearMeshDecl, JointDecl, JointKind, PhysicsDomain, PrimitiveShape,
@@ -46,8 +46,8 @@ use fs_scenario::assembly::{GeometrySource, MaterialRef};
 use fs_scenario::entity::{Entity, EntityCatalog, EntityId, EntityKind};
 
 use crate::elements::{
-    Conductance, Damper, ElementError, Force, HeatCapacity, Heater, Mass, Motion, SourceAccount,
-    Spring, Storage, Waveform,
+    Conductance, Damper, ElementError, FlowSource, Force, HeatCapacity, Heater, Mass, Motion,
+    SourceAccount, Spring, Storage, Waveform,
 };
 use crate::{
     AdmissionError, CausalizationAudit, ExecutionPlan, HeatSink, NodeId, PortRef, RouteTemperature,
@@ -99,6 +99,7 @@ const TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const FREQUENCY_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const VELOCITY_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
 // ============================================================================
 // Registry Keys
@@ -1643,6 +1644,7 @@ pub struct LoweringGraph {
     ground_entities: BTreeSet<EntityId>,
     initial_guesses: BTreeMap<PortRef, Vec<f64>>,
     observers: BTreeMap<EntityId, Observer>,
+    consumed_sources: BTreeMap<usize, SourceLoweringReceipt>,
 }
 
 impl LoweringGraph {
@@ -1660,6 +1662,7 @@ impl LoweringGraph {
             ground_entities: BTreeSet::new(),
             initial_guesses: BTreeMap::new(),
             observers: BTreeMap::new(),
+            consumed_sources: BTreeMap::new(),
         }
     }
 
@@ -1755,6 +1758,40 @@ impl LoweringGraph {
         let node = self.builder.add(name, component, state)?;
         self.register_node_meta(name, owner, node, &specs);
         Ok(node)
+    }
+
+    /// Add a non-smooth [`fs_ports::component::LoadLine`] component to the
+    /// lowering graph, recording its node name and port metadata.
+    ///
+    /// # Errors
+    /// Propagates [`AdmissionError`].
+    pub fn add_on_line<C>(
+        &mut self,
+        name: &str,
+        owner: Option<EntityId>,
+        component: C,
+        state: C::State,
+    ) -> Result<NodeId, LoweringError>
+    where
+        C: fs_ports::component::LoadLine + 'static,
+        C::State: 'static,
+    {
+        let specs: Vec<(Carrier, PortRole, usize)> = component
+            .ports()
+            .iter()
+            .map(|p| (p.carrier(), p.role(), p.width()))
+            .collect();
+        let node = self.builder.add_on_line(name, component, state)?;
+        self.register_node_meta(name, owner, node, &specs);
+        Ok(node)
+    }
+
+    /// Connect a signal output port to a signal input port of equal width.
+    ///
+    /// # Errors
+    /// Propagates [`AdmissionError`].
+    pub fn connect_signal(&mut self, from: PortRef, to: PortRef) -> Result<(), LoweringError> {
+        Ok(self.builder.signal(from, to)?)
     }
 
     fn register_node_meta(
@@ -3250,6 +3287,10 @@ impl LoweringRegistry {
                 source_receipts.push(rec);
                 continue;
             }
+            if let Some(rec) = graph.consumed_sources.remove(&index) {
+                source_receipts.push(rec);
+                continue;
+            }
             let rec = lower_source(src, &input.catalog, &mut graph)?;
             source_receipts.push(rec);
         }
@@ -3916,6 +3957,95 @@ pub fn register_kernel_defaults(registry: &mut LoweringRegistry) {
     registry.register_acoustic_family("cavity", lower_acoustic_cavity_family);
 }
 
+fn lumped_initial_motion(
+    part: &DraftPartDecl,
+    scope: &str,
+    rot: bool,
+    rec: &mut ProvenanceRecorder,
+) -> Result<Motion, LoweringError> {
+    let Some(init) = &part.initial else {
+        return Ok(Motion {
+            position_m: 0.0,
+            velocity_m_s: 0.0,
+        });
+    };
+    let refuse = |field: &str, val: String| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: format!("lumped 1-DOF rigid body refuses non-zero {field} = {val}"),
+    };
+    let q = init.orientation;
+    if !q[0].is_finite() || (q[0].abs() - 1.0).abs() > 1.0e-12 || q[1..].iter().any(|c| *c != 0.0) {
+        return Err(refuse("initial.orientation", format!("{q:?}")));
+    }
+    let zero = |name: &str, vals: &[QtyAny], skip: Option<usize>| -> Result<(), LoweringError> {
+        for (ax, qty) in vals.iter().enumerate() {
+            if skip != Some(ax) && qty.value != 0.0 {
+                return Err(refuse(
+                    &format!("initial.{name}[{ax}]"),
+                    qty.value.to_string(),
+                ));
+            }
+        }
+        Ok(())
+    };
+    if rot {
+        zero("position", &init.position, None)?;
+        zero("linear_velocity", &init.linear_velocity, None)?;
+        zero("angular_velocity", &init.angular_velocity, Some(2))?;
+        let wz = init.angular_velocity[2].value;
+        rec.record_declared_field(
+            "initial_angular_velocity_rad_s",
+            wz,
+            FREQUENCY_DIMS,
+            scope,
+            "initial.angular_velocity[2]",
+        );
+        return Ok(Motion {
+            position_m: 0.0,
+            velocity_m_s: wz,
+        });
+    }
+    zero("position", &init.position, Some(0))?;
+    zero("linear_velocity", &init.linear_velocity, Some(0))?;
+    zero("angular_velocity", &init.angular_velocity, None)?;
+    let (x, vx) = (init.position[0].value, init.linear_velocity[0].value);
+    rec.record_declared_field(
+        "initial_position_m",
+        x,
+        LENGTH_DIMS,
+        scope,
+        "initial.position[0]",
+    );
+    rec.record_declared_field(
+        "initial_velocity_m_s",
+        vx,
+        VELOCITY_DIMS,
+        scope,
+        "initial.linear_velocity[0]",
+    );
+    Ok(Motion {
+        position_m: x,
+        velocity_m_s: vx,
+    })
+}
+
+fn lumped_initial_temp(
+    ctx: &PartLoweringContext<'_>,
+    scope: &str,
+    rec: &mut ProvenanceRecorder,
+) -> f64 {
+    let (t, src, field) = match ctx.part.initial.as_ref().and_then(|i| i.temperature) {
+        Some(t) => (t.value, scope, "initial.temperature"),
+        None => (
+            ctx.ambient_temperature_k(),
+            "environment",
+            "ambient_temperature",
+        ),
+    };
+    rec.record_declared_field("initial_temperature_k", t, TEMPERATURE_DIMS, src, field);
+    t
+}
+
 fn lower_lumped_rigid_body(
     ctx: &PartLoweringContext<'_>,
     graph: &mut LoweringGraph,
@@ -3977,10 +4107,7 @@ fn lower_lumped_rigid_body(
             (comp, ctx.part.name.clone(), "mechanics")
         };
 
-    let init = Motion {
-        position_m: 0.0,
-        velocity_m_s: 0.0,
-    };
+    let init = lumped_initial_motion(ctx.part, &scope, port_name == "rotation", &mut recorder)?;
     let node =
         graph.add_with_tangent_and_residual(&node_name, Some(ctx.part.entity), component, init)?;
     let p = graph.port(node, "p")?;
@@ -4019,7 +4146,6 @@ fn lower_lumped_rigid_thermal_body(
         })?;
     let mass_kg = rho.value * vol;
     let capacity_j_k = mass_kg * cp.value;
-    let t_init = ctx.ambient_temperature_k();
 
     recorder.record_geometry_derived(
         "volume",
@@ -4045,13 +4171,8 @@ fn lower_lumped_rigid_thermal_body(
         &gen_label,
         "heat_capacity = mass * specific_heat_capacity",
     );
-    recorder.record_declared_field(
-        "initial_temperature_k",
-        t_init,
-        TEMPERATURE_DIMS,
-        "environment",
-        "ambient_temperature",
-    );
+    let init = lumped_initial_motion(ctx.part, &scope, false, &mut recorder)?;
+    let t_init = lumped_initial_temp(ctx, &scope, &mut recorder);
 
     let mech_name = format!("{}.mechanics", ctx.part.name);
     let therm_name = format!("{}.thermal", ctx.part.name);
@@ -4064,15 +4185,8 @@ fn lower_lumped_rigid_thermal_body(
         source,
     })?;
 
-    let mech_node = graph.add_with_tangent_and_residual(
-        &mech_name,
-        Some(ctx.part.entity),
-        mass,
-        Motion {
-            position_m: 0.0,
-            velocity_m_s: 0.0,
-        },
-    )?;
+    let mech_node =
+        graph.add_with_tangent_and_residual(&mech_name, Some(ctx.part.entity), mass, init)?;
     let therm_node =
         graph.add_with_tangent_and_residual(&therm_name, Some(ctx.part.entity), cap, t_init)?;
 
@@ -4109,7 +4223,6 @@ fn lower_lumped_thermal_solid(
             detail: "lumped thermal solid requires closed-form volume geometry".to_owned(),
         })?;
     let capacity_j_k = rho.value * vol * cp.value;
-    let t_init = ctx.ambient_temperature_k();
 
     recorder.record_geometry_derived(
         "volume",
@@ -4127,13 +4240,7 @@ fn lower_lumped_thermal_solid(
         &gen_label,
         "heat_capacity = density * volume * specific_heat_capacity",
     );
-    recorder.record_declared_field(
-        "initial_temperature_k",
-        t_init,
-        TEMPERATURE_DIMS,
-        "environment",
-        "ambient_temperature",
-    );
+    let t_init = lumped_initial_temp(ctx, &scope, &mut recorder);
 
     let cap = HeatCapacity::new(capacity_j_k).map_err(|source| LoweringError::Element {
         item: scope,
@@ -4286,24 +4393,84 @@ fn lower_lumped_spring_beam(
     })
 }
 
-#[allow(clippy::unnecessary_wraps)] // Signature required by PartConstructor.
 fn lower_lumped_driven_frame(
     ctx: &PartLoweringContext<'_>,
     graph: &mut LoweringGraph,
 ) -> Result<LoweredPartOutput, LoweringError> {
-    let scope = format!("part:{}", ctx.part.name);
-    let mut recorder = ProvenanceRecorder::default();
-    recorder.record_declared_field(
-        "prescribed_velocity_m_s",
-        0.0,
-        Dims([1, 0, -1, 0, 0, 0]),
-        &scope,
-        "driven_body.stationary_frame",
+    let (scope, mut rec) = (
+        format!("part:{}", ctx.part.name),
+        ProvenanceRecorder::default(),
     );
-    graph.mark_ground_entity(ctx.part.entity);
-    let (property_receipts, parameter_sources) = recorder.finish();
+    let drives: Vec<_> = ctx.draft.input().sources.iter().enumerate().filter(|(_, s)| {
+        matches!(&s.target, SourceTarget::Port { entity, port } if *entity == ctx.part.entity && port == "mechanics")
+    }).collect();
+    if drives.is_empty() {
+        rec.record_declared_field(
+            "prescribed_velocity_m_s",
+            0.0,
+            VELOCITY_DIMS,
+            &scope,
+            "driven_body.stationary_frame",
+        );
+        graph.mark_ground_entity(ctx.part.entity);
+        let (property_receipts, parameter_sources) = rec.finish();
+        return Ok(LoweredPartOutput {
+            created_nodes: vec![],
+            property_receipts,
+            parameter_sources,
+        });
+    }
+    if drives.len() > 1 {
+        return Err(LoweringError::Invalid {
+            item: scope,
+            detail: "driven body accepts at most one mechanics velocity source".into(),
+        });
+    }
+    let (src_idx, src) = drives[0];
+    let (src_scope, mut src_rec) = (
+        format!("source:{}", src.name),
+        ProvenanceRecorder::default(),
+    );
+    let dims = record_time_history_provenance(&src_scope, &src.history, &mut src_rec);
+    if dims != VELOCITY_DIMS {
+        return Err(LoweringError::Invalid {
+            item: src_scope,
+            detail: format!(
+                "driven body velocity source needs dims [1,0,-1,0,0,0], got {:?}",
+                dims.0
+            ),
+        });
+    }
+    let wf = time_history_to_waveform(&src_scope, &src.history)?;
+    let v0 = evaluate_time_history(&src.history, 0.0);
+    rec.record_declared_field(
+        "initial_velocity_m_s",
+        v0,
+        VELOCITY_DIMS,
+        &src_scope,
+        "driven_body.velocity_t0",
+    );
+    let node = graph.add_with_tangent_and_residual(
+        &ctx.part.name,
+        Some(ctx.part.entity),
+        FlowSource::new(wf).publishing(),
+        SourceAccount::default(),
+    )?;
+    graph.expose_port(ctx.part.entity, "mechanics", graph.port(node, "p")?);
+    graph.expose_port(ctx.part.entity, "span", graph.port(node, "span")?);
+    let (_, src_params) = src_rec.finish();
+    graph.consumed_sources.insert(
+        src_idx,
+        SourceLoweringReceipt {
+            source_name: src.name.clone(),
+            target_description: format!("{}.mechanics", ctx.part.entity.token()),
+            created_nodes: vec![ctx.part.name.clone()],
+            parameter_sources: src_params,
+        },
+    );
+    let (property_receipts, parameter_sources) = rec.finish();
     Ok(LoweredPartOutput {
-        created_nodes: Vec::new(),
+        created_nodes: vec![ctx.part.name.clone()],
         property_receipts,
         parameter_sources,
     })

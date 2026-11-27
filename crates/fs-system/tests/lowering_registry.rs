@@ -18,17 +18,18 @@ use fs_ports::PortKind;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
     ControllerDecl, ControllerLaw, DraftAssembly, DraftAssemblyInput, DraftEnvironment,
-    DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind,
-    FidelityErrorBudget, FidelityPolicy, FidelityRung, GearGenerator, GearMeshDecl, JointDecl,
-    JointKind, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
-    TimeHistory, TimePlan, TimeScheme,
+    DraftGeometrySource, DraftInitialState, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
+    DraftPartKind, FidelityErrorBudget, FidelityPolicy, FidelityRung, GearGenerator, GearMeshDecl,
+    JointDecl, JointKind, PhysicsDomain, PrimitiveShape, SourceDecl, SourceTarget, StepPolicy,
+    ThirdBodyDecl, TimeHistory, TimePlan, TimeScheme,
 };
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState, UnknownProperty};
 use fs_scenario::{
-    EntityCatalog, EntityDeclaration, Environment, FrameId, InterfacePair, Scenario,
+    EntityCatalog, EntityDeclaration, EntityId, Environment, FrameId, InterfacePair, Scenario,
 };
 use fs_system::elements::{
-    Admittance, Damper, Force, HeatCapacity, Mass, Motion, SourceAccount, Spring, Storage, Waveform,
+    Admittance, Damper, Force, HeatCapacity, Mass, Motion, Slider, SliderEnd, Slip, SourceAccount,
+    Spring, Storage, Waveform,
 };
 use fs_system::{
     AcousticAssemblySpec, AcousticMemberSpec, AnalysisKind, BlockSolveMode, BlockSolverPolicy,
@@ -2070,44 +2071,32 @@ fn one_d_field_thermal_conductance_lowers_observes_and_refuses_invalid() {
         .declare(EntityDeclaration::part(root, "slab"))
         .unwrap();
     let sources = [("h", "a", 307.15), ("c", "b", 287.15)]
-        .map(|(n, p, t)| SourceDecl {
-            name: n.into(),
-            target: SourceTarget::Port {
-                entity: slab,
-                port: p.into(),
-            },
-            history: TimeHistory::Constant(QtyAny::new(t, TEMPERATURE)),
+        .map(|(n, p, t)| {
+            port_src(
+                n,
+                slab,
+                p,
+                TimeHistory::Constant(QtyAny::new(t, TEMPERATURE)),
+            )
         })
         .into();
-    let mut input = DraftAssemblyInput {
-        name: "s".into(),
-        root,
-        catalog,
-        reference_state: Some(ReferenceState::Assembled),
-        environment: DraftEnvironment::earth_lab_air(),
-        time_plan: fixed_time_plan(1.0, 0.1),
-        parts: vec![DraftPartDecl {
-            name: "slab".into(),
-            entity: slab,
-            kind: DraftPartKind::Solid,
-            geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
-                lx: QtyAny::new(0.02, LENGTH),
-                ly: QtyAny::new(0.5, LENGTH),
-                lz: QtyAny::new(0.5, LENGTH),
-            }),
-            materials: vec![mat_ref(ch)],
-            physics: BTreeSet::from([PhysicsDomain::Thermal]),
-            fidelity: policy_rungs(vec![FidelityRung::OneDField { cells: 1 }]),
-            uncertainty: Vec::new(),
-            initial: None,
-        }],
-        joints: Vec::new(),
-        gear_meshes: Vec::new(),
-        interfaces: Vec::new(),
-        sources,
-        controllers: Vec::new(),
-        probes: Vec::new(),
+    let slab_part = DraftPartDecl {
+        name: "slab".into(),
+        entity: slab,
+        kind: DraftPartKind::Solid,
+        geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
+            lx: QtyAny::new(0.02, LENGTH),
+            ly: QtyAny::new(0.5, LENGTH),
+            lz: QtyAny::new(0.5, LENGTH),
+        }),
+        materials: vec![mat_ref(ch)],
+        physics: BTreeSet::from([PhysicsDomain::Thermal]),
+        fidelity: policy_rungs(vec![FidelityRung::OneDField { cells: 1 }]),
+        uncertainty: Vec::new(),
+        initial: None,
     };
+    let mut input = empty_draft("s", root, catalog, vec![slab_part], sources);
+    input.time_plan = fixed_time_plan(1.0, 0.1);
     let (reg, scen) = (LoweringRegistry::with_kernel_defaults(), base_scenario("s"));
     let mut lo = reg
         .lower(&DraftAssembly::admit(input.clone(), &scen).unwrap(), &cards)
@@ -2131,4 +2120,231 @@ fn one_d_field_thermal_conductance_lowers_observes_and_refuses_invalid() {
         height: QtyAny::new(0.02, LENGTH),
     });
     assert!(bad(input).contains("Cylinder"));
+}
+
+fn box_part(
+    name: &str,
+    entity: EntityId,
+    kind: DraftPartKind,
+    mat: ContentHash,
+    phys: &[PhysicsDomain],
+) -> DraftPartDecl {
+    let q = QtyAny::new(0.1, LENGTH);
+    DraftPartDecl {
+        name: name.into(),
+        entity,
+        kind,
+        geometry: DraftGeometrySource::Primitive(PrimitiveShape::Box {
+            lx: q,
+            ly: q,
+            lz: q,
+        }),
+        materials: vec![mat_ref(mat)],
+        physics: phys.iter().copied().collect(),
+        fidelity: policy_rungs(vec![FidelityRung::Lumped]),
+        uncertainty: vec![],
+        initial: None,
+    }
+}
+
+fn empty_draft(
+    name: &str,
+    root: EntityId,
+    catalog: EntityCatalog,
+    parts: Vec<DraftPartDecl>,
+    sources: Vec<SourceDecl>,
+) -> DraftAssemblyInput {
+    DraftAssemblyInput {
+        name: name.into(),
+        root,
+        catalog,
+        reference_state: Some(ReferenceState::Assembled),
+        environment: DraftEnvironment::earth_lab_air(),
+        time_plan: fixed_time_plan(0.2, 0.01),
+        parts,
+        joints: vec![],
+        gear_meshes: vec![],
+        interfaces: vec![],
+        sources,
+        controllers: vec![],
+        probes: vec![],
+    }
+}
+
+fn port_src(n: &str, e: EntityId, p: &str, history: TimeHistory) -> SourceDecl {
+    SourceDecl {
+        name: n.into(),
+        target: SourceTarget::Port {
+            entity: e,
+            port: p.into(),
+        },
+        history,
+    }
+}
+
+#[test]
+fn lumped_initial_state_propagates_and_refuses_off_axis() {
+    use PhysicsDomain as P;
+    let (vel, q) = (Dims([1, 0, -1, 0, 0, 0]), QtyAny::new);
+    let (mut cards, mut cat) = (CardStore::new(), EntityCatalog::new());
+    let steel = cards.insert_material(steel_card());
+    let root = cat.declare(EntityDeclaration::assembly("init")).unwrap();
+    let body = cat.declare(EntityDeclaration::part(root, "body")).unwrap();
+    let solid = cat.declare(EntityDeclaration::part(root, "solid")).unwrap();
+    let mut ib = DraftInitialState {
+        position: [q(0.25, LENGTH), q(0.0, LENGTH), q(0.0, LENGTH)],
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        linear_velocity: [q(1.5, vel), q(0.0, vel), q(0.0, vel)],
+        angular_velocity: [q(0.0, FREQUENCY); 3],
+        temperature: Some(q(340.0, TEMPERATURE)),
+    };
+    let is = DraftInitialState {
+        position: [q(0.0, LENGTH); 3],
+        linear_velocity: [q(0.0, vel); 3],
+        temperature: Some(q(365.0, TEMPERATURE)),
+        ..ib.clone()
+    };
+    let mut bp = box_part(
+        "body",
+        body,
+        DraftPartKind::RigidBody,
+        steel,
+        &[P::Mechanics, P::Thermal],
+    );
+    bp.initial = Some(ib.clone());
+    let mut sp = box_part("solid", solid, DraftPartKind::Solid, steel, &[P::Thermal]);
+    sp.initial = Some(is);
+    let c0 = |d| TimeHistory::Constant(q(0.0, d));
+    let srcs = vec![
+        port_src("f0", body, "mechanics", c0(FORCE)),
+        port_src("q0", body, "thermal", c0(POWER)),
+        port_src("q1", solid, "thermal", c0(POWER)),
+    ];
+    let mut inp = empty_draft("init", root, cat, vec![bp, sp], srcs);
+    let reg = LoweringRegistry::with_kernel_defaults();
+    let scen = base_scenario("init");
+    let go = |i| reg.lower(&DraftAssembly::admit(i, &scen).unwrap(), &cards);
+    let tmp =
+        |l: &fs_system::LoweredSystem, k: &str| *l.system.state::<f64>(l.node_map[k]).unwrap();
+    let mut lo = go(inp.clone()).unwrap();
+    let m0 = *lo
+        .system
+        .state::<Motion>(lo.node_map["body.mechanics"])
+        .unwrap();
+    assert!((m0.position_m - 0.25).abs() <= 1e-15 && (m0.velocity_m_s - 1.5).abs() <= 1e-15);
+    assert!((tmp(&lo, "body.thermal") - 340.0).abs() <= 1e-15);
+    assert!((tmp(&lo, "solid") - 365.0).abs() <= 1e-15);
+    with_cx(&CancelGate::new(), |cx| lo.system.step(0.1, cx).unwrap());
+    let m1 = *lo
+        .system
+        .state::<Motion>(lo.node_map["body.mechanics"])
+        .unwrap();
+    assert!((m1.position_m - 0.40).abs() <= 1e-14 && (m1.velocity_m_s - 1.5).abs() <= 1e-14);
+    let mut check_bad = |ax: &str, val: &str, edit: fn(&mut DraftInitialState)| {
+        let mut bi = ib.clone();
+        edit(&mut bi);
+        inp.parts[0].initial = Some(bi);
+        let msg = go(inp.clone()).err().unwrap().to_string();
+        assert!(msg.contains(ax) && msg.contains(val), "{msg}");
+    };
+    check_bad("initial.linear_velocity[1]", "0.75", |i| {
+        i.linear_velocity[1].value = 0.75;
+    });
+    check_bad("initial.position[2]", "0.1", |i| i.position[2].value = 0.1);
+    check_bad("initial.angular_velocity[0]", "2", |i| {
+        i.angular_velocity[0].value = 2.0;
+    });
+    check_bad("initial.orientation", "0.707", |i| {
+        let r = core::f64::consts::FRAC_1_SQRT_2;
+        i.orientation = [r, r, 0.0, 0.0];
+    });
+    ib.temperature = None;
+    inp.parts[0].initial = Some(ib);
+    assert!((tmp(&go(inp).unwrap(), "body.thermal") - 293.15).abs() <= 1e-12);
+}
+
+#[test]
+fn moving_driven_body_and_load_line_graph_helpers() {
+    let (vel, q) = (Dims([1, 0, -1, 0, 0, 0]), QtyAny::new);
+    let (mut cards, mut cat) = (CardStore::new(), EntityCatalog::new());
+    let steel = cards.insert_material(steel_card());
+    let mut fc = ClaimSet::new();
+    fc.insert_claim(scalar_claim("k", 1.0, Dims::NONE, "fixture"))
+        .unwrap();
+    let fcard = cards
+        .insert_interface("toy-slider", interface_card(fc, "dry"))
+        .unwrap();
+    let root = cat.declare(EntityDeclaration::assembly("belt")).unwrap();
+    let blk = cat.declare(EntityDeclaration::part(root, "block")).unwrap();
+    let blt = cat.declare(EntityDeclaration::part(root, "belt")).unwrap();
+    let sa = cat.declare(EntityDeclaration::surface(blk, "sa")).unwrap();
+    let sb = cat.declare(EntityDeclaration::surface(blt, "sb")).unwrap();
+    let pair = InterfacePair::ordered(sa, sb);
+    let cid = cat
+        .declare(EntityDeclaration::interface(root, "c", pair))
+        .unwrap();
+    let knots = vec![(q(0.0, TIME), q(0.0, vel)), (q(0.1, TIME), q(0.2, vel))];
+    let src = port_src(
+        "bv",
+        blt,
+        "mechanics",
+        TimeHistory::PiecewiseLinear { knots },
+    );
+    let m = &[PhysicsDomain::Mechanics][..];
+    let parts = vec![
+        box_part("block", blk, DraftPartKind::RigidBody, steel, m),
+        box_part("belt", blt, DraftPartKind::DrivenBody, steel, m),
+    ];
+    let mut inp = empty_draft("belt", root, cat, parts, vec![src]);
+    inp.interfaces.push(DraftInterfaceDecl {
+        name: "c".into(),
+        entity: cid,
+        feature_a: sa,
+        feature_b: sb,
+        kind: DraftInterfaceKind::MechanicalContact {
+            law_card: fcard,
+            third_body: None,
+            state: vec![],
+        },
+    });
+    let mut reg = LoweringRegistry::with_kernel_defaults();
+    let key = InterfaceLoweringKey::new(InterfaceKindTag::MechanicalContact, "toy-slider");
+    reg.register_interface(key, |ctx, g| {
+        let sl = Slider::new(100.0, 0.5, 0.3).unwrap().told(SliderEnd::B);
+        let n = g.add_on_line("s", Some(ctx.interface.entity), sl, Slip::stuck())?;
+        let c = &ctx.draft.input().catalog;
+        let (fa, fb) = (ctx.interface.feature_a, ctx.interface.feature_b);
+        let pa = g.resolve_entity_port(c, fa, "mechanics").unwrap();
+        let pb = g.resolve_entity_port(c, fb, "mechanics").unwrap();
+        let sp = g.resolve_entity_port(c, fb, "span").unwrap();
+        g.attach_common_flow(pa, g.port(n, "a")?, 1.0);
+        g.attach_common_flow(pb, g.port(n, "b")?, 1.0);
+        g.connect_signal(sp, g.port(n, "span_b")?)?;
+        let hp = g.port(n, "heat")?;
+        let amb = Some(heat_sink("amb", 300.0).unwrap());
+        g.add_heat_route(hp, vec![], amb, RouteTemperature::Fixed(300.0));
+        let mut r = ProvenanceRecorder::default();
+        r.record_declared_field("normal_force", 10.0, FORCE, "toy", "n");
+        let (property_receipts, parameter_sources) = r.finish();
+        Ok(LoweredInterfaceOutput {
+            created_nodes: vec!["s".into()],
+            property_receipts,
+            parameter_sources,
+        })
+    });
+    let scen = base_scenario("belt");
+    let go = |i| reg.lower(&DraftAssembly::admit(i, &scen).unwrap(), &cards);
+    let err = |i| go(i).err().unwrap().to_string();
+    let mut lo = go(inp.clone()).unwrap();
+    assert!(lo.receipt.sources.len() == 1 && lo.part_ports.contains_key(&(blt, "span".into())));
+    with_cx(&CancelGate::new(), |cx| lo.system.step(0.01, cx).unwrap());
+    let bm = lo.system.state::<Motion>(lo.node_map["block"]).unwrap();
+    assert!((bm.velocity_m_s - 0.02).abs() <= 1e-12, "stuck: {bm:?}");
+    let mut bad = inp.clone();
+    bad.sources[0].history = TimeHistory::Constant(q(5.0, FORCE));
+    assert!(err(bad).contains("velocity source"));
+    let mut dup = inp.sources[0].clone();
+    dup.name = "bv2".into();
+    inp.sources.push(dup);
+    assert!(err(inp).contains("at most one"));
 }
