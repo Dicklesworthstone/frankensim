@@ -71,6 +71,10 @@ name = "gas_cavity_slice"
 required-features = ["slices"]
 
 [[test]]
+name = "modal_plate_slice"
+required-features = ["plate-slices"]
+
+[[test]]
 name = "painleve_rod"
 required-features = ["slices"]
 
