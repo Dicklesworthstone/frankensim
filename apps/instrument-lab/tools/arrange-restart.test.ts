@@ -290,3 +290,32 @@ test("same-tick channel release and expression reset respect MIDI wire order", (
   assert.equal(events.some(e => e.on === 65), false, "the note before the reset is silent");
   assert.equal(events.some(e => e.on === 67), true, "the note after the reset is audible");
 });
+
+test("the physical pedals and hammers observe SMF order within a score frame", () => {
+  const bytes = [
+    0, 0xb0, 67, 127, 20, 0x90, 60, 90, 0, 0xb0, 121, 0, 0, 0x90, 64, 90,
+    20, 0xb0, 64, 127, 0, 0xb0, 66, 127, 0, 0xb0, 64, 0,
+    20, 0xb0, 66, 0, 0, 0x80, 60, 0, 0, 0xb0, 66, 127,
+    10, 0x80, 64, 0, 0, 0x90, 67, 80,
+    10, 0xb0, 66, 0, 0, 0xb0, 66, 127, 10, 0x80, 67, 0, 0, 255, 47, 0,
+  ];
+  const result = decodeMidi(Uint8Array.from([
+    77, 84, 104, 100, 0, 0, 0, 6, 0, 0, 0, 1, 0, 100,
+    77, 84, 114, 107, 0, 0, 0, bytes.length, ...bytes,
+  ]));
+  if (!result.ok) throw new Error(result.message);
+  const { events } = arrange(result.midi, "pedal-order.mid");
+  const at = (t: number) => events.filter(e => e.t === t).map(({ t: _t, speed: _speed, ...e }) => e);
+  assert.deepEqual(at(0.1), [{ on: 60 }, { unaCorda: false }, { on: 64 }]);
+  assert.deepEqual(pianoEventsFrom(events, 0.1).slice(0, 4).map(({ t, speed, ...e }) => e),
+    [{ unaCorda: true }, { on: 60 }, { unaCorda: false }, { on: 64 }], "seeking preserves the earlier strike’s soft pedal");
+  assert.deepEqual(at(0.2), [{ sustain: 1 }, { sostenuto: true }, { sustain: 0 }],
+    "full sustain lifts every damper at the capture even with zero elapsed samples");
+  assert.deepEqual(at(0.3), [{ sostenuto: false }, { off: 60 }, { sostenuto: true }],
+    "releasing a key between rod movements changes which dampers get caught");
+  assert.deepEqual(at(0.4), [{ sostenuto: false }, { sostenuto: true }],
+    "the same channel releases its old capture of 64 and re-captures 67 at one tick");
+  assert.deepEqual(pianoEventsFrom(events, 0.42).slice(0, 3), [
+    { t: 0.42, silent: 67 }, { t: 0.42, sostenuto: true }, { t: 0.42, off: 67 },
+  ], "the actual captured damper is restored after the same-tick recapture");
+});

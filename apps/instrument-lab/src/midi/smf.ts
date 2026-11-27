@@ -23,7 +23,7 @@ const MAX_NOTES = 131_072;
 
 export interface TempoEntry { tick: number; microsecondsPerQuarter: number }
 export interface MeterEntry { tick: number; numerator: number; denominatorPower: number }
-export interface PairedNote { channel: number; key: number; onTick: number; offTick: number; onVelocity: number; onOrder?: number }
+export interface PairedNote { channel: number; key: number; onTick: number; offTick: number; onVelocity: number; onOrder?: number; offOrder?: number }
 export interface ControlEvent { tick: number; channel: number; controller: number; value: number; order?: number }
 export interface ProgramEvent { tick: number; channel: number; program: number }
 export interface TextEvent { tick: number; kind: "marker" | "text" | "lyric" | "cue"; text: string }
@@ -192,12 +192,12 @@ function decode(input: Uint8Array): DecodeResult {
       if (high === 0x90 && b > 0) {
         const slot = channel * 128 + a;
         const prior = open.get(slot);
-        if (prior) close(track, channel, a, prior, tick, lenient); // salvage normally ended it already
+        if (prior) close(track, channel, a, prior, tick, lenient, counters.events); // salvage normally ended it already
         open.set(slot, { tick, velocity: b, order: counters.events });
       } else if (high === 0x80 || high === 0x90) {
         const slot = channel * 128 + a;
         const prior = open.get(slot);
-        if (prior) { close(track, channel, a, prior, tick, lenient); open.delete(slot); }
+        if (prior) { close(track, channel, a, prior, tick, lenient, counters.events); open.delete(slot); }
       } else if (high === 0xb0) {
         track.controls.push({ tick, channel, controller: a, value: b, order: counters.events });
       } else if (high === 0xc0) {
@@ -222,10 +222,10 @@ function decode(input: Uint8Array): DecodeResult {
   return { ok: true, midi: { format: format === 0 ? 0 : 1, division, tempoMap, meterMap, tracks, salvageNote, lenient, counters } };
 }
 
-function close(track: DecodedTrack, channel: number, key: number, on: { tick: number; velocity: number; order: number }, offTick: number, lenient: DecodedMidi["lenient"]): void {
+function close(track: DecodedTrack, channel: number, key: number, on: { tick: number; velocity: number; order: number }, offTick: number, lenient: DecodedMidi["lenient"], offOrder?: number): void {
   let off = offTick;
   if (off <= on.tick) { lenient.zeroLengthNotes++; off = on.tick + 1; }
-  track.notes.push({ channel, key, onTick: on.tick, offTick: off, onVelocity: on.velocity, onOrder: on.order });
+  track.notes.push({ channel, key, onTick: on.tick, offTick: off, onVelocity: on.velocity, onOrder: on.order, offOrder: off === offTick ? offOrder : undefined });
 }
 
 /** Seconds at every tick, from the file's tempo map (120 bpm until the first tempo, as SMF says). */

@@ -16,6 +16,9 @@ export interface SourceNote {
   off: number;
   /** A channel-wide release also bounds any minimum-duration extension. */
   releaseAt?: number;
+  onOrder?: number;
+  offOrder?: number;
+  releaseOrder?: number;
   key: number;
   /** written velocity 1..127 */
   vel: number;
@@ -31,7 +34,7 @@ export interface SourcePart {
   baseRole: Role;
   notes: SourceNote[];
 }
-export interface PlayedNote { key: number; t: number; off: number; vel: number; part: number; prio: number }
+export interface PlayedNote { key: number; t: number; off: number; vel: number; part: number; prio: number; onOrder?: number; offOrder?: number }
 export interface PartPlan {
   role: Role;
   /** what happened to the part, in words, for the page */
@@ -147,7 +150,8 @@ export function orchestrate(parts: SourcePart[]): { notes: PlayedNote[]; plans: 
     ns.forEach((n, k) => {
       const off = Math.min(Math.max(n.off, n.t + MIN_DUR), n.releaseAt ?? Infinity);
       if (off > n.off) lengthened++;
-      out.push({ key: n.key, t: n.t, off, vel: Math.max(8, Math.min(118, Math.round(vels[k]!))), part: i, prio: PRIO[plan.role] ?? 3 });
+      const offOrder = off === n.releaseAt ? n.releaseOrder : off === n.off ? n.offOrder : undefined;
+      out.push({ key: n.key, t: n.t, off, onOrder: n.onOrder, offOrder, vel: Math.max(8, Math.min(118, Math.round(vels[k]!))), part: i, prio: PRIO[plan.role] ?? 3 });
     });
     if (lengthened > ns.length * 0.2) plan.actions.push(`${lengthened} notes shorter than ${MIN_DUR * 1000} ms lengthened toward ${MIN_DUR * 1000} ms`);
     plan.notesOut = ns.length;
