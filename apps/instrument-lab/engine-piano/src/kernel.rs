@@ -1532,6 +1532,13 @@ struct Contact {
     enabled: bool,
 }
 
+/// The velocity and lateral hammer position at the note-on that requested a strike.
+#[derive(Clone, Copy)]
+struct Strike {
+    velocity_m_s: f64,
+    una_corda: bool,
+}
+
 #[derive(Clone)]
 struct Key {
     midi: u8,
@@ -1550,7 +1557,7 @@ struct Key {
     active: bool,
     /// Creep memory still relaxing after the hammer was caught.
     relaxing: bool,
-    pending_velocity: Option<f64>,
+    pending_strike: Option<Strike>,
     /// Unforced shank step of the current sample (state, bending loss).
     predicted: Option<(shank::State, f64)>,
     refused: bool,
@@ -1675,8 +1682,8 @@ pub struct LivePiano {
     active: Vec<ACourse>,
     /// Keys whose hammer is in flight/contact or whose creep still relaxes.
     busy: Vec<usize>,
-    /// Strikes waiting for the next sample: (course, hammer velocity).
-    pending_on: Vec<(usize, f64)>,
+    /// Courses waiting for the next sample. A silent key activation has no strike.
+    pending_on: Vec<(usize, Option<Strike>)>,
     sustain: f64,
     sostenuto: bool,
     una_corda: bool,
@@ -2229,7 +2236,7 @@ impl LivePiano {
                 motion: rest,
                 active: false,
                 relaxing: false,
-                pending_velocity: None,
+                pending_strike: None,
                 predicted: None,
                 refused: false,
                 law,
@@ -2440,8 +2447,8 @@ impl LivePiano {
         self.sostenuto = on;
     }
     pub fn sostenuto(&self) -> bool { self.sostenuto }
-    /// Una corda (engine.rs `set_una_corda`): strikes that START afterwards meet
-    /// max(unison - 1, 1) strings of their course; the rest are missed.
+    /// With una corda down, subsequent note-ons strike max(unison - 1, 1) strings.
+    /// A queued or in-flight strike keeps the hammer position it started with.
     pub fn set_una_corda(&mut self, on: bool) { self.una_corda = on; }
     pub fn una_corda(&self) -> bool { self.una_corda }
 
@@ -3098,7 +3105,8 @@ impl LivePiano {
         // Strikes received between two samples start together: one cold
         // voice-set change serves the whole chord (see `apply_pending_notes`).
         self.pending_on.retain(|(key, _)| *key != ci);
-        self.pending_on.push((ci, hammer_velocity_m_s));
+        let strike = Strike { velocity_m_s: hammer_velocity_m_s, una_corda: self.una_corda };
+        self.pending_on.push((ci, Some(strike)));
         self.counters.note_ons += 1;
         Ok(())
     }
@@ -3118,8 +3126,7 @@ impl LivePiano {
         key.held = true;
         if !self.pending_on.iter().any(|(k, _)| *k == ci) {
             key.silent = true;
-            // Velocity 0 marks an activation without a launch (note_on admits none).
-            self.pending_on.push((ci, 0.0));
+            self.pending_on.push((ci, None));
         }
         Ok(())
     }
@@ -3156,7 +3163,7 @@ impl LivePiano {
             if modes > self.cfg.max_dynamic_modes || keys > self.cfg.max_courses {
                 let mut victims: Vec<(f64, usize, usize)> = self.active.iter().enumerate()
                     .filter(|(_, ac)| !pending.iter().any(|(ci, _)| *ci == ac.ci)
-                        && !self.keys[ac.ci].active && self.keys[ac.ci].pending_velocity.is_none())
+                        && !self.keys[ac.ci].active && self.keys[ac.ci].pending_strike.is_none())
                     .map(|(slot, ac)| {
                         let key = &self.keys[ac.ci];
                         // A silent key with its dampers up has almost no energy of its own; it goes last.
@@ -3204,7 +3211,7 @@ impl LivePiano {
                 self.last_error = Some(e);
             }
         }
-        for (ci, velocity) in pending {
+        for (ci, strike) in pending {
             if std::mem::take(&mut self.keys[ci].refused) {
                 continue;
             }
@@ -3214,14 +3221,12 @@ impl LivePiano {
                 self.counters.refused_note_ons += 1;
                 continue;
             }
-            if velocity == 0.0 {
-                continue; // silent_key_down: attached, not struck
-            }
+            let Some(strike) = strike else { continue; };
             if self.keys[ci].active {
                 // The hammer has not come back yet: relaunch as soon as it is clear.
-                self.keys[ci].pending_velocity = Some(velocity);
+                self.keys[ci].pending_strike = Some(strike);
             } else {
-                self.launch(ci, velocity);
+                self.launch(ci, strike);
             }
         }
     }
@@ -3236,13 +3241,13 @@ impl LivePiano {
         dot(&self.m.hs[s.off..s.off + s.n], &self.q[s.off..s.off + s.n]) + s.hammer_lift * b
     }
 
-    fn launch(&mut self, ci: usize, velocity: f64) {
+    fn launch(&mut self, ci: usize, strike: Strike) {
         let Some(slot) = self.keys[ci].slot else { return; };
         let ac = &self.active[slot];
         // engine.rs `arm`: keep 2 mm clearance below the lowest felt face it will meet.
         // Una corda selects physical strings: the shifted hammer misses the last one.
         let unison = self.courses[ci].unison;
-        let count = if self.una_corda { unison.saturating_sub(1).max(1) } else { unison };
+        let count = if strike.una_corda { unison.saturating_sub(1).max(1) } else { unison };
         let mut launch = -LAUNCH_CLEARANCE;
         let mut positions = [0.0_f64; 3];
         for s in ac.segs.iter().filter(|s| !s.duplex) {
@@ -3261,7 +3266,7 @@ impl LivePiano {
             c.enabled = member < count;
         }
         let before = key.model.energy(&key.motion, CATCH_DISTANCE);
-        key.motion = key.model.launch(launch, velocity);
+        key.motion = key.model.launch(launch, strike.velocity_m_s);
         key.active = true;
         key.relaxing = false;
         let y = key.model.position(&key.motion);
@@ -3287,7 +3292,7 @@ impl LivePiano {
         for key in &mut self.keys {
             key.held = false;
             key.silent = false;
-            key.pending_velocity = None;
+            key.pending_strike = None;
         }
         self.sustain = 0.0;
         self.set_sostenuto(false);
@@ -3959,7 +3964,7 @@ impl LivePiano {
             key.motion = key.rest;
             key.active = false;
             key.relaxing = false;
-            key.pending_velocity = None;
+            key.pending_strike = None;
             for c in &mut key.contacts {
                 c.memory = relaxation::Memory::default();
                 c.overlap = -CATCH_DISTANCE;
@@ -3981,7 +3986,7 @@ impl LivePiano {
     fn advance_hammers(&mut self) -> (f64, f64, f64) {
         let (mut felt_loss, mut shank_loss, mut catch_loss) = (0.0, 0.0, 0.0);
         let mut busy = std::mem::take(&mut self.busy);
-        let mut relaunch: Vec<(usize, f64)> = Vec::new();
+        let mut relaunch: Vec<(usize, Strike)> = Vec::new();
         for &ci in &busy {
             let slot = self.keys[ci].slot;
             // String-side contact positions after the accepted step. Only a
@@ -4045,7 +4050,7 @@ impl LivePiano {
             if key.active {
                 let clear = key.contacts.iter().all(|c| c.overlap <= 0.0);
                 let landed = y < -CATCH_DISTANCE - 1e-10 && key.model.velocity(&key.motion) < 0.0;
-                if clear && (landed || key.pending_velocity.is_some()) {
+                if clear && (landed || key.pending_strike.is_some()) {
                     catch_loss += key.model.energy(&key.motion, CATCH_DISTANCE) - key.rest_energy;
                     key.motion = key.rest;
                     key.active = false;
@@ -4056,8 +4061,8 @@ impl LivePiano {
                         c.force = 0.0;
                         c.stored_j = 0.0;
                     }
-                    if let Some(velocity) = key.pending_velocity.take() {
-                        relaunch.push((ci, velocity));
+                    if let Some(strike) = key.pending_strike.take() {
+                        relaunch.push((ci, strike));
                     }
                 }
             }
@@ -4072,9 +4077,9 @@ impl LivePiano {
         }
         busy.retain(|&ci| self.keys[ci].active || self.keys[ci].relaxing);
         self.busy = busy;
-        for (ci, velocity) in relaunch {
+        for (ci, strike) in relaunch {
             if self.keys[ci].slot.is_some() {
-                self.launch(ci, velocity);
+                self.launch(ci, strike);
             }
         }
         (felt_loss, shank_loss, catch_loss)
@@ -4091,7 +4096,7 @@ impl LivePiano {
         for (slot, ac) in self.active.iter().enumerate().rev() {
             let key = &self.keys[ac.ci];
             // A silent key with its dampers up is attached for what the board drives into it.
-            if key.active || key.pending_velocity.is_some() || ac.age < 2048 || (key.silent && self.lifted(ac.ci)) {
+            if key.active || key.pending_strike.is_some() || ac.age < 2048 || (key.silent && self.lifted(ac.ci)) {
                 continue;
             }
             let damped = self.is_damped(ac);

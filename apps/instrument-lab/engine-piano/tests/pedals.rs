@@ -68,6 +68,56 @@ fn play(p: &mut LivePiano, seconds: f64) -> Vec<u32> {
 }
 
 #[test]
+fn una_corda_is_captured_when_the_note_enters_the_sample_batch() {
+    let base = piano();
+    let strikes = |at_note_on, at_render| {
+        let mut p = base.clone();
+        p.set_una_corda(at_note_on);
+        p.note_on(57, 2.5).unwrap();
+        p.set_una_corda(at_render);
+        let pressure = play(&mut p, 0.04);
+        assert!(p.take_error().is_none());
+        pressure
+    };
+    let normal = strikes(false, false);
+    let shifted = strikes(true, true);
+    assert!(normal != shifted, "striking two or three strings must produce different pressure");
+    assert!(strikes(true, false) == shifted);
+    assert!(strikes(false, true) == normal);
+}
+
+#[test]
+fn a_restrike_waiting_for_hammer_clearance_retains_its_una_corda_position() {
+    let mut base = piano();
+    base.note_on(57, 2.5).unwrap();
+    // Wait for physical contact so the next request must wait for clearance.
+    for _ in 0..(RATE / 100) {
+        base.step();
+        if base.hammer_force(57).unwrap() > 0.0 { break; }
+    }
+    assert!(base.hammer_force(57).unwrap() > 0.0);
+    base.note_off(57);
+    let strikes = |at_note_on, while_waiting| {
+        let mut p = base.clone();
+        let first_input = p.ledger.input_j;
+        p.set_una_corda(at_note_on);
+        p.note_on(57, 2.0).unwrap();
+        p.apply_pending_notes();
+        assert_eq!(p.ledger.input_j, first_input, "the first hammer is still in contact");
+        p.set_una_corda(while_waiting);
+        let pressure = play(&mut p, 0.04);
+        assert!(p.ledger.input_j > first_input, "the repeated hammer launched");
+        assert!(p.take_error().is_none());
+        pressure
+    };
+    let normal = strikes(false, false);
+    let shifted = strikes(true, true);
+    assert!(normal != shifted);
+    assert!(strikes(true, false) == shifted);
+    assert!(strikes(false, true) == normal);
+}
+
+#[test]
 fn a_key_caught_by_the_sostenuto_sounds_as_a_held_key() {
     let mut held = piano();
     held.note_on(57, 2.0).unwrap();
