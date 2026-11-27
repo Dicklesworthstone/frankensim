@@ -7,7 +7,7 @@
 
 import { chordTimeline } from "./chords";
 import { orchestrate, type Role, type SourcePart } from "./orchestrate";
-import { tempoClock, type DecodedMidi, type DecodedTrack, type PairedNote } from "./smf";
+import { performanceClock, type DecodedMidi, type DecodedTrack, type PairedNote } from "./smf";
 import { HIHAT_CLOSED_FORCE_N, HIHAT_TRANSITION_SECONDS } from "../live/hiHat";
 
 import { DRUM_MAP, stickFactor, type PieceId } from "./drums";
@@ -262,7 +262,8 @@ function classify(name: string, notes: readonly PairedNote[], channel: number): 
 
 // ------------------------------------------------------------------- arrange
 export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
-  const sec = tempoClock(midi);
+  const clock = performanceClock(midi);
+  const sec = clock.secondsAtTick;
   const report: Arrangement["report"] = {
     pianoNotesIn: 0, drumNotesIn: 0, folded: 0, merged: 0, thinnedChord: 0, thinnedDensity: 0, pedalChanges: 0, pedalSkipped: 0, softPedalChanges: 0, sostenutoChanges: 0,
     peakKeys: 0, tempoChanges: Math.max(0, midi.tempoMap.length - 1), drumsMapped: {}, drumsSkipped: {}, ignoredControllers: 0,
@@ -660,9 +661,15 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const bars: { t: number; n: number }[] = [];
   for (let i = 0; i < meters.length && bars.length < 20000; i++) {
     const m = meters[i]!;
-    const barTicks = (m.numerator * midi.division * 4) / 2 ** m.denominatorPower;
-    const end = meters[i + 1]?.tick ?? lastTick + 1;
-    for (let tick = m.tick; tick < end && bars.length < 20000; tick += Math.max(1, barTicks)) bars.push({ t: sec(tick), n: bars.length });
+    const start = clock.quartersAtTick(m.tick);
+    const next = meters[i + 1];
+    const end = clock.quartersAtTick(next?.tick ?? lastTick);
+    const quartersPerBar = (m.numerator * 4) / 2 ** m.denominatorPower;
+    for (let bar = 0; bars.length < 20000; bar++) {
+      const quarter = start + bar * quartersPerBar;
+      if (next ? quarter >= end : quarter > end) break;
+      bars.push({ t: clock.secondsAtQuarter(quarter), n: bars.length });
+    }
   }
 
   const lastNote = notes.reduce((m, n) => Math.max(m, n.off), 0);
@@ -670,7 +677,6 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const lastEventS = Math.max(lastNote, lastHit, events.at(-1)?.t ?? 0);
   const usedPieces = [...new Set(hits.map((h) => h.piece))];
   const order: PieceId[] = ["kick", "snare", "snare-off", "hihat", "tom-12", "tom-14", "ride", "crash"];
-  const tempo0 = midi.tempoMap.find((e) => e.tick <= 0) ?? midi.tempoMap[0];
   const meter0 = midi.meterMap.reduce<{ m: (typeof midi.meterMap)[number] | null; span: number }>((best, m, i) => {
     const span = (midi.meterMap[i + 1]?.tick ?? lastTick) - m.tick;
     return span > best.span ? { m, span } : best;
@@ -692,7 +698,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     sections,
     bars,
     parts,
-    tempoBpm: tempo0 ? 60e6 / tempo0.microsecondsPerQuarter : 120,
+    tempoBpm: clock.initialBpm,
     meter: meter0 ? `${meter0.numerator}/${2 ** meter0.denominatorPower}` : "4/4",
     report,
   };

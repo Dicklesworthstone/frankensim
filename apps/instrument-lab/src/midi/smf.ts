@@ -11,7 +11,7 @@
 //
 // A player is more forgiving than an editor: a missing End of Track, a chunk that runs past the
 // end of the file, or a note still open at the end are read anyway, and every such leniency is
-// counted in `lenient` so the page can say what it did. Format 2 and SMPTE time refuse.
+// counted in `lenient` so the page can say what it did. Both musical (PPQN) and frame (SMPTE) clocks are supported.
 
 import { salvageMidiBytes } from "./midi-salvage";
 
@@ -38,6 +38,7 @@ export interface DecodedTrack {
 }
 export interface DecodedMidi {
   format: 0 | 1;
+  /** Raw SMF division word, including both bytes of a frame clock. */
   division: number;
   tempoMap: TempoEntry[];
   meterMap: MeterEntry[];
@@ -111,7 +112,10 @@ function decode(input: Uint8Array): DecodeResult {
   const division = ((bytes[12] ?? 0) << 8) | (bytes[13] ?? 0);
   if (format === 2) return { ok: false, message: "Format 2 MIDI files (independent patterns) are not supported." };
   if (format > 2) return { ok: false, message: `Unknown MIDI format ${format}.` };
-  if (division & 0x8000) return { ok: false, message: "This file counts time in SMPTE frames, which the player does not read." };
+  if (division & 0x8000) {
+    if (!frameRate(division)) return { ok: false, message: "The MIDI header declares an unsupported SMPTE frame rate." };
+    if (!(division & 0xff)) return { ok: false, message: "The MIDI header declares zero ticks per SMPTE frame." };
+  }
   if (division < 1) return { ok: false, message: "The file declares zero ticks per quarter note." };
 
   const lenient = { missingEndOfTrack: 0, truncatedChunks: 0, openNotesClosed: 0, zeroLengthNotes: 0 };
@@ -228,22 +232,63 @@ function close(track: DecodedTrack, channel: number, key: number, on: { tick: nu
   track.notes.push({ channel, key, onTick: on.tick, offTick: off, onVelocity: on.velocity, onOrder: on.order, offOrder: off === offTick ? offOrder : undefined });
 }
 
-/** Seconds at every tick, from the file's tempo map (120 bpm until the first tempo, as SMF says). */
-export function tempoClock(midi: DecodedMidi): (tick: number) => number {
-  const ppq = midi.division;
-  const segs: { tick: number; sec: number; us: number }[] = [];
-  let us = 500_000, sec = 0, last = 0;
-  for (const e of midi.tempoMap) {
-    sec += ((e.tick - last) * us) / ppq / 1e6;
-    last = e.tick;
-    us = e.microsecondsPerQuarter;
-    segs.push({ tick: e.tick, sec, us });
+/** SMF encodes the negated nominal frame rate in the high byte. */
+function frameRate(division: number): number {
+  switch (256 - (division >>> 8)) {
+    case 24: return 24;
+    case 25: return 25;
+    case 29: return 30_000 / 1_001;
+    case 30: return 30;
+    default: return 0;
   }
-  return (tick: number): number => {
-    let lo = 0, hi = segs.length - 1, k = -1;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (segs[mid]!.tick <= tick) { k = mid; lo = mid + 1; } else hi = mid - 1; }
-    if (k < 0) return (tick * 500_000) / ppq / 1e6;
-    const s = segs[k]!;
-    return s.sec + ((tick - s.tick) * s.us) / ppq / 1e6;
+}
+
+/** One tempo map for sounding time and for musical positions on the bar ruler.
+ * In a frame-timed score, a tempo change moves the bar lines relative to the
+ * performance. In a PPQN score, it moves the performance relative to seconds. */
+export function performanceClock(midi: DecodedMidi) {
+  const { division } = midi;
+  const ticksPerSecond = division & 0x8000 ? frameRate(division) * (division & 0xff) : 0;
+  const segments = [{ tick: 0, quarter: 0, sec: 0, us: 500_000 }];
+  for (const tempo of midi.tempoMap) {
+    const last = segments[segments.length - 1]!;
+    if (tempo.tick === last.tick) { last.us = tempo.microsecondsPerQuarter; continue; }
+    const ticks = tempo.tick - last.tick;
+    const seconds = ticksPerSecond ? ticks / ticksPerSecond : ticks / division * last.us / 1e6;
+    segments.push({
+      tick: tempo.tick,
+      quarter: ticksPerSecond ? last.quarter + seconds * 1e6 / last.us : tempo.tick / division,
+      sec: ticksPerSecond ? tempo.tick / ticksPerSecond : last.sec + seconds,
+      us: tempo.microsecondsPerQuarter,
+    });
+  }
+  function segmentAt(position: number, unit: "tick" | "quarter") {
+    let lo = 0, hi = segments.length;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (segments[mid]![unit] <= position) lo = mid; else hi = mid;
+    }
+    return segments[lo]!;
+  }
+  return {
+    initialBpm: 60e6 / segments[0]!.us,
+    secondsAtTick(tick: number): number {
+      if (ticksPerSecond) return tick / ticksPerSecond;
+      const s = segmentAt(tick, "tick");
+      return s.sec + (tick - s.tick) / division * s.us / 1e6;
+    },
+    quartersAtTick(tick: number): number {
+      if (!ticksPerSecond) return tick / division;
+      const s = segmentAt(tick, "tick");
+      return s.quarter + (tick - s.tick) / ticksPerSecond * 1e6 / s.us;
+    },
+    secondsAtQuarter(quarter: number): number {
+      const s = segmentAt(quarter, "quarter");
+      return s.sec + (quarter - s.quarter) * s.us / 1e6;
+    },
   };
+}
+
+export function tempoClock(midi: DecodedMidi): (tick: number) => number {
+  return performanceClock(midi).secondsAtTick;
 }
