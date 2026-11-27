@@ -71,6 +71,10 @@ name = "painleve_rod"
 required-features = ["slices"]
 
 [[test]]
+name = "pose_gap"
+required-features = ["slices"]
+
+[[test]]
 name = "modal_structure_slice"
 required-features = ["modal-slices"]
 

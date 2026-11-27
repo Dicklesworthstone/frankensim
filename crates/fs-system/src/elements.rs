@@ -104,6 +104,8 @@ mod modulated_transformer;
 pub use modulated_transformer::ModulatedTransformer;
 mod multiport_inertia;
 pub use multiport_inertia::MultiportInertia;
+mod pose_gap;
+pub use pose_gap::{Pose, PoseGap};
 mod resistance;
 pub use resistance::Resistance;
 mod sampled_controller;

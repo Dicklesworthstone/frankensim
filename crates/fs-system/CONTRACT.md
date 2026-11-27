@@ -694,6 +694,8 @@ physics owners below fs-couple can be composed without it.
     - `Mass`: two words, position and velocity; identity: inertance.
     - `MultiportInertia`: `n` words, the velocities; identity: `n`, the port
       count, the mass matrix and the port map.
+    - `PoseGap`: two words, the translation and the turn, both finite;
+      identity: the gap's four coefficients `g0`, `a`, `c`, `k`.
     - `GapField`: two words, the field coordinate and the gap; a decode
       refuses a gap outside the open range. Identity: the kind (capacitor
       or inductor), the coupling scale and both limits.
@@ -955,6 +957,38 @@ physics owners below fs-couple can be composed without it.
     runs tell the solve an absolute tolerance of 1e-15 m/s, and under the
     default solve the stuck end is refused by name (`NotConverged` on
     `slider.a`).
+  - `PoseGap::new(pivot, axis, point, face, normal)` is the gap from a point
+    on a planar body that translates by `s` along a unit `axis` and turns by
+    `theta` about a pivot the translation carries, to a fixed straight face
+    with outward unit `normal`: `g = g0 + a s + c cos(theta) + k sin(theta)`
+    (`axis` and `normal` are scaled to unit length). It is the geometry
+    owner of a contact on a moving, turning body, and the junction it
+    presents is not constant over a step. Ports `s` (mechanical) and `theta`
+    (rotational) receive the pose's rates, `gap` (mechanical) receives the
+    effort `R` of what it is joined to; the state is the `Pose`, moved by
+    `dt` times the rates. The gap's rate is `J . (ds, dtheta) / dt` with `J`
+    the exact discrete gradient of `g` over the move (`J_theta` in the
+    product-to-sum form `sinc(dtheta / 2) (k cos(theta_m) - c sin(theta_m))`,
+    so no digit is lost as the turn goes to zero), and the efforts are `-R J`:
+    the ports' powers cancel, nothing is stored, and the receipt is lossless
+    with a rounding allowance from each port's work. The gap's end does not
+    follow the midpoint relation (`EndOfStep::Untold`), so the element sits
+    only beside lines that read mean flows only, such as fs-dcontact's
+    contact. One point and one unbounded straight face: a face with ends, a
+    curved face or a face on a second moving body is not this element.
+    `tests/pose_gap.rs` (under `slices`) swings a rotor on a torsional spring
+    (`I = 1e-3 kg m^2`, `k = 1 N m/rad`, released at rest from 0.3 rad) whose
+    arm tip meets a Hertz wall at 0.15 rad. The contact closes in the step
+    of the closed form `t_c = acos(0.15 / 0.3) / omega` (3312 at
+    `dt = 1e-5 s`); at every step the contact's closure is `-g` at the pose
+    within a rounding bound that grows with the step count, and so is the
+    energy with the contact's potential taken at `-g`; the swing returns to
+    its release turn within the sampling bound `omega^2 theta0 dt^2 / 8`. It
+    also checks conformance and tangents at three turn rates (zero among
+    them), the rate against the geometry's change and the slope at a pose
+    that does not turn, the codec, and the refusals; and that a contact that
+    reads an end input at `a` is refused beside the gap (`LineEnd` on
+    `wall.a`).
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and
