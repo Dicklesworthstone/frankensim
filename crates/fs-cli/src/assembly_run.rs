@@ -6,7 +6,6 @@
 
 mod budget;
 pub(crate) mod cli;
-mod codec;
 mod report;
 
 use budget::{
@@ -37,7 +36,25 @@ use fs_system::{
     LoweringRegistry, ModalConfig, NodeId, OutputChannel, StateMap, StationaryConfig, System,
 };
 
-use self::codec::{AdmittedAssembly, admit_assembly_source};
+pub use fs_fsim::AssemblyAnalysisMode;
+use fs_fsim::{AdmittedAssembly, PackCatalog, PackEntry};
+
+fn admit_assembly_source(
+    source: &[u8],
+    packs: &CardPackSet,
+) -> Result<AdmittedAssembly, SolveRefusal> {
+    let to_entry = |p: &crate::cards::AdmittedCardPack| PackEntry {
+        card: p.card(),
+        identity: p.identity().to_owned(),
+        bytes: p.bytes().to_vec(),
+    };
+    let catalog = PackCatalog::from_parts(
+        packs.materials().iter().map(to_entry).collect(),
+        packs.interfaces().iter().map(to_entry).collect(),
+    );
+    fs_fsim::admit_assembly_source(source, &catalog)
+        .map_err(|r| staged_refusal(r.code, "admit", r.what, r.fix))
+}
 use self::report::{
     AssemblyReportInputs, EntitySample, EvaluatedProbe, PROBE_SERIES_KIND, RunTrace,
     build_assembly_report, dims_to_unit, evaluate_probes,
@@ -146,41 +163,6 @@ impl StageDescriptor for AssemblyStage {
     }
     fn gap_dependency(self) -> Option<&'static str> {
         None
-    }
-}
-
-/// Selectable analysis mode for `--analysis transient|stationary|harmonic|modal`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssemblyAnalysisMode {
-    /// Coupled transient stepping via `System::step`.
-    Transient,
-    /// Stationary equilibrium via `System::run_analysis(Stationary)`.
-    Stationary,
-    /// Linearised frequency response via `System::run_analysis(Harmonic)`.
-    Harmonic,
-    /// Linearised eigenmodes via `System::run_analysis(Modal)`.
-    Modal,
-}
-
-impl AssemblyAnalysisMode {
-    /// Canonical lowercase mode identifier.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Transient => "transient",
-            Self::Stationary => "stationary",
-            Self::Harmonic => "harmonic",
-            Self::Modal => "modal",
-        }
-    }
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        match s {
-            "transient" => Some(Self::Transient),
-            "stationary" => Some(Self::Stationary),
-            "harmonic" => Some(Self::Harmonic),
-            "modal" => Some(Self::Modal),
-            _ => None,
-        }
     }
 }
 

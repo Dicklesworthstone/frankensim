@@ -1193,6 +1193,7 @@ dependencies = [
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
+ "fs-fsim",
  "fs-ga",
  "fs-gas",
  "fs-geom",
@@ -1853,7 +1854,12 @@ dependencies = [
 name = "fs-fsim"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
  "fs-qty",
+ "fs-scenario",
+ "fs-system",
 ]
 
 [[package]]
@@ -2804,6 +2810,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-exec",
+ "fs-fsim",
  "fs-matdb",
  "fs-ports",
  "fs-qty",

@@ -6,7 +6,7 @@
 ## Public types and semantics
 - `AssemblyRuntime`: owns a sealed kernel `System`, pre-allocated `ArenaPool`, lock-free `AtomicU64` interactive input cells (initialized from each `InputDescriptor::default_value` in `from_system`), pre-resolved probe readers, generated `SnapshotDescriptor`, and once-delivered refusal state.
 - `InputBinding`, `ProbeBinding`, `CustomProbeFn`: typed input and probe bindings for `AssemblyRuntime::from_system`.
-- `SnapshotDescriptor` (`SNAPSHOT_DESCRIPTOR_SCHEMA = "frankensim.runtime.snapshot_descriptor.v1"`), `ProbeDescriptor`, `InputDescriptor`, `RuntimeRefusal`, `inputs_to_json`, `dims_to_unit`: canonical descriptors, refusals, and JSON encoders.
+- `SnapshotDescriptor` (`SNAPSHOT_DESCRIPTOR_SCHEMA = "frankensim.runtime.snapshot_descriptor.v1"`), `ProbeDescriptor`, `InputDescriptor`, `RuntimeRefusal`, `inputs_to_json`, `MAX_PACKS`, `UNIT_DIMS`, `dims_to_unit` (re-exported from `fs-fsim`): canonical descriptors, refusals, and JSON encoders.
 
 ## Invariants
 - On the success path of `set_input`, `step`, `read_probes`, and `render_f32`, the runtime wrapper adds no heap allocation (refusal paths format diagnostics, and any allocation inside a component belongs to the sealed `System`); `tests/no_alloc.rs` measures 0 heap allocations for a 1 kg `Mass` + `ControlledSource` system after one warm-up step.
@@ -35,7 +35,6 @@ None. All dependencies are pure Franken workspace crates; `wasm32-unknown-unknow
 ## No-claim boundaries
 `fs-runtime` adds no physical model, integrator, material provenance, or audio post-processing. Scientific claims remain owned by the admitted assembly's cards and `fs-system` components.
 
-## Planned (R2a-R3)
-- Cut R2a/R2b: `fs-fsim` split and unified `.fsim` codec + `UNIT_DIMS`/`dims_to_unit`.
+## Planned (R1c-R3)
 - Cut R1c/R1d: `LiveSource` (`StageResidual`), `LiveInputSpec`, `from_draft`/`load`, and `tests/runtime_core.rs`.
 - Cut R3: `fs-runtime-wasm` (`wasm-bindgen` wrapper + cross-target native-vs-`wasm32` parity tests).

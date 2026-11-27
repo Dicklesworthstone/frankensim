@@ -35,23 +35,7 @@ const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const ANGULAR_VELOCITY: Dims = Dims([0, 0, -1, 0, 0, 0]);
 const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
 
-pub(crate) const UNIT_DIMS: &[(&str, Dims)] = &[
-    ("m", Dims([1, 0, 0, 0, 0, 0])),
-    ("m^3", Dims([3, 0, 0, 0, 0, 0])),
-    ("m/s", Dims([1, 0, -1, 0, 0, 0])),
-    ("s", Dims([0, 0, 1, 0, 0, 0])),
-    ("K", Dims([0, 0, 0, 1, 0, 0])),
-    ("W", Dims([2, 1, -3, 0, 0, 0])),
-    ("rad/s", Dims([0, 0, -1, 0, 0, 0])),
-    ("1", Dims::NONE),
-    ("m/N", Dims([0, -1, 2, 0, 0, 0])),
-    ("m/(N*s)", Dims([0, -1, 1, 0, 0, 0])),
-    ("K/W", Dims([-2, -1, 3, 1, 0, 0])),
-];
-
-pub(crate) fn dims_to_unit(d: Dims) -> Option<&'static str> {
-    UNIT_DIMS.iter().find(|(_, x)| *x == d).map(|(u, _)| *u)
-}
+pub(crate) use fs_fsim::{UNIT_DIMS, dims_to_unit};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntitySample {

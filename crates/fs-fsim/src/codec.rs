@@ -1,11 +1,11 @@
-//! Assembly `.fsim` (s-expression & isomorphic `fs-ir` JSON) parser, Five
-//! Explicits admission, and `CardPackSet -> fs_system::CardStore` bridge.
+//! Assembly `.fsim` (s-expression & isomorphic JSON) parser, Five Explicits
+//! admission, and `PackCatalog -> fs_system::CardStore` bridge.
 
+use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{ContentHash, hash_bytes};
 use fs_evidence::uncertainty::RequirementRelation;
-use fs_ir::ast::{CountUnit, Node, NodeKind};
 use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
@@ -20,10 +20,212 @@ use fs_scenario::entity::ToleranceSource;
 use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
 use fs_system::CardStore;
 
-use super::AssemblyAnalysisMode;
-use crate::cards::{CardPackKind, CardPackSet};
-use crate::solve::SolveRefusal;
-use crate::stage_driver::staged_refusal;
+use crate::ast::{CountUnit, Node, NodeKind};
+
+/// Selectable analysis mode for `--analysis transient|stationary|harmonic|modal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyAnalysisMode {
+    /// Coupled transient stepping via `System::step`.
+    Transient,
+    /// Stationary equilibrium via `System::run_analysis(Stationary)`.
+    Stationary,
+    /// Linearised frequency response via `System::run_analysis(Harmonic)`.
+    Harmonic,
+    /// Linearised eigenmodes via `System::run_analysis(Modal)`.
+    Modal,
+}
+
+impl AssemblyAnalysisMode {
+    /// Canonical lowercase mode identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Stationary => "stationary",
+            Self::Harmonic => "harmonic",
+            Self::Modal => "modal",
+        }
+    }
+
+    /// Parse a canonical lowercase analysis mode label.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "transient" => Some(Self::Transient),
+            "stationary" => Some(Self::Stationary),
+            "harmonic" => Some(Self::Harmonic),
+            "modal" => Some(Self::Modal),
+            _ => None,
+        }
+    }
+}
+
+/// Which normalized `fs-matdb` pack envelope a card belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackKind {
+    /// `FSMCDPK\0` material card pack.
+    Material,
+    /// `FSINTPK\0` interface card pack.
+    Interface,
+}
+
+impl PackKind {
+    /// Lowercase diagnostic label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Material => "material",
+            Self::Interface => "interface",
+        }
+    }
+
+    /// CLI flag supplying this pack kind.
+    #[must_use]
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::Material => "--materials",
+            Self::Interface => "--interfaces",
+        }
+    }
+}
+
+/// One admitted normalized card pack entry.
+#[derive(Debug, Clone)]
+pub struct PackEntry {
+    /// Content hash of the reconstructed card.
+    pub card: ContentHash,
+    /// Human-readable card identity selector.
+    pub identity: String,
+    /// Exact canonical pack bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Maximum card packs accepted by [`PackCatalog::from_raw_bytes`].
+pub const MAX_PACKS: usize = 128;
+
+/// Admitted material and interface card packs passed to [`admit_assembly_source`].
+#[derive(Debug, Clone, Default)]
+pub struct PackCatalog {
+    materials: Vec<PackEntry>,
+    interfaces: Vec<PackEntry>,
+}
+
+fn push_unique(
+    out: &mut Vec<(ContentHash, PackEntry)>,
+    kind: &str,
+    root: ContentHash,
+    entry: PackEntry,
+) -> Result<(), CodecRefusal> {
+    if out.iter().any(|(r, _)| *r == root) {
+        return Ok(());
+    }
+    if out.iter().any(|(_, e)| e.card == entry.card) {
+        return Err(err(format!(
+            "conflicting {kind} packs for card {}",
+            entry.card.to_hex()
+        )));
+    }
+    out.push((root, entry));
+    Ok(())
+}
+
+impl PackCatalog {
+    /// Build a catalog from already-admitted material and interface entries.
+    #[must_use]
+    pub fn from_parts(materials: Vec<PackEntry>, interfaces: Vec<PackEntry>) -> Self {
+        Self {
+            materials,
+            interfaces,
+        }
+    }
+
+    /// Decode canonical `FSMCDPK\0` and `FSINTPK\0` byte buffers into a catalog.
+    pub fn from_raw_bytes(packs: &[&[u8]]) -> Result<Self, CodecRefusal> {
+        if packs.len() > MAX_PACKS {
+            return Err(err(format!(
+                "too many card packs: {} exceeds limit {MAX_PACKS}",
+                packs.len()
+            )));
+        }
+        let (mut mats, mut ints) = (Vec::new(), Vec::new());
+        for raw in packs {
+            match raw.get(..8) {
+                Some(b"FSMCDPK\0") => {
+                    let dec = NormalizedMaterialCardPack::from_bytes(raw)
+                        .map_err(|e| err(format!("material pack decode failed: {e}")))?;
+                    let e = PackEntry {
+                        card: dec.card().content_hash(),
+                        identity: dec.card().id().to_string(),
+                        bytes: raw.to_vec(),
+                    };
+                    push_unique(&mut mats, "material", dec.content_hash(), e)?;
+                }
+                Some(b"FSINTPK\0") => {
+                    let dec = NormalizedInterfacePack::from_bytes(raw)
+                        .map_err(|e| err(format!("interface pack decode failed: {e}")))?;
+                    let id = format!(
+                        "{} | {} | {}",
+                        dec.card().surface_a().material,
+                        dec.card().surface_b().material,
+                        dec.card().medium()
+                    );
+                    let e = PackEntry {
+                        card: dec.card().content_hash(),
+                        identity: id,
+                        bytes: raw.to_vec(),
+                    };
+                    push_unique(&mut ints, "interface", dec.content_hash(), e)?;
+                }
+                _ => {
+                    return Err(err(
+                        "unknown card pack magic (expected FSMCDPK\0 or FSINTPK\0)",
+                    ));
+                }
+            }
+        }
+        mats.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        ints.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        Ok(Self {
+            materials: mats.into_iter().map(|(_, e)| e).collect(),
+            interfaces: ints.into_iter().map(|(_, e)| e).collect(),
+        })
+    }
+
+    /// Admitted material packs.
+    #[must_use]
+    pub fn materials(&self) -> &[PackEntry] {
+        &self.materials
+    }
+
+    /// Admitted interface packs.
+    #[must_use]
+    pub fn interfaces(&self) -> &[PackEntry] {
+        &self.interfaces
+    }
+}
+
+/// Structured refusal surfaced by `.fsim` assembly admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecRefusal {
+    /// Stable machine refusal code.
+    pub code: &'static str,
+    /// Human-readable description of what failed.
+    pub what: String,
+    /// Actionable fix hint.
+    pub fix: String,
+}
+
+impl fmt::Display for CodecRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}; fix: {}", self.code, self.what, self.fix)
+    }
+}
+
+impl std::error::Error for CodecRefusal {}
+
+type SolveRefusal = CodecRefusal;
+type CardPackSet = PackCatalog;
+type CardPackKind = PackKind;
 
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
@@ -34,15 +236,21 @@ const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
 const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
+/// Scalar summary statistic applied to a probe series by a requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProbeStat {
+pub enum ProbeStat {
+    /// Maximum finite value.
     Max,
+    /// Minimum finite value.
     Min,
+    /// Final sample.
     Final,
 }
 
 impl ProbeStat {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Canonical lowercase label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Max => "max",
             Self::Min => "min",
@@ -51,66 +259,107 @@ impl ProbeStat {
     }
 }
 
+/// Declared requirement linking a probe summary to a threshold.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AssemblyRequirement {
-    pub(crate) id: String,
-    pub(crate) analysis: Option<AssemblyAnalysisMode>,
-    pub(crate) probe: String,
-    pub(crate) stat: ProbeStat,
-    pub(crate) relation: RequirementRelation,
-    pub(crate) limit: QtyAny,
+pub struct AssemblyRequirement {
+    /// Unique requirement id.
+    pub id: String,
+    /// Optional analysis mode override.
+    pub analysis: Option<AssemblyAnalysisMode>,
+    /// Target probe name.
+    pub probe: String,
+    /// Reduction statistic.
+    pub stat: ProbeStat,
+    /// Bound direction.
+    pub relation: RequirementRelation,
+    /// Dimensioned limit.
+    pub limit: QtyAny,
 }
 
-pub(crate) const BOX_AXES: [&str; 3] = ["lx", "ly", "lz"];
+/// Canonical box dimension axis labels.
+pub const BOX_AXES: [&str; 3] = ["lx", "ly", "lz"];
+
+/// Declared geometric tolerance envelope on one box axis.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GeomEnvelope {
-    pub(crate) part: String,
-    pub(crate) axis: usize,
-    pub(crate) half_width_m: f64,
-    pub(crate) source: String,
+pub struct GeomEnvelope {
+    /// Part name.
+    pub part: String,
+    /// Box axis index (`0..3`).
+    pub axis: usize,
+    /// Positive half-width [m].
+    pub half_width_m: f64,
+    /// Cited tolerance source.
+    pub source: String,
 }
+
+/// Declared uncertainty envelope on a boundary condition or probe.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TargetEnvelope {
-    pub(crate) target: String,
-    pub(crate) half_width: Option<QtyAny>,
-    pub(crate) source: String,
+pub struct TargetEnvelope {
+    /// Target source or probe name.
+    pub target: String,
+    /// Optional half-width (`None` when covered-by-source).
+    pub half_width: Option<QtyAny>,
+    /// Cited source string.
+    pub source: String,
 }
+
+/// Uncertainty envelopes declared in an assembly document.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct DeclaredEnvelopes {
-    pub(crate) geometry: Vec<GeomEnvelope>,
-    pub(crate) boundary_conditions: Vec<TargetEnvelope>,
-    pub(crate) measurement: Vec<TargetEnvelope>,
-    pub(crate) model_form: Vec<TargetEnvelope>,
+pub struct DeclaredEnvelopes {
+    /// Geometry tolerance envelopes.
+    pub geometry: Vec<GeomEnvelope>,
+    /// Boundary-condition envelopes.
+    pub boundary_conditions: Vec<TargetEnvelope>,
+    /// Measurement envelopes.
+    pub measurement: Vec<TargetEnvelope>,
+    /// Model-form envelopes.
+    pub model_form: Vec<TargetEnvelope>,
 }
 
 /// Admitted assembly document, Five Explicits, and resolved card store.
-pub(crate) struct AdmittedAssembly {
-    pub(crate) canonical_source: Vec<u8>,
-    pub(crate) source_hash: ContentHash,
-    pub(crate) name: String,
-    pub(crate) seed: u64,
-    pub(crate) constellation: String,
-    pub(crate) workspace: String,
-    pub(crate) wall_budget_s: f64,
-    pub(crate) mem_budget_bytes: u64,
-    pub(crate) cores: u64,
-    pub(crate) granted_ops: Vec<String>,
-    pub(crate) draft: DraftAssembly,
-    pub(crate) card_store: CardStore,
-    pub(crate) entity_names: BTreeMap<EntityId, String>,
-    pub(crate) harmonic_frequencies_hz: Vec<f64>,
-    pub(crate) modal_max_modes: usize,
-    pub(crate) requirements: Vec<AssemblyRequirement>,
-    pub(crate) envelopes: DeclaredEnvelopes,
+pub struct AdmittedAssembly {
+    /// Canonical s-expression bytes.
+    pub canonical_source: Vec<u8>,
+    /// BLAKE3 hash of `canonical_source`.
+    pub source_hash: ContentHash,
+    /// Assembly name.
+    pub name: String,
+    /// Deterministic seed.
+    pub seed: u64,
+    /// Constellation version.
+    pub constellation: String,
+    /// Workspace version.
+    pub workspace: String,
+    /// Wall-clock budget [s].
+    pub wall_budget_s: f64,
+    /// Memory budget [bytes].
+    pub mem_budget_bytes: u64,
+    /// Granted core count.
+    pub cores: u64,
+    /// Granted operation patterns.
+    pub granted_ops: Vec<String>,
+    /// Admitted structural draft assembly.
+    pub draft: DraftAssembly,
+    /// Resolved material and interface card store.
+    pub card_store: CardStore,
+    /// Entity id to declared name map.
+    pub entity_names: BTreeMap<EntityId, String>,
+    /// Harmonic sweep frequencies [Hz].
+    pub harmonic_frequencies_hz: Vec<f64>,
+    /// Maximum modal count requested.
+    pub modal_max_modes: usize,
+    /// Declared requirements.
+    pub requirements: Vec<AssemblyRequirement>,
+    /// Declared uncertainty envelopes.
+    pub envelopes: DeclaredEnvelopes,
 }
 
-fn err(what: impl Into<String>) -> SolveRefusal {
-    staged_refusal(
-        "cli-assembly-admit",
-        "admit",
-        what,
-        "fix the assembly declaration",
-    )
+fn err(what: impl Into<String>) -> CodecRefusal {
+    CodecRefusal {
+        code: "cli-assembly-admit",
+        what: what.into(),
+        fix: "fix the assembly declaration".into(),
+    }
 }
 
 fn as_list<'a>(n: &'a Node, w: &str) -> Result<&'a [Node], SolveRefusal> {
@@ -404,26 +653,24 @@ fn resolve_card(
     let hits: Vec<ContentHash> = slice
         .iter()
         .filter(|p| {
-            p.card().to_hex() == sel
-                || p.identity() == sel
-                || p.identity().starts_with(&format!("{sel}/"))
+            p.card.to_hex() == sel
+                || p.identity == sel
+                || p.identity.starts_with(&format!("{sel}/"))
         })
-        .map(crate::cards::AdmittedCardPack::card)
+        .map(|p| p.card)
         .collect();
     match hits.as_slice() {
         [only] => Ok(*only),
-        [] => Err(staged_refusal(
-            "cli-assembly-card-missing",
-            "admit",
-            format!("{scope} missing {} card `{sel}`", kind.label()),
-            format!("supply the card pack via {}", kind.flag()),
-        )),
-        _ => Err(staged_refusal(
-            "cli-assembly-card-missing",
-            "admit",
-            format!("{scope} card selector `{sel}` is ambiguous"),
-            "specify full identity or 64-hex hash",
-        )),
+        [] => Err(CodecRefusal {
+            code: "cli-assembly-card-missing",
+            what: format!("{scope} missing {} card `{sel}`", kind.label()),
+            fix: format!("supply the card pack via {}", kind.flag()),
+        }),
+        _ => Err(CodecRefusal {
+            code: "cli-assembly-card-missing",
+            what: format!("{scope} card selector `{sel}` is ambiguous"),
+            fix: "specify full identity or 64-hex hash".into(),
+        }),
     }
 }
 
@@ -433,15 +680,15 @@ fn build_card_store(
 ) -> Result<CardStore, SolveRefusal> {
     let mut store = CardStore::new();
     for p in packs.materials() {
-        let dec = NormalizedMaterialCardPack::from_bytes(p.bytes())
+        let dec = NormalizedMaterialCardPack::from_bytes(&p.bytes)
             .map_err(|e| err(format!("material pack decode failed: {e}")))?;
         store.insert_material(dec.card().clone());
     }
     for p in packs.interfaces() {
-        let dec = NormalizedInterfacePack::from_bytes(p.bytes())
+        let dec = NormalizedInterfacePack::from_bytes(&p.bytes)
             .map_err(|e| err(format!("interface pack decode failed: {e}")))?;
         let fam = families
-            .get(&p.card())
+            .get(&p.card)
             .cloned()
             .unwrap_or_else(|| "thermal-conductance".into());
         store
@@ -700,19 +947,20 @@ fn bind_envelopes(
     Ok(())
 }
 
+/// Parse, admit, and resolve card packs for a `.fsim` s-expression or JSON source.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn admit_assembly_source(
+pub fn admit_assembly_source(
     source: &[u8],
     packs: &CardPackSet,
 ) -> Result<AdmittedAssembly, SolveRefusal> {
     let text = std::str::from_utf8(source).map_err(|e| err(format!("non-UTF-8 source: {e}")))?;
     let ast = if text.trim_start().starts_with(['{', '[']) {
-        fs_ir::json::parse(text)
+        crate::json::parse(text)
     } else {
-        fs_ir::sexpr::parse(text)
+        crate::sexpr::parse(text)
     }
     .map_err(|e| err(format!("assembly parse failed: {e}")))?;
-    let canonical_source = fs_ir::sexpr::print_checked(&ast)
+    let canonical_source = crate::sexpr::print_checked(&ast)
         .map_err(|e| err(format!("canonicalization failed: {e}")))?
         .into_bytes();
     let source_hash = hash_bytes(&canonical_source);
@@ -1423,15 +1671,14 @@ pub(crate) fn admit_assembly_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cards::RawCardPack;
 
     const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
     fn admit(attrs: &str) -> Result<AdmittedAssembly, SolveRefusal> {
-        admit_with(attrs, Vec::new())
+        admit_with(attrs, &[])
     }
 
-    fn admit_with(attrs: &str, raw: Vec<RawCardPack>) -> Result<AdmittedAssembly, SolveRefusal> {
+    fn admit_with(attrs: &str, raw: &[&[u8]]) -> Result<AdmittedAssembly, SolveRefusal> {
         let src = format!(
             "(assembly \"init_check\" (version 1) (units \"SI\") (seed 0x1) \
              (versions (constellation \"2026-07\") (workspace \"pkg-1c\")) \
@@ -1442,7 +1689,7 @@ mod tests {
              (part \"rotor\" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) \
              :physics (mechanics thermal) :fidelity lumped {attrs}))\n"
         );
-        let packs = CardPackSet::admit(raw).unwrap();
+        let packs = PackCatalog::from_raw_bytes(raw).unwrap();
         admit_assembly_source(src.as_bytes(), &packs)
     }
 
@@ -1459,7 +1706,7 @@ mod tests {
             angular_velocity: [q(0.0, FREQUENCY), q(-2.5, FREQUENCY), q(120.0, FREQUENCY)],
             temperature: Some(q(320.0, TEMPERATURE)),
         };
-        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        let packs = PackCatalog::default();
         let a1 = admit(full).expect("full :initial admits");
         let init1 = a1.draft.input().parts[0].initial.as_ref().unwrap();
         assert_eq!(init1, &expected);
@@ -1468,8 +1715,8 @@ mod tests {
         let a2 = admit_assembly_source(&a1.canonical_source, &packs).unwrap();
         assert_eq!(a2.draft.input().parts[0].initial.as_ref(), Some(&expected));
 
-        let ast = fs_ir::sexpr::parse(std::str::from_utf8(&a1.canonical_source).unwrap()).unwrap();
-        let json = fs_ir::json::print_checked(&ast).unwrap();
+        let ast = crate::sexpr::parse(std::str::from_utf8(&a1.canonical_source).unwrap()).unwrap();
+        let json = crate::json::print_checked(&ast).unwrap();
         let a3 = admit_assembly_source(json.as_bytes(), &packs).unwrap();
         assert_eq!(a3.draft.input().parts[0].initial.as_ref(), Some(&expected));
 
@@ -1488,7 +1735,7 @@ mod tests {
 
     #[test]
     fn a_time_plan_is_explicit_unless_it_names_an_implicit_scheme() {
-        let packs = CardPackSet::admit(Vec::new()).unwrap();
+        let packs = PackCatalog::default();
         let plain = admit("").unwrap();
         assert_eq!(plain.draft.input().time_plan.scheme, TimeScheme::Explicit);
         let source = std::str::from_utf8(&plain.canonical_source).unwrap();
@@ -1562,7 +1809,7 @@ mod tests {
             let Err(r) = admit(&attrs) else {
                 panic!("expected refusal for `{attrs}`");
             };
-            assert_eq!((r.code, r.stage), ("cli-assembly-admit", Some("admit")));
+            assert_eq!(r.code, "cli-assembly-admit");
             assert!(
                 r.what.contains(needle),
                 "got `{}` without `{needle}`",
@@ -1584,7 +1831,7 @@ mod tests {
                  (part \"p\" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m) :physics (thermal) :fidelity lumped) \
                  (probe \"tp\" :kind thermocouple :target \"p\" :sample-rate 1000Hz) {extra})\n"
             );
-            admit_assembly_source(src.as_bytes(), &CardPackSet::admit(Vec::new()).unwrap())
+            admit_assembly_source(src.as_bytes(), &PackCatalog::default())
         };
         let ok = with("(requirement \"r1\" :probe \"tp\" :stat max :relation at-most :limit 310K)")
             .unwrap();
@@ -1642,7 +1889,7 @@ mod tests {
 
     /// `admit_with`'s text closing the rotor's part, a thermal cell, and
     /// `forms`, whose last parenthesis `admit_with` writes.
-    fn with_cell(forms: &str, raw: Vec<RawCardPack>) -> Result<AdmittedAssembly, SolveRefusal> {
+    fn with_cell(forms: &str, raw: &[&[u8]]) -> Result<AdmittedAssembly, SolveRefusal> {
         let forms = forms.strip_suffix(')').expect("closed forms");
         let cell = "(part \"cell\" :kind solid :geometry (box 0.1m 0.1m 0.1m) \
                     :physics (thermal) :fidelity lumped)";
@@ -1652,15 +1899,9 @@ mod tests {
     #[test]
     fn memory_a_temperature_source_and_a_source_on_an_interface_admit_and_round_trip() {
         // Any interface card shows the memory; admission reads no bushing law.
-        let bytes = include_bytes!("../../../../examples/contact-pair/cold-hot.fsintpk");
-        let raw = RawCardPack {
-            kind: CardPackKind::Interface,
-            source: "contact".to_owned(),
-            bytes: bytes.to_vec(),
-            expect: None,
-        };
-        let packs = CardPackSet::admit(vec![raw.clone()]).unwrap();
-        let law_card = packs.interfaces()[0].card();
+        let bytes: &[u8] = include_bytes!("../../../examples/contact-pair/cold-hot.fsintpk");
+        let packs = PackCatalog::from_raw_bytes(&[bytes]).unwrap();
+        let law_card = packs.interfaces()[0].card;
         let pad = "(part \"pad\" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) \
                    :physics (mechanics) :fidelity lumped)";
         let memory = "displacement-0-x 0.4m displacement-0-y 0m displacement-0-z 0m \
@@ -1676,7 +1917,7 @@ mod tests {
         let hold = "(source \"hold\" :interface \"mount\" :port \"drive_x\" \
                     :history (constant 0.7N))";
         let forms = format!("{pad} {mount} {warm} {hold}");
-        let a = with_cell(&forms, vec![raw]).expect("all three admit");
+        let a = with_cell(&forms, &[bytes]).expect("all three admit");
         let input = a.draft.input();
         let key = |name, value, dims| (ParameterKey::new(name, dims), QtyAny::new(value, dims));
         let state = vec![
@@ -1700,8 +1941,8 @@ mod tests {
         let (entity, port) = (input.interfaces[0].entity, "drive_x".to_owned());
         assert_eq!(input.sources[0].target, SourceTarget::Port { entity, port });
         let again = admit_assembly_source(&a.canonical_source, &packs).unwrap();
-        let ast = fs_ir::sexpr::parse(std::str::from_utf8(&a.canonical_source).unwrap()).unwrap();
-        let json = fs_ir::json::print_checked(&ast).unwrap();
+        let ast = crate::sexpr::parse(std::str::from_utf8(&a.canonical_source).unwrap()).unwrap();
+        let json = crate::json::print_checked(&ast).unwrap();
         let from_json = admit_assembly_source(json.as_bytes(), &packs).unwrap();
         for b in [again, from_json] {
             assert_eq!(b.draft.input().interfaces, input.interfaces);
@@ -1728,7 +1969,7 @@ mod tests {
 
     #[test]
     fn memory_keys_temperature_sources_and_interface_sources_refuse_by_name() {
-        let refused = |forms: &str| with_cell(forms, Vec::new()).err().unwrap().what;
+        let refused = |forms: &str| with_cell(forms, &[]).err().unwrap().what;
         let route = "(interface \"route\" :kind heat-route :a \"rotor\" :b \"cell\" :fraction 0.7";
         for row in [
             "displacement-0-w 0m | no :memory key `displacement-0-w`",
@@ -1761,15 +2002,9 @@ mod tests {
     #[test]
     fn shear_film_names_its_fluid_gap_and_query_point_and_no_card() {
         // Any material card shows the binding; the lowering reads its viscosity.
-        let bytes = include_bytes!(
-            "../../../../examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk"
+        let bytes: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk"
         );
-        let raw = RawCardPack {
-            kind: CardPackKind::Material,
-            source: "fluid".to_owned(),
-            bytes: bytes.to_vec(),
-            expect: None,
-        };
         let film = |extra: &str| {
             let pad = "(part \"pad\" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) \
                  :physics (mechanics) :fidelity lumped)";
@@ -1778,7 +2013,7 @@ mod tests {
             let at = ":fluid-at (T 313.15K phase-liquid 1)";
             admit_with(
                 &format!(") {pad} {film} {at} :area 0.01m^2{extra}"),
-                vec![raw.clone()],
+                &[bytes],
             )
         };
         let a = film("").expect("a shear film admits with its fluid");
@@ -1869,19 +2104,13 @@ mod tests {
 
     #[test]
     fn part_query_at_and_one_d_field_fidelity_admit_and_refuse() {
-        let b =
-            include_bytes!("../../../../examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk");
-        let pk = RawCardPack {
-            kind: CardPackKind::Material,
-            source: "srm".into(),
-            bytes: b.to_vec(),
-            expect: None,
-        };
+        let b: &[u8] =
+            include_bytes!("../../../examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk");
         let slab = |e: &str, f: &str| {
             let s = format!(
                 ") (part \"s\" :kind solid :geometry (box 0.0254m 0.25m 0.25m) :material \"eps-nist-srm1453-2013\" {e} :physics (thermal) :fidelity {f}"
             );
-            admit_with(&s, vec![pk.clone()])
+            admit_with(&s, &[b])
         };
         let ok = slab(
             ":query-at (mean-temperature 297.15K bulk-density 41kg/m^3 source-lot-srm1453 1)",

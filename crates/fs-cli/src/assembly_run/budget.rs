@@ -26,12 +26,12 @@ use fs_system::{
     ParameterSource, SolveConfig,
 };
 
-use super::codec::{AdmittedAssembly, AssemblyRequirement, BOX_AXES, ProbeStat, TargetEnvelope};
 use super::report::{EvaluatedProbe, RunTrace, UNIT_DIMS, evaluate_probes};
 use crate::import::json_string as js;
 use crate::json_read::JsonValue;
 use crate::solve::SolveRefusal;
 use crate::stage_driver::{RetainedSideArtifact, staged_refusal};
+use fs_fsim::{AdmittedAssembly, AssemblyRequirement, BOX_AXES, ProbeStat, TargetEnvelope};
 
 pub(crate) const QOI_BUDGET_KIND: &str = "assembly-qoi-budget";
 pub(crate) const QOI_BUDGET_SCHEMA: &str = "frankensim.cli.assembly-qoi-budget.v1";

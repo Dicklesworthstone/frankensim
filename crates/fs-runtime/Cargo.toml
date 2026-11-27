@@ -13,6 +13,7 @@ layer = "L6"
 [dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
+fs-fsim = { path = "../fs-fsim" }
 fs-matdb = { path = "../fs-matdb" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }

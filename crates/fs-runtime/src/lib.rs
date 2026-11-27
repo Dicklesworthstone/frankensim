@@ -9,6 +9,7 @@ mod runtime;
 
 pub use descriptor::{
     InputDescriptor, ProbeDescriptor, RuntimeRefusal, SNAPSHOT_DESCRIPTOR_SCHEMA,
-    SnapshotDescriptor, dims_to_unit, inputs_to_json,
+    SnapshotDescriptor, inputs_to_json,
 };
+pub use fs_fsim::{MAX_PACKS, UNIT_DIMS, dims_to_unit};
 pub use runtime::{AssemblyRuntime, CustomProbeFn, InputBinding, ProbeBinding};

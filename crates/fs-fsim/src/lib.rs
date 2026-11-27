@@ -1,15 +1,53 @@
 //! Wasm32-clean FrankenScript syntax AST (`ast`), isomorphic s-expression
 //! (`sexpr`) and JSON (`json`) codecs, and structured [`IrError`].
+//!
+//! Moved isomorphically out of `fs-ir` (`frankensim-rc-1109-root-3gc12.11.9`,
+//! Cut R2a) so `fs-ir`, `fs-cli`, and `fs-runtime` share one parser with zero
+//! `fs-ledger`/SQLite dependency on `wasm32-unknown-unknown`.
 
 #![forbid(unsafe_code)]
 
 pub mod ast;
+pub mod codec;
 pub mod json;
 pub mod sexpr;
 
 pub use ast::{CountUnit, CountValue, Node, NodeKind, Span};
+pub use codec::{
+    AdmittedAssembly, AssemblyAnalysisMode, AssemblyRequirement, BOX_AXES, CodecRefusal,
+    DeclaredEnvelopes, GeomEnvelope, MAX_PACKS, PackCatalog, PackEntry, PackKind, ProbeStat,
+    TargetEnvelope, admit_assembly_source,
+};
 
 use core::fmt;
+use fs_qty::Dims;
+
+/// Canonical SI unit labels indexed by base dimension exponents `[L, M, T, Theta, I, N]`.
+pub const UNIT_DIMS: &[(&str, Dims)] = &[
+    ("m", Dims([1, 0, 0, 0, 0, 0])),
+    ("m^3", Dims([3, 0, 0, 0, 0, 0])),
+    ("m/s", Dims([1, 0, -1, 0, 0, 0])),
+    ("s", Dims([0, 0, 1, 0, 0, 0])),
+    ("K", Dims([0, 0, 0, 1, 0, 0])),
+    ("W", Dims([2, 1, -3, 0, 0, 0])),
+    ("rad/s", Dims([0, 0, -1, 0, 0, 0])),
+    ("1", Dims::NONE),
+    ("m/N", Dims([0, -1, 2, 0, 0, 0])),
+    ("m/(N*s)", Dims([0, -1, 1, 0, 0, 0])),
+    ("K/W", Dims([-2, -1, 3, 1, 0, 0])),
+    ("kg", Dims([0, 1, 0, 0, 0, 0])),
+    ("N", Dims([1, 1, -2, 0, 0, 0])),
+    ("N*m", Dims([2, 1, -2, 0, 0, 0])),
+    ("Pa", Dims([-1, 1, -2, 0, 0, 0])),
+    ("V", Dims([2, 1, -3, 0, -1, 0])),
+    ("A", Dims([0, 0, 0, 0, 1, 0])),
+];
+
+/// Map SI base dimensions to their canonical display unit label, when known.
+#[must_use]
+pub fn dims_to_unit(d: Dims) -> Option<&'static str> {
+    UNIT_DIMS.iter().find(|(_, x)| *x == d).map(|(u, _)| *u)
+}
 
 /// What went wrong while reading a program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sexpr_and_json_round_trip() {
+    fn sexpr_and_json_round_trip_and_dims_to_unit_match() {
         let ast = sexpr::parse("(assembly \"demo\" (version 1) (seed 0x22))").unwrap();
         let json = json::print_checked(&ast).unwrap();
         let back = json::parse(&json).unwrap();
@@ -122,5 +160,14 @@ mod tests {
             sexpr::print_checked(&back).unwrap(),
             sexpr::print_checked(&ast).unwrap()
         );
+        assert_eq!(dims_to_unit(Dims([1, 1, -2, 0, 0, 0])), Some("N"));
+        assert_eq!(dims_to_unit(Dims([0, 0, -1, 0, 0, 0])), Some("rad/s"));
+        assert_eq!(dims_to_unit(Dims([1, 2, 3, 0, 0, 0])), None);
+        assert!(PackCatalog::from_raw_bytes(&[b"BADMAGIC"]).is_err());
+        let steel: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let dedup = PackCatalog::from_raw_bytes(&[steel, steel]).unwrap();
+        assert_eq!(dedup.materials().len(), 1);
     }
 }

@@ -1,7 +1,6 @@
 //! Assembly-derived descriptors, structured refusals, and canonical JSON writers.
 
 use core::fmt::{self, Write as _};
-use fs_qty::Dims;
 
 /// Schema version for exported [`SnapshotDescriptor`] JSON payloads.
 pub const SNAPSHOT_DESCRIPTOR_SCHEMA: &str = "frankensim.runtime.snapshot_descriptor.v1";
@@ -197,28 +196,6 @@ pub fn inputs_to_json(inputs: &[InputDescriptor]) -> String {
     out
 }
 
-/// Canonical SI unit label for common physical dimensions (unified into `fs-fsim` in R2b).
-#[must_use]
-pub const fn dims_to_unit(dims: Dims) -> Option<&'static str> {
-    match dims.0 {
-        [1, 0, 0, 0, 0, 0] => Some("m"),
-        [3, 0, 0, 0, 0, 0] => Some("m^3"),
-        [1, 0, -1, 0, 0, 0] => Some("m/s"),
-        [0, 0, 1, 0, 0, 0] => Some("s"),
-        [0, 0, 0, 1, 0, 0] => Some("K"),
-        [2, 1, -3, 0, 0, 0] => Some("W"),
-        [0, 0, -1, 0, 0, 0] => Some("rad/s"),
-        [0, 0, 0, 0, 0, 0] => Some("1"),
-        [0, 1, 0, 0, 0, 0] => Some("kg"),
-        [1, 1, -2, 0, 0, 0] => Some("N"),
-        [2, 1, -2, 0, 0, 0] => Some("N*m"),
-        [-1, 1, -2, 0, 0, 0] => Some("Pa"),
-        [2, 1, -3, 0, -1, 0] => Some("V"),
-        [0, 0, 0, 0, 1, 0] => Some("A"),
-        _ => None,
-    }
-}
-
 pub(crate) fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
@@ -240,6 +217,8 @@ pub(crate) fn push_json_str(out: &mut String, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_fsim::dims_to_unit;
+    use fs_qty::Dims;
 
     #[test]
     fn canonical_json_writers_pin_exact_bytes() {

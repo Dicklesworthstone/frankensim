@@ -11,7 +11,12 @@ description = "Wasm32-clean FrankenScript AST, canonical s-expression/JSON synta
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
 fs-qty = { path = "../fs-qty" }
+fs-scenario = { path = "../fs-scenario" }
+fs-system = { path = "../fs-system" }
 
 [lints]
 workspace = true

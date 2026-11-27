@@ -30,6 +30,7 @@ fs-dcontact = { path = "../fs-dcontact", features = ["component"] }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-fsim = { path = "../fs-fsim" }
 fs-ga = { path = "../fs-ga" }
 fs-gas = { path = "../fs-gas", features = ["component"] }
 fs-geom = { path = "../fs-geom" }
