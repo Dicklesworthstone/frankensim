@@ -795,6 +795,73 @@ fn slider_identity_conformance_and_liftoff() {
     });
 }
 
+/// A slider loaded by a signal holds to `mu_s` times the normal load it reads,
+/// and no further: with that load held, a body at rest pushed by a force 1 %
+/// under the hold stays at rest, and pushed 1 % over it slides away at
+/// `(F - mu_k N) / m`.
+#[test]
+fn a_signal_loaded_slider_holds_to_mu_s_n_and_slips_past_it() {
+    use fs_system::SolveConfig;
+    use fs_system::elements::{Force, Waveform};
+    const MASS_KG: f64 = 1.0;
+    const NORMAL_N: f64 = 10.0;
+    const MU_S: f64 = 0.4;
+    const MU_K: f64 = 0.3;
+    const DT_S: f64 = 1.0e-3;
+    let speeds = |ratio: f64, cx: &Cx<'_>| {
+        let mut b = SystemBuilder::new();
+        let rest = Motion {
+            position_m: 0.0,
+            velocity_m_s: 0.0,
+        };
+        let m = b
+            .add_with_tangent("m", Mass::new(MASS_KG).unwrap(), rest)
+            .unwrap();
+        let slider = Slider::loaded_by_signal(MU_S, MU_K).unwrap();
+        let sl = b.add_on_line("s", slider, Slip::stuck()).unwrap();
+        let push = Force::new(Waveform::constant(ratio * MU_S * NORMAL_N).unwrap());
+        let f = b
+            .add_with_tangent("f", push, SourceAccount::default())
+            .unwrap();
+        let p = |b: &SystemBuilder, n, k| b.port(n, k).unwrap();
+        b.common_flow(p(&b, m, "p"), &[p(&b, sl, "a"), p(&b, f, "p")])
+            .unwrap();
+        b.boundary(p(&b, sl, "b"), Box::new(|_, _, v| v[0] = 0.0))
+            .unwrap();
+        b.boundary(p(&b, sl, "heat"), Box::new(|_, _, v| v[0] = 300.0))
+            .unwrap();
+        b.boundary(p(&b, sl, "normal_n"), Box::new(|_, _, v| v[0] = NORMAL_N))
+            .unwrap();
+        let mut s = b.seal().unwrap();
+        // A stuck end has no size (load_line.rs): the solve is told its
+        // tolerance in m/s.
+        s.set_config(SolveConfig {
+            absolute_tolerance: 1.0e-15,
+            ..SolveConfig::default()
+        });
+        (0..100)
+            .map(|_| {
+                s.step(DT_S, cx).unwrap();
+                s.state::<Motion>(m).unwrap().velocity_m_s.abs()
+            })
+            .collect::<Vec<_>>()
+    };
+    with_cx(|cx| {
+        let held = speeds(0.99, cx);
+        assert!(held.iter().all(|&v| v <= 1.0e-12), "{held:?}");
+        // From rest, the slide's speed after step k is a k dt to within a
+        // step: the step that breaks the hold.
+        let a = (1.01 * MU_S - MU_K) * NORMAL_N / MASS_KG;
+        for (k, &v) in (1_u32..).zip(&speeds(1.01, cx)) {
+            let expected = a * f64::from(k) * DT_S;
+            assert!(
+                (v - expected).abs() <= a * DT_S,
+                "step {k}: {v} m/s, the closed form {expected} m/s"
+            );
+        }
+    });
+}
+
 fn add_iface(
     cat: &mut EntityCatalog,
     root: EntityId,
