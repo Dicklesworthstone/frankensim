@@ -13,8 +13,10 @@
 //! of its full scale over the run; the stored energy within 1e-9 of the
 //! start's, and the kernel's summed residual within 1e-12 of it; after a
 //! catch (both sides rebuilt from their own head states without the stick)
-//! the heads within the same bound; no allocation in a warm step; and the
-//! refusals the image names.
+//! the heads within the same bound; no allocation in a warm step; the
+//! refusals the image names; and the kernel's static plan: one looped block
+//! solved by a Woodbury tear on the contact's two efforts (2 of 6 unknowns
+//! kept), and nothing looped without the stick.
 //!
 //! Not covered: the live drum (engine-drum's own tests), radiation, several
 //! contacts, dampers, timing.
@@ -33,6 +35,7 @@ use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::multiple::MultiContactConfig;
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
+use fs_system::TearStrategy;
 
 struct Counting;
 
@@ -399,6 +402,28 @@ fn a_warm_step_of_the_kernel_image_allocates_nothing() {
         );
     }
     assert!(touching > 0, "the stick never touched the head");
+}
+
+/// The kernel's static plan for the image (bead .6.4, Do 1). With the stick,
+/// the two parts and the contact form one loop on the contact's load line:
+/// six unknowns (the stick's and the head's efforts, the contact's flows and
+/// ends), solved by a Woodbury tear that keeps the contact's two efforts.
+/// Without the stick nothing loops.
+#[test]
+fn the_kernel_image_plans_the_strike_as_a_woodbury_tear_on_the_contact() {
+    let plan = graph(true, &at_rest()).system().execution_plan();
+    assert_eq!((plan.block_count, plan.loop_count), (1, 1));
+    let block = &plan.blocks[0];
+    assert_eq!(block.nodes, ["part0", "part1", "contact"]);
+    assert_eq!(block.tear_strategy, TearStrategy::LoadLineWoodbury);
+    assert_eq!(block.load_line_node.as_deref(), Some("contact"));
+    assert_eq!((block.total_unknowns, block.kept_unknowns), (6, 2));
+    assert_eq!(block.tear_variables, ["contact.a", "contact.b"]);
+
+    let free = graph(false, &at_rest()).system().execution_plan();
+    assert_eq!((free.block_count, free.loop_count), (1, 0));
+    assert_eq!(free.blocks[0].tear_strategy, TearStrategy::Acyclic);
+    assert_eq!(free.blocks[0].total_unknowns, 0);
 }
 
 fn refusal(result: Result<ImpactGraph, ImpactError>) -> String {
