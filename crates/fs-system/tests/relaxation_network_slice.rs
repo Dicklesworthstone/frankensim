@@ -609,6 +609,216 @@ fn preloaded_three_body_network_can_leave_rest() {
     }
 }
 
+/// The three-body network's own equations, integrated independently of the
+/// owner (fs-mbd's CONTRACT; its `tests/internal_viscous_network_motion`
+/// states the same ones): full-inertia Newton-Euler bodies, and on each
+/// connector, in its first body's material axes, the Kelvin load `-C s` and
+/// per branch `-L^T a` with `a' = L s - a / tau`, for the connector's twist
+/// `s`. Heat is `s^T C s + |a|^2 / tau`.
+#[derive(Clone, Copy)]
+struct NetworkOde {
+    x: [Vec3; 3],
+    p: [Vec3; 3],
+    h: [Vec3; 3],
+    q: [[f64; 4]; 3],
+    memory: [[f64; 6]; 3],
+    heat_j: f64,
+}
+
+impl NetworkOde {
+    fn at(state: &RelaxationState) -> Self {
+        let bodies = &state.bodies;
+        Self {
+            x: core::array::from_fn(|i| bodies[i].pose().position_world()),
+            p: core::array::from_fn(|i| bodies[i].linear_momentum_world()),
+            h: core::array::from_fn(|i| bodies[i].angular_momentum_body()),
+            q: core::array::from_fn(|i| bodies[i].pose().orientation().components()),
+            memory: [state.memory[0][0], state.memory[0][1], state.memory[1][0]],
+            heat_j: 0.0,
+        }
+    }
+
+    fn shifted(self, rate: Self, h: f64) -> Self {
+        let step = |a: Vec3, b: Vec3| a.add(b.scale(h));
+        Self {
+            x: core::array::from_fn(|i| step(self.x[i], rate.x[i])),
+            p: core::array::from_fn(|i| step(self.p[i], rate.p[i])),
+            h: core::array::from_fn(|i| step(self.h[i], rate.h[i])),
+            q: core::array::from_fn(|i| core::array::from_fn(|j| self.q[i][j] + h * rate.q[i][j])),
+            memory: core::array::from_fn(|k| {
+                core::array::from_fn(|c| self.memory[k][c] + h * rate.memory[k][c])
+            }),
+            heat_j: self.heat_j + h * rate.heat_j,
+        }
+    }
+
+    fn rate(self) -> Self {
+        let p = properties();
+        let q = self
+            .q
+            .map(|q| UnitQuaternion::new(q[0], q[1], q[2], q[3]).expect("rotation"));
+        let w: [Vec3; 3] =
+            core::array::from_fn(|i| p[i].angular_velocity_body_checked(self.h[i]).expect("spin"));
+        let spin: [Vec3; 3] = core::array::from_fn(|i| q[i].rotate_body_to_world(w[i]));
+        let v: [Vec3; 3] = core::array::from_fn(|i| self.p[i].scale(1.0 / p[i].mass()));
+        let mut out = Self {
+            x: v,
+            p: [Vec3::ZERO; 3],
+            h: core::array::from_fn(|i| w[i].cross(self.h[i]).scale(-1.0)),
+            q: core::array::from_fn(|i| {
+                let ([a, b, c, d], o) = (self.q[i], w[i]);
+                [
+                    -0.5 * (b * o.x + c * o.y + d * o.z),
+                    0.5 * (a * o.x + c * o.z - d * o.y),
+                    0.5 * (a * o.y + d * o.x - b * o.z),
+                    0.5 * (a * o.z + b * o.y - c * o.x),
+                ]
+            }),
+            memory: [[0.0; 6]; 3],
+            heat_j: 0.0,
+        };
+        let mut k = 0;
+        for link in links() {
+            let [a, b] = link.viscous.bodies;
+            let arms = link.viscous.arms_body_m;
+            let arms = [
+                q[a].rotate_body_to_world(arms[0]),
+                q[b].rotate_body_to_world(arms[1]),
+            ];
+            let lever = self.x[b].add(arms[1]).sub(self.x[a]);
+            let slip = v[b]
+                .add(spin[b].cross(arms[1]))
+                .sub(v[a].add(spin[a].cross(lever)));
+            let slip = q[a].rotate_world_to_body(slip);
+            let turn = q[a].rotate_world_to_body(spin[b].sub(spin[a]));
+            let twist = [slip.x, slip.y, slip.z, turn.x, turn.y, turn.z];
+            let c = link.viscous.damping.native_coefficients();
+            let mut load: [f64; 6] =
+                core::array::from_fn(|i| -(0..6).map(|j| c[i][j] * twist[j]).sum::<f64>());
+            out.heat_j -= (0..6).map(|i| twist[i] * load[i]).sum::<f64>();
+            for branch in &link.branches {
+                let (l, tau) = (branch.gram_rows(), branch.relaxation_time_s().expect("tau"));
+                let amplitude = self.memory[k];
+                for r in 0..6 {
+                    load[r] -= (0..6).map(|i| l[i][r] * amplitude[i]).sum::<f64>();
+                    let observed = (0..6).map(|j| l[r][j] * twist[j]).sum::<f64>();
+                    out.memory[k][r] = observed - amplitude[r] / tau;
+                    out.heat_j += amplitude[r] * amplitude[r] / tau;
+                }
+                k += 1;
+            }
+            let force = q[a].rotate_body_to_world(Vec3::new(load[0], load[1], load[2]));
+            let couple = q[a].rotate_body_to_world(Vec3::new(load[3], load[4], load[5]));
+            out.p[a] = out.p[a].sub(force);
+            out.p[b] = out.p[b].add(force);
+            let first = lever.cross(force).add(couple).scale(-1.0);
+            out.h[a] = out.h[a].add(q[a].rotate_world_to_body(first));
+            let second = arms[1].cross(force).add(couple);
+            out.h[b] = out.h[b].add(q[b].rotate_world_to_body(second));
+        }
+        out
+    }
+
+    /// Classical RK4 from `self` over `t_s` in `steps` steps.
+    fn integrated(self, t_s: f64, steps: u32) -> Self {
+        let h = t_s / f64::from(steps);
+        let mut s = self;
+        for _ in 0..steps {
+            let k1 = s.rate();
+            let k2 = s.shifted(k1, 0.5 * h).rate();
+            let k3 = s.shifted(k2, 0.5 * h).rate();
+            let k4 = s.shifted(k3, h).rate();
+            s = s.shifted(k1, h / 6.0).shifted(k2, h / 3.0);
+            s = s.shifted(k3, h / 3.0).shifted(k4, h / 6.0);
+        }
+        s
+    }
+
+    /// The sum of the absolute differences of every coordinate and the heat.
+    fn distance(&self, other: &Self) -> f64 {
+        let vec = |a: Vec3, b: Vec3| (a.x - b.x).abs() + (a.y - b.y).abs() + (a.z - b.z).abs();
+        let mut sum = (self.heat_j - other.heat_j).abs();
+        for i in 0..3 {
+            sum += vec(self.x[i], other.x[i]) + vec(self.p[i], other.p[i]);
+            sum += vec(self.h[i], other.h[i]);
+            sum += (0..4)
+                .map(|j| (self.q[i][j] - other.q[i][j]).abs())
+                .sum::<f64>();
+        }
+        for (a, b) in self
+            .memory
+            .iter()
+            .flatten()
+            .zip(other.memory.iter().flatten())
+        {
+            sum += (a - b).abs();
+        }
+        sum
+    }
+}
+
+/// The network at rest with its preloaded memory (bead .6.1.1), stepped by the
+/// component over 0.2 s in 4, 8 and 16 steps, against [`NetworkOde`]
+/// integrated in 4096 RK4 steps.
+///
+/// Claims: the owner solves each fixed-geometry half of a step exactly and
+/// composes two halves around the bodies' drift, a second-order splitting, so
+/// its error against the equations is `c dt^2` and each halving of `dt` divides
+/// it by 4 (asserted within 3.8 to 4.2). A step solving other equations would
+/// stop at their difference instead, and the ratio would fall towards 1. RK4's
+/// own error is `O(h^4)`: its 2048- and 4096-step results must agree within
+/// 1e-6 of the finest rung's error.
+#[test]
+fn a_preloaded_network_leaving_rest_converges_to_its_own_equations() {
+    let component = network(Gravity::ZERO);
+    let p = properties();
+    let start = RelaxationState {
+        bodies: moving()
+            .iter()
+            .zip(&p)
+            .map(|(moving, &properties)| {
+                body(
+                    properties,
+                    moving.pose().position_world(),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                )
+            })
+            .collect(),
+        memory: preloaded(),
+    };
+    let duration_s = 0.2;
+    let expected = NetworkOde::at(&start).integrated(duration_s, 4096);
+    // RK4 at half the steps errs 16 times as much, so this difference bounds
+    // the reference's own error by 1/15 of it.
+    let rk4 = NetworkOde::at(&start)
+        .integrated(duration_s, 2048)
+        .distance(&expected);
+    let gate = CancelGate::new_clock_free();
+    let inputs = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 300.0, 300.0];
+    let mut errors = [0.0; 3];
+    for (rung, steps) in [4_u32, 8, 16].into_iter().enumerate() {
+        let dt_s = duration_s / f64::from(steps);
+        let (mut state, mut heat_j) = (start.clone(), 0.0);
+        for _ in 0..steps {
+            let (next, _, outputs) = propose(&component, &state, dt_s, &inputs, &gate)
+                .expect("the preloaded network leaves rest");
+            heat_j -= dt_s * (outputs[9] + outputs[10]);
+            state = next;
+        }
+        let reached = NetworkOde {
+            heat_j,
+            ..NetworkOde::at(&state)
+        };
+        errors[rung] = reached.distance(&expected);
+    }
+    println!("against the network's own equations over 0.2 s: errors {errors:?}, RK4 {rk4:e}");
+    assert!(rk4 < 1e-6 * errors[2], "{rk4} against {errors:?}");
+    for pair in errors.windows(2) {
+        assert!((3.8..4.2).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+}
+
 #[test]
 fn an_equilibrium_branch_stores_and_returns_energy_and_never_heats() {
     let gate = CancelGate::new_clock_free();
