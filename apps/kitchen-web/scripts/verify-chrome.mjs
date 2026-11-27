@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit"];
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -182,6 +182,7 @@ async function main() {
       "[data-crowd-canvas]",
       '[data-pair-canvas="hub"]',
       "[data-kit-canvas]",
+      "[data-trip-canvas]",
     ];
 
     for (let i = 0; i < sectionIds.length; i += 1) {
@@ -555,6 +556,40 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-kit.png");
       }
 
+      if (sid === "trip") {
+        // As set on arrival (800 meals, every swap, the left combi out 9:20 to 10:20): the van 18 min late; the map has
+        // all 486 trips, most of them free. Held mid-trip, the stage marks the combi and the camera's screen flags it;
+        // both screens draw. At 820 meals the braise fills both combis and few trips are free; a short early trip at
+        // 800 costs nothing.
+        const info = () => page.$eval("[data-trip-stage]", (el) => el.trip.info());
+        const status = () => page.$eval("[data-tp-status]", (el) => el.textContent || "");
+        const settle = () => page.waitForFunction(() => document.querySelector("[data-trip-stage]")?.trip?.info().ready, { timeout: 90000 });
+        await settle();
+        const built = await info();
+        console.log(`[verify-chrome] A combi trips: ${JSON.stringify({ depart: built.depart, late: built.late, pastBest: built.pastBest, free: built.free, cells: built.cells })} | ${(await status()).slice(0, 90)}`);
+        if (built.depart !== "10:48" || built.cells !== 486 || !(built.free > 400)) throw new Error(`A combi trips: the default trip did not cost the van 18 min, or the map is wrong: ${JSON.stringify(built)}`);
+        await page.$eval("[data-trip-stage]", (el) => el.trip.hold(215));
+        await page.evaluate(() => document.querySelector(".tp-mons")?.scrollIntoView({ behavior: "instant", block: "center" }));
+        for (const cam of ["twin", "seen"]) await page.waitForFunction((c) => document.querySelector(`[data-trip-cam="${c}"]`)?.dataset.drawn === "1", { timeout: 20000 }, cam);
+        await sleep(1200);
+        const held = await info();
+        if (held.pads !== 1 || held.box !== true || !/dark/.test(held.flag || "")) throw new Error(`A combi trips: mid-trip, the combi is not marked out: ${JSON.stringify(held)}`);
+        await page.$eval("[data-trip-stage]", (el) => el.trip.hold(null));
+        await page.$eval("[data-trip-stage]", (el) => el.trip.set({ meals: 820 }));
+        await settle();
+        const full = await info();
+        console.log(`[verify-chrome] A combi trips, 820 meals: ${JSON.stringify({ depart: full.depart, free: full.free })} | ${(await status()).slice(0, 90)}`);
+        if (!(full.free < 120)) throw new Error(`A combi trips: at 820 meals too many trips are free: ${JSON.stringify(full)}`);
+        await page.$eval("[data-trip-stage]", (el) => el.trip.set({ meals: 800, at: 150, mins: 45 }));
+        await settle();
+        const cheap = await status();
+        if (!/costs nothing/.test(cheap)) throw new Error(`A combi trips: a short trip at 8:30 did not cost nothing: ${cheap}`);
+        await page.$eval("[data-trip-stage]", (el) => el.trip.set({ at: 200, mins: 60 }));
+        await settle();
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-trip.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-trip.png");
+      }
+
       if (sid === "morning") {
         // The menu as written must miss the van at 700 meals with three cooks and every swap must make it; the status
         // must say which, and the worker must post every menu's limit, cooked today and ahead.
@@ -581,9 +616,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 15 WebGL canvases (14 figures; the two-kitchen figure has two) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 18 WebGL canvases (15 figures; the two-kitchen figure has two, the combi trip has its two screens) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -599,15 +634,18 @@ async function main() {
         "[data-crowd-canvas]",
         '[data-pair-canvas="hub"]',
         "[data-kit-canvas]",
+        "[data-trip-canvas]",
         '[data-pair-canvas="far"]',
+        '[data-trip-cam="twin"]',
+        '[data-trip-cam="seen"]',
       ];
-      ids.push("pair-far");
+      ids.push("pair-far", "trip-twin", "trip-seen");
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 15 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 18 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);

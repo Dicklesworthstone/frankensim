@@ -21,6 +21,7 @@ import { PIVOT_PIECES, mountPivotLab } from "./three/pivotLab";
 import { CROWD_PIECES, mountCrowdLab } from "./three/crowdLab";
 import { PAIR_PIECES, mountPairLab } from "./three/pairLab";
 import { KIT_PIECES, mountKitLab } from "./three/kitLab";
+import { TRIP_PIECES, mountTripLab } from "./three/tripLab";
 
 declare global {
   interface Window {
@@ -263,6 +264,7 @@ function bootstrap(): void {
     { id: "crowd", el: document.getElementById("crowd")!, mount: mountCrowdLab, done: false, pieces: CROWD_PIECES },
     { id: "pair", el: document.getElementById("pair")!, mount: mountPairLab, done: false, pieces: PAIR_PIECES },
     { id: "kit", el: document.getElementById("kit")!, mount: mountKitLab, done: false, pieces: KIT_PIECES },
+    { id: "trip", el: document.getElementById("trip")!, mount: mountTripLab, done: false, pieces: TRIP_PIECES },
   ].filter((entry) => entry.el !== null);
 
   // Each chapter mounts in a task of its own, in the order asked. Two that come into range together, or the stove

@@ -3628,3 +3628,255 @@ button.wk-dish[aria-pressed="true"] {
     display: none;
   }
 }
+
+/* A combi trips (chapter 07, fifth figure). */
+.tp-stage {
+  aspect-ratio: 16 / 9;
+  margin-bottom: 1rem;
+}
+.tp-hud {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  max-width: calc(100% - 1.8rem);
+}
+.tp-hud em[hidden] {
+  display: none;
+}
+.tp-hud em[data-kind="late"] {
+  color: #fecdd3;
+  background: rgb(251 113 133 / 0.22);
+}
+.tp-hud em[data-kind="full"] {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.24);
+}
+.tp-hud em[data-kind="wait"] {
+  color: #fde68a;
+  background: rgb(251 191 36 / 0.2);
+}
+.tp-legend .out {
+  --k: #ef4444;
+}
+.tp-legend .wait {
+  --k: #fbbf24;
+}
+/* The camera's two screens: a picture from a security camera, low in colour, its clock in the corner. */
+.tp-mons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem;
+  margin: 0 0 1.6rem;
+}
+.tp-mon {
+  margin: 0;
+}
+.tp-screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 2px solid #26272b;
+  border-radius: 0.6rem;
+  background: #050506;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05);
+  transition: border-color 0.25s;
+}
+.tp-screen canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  filter: saturate(0.3) contrast(1.12) brightness(1.06);
+}
+/* Scan lines and a darker edge, over the picture. */
+.tp-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(0deg, rgb(0 0 0 / 0.16) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at 50% 50%, transparent 58%, rgb(0 0 0 / 0.42));
+}
+.tp-ts,
+.tp-src,
+.tp-flag {
+  position: absolute;
+  z-index: 1;
+  font: 600 0.68rem/1 var(--mono);
+  letter-spacing: 0.04em;
+  color: rgb(255 255 255 / 0.86);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.9);
+}
+.tp-ts {
+  left: 0.55rem;
+  top: 0.5rem;
+}
+.tp-src {
+  right: 0.55rem;
+  top: 0.5rem;
+}
+.tp-src.rec i {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: #ef4444;
+  vertical-align: -0.04em;
+  animation: tp-rec 1s steps(2, jump-none) infinite;
+}
+@keyframes tp-rec {
+  50% {
+    opacity: 0.15;
+  }
+}
+.tp-flag {
+  left: 0.55rem;
+  bottom: 0.5rem;
+  max-width: calc(100% - 1.1rem);
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.3rem;
+  background: rgb(239 68 68 / 0.85);
+  color: #fff;
+  text-shadow: none;
+  line-height: 1.25;
+}
+.tp-mon[data-differs] .tp-screen {
+  border-color: #ef4444;
+}
+.tp-box {
+  position: absolute;
+  z-index: 1;
+  border: 2px solid #ef4444;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5);
+  pointer-events: none;
+}
+.tp-box[hidden] {
+  display: none;
+}
+.tp-mon figcaption {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.tp-mon[data-differs] figcaption {
+  color: #fecaca;
+}
+.tp-lab .wk-tile b {
+  font-size: 1.12rem;
+  white-space: nowrap;
+}
+.tp-lab .wk-tiles {
+  transition: opacity 0.2s;
+}
+.tp-lab .wk-tiles[data-stale] {
+  opacity: 0.45;
+}
+/* The map: a cell to a trip, coloured by its cost. */
+.tp-map {
+  margin-top: 0.3rem;
+}
+.tp-svg .cell {
+  cursor: pointer;
+  stroke: none;
+}
+.tp-svg .cell.pend {
+  fill: rgb(255 255 255 / 0.05);
+}
+.tp-svg .cell.ok,
+.tp-keys .ok {
+  --k: rgb(134 211 155 / 0.32);
+  fill: rgb(134 211 155 / 0.32);
+}
+.tp-svg .cell.pb,
+.tp-keys .pb {
+  --k: rgb(251 191 36 / 0.7);
+  fill: rgb(251 191 36 / 0.7);
+}
+.tp-svg .cell.l1,
+.tp-keys .l1 {
+  --k: rgb(239 68 68 / 0.42);
+  fill: rgb(239 68 68 / 0.42);
+}
+.tp-svg .cell.l2 {
+  fill: rgb(239 68 68 / 0.62);
+}
+.tp-svg .cell.l3 {
+  fill: rgb(239 68 68 / 0.8);
+}
+.tp-svg .cell.l4,
+.tp-keys .l4 {
+  --k: rgb(190 18 60 / 1);
+  fill: rgb(190 18 60 / 1);
+}
+.tp-svg .cell:hover {
+  stroke: rgb(255 255 255 / 0.6);
+  stroke-width: 1;
+}
+.tp-svg .cell.on {
+  stroke: #fff;
+  stroke-width: 2;
+}
+.tp-keys .load {
+  --k: #5ec8f2;
+}
+.tp-svg .load {
+  opacity: 0.78;
+}
+.tp-svg .nm {
+  fill: var(--soft);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  text-anchor: end;
+}
+.tp-svg .nm.st {
+  text-anchor: start;
+}
+.tp-svg .xa.vanl {
+  fill: var(--soft);
+  text-anchor: end;
+}
+.tp-svg .of {
+  text-anchor: start;
+}
+.tp-svg.stale > :not(.planning) {
+  opacity: 0.4;
+}
+.tp-svg .planning {
+  text-anchor: middle;
+  font-size: 12px;
+  fill: var(--text);
+}
+@media (max-width: 599px) {
+  .tp-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .tp-mons {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+  }
+  .tp-ts,
+  .tp-src,
+  .tp-flag {
+    font-size: 0.62rem;
+  }
+  .tp-ts,
+  .tp-src {
+    top: 0.35rem;
+  }
+  .tp-ts {
+    left: 0.4rem;
+  }
+  .tp-src {
+    right: 0.4rem;
+  }
+  .tp-flag {
+    left: 0.35rem;
+    bottom: 0.35rem;
+    max-width: calc(100% - 0.7rem);
+  }
+  .tp-mon figcaption {
+    font-size: 0.7rem;
+  }
+}

@@ -1633,6 +1633,8 @@ function mats(): FamilyMats {
   });
   bag.userData.uv = "own";
   const ui = basic(combiUi());
+  // Named, so a view can find a combi's screen: one out of use shows it dark (morningKitchen.ts).
+  ui.name = "combi-ui";
   const own = <T extends THREE.Material>(m: T): T => {
     m.userData.uv = "own";
     return m;

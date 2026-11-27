@@ -13,7 +13,7 @@ import { DOOR, KIT, MENUS, RANGE_BURNERS, RANGE_PLACES, SLOTS, TABLE_SPOTS, cloc
 import { BUYS, buyKey, limitKey, planKey, type Buy, type KitSettings } from "../sim/buyOne";
 import type { KitAsk, KitDone } from "../sim/kitRuns.worker";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
-import { CARRIER, CARRIER_COLS, CARRIER_X0, CUTOFF, END_HOLD_S, LINE_Z, MorningKitchen, OVEN, RANGE, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, kitchenPieces, ovenX, ovenX0, rangeSideX, rangeX0, type CookSpec, type KitchenMoment } from "./morningKitchen";
+import { CARRIER, CARRIER_COLS, CARRIER_X0, CUTOFF, END_HOLD_S, LINE_Z, MorningKitchen, OVEN, RANGE, ROLL_MIN, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, fmtLate, kitchenPieces, ovenX, ovenX0, pauseBadgeMaterial, rangeSideX, rangeX0, softPadTexture, type CookSpec, type KitchenMoment } from "./morningKitchen";
 import type { Piece } from "./models/all";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { backdrop, tilePlane } from "./weekLab";
@@ -157,24 +157,7 @@ export function mountKitLab(root: HTMLElement): void {
   scene.add(kitchen.group);
 
   /* The floor in front of each station: red while every place at that station is taken. */
-  const padTex = (() => {
-    const S = 64;
-    const cv = document.createElement("canvas");
-    cv.width = cv.height = S;
-    const x = cv.getContext("2d")!;
-    const img = x.createImageData(S, S);
-    for (let j = 0; j < S; j++)
-      for (let i = 0; i < S; i++) {
-        // Soft at the edges: full inside, fading over the outer fifth.
-        const e = Math.min(i + 0.5, S - i - 0.5, j + 0.5, S - j - 0.5) / (S * 0.2);
-        const a = Math.max(0, Math.min(1, e));
-        const o = 4 * (j * S + i);
-        img.data[o] = img.data[o + 1] = img.data[o + 2] = 255;
-        img.data[o + 3] = Math.round(255 * a * a * (3 - 2 * a));
-      }
-    x.putImageData(img, 0, 0);
-    return new THREE.CanvasTexture(cv);
-  })();
+  const padTex = softPadTexture();
   type Pad = { mesh: THREE.Mesh; kind: Kind; piece: number; on: number };
   const pads: Pad[] = [];
   const pad = (kind: Kind, piece: number, x: number, z: number, w: number, d: number) => {
@@ -191,24 +174,7 @@ export function mountKitLab(root: HTMLElement): void {
   for (let k = 0; k < TABLE_SPOTS; k++) pad("table", 0, TABLE.x0 + (TABLE.w * (k + 0.5)) / TABLE_SPOTS, TABLE_Z - 0.32, (TABLE.w / TABLE_SPOTS) * 0.96, 0.56);
 
   /* A cook free while work waits for a station with no room: a pause badge over their head. */
-  const badgeMat = (() => {
-    const cv = document.createElement("canvas");
-    cv.width = cv.height = 96;
-    const x = cv.getContext("2d")!;
-    x.fillStyle = AMBER;
-    x.strokeStyle = "rgba(255,255,255,0.92)";
-    x.lineWidth = 6;
-    x.beginPath();
-    x.arc(48, 48, 40, 0, Math.PI * 2);
-    x.fill();
-    x.stroke();
-    x.fillStyle = "#1a1206";
-    x.fillRect(34, 30, 9, 36);
-    x.fillRect(53, 30, 9, 36);
-    const t = new THREE.CanvasTexture(cv);
-    t.colorSpace = THREE.SRGBColorSpace;
-    return new THREE.SpriteMaterial({ map: t, toneMapped: false, depthTest: false, depthWrite: false });
-  })();
+  const badgeMat = pauseBadgeMaterial(AMBER);
   const badges = kitchen.cooks.map(() => {
     const b = new THREE.Sprite(badgeMat);
     b.scale.setScalar(0.26);

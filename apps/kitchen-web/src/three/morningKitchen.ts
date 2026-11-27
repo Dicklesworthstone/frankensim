@@ -4,6 +4,7 @@
  * acts a planned morning out on it (planMorning, sim/cateringMorning.ts):
  *   - a pot or a skillet stands on each burner for as long as the plan has a batch cooking there, its flame lit;
  *   - each combi's door is open while a cook loads or unloads it, and its fan, heat and steam run with its program;
+ *     a combi out of use (the morning's `out`) is dark, its screen off and its program stopped;
  *   - a hotel pan stands at a table place while a cook packs it, and a cutting board when they prep;
  *   - the insulated carriers by the door fill with the hot pans as they are packed, six to a carrier, and (with
  *     `rollOut`) roll out of the door when the van leaves;
@@ -551,6 +552,52 @@ const ROLL_IN_S = 1.4;
 export const ROLL_MIN = ROLL_S / SEC_PER_MIN;
 
 /** What the kitchen shows at a moment, for the page's readouts. */
+/** The soft-edged square a figure lays on the floor in front of a station (white: tint it with the material). */
+let padTexture: THREE.CanvasTexture | null = null;
+export function softPadTexture(): THREE.CanvasTexture {
+  if (padTexture) return padTexture;
+  const S = 64;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = S;
+  const x = cv.getContext("2d")!;
+  const img = x.createImageData(S, S);
+  for (let j = 0; j < S; j++)
+    for (let i = 0; i < S; i++) {
+      // Soft at the edges: full inside, fading over the outer fifth.
+      const e = Math.min(i + 0.5, S - i - 0.5, j + 0.5, S - j - 0.5) / (S * 0.2);
+      const a = Math.max(0, Math.min(1, e));
+      const o = 4 * (j * S + i);
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = 255;
+      img.data[o + 3] = Math.round(255 * a * a * (3 - 2 * a));
+    }
+  x.putImageData(img, 0, 0);
+  return (padTexture = new THREE.CanvasTexture(cv));
+}
+
+/** The pause badge a figure hangs over a cook with free hands while their work waits: two bars on an amber disc. */
+export function pauseBadgeMaterial(color = "#fbbf24"): THREE.SpriteMaterial {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 96;
+  const x = cv.getContext("2d")!;
+  x.fillStyle = color;
+  x.strokeStyle = "rgba(255,255,255,0.92)";
+  x.lineWidth = 6;
+  x.beginPath();
+  x.arc(48, 48, 40, 0, Math.PI * 2);
+  x.fill();
+  x.stroke();
+  x.fillStyle = "#1a1206";
+  x.fillRect(34, 30, 9, 36);
+  x.fillRect(53, 30, 9, 36);
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.SpriteMaterial({ map: t, toneMapped: false, depthTest: false, depthWrite: false });
+}
+
+/** A combi's touch screen with its power off: black glass. */
+let screenOff: THREE.MeshStandardMaterial | null = null;
+const darkScreen = () => (screenOff ??= new THREE.MeshStandardMaterial({ color: 0x040506, roughness: 0.16, metalness: 0 }));
+
 export interface KitchenMoment {
   /** Hot pans packed so far, of all the morning's. */
   packed: number;
@@ -590,6 +637,9 @@ export class MorningKitchen {
   private readonly stack = new THREE.Group();
   private readonly door: number[];
   private readonly heat: number[];
+  /** Each combi's touch screen, and its lit face (a combi out of use shows it dark). */
+  private readonly screens: (THREE.Mesh | null)[];
+  private readonly screenOn: (THREE.Material | THREE.Material[] | null)[];
   /** The burners whose skillet a cook holds: each cook holding one, the front skillet among their range jobs now. */
   private readonly inHand = new Set<number>();
 
@@ -611,6 +661,19 @@ export class MorningKitchen {
     });
     this.door = this.ovens.map(() => 0);
     this.heat = this.ovens.map(() => 0);
+    this.screens = this.ovens.map((m) => {
+      let found: THREE.Mesh | null = null;
+      m.group.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!found && mesh.isMesh && !Array.isArray(mesh.material) && mesh.material.name === "combi-ui") found = mesh;
+      });
+      return found;
+    });
+    this.screenOn = this.screens.map((m) => m?.material ?? null);
+    // The dark screen, hidden, so a view's shader warm-up compiles it before a combi first goes out.
+    const warm = new THREE.Mesh(new THREE.PlaneGeometry(0.01, 0.01), darkScreen());
+    warm.visible = false;
+    add(warm);
     this.ovenIn = this.ovens.map((_, o) => (o < KIT.ovens ? 1 : 0));
     this.rangeIn = this.ranges.map((_, r) => (r < KIT.ranges ? 1 : 0));
 
@@ -804,8 +867,12 @@ export class MorningKitchen {
     // Ovens: the door open to load and unload, the program running between.
     for (let o = 0; o < ovens.length; o++) {
       const l = morning?.loads.find((x) => x.oven === o && x.t0 <= t && x.t3 > t);
+      const out = !!morning?.settings.out?.some((u) => u.oven === o && u.t0 <= t && u.t1 > t);
       const open = l && (t < l.t1 || t >= l.tu) ? 1 : 0;
-      const run = l && t >= l.t1 && t < l.t2 ? 1 : 0;
+      const run = l && t >= l.t1 && t < l.t2 && !out ? 1 : 0;
+      const screen = this.screens[o];
+      const face = out ? darkScreen() : this.screenOn[o];
+      if (screen && face && screen.material !== face) screen.material = face;
       door[o]! += (open - door[o]!) * Math.min(1, dt * 4);
       heat[o]! += (run - heat[o]!) * Math.min(1, dt * 2);
       const ov = ovens[o]!;

@@ -1146,7 +1146,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
               <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
               <p class="kicker">
-                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning. Or add one more combi, range or cook, and see which one moves the limit.
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning. Or add one more combi, range or cook, and see which one moves the limit. And when a combi trips mid-morning, see what it costs the van, and know it the minute it happens.
               </p>
             </div>
             <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -1411,6 +1411,78 @@
               <div>
                 <code class="formula">full = every place at the station taken<br />waiting = hands free, work ready, no room</code>
                 <p class="model">Model: <code>planMorning</code> with the combis, ranges and crew bought, and <code>morningLimit</code> for the most meals.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+          <figure class="fig reveal tp-fig" id="trip">
+            <header class="fig-head">
+              <p class="todo">Trip a combi mid-morning, and see what it costs the van</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage tp-stage" data-trip-stage>
+                <canvas data-trip-canvas tabindex="0" aria-label="The morning's kitchen with one combi tripped: it goes dark at the time picked, its program stopped, and the floor in front of it glows red until it is back. A cook with free hands while work waits for a combi wears a pause badge. A camera on a stand at the front right watches the line, its view's edges drawn faintly; the two screens below show what it sees. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud mo-hud kt-hud tp-hud" aria-hidden="true"><b data-tp-hud-clock>6:00</b><span data-tp-hud-van>…</span><em data-tp-hud-note hidden></em></div>
+                <p class="wk-legend rs-legend tp-legend" aria-hidden="true"><span class="out">Red floor: the combi that is out</span><span class="wait">Pause badge: a cook free, waiting for a combi</span></p>
+              </div>
+              <div class="tp-mons">
+                <figure class="tp-mon" data-tp-mon="twin">
+                  <div class="tp-screen"><canvas data-trip-cam="twin" aria-label="The camera's view as the twin expects it, from the plan"></canvas><span class="tp-ts" data-tp-ts="twin">CAM 1 · 06:00</span><span class="tp-src">TWIN</span></div>
+                  <figcaption>What the twin expects: the plan</figcaption>
+                </figure>
+                <figure class="tp-mon" data-tp-mon="seen">
+                  <div class="tp-screen"><canvas data-trip-cam="seen" aria-label="The camera's view of the morning with the combi tripped, with the twin's mark on what differs from the plan"></canvas><span class="tp-box" data-tp-box hidden></span><span class="tp-ts" data-tp-ts="seen">CAM 1 · 06:00</span><span class="tp-src rec"><i></i>REC</span><span class="tp-flag" data-tp-flag hidden></span></div>
+                  <figcaption>What the camera sees</figcaption>
+                </figure>
+              </div>
+              <div class="lab tp-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>The van leaves</span><b><i data-tp-van>…</i><em data-tp-van-d hidden></em></b><small data-tp-van-s>…</small></div>
+                    <div class="wk-tile"><span>Seen at</span><b><i data-tp-known>…</i></b><small data-tp-known-s>…</small></div>
+                    <div class="wk-tile"><span>Past their best</span><b><i data-tp-best>…</i></b><small data-tp-best-s>…</small></div>
+                    <div class="wk-tile"><span>Trips that cost nothing</span><b><i data-tp-free>…</i></b><small data-tp-free-s>…</small></div>
+                  </div>
+                  <div class="rs-map-wrap tp-map-wrap">
+                    <p class="rs-map-head"><b>Every trip, and what it costs</b><span class="wk-keys rs-map-keys tp-keys"><span class="ok">Costs nothing</span><span class="pb">On time, more past their best</span><span class="l1">Van late</span><span class="l4">An hour or more</span><span class="load">The combi's loads, as planned</span></span></p>
+                    <div class="tp-map" data-trip-map role="img" aria-label="For each combi, every trip on a grid: across, when it trips, every ten minutes from 6:00 to 10:20; down, how long it is out, ten to ninety minutes. Each cell is coloured by what that trip costs the van. Above each grid, the combi's loads as planned."></div>
+                    <p class="rs-map-note" data-trip-map-note></p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">Know what a trip would cost before it happens, and the minute it does.</p>
+                  <div class="field">
+                    <p class="micro">Which combi trips</p>
+                    <div class="seg fill tp-oven" role="group" aria-label="Which combi trips">
+                      <button type="button" data-tp-oven="0" aria-pressed="true">The left combi</button>
+                      <button type="button" data-tp-oven="1" aria-pressed="false">The right combi</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>It trips at</b><output data-tp-at-val>9:20</output></span><input type="range" min="0" max="260" step="10" value="200" data-tp-at aria-label="When the combi trips" /></label>
+                  <label class="range"><span><b>Out for</b><output data-tp-for-val>60 min</output></span><input type="range" min="10" max="90" step="10" value="60" data-tp-for aria-label="How long the combi is out" /></label>
+                  <div class="field">
+                    <p class="micro">The menu · how long each dish holds · where it cooks · press to swap</p>
+                    <ul class="wk-menu kt-menu" data-tp-menu></ul>
+                  </div>
+                  <label class="range"><span><b>Meals on the van</b><output data-tp-meals-val>800 meals</output></span><input type="range" min="100" max="1400" step="10" value="800" data-tp-meals aria-label="Meals on the van" /></label>
+                  <div class="status" data-tp-status data-state="warn">Planning the morning and mapping every trip…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="trip-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>This is the kitchen above with three cooks and the van at 10:30, planned the same way. Then one combi trips: it goes dark at the time picked and comes back when its time out is up. A program running in it stops, and runs the rest of its minutes once the combi is back; nothing goes into it while it is out, and food that is done can still come out. The kitchen keeps to its plan: no dish starts sooner than the plan had it, and the cooks take the work as it comes, as they would have.</p>
+                <p>The map runs that morning for every trip on its grid: each combi, tripping every ten minutes from 6:00 to 10:20, out for ten to ninety minutes, 486 mornings in all. A trip costs nothing when the van leaves no later than planned and no more portions are past their best at lunch. Lunch moves with the van, so a late van also means food held longer.</p>
+                <p>The two screens are the camera's view from its stand. The left one is the twin's picture of the planned morning; the right one is the morning with the combi out, as the camera would show it. They part the minute the combi goes dark, and the twin marks the combi on the camera's picture. It cannot know then how long the combi will be out, but it has the map: the column for that minute shows what every length of outage would cost the van, while there is still time to act.</p>
+              </div>
+              <div>
+                <code class="formula">costs nothing = van no later, nothing more past its best<br />486 trips = 2 combis × 27 start times × 9 lengths</code>
+                <p class="model">Model: <code>carryOn</code> with the combi out, from <code>planMorning</code>'s plan; the map is every trip on the grid.</p>
               </div>
                 </div>
               </details>

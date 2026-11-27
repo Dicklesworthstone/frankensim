@@ -22,6 +22,9 @@
  * "Cooked the day before" moves the prep that keeps a day, and the whole cooking of the dishes that keep, to the
  * quiet day before: those dishes are only reheated in an oven this morning.
  *
+ * A combi can trip and be out for a while (an Outage). `carryOn` is that morning when the kitchen keeps to the plan
+ * made without it: every dish started when the plan had it, the cooks taking the work as it comes.
+ *
  * `planMorning` runs one morning; `morningLimit` finds the most meals a plan gets onto the van at 10:30 with every
  * portion still at its best at lunch. Everything is deterministic.
  */
@@ -176,6 +179,14 @@ export const MENUS = 1 << SLOTS.length;
 /** The morning's dishes: the menu's three, then the sides (place 3). */
 export const menuDishes = (menu: number): MorningDish[] => [...SLOTS.map((s, k) => (menu & (1 << k) ? s.swap : s.written)), SIDES];
 
+/** A combi out of use, minutes from 6:00: it trips at t0 and is back at t1. A program running in it stops, and runs
+ *  its remaining minutes once the combi is back; nothing goes into it while it is out, and it can still be unloaded. */
+export interface Outage {
+  oven: number;
+  t0: number;
+  t1: number;
+}
+
 export type Crew = 2 | 3 | 4;
 export interface MorningSettings {
   meals: number;
@@ -190,6 +201,8 @@ export interface MorningSettings {
   portions?: readonly number[];
   /** The equipment, when not as built (KIT). */
   kit?: Kit;
+  /** Combis out of use this morning. */
+  out?: readonly Outage[];
 }
 
 /** When the van leaves for these settings. */
@@ -247,6 +260,8 @@ export interface Wait {
 }
 export interface BatchOut {
   slot: number;
+  /** The earliest its cooking could start, minutes from 6:00: the plan's hold on it. */
+  release: number;
   portions: number;
   pans: number;
   /** When its cooking finished, and when it was packed. `pans`: the hotel pans its packing fills (a pan part filled
@@ -305,6 +320,8 @@ interface Batch {
 }
 
 const EPS = 1e-6;
+/** Releases kept from another plan (carryOn): each batch's cooking starts no earlier than that plan had it. */
+type Keep = readonly number[];
 const stageMin = (s: Stage, b: { portions: number; pans: number }) =>
   s.at === "table" ? s.min * b.portions : s.at === "range" ? s.min : s.min + 2 * b.pans * (s.perPan ?? 0);
 /** A stage's hands-on crew-minutes for a batch. */
@@ -335,8 +352,10 @@ export function portionsFor(meals: number): number[] {
   return [...out, meals];
 }
 
-function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean): Morning {
+function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean, keep?: Keep): Morning {
   const dishes = menuDishes(s.menu);
+  /** Each combi's times out, in order. */
+  const downs = Array.from({ length: kitOf(s).ovens }, (_, o) => (s.out ?? []).filter((u) => u.oven === o && u.t1 > u.t0).sort((a, b) => a.t0 - b.t0));
   const door = doorOf(s);
   const portions = s.portions ?? portionsFor(s.meals);
   const batches = dishes.flatMap((d, k) => batchesFor(d, k, portions[k]!, s.ahead));
@@ -368,7 +387,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     const floor = SERVE - d.holdMin - chain;
     const soon = door - tailMin - EARLY;
     const sh = shift[b.slot] ?? 0;
-    b.release = Math.max(0, fresh ? Math.max(floor, soon - sh) : Math.max(floor, soon) - sh);
+    b.release = keep?.[b.id] ?? Math.max(0, fresh ? Math.max(floor, soon - sh) : Math.max(floor, soon) - sh);
   }
   const kit = kitOf(s);
   const nBurners = kit.ranges * RANGE_BURNERS;
@@ -379,6 +398,20 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
   };
 
   const spare = new Array<number>(s.cooks).fill(1);
+  /** Whether combi o is out at time t; and when a program put in it at `a` for `min` minutes ends, its minutes run only
+   *  while the combi is not out. */
+  const downAt = (o: number, t: number) => downs[o]!.some((d) => t >= d.t0 - EPS && t < d.t1 - EPS);
+  const progEnd = (o: number, a: number, min: number) => {
+    let at = a;
+    let left = min;
+    for (const d of downs[o]!) {
+      if (d.t1 <= at) continue;
+      if (at + left <= d.t0) break;
+      left -= Math.max(0, d.t0 - at);
+      at = d.t1;
+    }
+    return at + left;
+  };
   /** Where each cook last worked: the station, and on the range the burner column (0..2). */
   const where: { at: Station | null; col: number; spot: number }[] = Array.from({ length: s.cooks }, (_, c) => ({ at: null, col: c % 3, spot: c % TABLE_SPOTS }));
   const burner: (Batch | null)[] = new Array(nBurners).fill(null);
@@ -501,7 +534,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
       return true;
     }
     // An oven: the first idle one; the load is every batch of this dish ready for this stage, up to its pans.
-    const o = ovens.findIndex((x) => x.phase === "idle");
+    const o = ovens.findIndex((x, k) => x.phase === "idle" && !downAt(k, t));
     if (o < 0) return false;
     const c = pickCook(1, "oven", (k) => (where[k]!.at === "oven" && where[k]!.spot === o ? -1 : 0));
     if (c < 0) return false;
@@ -517,7 +550,8 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     const per = st.perPan ?? 0;
     const tl = pans * per;
     const ov = ovens[o]!;
-    const load: Load = { oven: o, batches: group.map((x) => x.id), slot: b.slot, verb: st.verb, pans, t0: t, t1: t + tl, t2: t + tl + st.min, tu: t + tl + st.min, t3: t + tl + st.min };
+    const t2 = progEnd(o, t + tl, st.min);
+    const load: Load = { oven: o, batches: group.map((x) => x.id), slot: b.slot, verb: st.verb, pans, t0: t, t1: t + tl, t2, tu: t2, t3: t2 };
     loads.push(load);
     ov.phase = "load";
     ov.load = load;
@@ -609,6 +643,8 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     let next = Infinity;
     for (const r of running) next = Math.min(next, r.end);
     for (const b of batches) if (!b.busy && b.next === b.firstCook && b.release > t + EPS) next = Math.min(next, b.release);
+    // A combi that is out comes back.
+    for (const ds of downs) for (const d of ds) if (d.t1 > t + EPS) next = Math.min(next, d.t1);
     if (!Number.isFinite(next) || next > HORIZON) break;
     // Cooks with their hands free while work is ready: none of it could start, so it waits for room at its station.
     const idle: number[] = [];
@@ -670,7 +706,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean):
     burns,
     loads,
     waits,
-    batches: batches.map((b, i) => ({ slot: b.slot, portions: b.portions, pans: packPans[i]!, cooked: b.cooked, packed: b.packed })),
+    batches: batches.map((b, i) => ({ slot: b.slot, release: b.release, portions: b.portions, pans: packPans[i]!, cooked: b.cooked, packed: b.packed })),
     depart,
     late,
     finished,
@@ -730,6 +766,13 @@ export function planMorning(s: MorningSettings): Morning {
   if (rush.late > 0.5) return { ...plan, onTimePastBest: null };
   if (rush.pastBest === 0) return rush;
   return { ...plan, onTimePastBest: rush.pastBest };
+}
+
+/** The morning with the combis out (s.out) when the kitchen keeps to `plan`, made without knowing: every dish's cooking
+ *  starts no earlier than the plan had it, and the cooks take the work as it comes, as they would have. `s` is the
+ *  plan's settings with the outages added. */
+export function carryOn(s: MorningSettings, plan: Morning): Morning {
+  return schedule(s, plan.shift, true, plan.batches.map((b) => b.release));
 }
 
 /** Whether a morning makes the van with everything still at its best at lunch. */
