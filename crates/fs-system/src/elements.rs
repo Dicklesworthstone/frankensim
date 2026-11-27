@@ -580,7 +580,7 @@ fn held_table_mean(knots: &[(f64, f64)], start: f64, end: f64) -> f64 {
     let mut value = held_table_value(knots, start);
     let mut from = start;
     let mut total = Sum::default();
-    let next = knots.partition_point(|knot| knot.0 <= start);
+    let next = knots.partition_point(|knot| knot.0 <= start).max(1);
     for &(time_s, next_value) in &knots[next..] {
         if time_s >= end {
             break;

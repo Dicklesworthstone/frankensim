@@ -2768,7 +2768,7 @@ fn port_hamiltonian_scenes_refuse_invalid_ports_state_and_fields_by_name() {
         (
             "domain",
             "\"translation\"",
-            "\"hydraulic\"",
+            "\"magnetic\"",
             "elements.oscillator.ports[0]: domain is one of",
         ),
         (

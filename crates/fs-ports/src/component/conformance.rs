@@ -646,10 +646,17 @@ where
             actual: case.inputs.len(),
         }));
     }
-    let scale = case.inputs.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
-    let step = scale * f64::EPSILON.cbrt();
     for seed in 1..=3_u64 {
-        let d = direction(n_in, seed);
+        let raw = direction(n_in, seed);
+        let scaled: Vec<f64> = case
+            .inputs
+            .iter()
+            .zip(&raw)
+            .map(|(x, r)| r * x.abs().max(1.0))
+            .collect();
+        let norm = scaled.iter().map(|v| v * v).sum::<f64>().sqrt().max(1.0);
+        let step = norm * f64::EPSILON.cbrt();
+        let d: Vec<f64> = scaled.into_iter().map(|v| v / norm).collect();
         let plus: Vec<f64> = case
             .inputs
             .iter()

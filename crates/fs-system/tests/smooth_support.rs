@@ -262,6 +262,36 @@ fn cancellation_during_a_backtracked_proposal_is_not_recovered() {
 }
 
 #[test]
+fn cancellation_during_a_picard_recovery_is_not_masked() {
+    let mut law = Logarithm::new();
+    law.cancel_on_recovery = true;
+    let mut builder = SystemBuilder::new();
+    let node = builder.add_with_tangent("law", law, [0.0, 0.5]).unwrap();
+    let lim = builder
+        .add_with_tangent(
+            "lim",
+            fs_system::elements::SignalLimiter::new(vec![0.01], vec![10.0]).unwrap(),
+            (),
+        )
+        .unwrap();
+    let law_in = builder.port(node, "input").unwrap();
+    let law_out = builder.port(node, "output").unwrap();
+    let lim_in = builder.port(lim, "input").unwrap();
+    let lim_out = builder.port(lim, "output").unwrap();
+    builder.signal(law_out, lim_in).unwrap();
+    builder.signal(lim_out, law_in).unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(law_in, &[0.5]));
+    assert!(system.guess(lim_in, &[0.08]));
+    let ledger = system.ledger().clone();
+    let error = with_cx(|cx| system.step(0.125, cx)).expect_err("cancelled during Picard recovery");
+    assert!(matches!(error, SystemError::Cancelled), "{error}");
+    assert_eq!(*system.state::<[f64; 2]>(node).unwrap(), [0.0, 0.5]);
+    assert_eq!(system.ledger(), &ledger);
+    assert_eq!((system.steps(), system.time_s()), (0, 0.0));
+}
+
+#[test]
 fn shortening_at_a_newton_iterate_still_restarts_the_physical_step() {
     let mut law = Logarithm::new();
     law.shorten_above_s = Some(0.25);

@@ -4076,6 +4076,16 @@ impl System {
             && nodes.iter().all(|&node| {
                 matches!(self.nodes[node].class(), Class::ExactLinear | Class::Smooth)
             });
+        // A non-smooth non-load-line block (e.g. a SignalLimiter feeding a
+        // domain-checked actuator) can overshoot across a kink on a linearized
+        // Newton update; one Picard substitution to g(x_old) moves onto the
+        // active branch without extrapolating past authored signal bounds.
+        let can_picard_recover = !can_backtrack
+            && self.lines[block].is_empty()
+            && work.scalar.is_none()
+            && nodes
+                .iter()
+                .any(|&node| self.nodes[node].class() == Class::NonSmooth);
         let BlockWork {
             scalar,
             residual,
@@ -4191,17 +4201,32 @@ impl System {
                     }
                 }
                 if let Some(error) = refused {
-                    if !can_backtrack
-                        || update_fraction == 0.0
-                        || !matches!(
-                            error,
-                            SystemError::Component {
-                                phase: Phase::Propose,
-                                ..
-                            }
-                        )
+                    let is_propose = matches!(
+                        error,
+                        SystemError::Component {
+                            phase: Phase::Propose,
+                            ..
+                        }
+                    );
+                    if can_picard_recover
+                        && update_fraction > 0.5
+                        && is_propose
+                        && iterations < self.config.max_iterations
                     {
-                        return Err(error);
+                        first_refusal = Some(error);
+                        for (row, &index) in unknowns.iter().enumerate() {
+                            self.inputs[index] = update_start[row];
+                        }
+                        update_fraction = 0.5;
+                        iterations += 1;
+                        continue;
+                    }
+                    if !can_backtrack || update_fraction == 0.0 || !is_propose {
+                        return Err(if can_picard_recover && is_propose {
+                            first_refusal.unwrap_or(error)
+                        } else {
+                            error
+                        });
                     }
                     // An owner's first typed refusal stays authoritative if
                     // this ray exhausts its budget, even if a later proposal
@@ -4249,6 +4274,9 @@ impl System {
                 let driver = &self.drivers[index];
                 let target = driver.value(&self.outputs, &self.boundary_values);
                 residual[row] = self.inputs[index] - target;
+                if can_picard_recover {
+                    update_start[row] = target;
+                }
                 let group = self.input_group[index];
                 let (own, terms) = match self.crossing(block, row) {
                     Some((flow, _)) => (
