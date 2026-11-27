@@ -19,6 +19,7 @@ use fs_system::elements::{Motion, Slip, SourceAccount};
 use fs_system::{CardStore, LoweredSystem, LoweringError, LoweringRegistry};
 
 const L: Dims = Dims([1, 0, 0, 0, 0, 0]);
+const T_DIM: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const V_DIM: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const F_DIM: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const TEMP: Dims = Dims([0, 0, 0, 1, 0, 0]);
@@ -174,7 +175,11 @@ fn make_part(s: &Side, entity: EntityId) -> d::DraftPartDecl {
 
 fn lower_pair(
     (side_a, side_b): (&Side, &Side),
-    (card, state): (ContentHash, Vec<(ParameterKey, QtyAny)>),
+    (card, third_body, state): (
+        ContentHash,
+        Option<d::ThirdBodyDecl>,
+        Vec<(ParameterKey, QtyAny)>,
+    ),
     (spring_k, belt): (Option<f64>, Option<d::TimeHistory>),
     (dt, t_end): (f64, f64),
     cards: &CardStore,
@@ -219,7 +224,7 @@ fn lower_pair(
     }
     let kind = d::DraftInterfaceKind::MechanicalContact {
         law_card: card,
-        third_body: None,
+        third_body,
         state,
     };
     let iface = d::DraftInterfaceDecl {
@@ -231,7 +236,6 @@ fn lower_pair(
     };
     let mut env = d::DraftEnvironment::earth_lab_air();
     env.base.ambient_temperature = QtyAny::new(300.0, TEMP);
-    let td = Dims([0, 0, 1, 0, 0, 0]);
     let inp = d::DraftAssemblyInput {
         name: "p".into(),
         root,
@@ -239,9 +243,9 @@ fn lower_pair(
         reference_state: Some(ReferenceState::Assembled),
         environment: env,
         time_plan: d::TimePlan {
-            horizon: QtyAny::new(t_end, td),
+            horizon: QtyAny::new(t_end, T_DIM),
             step_policy: d::StepPolicy::Fixed {
-                dt: QtyAny::new(dt, td),
+                dt: QtyAny::new(dt, T_DIM),
             },
             default_sample_rate: QtyAny::new(1.0 / dt, Dims([0, 0, -1, 0, 0, 0])),
             scheme: d::TimeScheme::Explicit,
@@ -282,7 +286,7 @@ fn run_stick_slip(
     let h = f64::from(steps) * dt;
     let mut lo = lower_pair(
         (&blk, &drv),
-        (fcard, st),
+        (fcard, None, st),
         (Some(stiff), drive),
         (dt, h),
         cards,
@@ -400,9 +404,268 @@ fn nasa_52100_kinetic_only_pack_refuses() {
     let blk = ("a", d::DraftPartKind::RigidBody, mat, true, None);
     let drv = ("b", d::DraftPartKind::DrivenBody, mat, false, None);
     let st = vec![kv("normal_force", 10.0, F_DIM)];
-    let msg = lower_pair((&blk, &drv), (nasa, st), (None, None), (0.01, 0.1), &cards)
-        .err()
-        .unwrap()
-        .to_string();
+    let msg = lower_pair(
+        (&blk, &drv),
+        (nasa, None, st),
+        (None, None),
+        (0.01, 0.1),
+        &cards,
+    )
+    .err()
+    .unwrap()
+    .to_string();
     assert!(msg.contains("static-friction-coefficient"), "{msg}");
+}
+
+#[test]
+fn two_free_thermal_bodies_arrest_partition_and_harmonic_entropy() {
+    let mut cards = CardStore::new();
+    let (mat_a, mat_b) = (
+        cards.insert_material(unit_mat(1.0, 100.0)),
+        cards.insert_material(unit_mat(3.0, 100.0)),
+    );
+    let fcard = cards
+        .insert_interface("dry-friction", friction_card(0.5, 0.3, 50.0, 5.0))
+        .unwrap();
+    let (share_a, ta0, tb0) = (0.25_f64, 300.0_f64, 320.0_f64);
+    let body_a = (
+        "a",
+        d::DraftPartKind::RigidBody,
+        mat_a,
+        true,
+        Some(init_st(2.0, Some(ta0))),
+    );
+    let body_b = (
+        "b",
+        d::DraftPartKind::RigidBody,
+        mat_b,
+        true,
+        Some(init_st(0.0, Some(tb0))),
+    );
+    let st = vec![
+        kv("normal_force", 10.0, F_DIM),
+        kv("heat_partition_a", share_a, Dims::NONE),
+    ];
+    let mut lo = lower_pair(
+        (&body_a, &body_b),
+        (fcard, None, st),
+        (None, None),
+        (1e-3, 0.8),
+        &cards,
+    )
+    .unwrap();
+    with_cx(|cx| {
+        for _ in 0..800 {
+            lo.system.step(1e-3, cx).unwrap();
+        }
+    });
+    let va = lo
+        .system
+        .state::<Motion>(lo.node_map["a.mechanics"])
+        .unwrap()
+        .velocity_m_s;
+    let vb = lo
+        .system
+        .state::<Motion>(lo.node_map["b.mechanics"])
+        .unwrap()
+        .velocity_m_s;
+    assert!((va - 0.5).abs() <= 1e-12 && (vb - 0.5).abs() <= 1e-12);
+    assert!(
+        lo.system
+            .state::<Slip>(lo.node_map["interface.pad"])
+            .unwrap()
+            .is_stuck()
+    );
+    let ta1 = *lo.system.state::<f64>(lo.node_map["a.thermal"]).unwrap();
+    let tb1 = *lo.system.state::<f64>(lo.node_map["b.thermal"]).unwrap();
+    let (qa, qb, q_ex) = (100.0 * (ta1 - ta0), 300.0 * (tb1 - tb0), 1.5_f64);
+    let rel_wh = ((qa + qb) - q_ex).abs() / q_ex;
+    let ds_ex = 100.0 * (ta1 / ta0).ln() + 300.0 * (tb1 / tb0).ln();
+    let ds_led = lo.system.ledger().entropy_generated_j_per_k();
+    assert!(
+        (qa - share_a * q_ex).abs() / q_ex <= 1e-9
+            && (qb - (1.0 - share_a) * q_ex).abs() / q_ex <= 1e-9
+    );
+    assert!(rel_wh <= 1e-9 && (ds_led - ds_ex).abs() / ds_ex <= 1e-9);
+    assert!(
+        lo.receipt
+            .canonical_json()
+            .contains("declared: side_a thermal")
+    );
+    eprintln!("two-body arrest: rel_wh={rel_wh:.3e} dS={ds_led:.9} exact={ds_ex:.9}");
+}
+
+#[test]
+fn reversing_piecewise_linear_belt_tracks_breaks_reverses_and_arrests() {
+    let mut cards = CardStore::new();
+    let mat = cards.insert_material(unit_mat(1.0, 100.0));
+    let fcard = cards
+        .insert_interface("dry-friction", friction_card(0.5, 0.3, 50.0, 5.0))
+        .unwrap();
+    let q = QtyAny::new;
+    let hist = d::TimeHistory::PiecewiseLinear {
+        knots: vec![
+            (q(0.0, T_DIM), q(0.0, V_DIM)),
+            (q(0.2, T_DIM), q(0.6, V_DIM)),
+            (q(0.4, T_DIM), q(-0.6, V_DIM)),
+            (q(0.8, T_DIM), q(-0.6, V_DIM)),
+        ],
+    };
+    let blk = (
+        "block",
+        d::DraftPartKind::RigidBody,
+        mat,
+        true,
+        Some(init_st(0.0, Some(300.0))),
+    );
+    let drv = ("belt", d::DraftPartKind::DrivenBody, mat, false, None);
+    let st = vec![kv("normal_force", 10.0, F_DIM)];
+    let mut lo = lower_pair(
+        (&blk, &drv),
+        (fcard, None, st),
+        (None, Some(hist)),
+        (1e-3, 0.8),
+        &cards,
+    )
+    .unwrap();
+    let (bm, bt) = (lo.node_map["block.mechanics"], lo.node_map["block.thermal"]);
+    let (sl, blt) = (lo.node_map["interface.pad"], lo.node_map["belt"]);
+    with_cx(|cx| {
+        for step in 1..=800 {
+            lo.system.step(1e-3, cx).unwrap();
+            if step == 200 {
+                let vel = lo.system.state::<Motion>(bm).unwrap().velocity_m_s;
+                assert!(
+                    (vel - 0.6).abs() <= 1e-12 && lo.system.state::<Slip>(sl).unwrap().is_stuck()
+                );
+                assert!((*lo.system.state::<f64>(bt).unwrap() - 300.0).abs() <= 1e-12);
+            }
+        }
+    });
+    let v_end = lo.system.state::<Motion>(bm).unwrap().velocity_m_s;
+    let q_blk = 100.0 * (*lo.system.state::<f64>(bt).unwrap() - 300.0);
+    let w_diss = -lo.system.state::<SourceAccount>(blt).unwrap().energy_in_j - 0.5 * v_end * v_end;
+    let rel_wh = (q_blk - w_diss).abs() / w_diss;
+    assert!((v_end + 0.6).abs() <= 1e-12 && lo.system.state::<Slip>(sl).unwrap().is_stuck());
+    assert!(q_blk > 0.1 && rel_wh <= 1e-9);
+    let rcpt = lo.receipt.canonical_json();
+    assert!(rcpt.contains("default: the only thermal side takes all the heat"));
+    assert!(!rcpt.contains("declared: single thermal"));
+    eprintln!("reversing belt: q={q_blk:.6} J rel_wh={rel_wh:.3e}");
+}
+
+fn refusal_msg(
+    cards: &CardStore,
+    mat: ContentHash,
+    card: ContentHash,
+    third: Option<d::ThirdBodyDecl>,
+    state: Vec<(ParameterKey, QtyAny)>,
+    two_thermal: bool,
+) -> String {
+    let b_kind = if two_thermal {
+        d::DraftPartKind::RigidBody
+    } else {
+        d::DraftPartKind::DrivenBody
+    };
+    let body_a = ("a", d::DraftPartKind::RigidBody, mat, true, None);
+    let body_b = ("b", b_kind, mat, two_thermal, None);
+    lower_pair(
+        (&body_a, &body_b),
+        (card, third, state),
+        (None, None),
+        (0.01, 0.1),
+        cards,
+    )
+    .err()
+    .unwrap()
+    .to_string()
+}
+
+#[test]
+fn dry_friction_refusals_cover_validity_order_third_body_partition_and_slip() {
+    let mut cards = CardStore::new();
+    let mat = cards.insert_material(unit_mat(1.0, 100.0));
+    let good = cards
+        .insert_interface("dry-friction", friction_card(0.5, 0.3, 50.0, 5.0))
+        .unwrap();
+    let bad_mu = cards
+        .insert_interface("dry-friction", friction_card(0.2, 0.4, 50.0, 5.0))
+        .unwrap();
+    let n10 = kv("normal_force", 10.0, F_DIM);
+    let tb = d::ThirdBodyDecl {
+        material_card: mat,
+        film_thickness: QtyAny::new(1e-4, L),
+        query_point: vec![],
+    };
+    let rows = [
+        (
+            good,
+            None,
+            vec![kv("normal_force", 90.0, F_DIM)],
+            false,
+            "outside the validity",
+        ),
+        (
+            good,
+            None,
+            vec![n10.clone(), kv("sliding_speed", 9.0, V_DIM)],
+            false,
+            "outside the validity",
+        ),
+        (
+            good,
+            None,
+            vec![n10.clone(), kv("sliding_speed", -0.5, V_DIM)],
+            false,
+            "sliding_speed",
+        ),
+        (
+            bad_mu,
+            None,
+            vec![n10.clone()],
+            false,
+            "static-friction-coefficient",
+        ),
+        (good, None, vec![], false, "normal_force"),
+        (
+            good,
+            None,
+            vec![kv("normal_force", -1.0, F_DIM)],
+            false,
+            "normal_force",
+        ),
+        (good, Some(tb), vec![n10.clone()], false, "third-body"),
+        (good, None, vec![n10.clone()], true, "heat_partition_a"),
+        (
+            good,
+            None,
+            vec![n10.clone(), kv("heat_partition_a", 1.2, Dims::NONE)],
+            true,
+            "heat_partition_a",
+        ),
+        (
+            good,
+            None,
+            vec![n10, kv("initial_slip", 1.0, V_DIM)],
+            false,
+            "initial_slip",
+        ),
+    ];
+    for (card, third, state, two_t, want) in rows {
+        let msg = refusal_msg(&cards, mat, card, third, state, two_t);
+        assert!(msg.contains(want), "expected `{want}` in: {msg}");
+    }
+    let ma = ("a", d::DraftPartKind::RigidBody, mat, false, None);
+    let mb = ("b", d::DraftPartKind::DrivenBody, mat, false, None);
+    let amb = lower_pair(
+        (&ma, &mb),
+        (good, None, vec![kv("normal_force", 10.0, F_DIM)]),
+        (None, None),
+        (0.01, 0.1),
+        &cards,
+    )
+    .unwrap();
+    let arcpt = amb.receipt.canonical_json();
+    assert!(arcpt.contains("default: no thermal side; all heat to ambient"));
+    assert!(!arcpt.contains("declared: ambient sink"));
 }

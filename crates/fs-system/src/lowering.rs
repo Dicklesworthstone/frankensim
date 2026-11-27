@@ -5146,12 +5146,17 @@ fn route_friction_heat(
             Ok(())
         }
         (Some(p), None, None) | (None, Some(p), None) => {
-            let (k, d) = if ta.is_some() {
-                ("heat_partition_a", "declared: single thermal side_a")
+            let k = if ta.is_some() {
+                "heat_partition_a"
             } else {
-                ("heat_partition_b", "declared: single thermal side_b")
+                "heat_partition_b"
             };
-            prec(rec, k, 1.0, d);
+            prec(
+                rec,
+                k,
+                1.0,
+                "default: the only thermal side takes all the heat",
+            );
             graph.attach_common_effort(p, heat, 1.0);
             Ok(())
         }
@@ -5178,7 +5183,12 @@ fn route_friction_heat(
             }
         }
         (None, None, None) => {
-            prec(rec, "heat_partition_ambient", 1.0, "declared: ambient sink");
+            prec(
+                rec,
+                "heat_partition_ambient",
+                1.0,
+                "default: no thermal side; all heat to ambient",
+            );
             amb(rec, Vec::new(), RouteTemperature::Fixed(t_amb))
         }
     }
