@@ -34,6 +34,11 @@ pub struct ProbeBinding {
     pub reader: CustomProbeFn,
 }
 
+struct InputSlot {
+    pending: AtomicU64,
+    live: Arc<AtomicU64>,
+}
+
 pub(crate) enum ProbeTarget {
     MotionPos(NodeId),
     MotionVel(NodeId),
@@ -69,7 +74,7 @@ pub struct AssemblyRuntime {
     gate: CancelGate,
     stream_key: StreamKey,
     input_descs: Vec<InputDescriptor>,
-    input_cells: Vec<Arc<AtomicU64>>,
+    input_slots: Vec<InputSlot>,
     descriptor: SnapshotDescriptor,
     probes: Vec<ResolvedProbe>,
     halted: bool,
@@ -144,6 +149,14 @@ impl AssemblyRuntime {
         total_len: usize,
         seed: u64,
     ) -> Self {
+        let input_slots = input_descs
+            .iter()
+            .zip(input_cells)
+            .map(|(d, live)| InputSlot {
+                pending: AtomicU64::new(d.default_value.to_bits()),
+                live,
+            })
+            .collect();
         Self {
             system,
             observers,
@@ -156,7 +169,7 @@ impl AssemblyRuntime {
                 iteration: 0,
             },
             input_descs,
-            input_cells,
+            input_slots,
             descriptor: SnapshotDescriptor {
                 schema: SNAPSHOT_DESCRIPTOR_SCHEMA.to_owned(),
                 assembly,
@@ -181,20 +194,20 @@ impl AssemblyRuntime {
         inputs_to_json(&self.input_descs)
     }
 
-    /// Update one interactive input value without allocating.
+    /// Stage one interactive input value without allocating; latched at the next [`Self::step`].
     pub fn set_input(&self, index: usize, value: f64) -> Result<(), RuntimeRefusal> {
-        let cell = self
-            .input_cells
+        let slot = self
+            .input_slots
             .get(index)
             .ok_or_else(|| err("unknown-input", "input", format!("idx {index}")))?;
         if !value.is_finite() {
             return Err(err("non-finite-input", "input", format!("idx {index}")));
         }
-        cell.store(value.to_bits(), Ordering::Relaxed);
+        slot.pending.store(value.to_bits(), Ordering::Relaxed);
         Ok(())
     }
 
-    /// Update one interactive input by declared name without allocating.
+    /// Stage one interactive input by declared name without allocating; latched at the next [`Self::step`].
     pub fn set_input_by_name(&self, name: &str, value: f64) -> Result<(), RuntimeRefusal> {
         let idx = self
             .input_descs
@@ -222,13 +235,17 @@ impl AssemblyRuntime {
         self.descriptor.total_len
     }
 
-    /// Advance the kernel by `dt_s` seconds in deterministic mode.
+    /// Latch staged inputs and advance the kernel by `dt_s` seconds in deterministic mode.
     pub fn step(&mut self, dt_s: f64) -> Result<StepReport, RuntimeRefusal> {
         if self.halted {
             return Err(err("runtime-halted", "step", "runtime halted"));
         }
         if !(dt_s.is_finite() && dt_s > 0.0) {
             return Err(self.halt("invalid-dt", format!("dt={dt_s}")));
+        }
+        for slot in &self.input_slots {
+            slot.live
+                .store(slot.pending.load(Ordering::Relaxed), Ordering::Relaxed);
         }
         let res = self.pool.scope(|arena| {
             let cx = Cx::new(

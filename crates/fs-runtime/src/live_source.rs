@@ -42,7 +42,6 @@ pub struct LiveInputSpec {
     pub default_value: f64,
 }
 
-#[allow(dead_code)] // Wired by draft.rs in Cut R1d-2.
 pub(crate) struct RegisteredInput {
     pub(crate) port: String,
     pub(crate) dims: Dims,
@@ -53,6 +52,9 @@ pub(crate) struct RegisteredInput {
 /// Lock-free interactive power source implementing `StageResidual` so untouched
 /// constant sources stay on `BlockSolveMode::MonolithicNewtonKrylov` and match static CLI
 /// lowering bit-for-bit (`to_bits()`).
+///
+/// `AssemblyRuntime` latches `pending -> live` once before each `System::step`;
+/// callers constructing `LiveSource` directly must not mutate `cell` mid-step.
 #[derive(Debug, Clone)]
 pub struct LiveSource {
     ports: [PortSpec; 1],
@@ -247,7 +249,6 @@ pub(crate) fn dims_match_power_port(kind: PortKind, role: PortRole, dims: Dims) 
     dims.0 == want
 }
 
-#[allow(dead_code)] // Wired by draft.rs in Cut R1d-2.
 pub(crate) fn register_runtime_inputs(
     registry: &mut LoweringRegistry,
     cells_shared: Arc<BTreeMap<String, RegisteredInput>>,
