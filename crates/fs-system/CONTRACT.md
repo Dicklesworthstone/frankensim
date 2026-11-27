@@ -692,6 +692,8 @@ physics owners below fs-couple can be composed without it.
     - `Restriction`: no words. Identity: conductance, carried count, and its
       gas's identity if it has one.
     - `Mass`: two words, position and velocity; identity: inertance.
+    - `MultiportInertia`: `n` words, the velocities; identity: `n`, the port
+      count, the mass matrix and the port map.
     - `GapField`: two words, the field coordinate and the gap; a decode
       refuses a gap outside the open range. Identity: the kind (capacitor
       or inductor), the coupling scale and both limits.
@@ -911,6 +913,26 @@ physics owners below fs-couple can be composed without it.
     factor `(1 - r dt / 2m) / (1 + r dt / 2m)` per step while the heat it books
     equals the kinetic energy lost and warms the body on its heat port. The
     kernel test has one row.
+  - `MultiportInertia::new(kind, mass, map, ports)` is the many-port `Mass`:
+    `n` generalized velocities `v` (the state, a `Vec<f64>`), a constant
+    symmetric positive definite mass matrix `M` (row-major `n x n`) and a
+    constant port map `G` (row-major `n x ports`). Ports `p0` to
+    `p<ports-1>` receive the efforts `e` and return the step-mean flows
+    `G^T (v0 + v1) / 2`, where `M (v1 - v0) = dt G e` is solved by the factor
+    `M = L D L^T`: the implicit midpoint rule, so each port ends its step by
+    the midpoint relation and a load line may sit beside it. The receipt is
+    lossless: the stored change `(v0 + v1)^T M (v1 - v0) / 2` is the port
+    work within `n^2 ports` roundoff units of the size of the kinetic
+    energies and the work. The constructor refuses `ElementError::Parameter`
+    (a mass matrix that is not `n x n`, a map that is not `n x ports`, no
+    port, an entry that is not finite), `ElementError::Asymmetric`, and
+    `ElementError::NotPositiveDefinite` (the first pivot of `L D L^T` that is
+    not positive and finite). Exact-linear, with analytic JVP and VJP. No
+    claim: `M` and `G` are constants, exact for a body whose configuration
+    does not change over the window it is used for; it is not a rigid body
+    that rotates, and it keeps no positions. `tests/multiport_inertia.rs`
+    checks that one row and one port with `G = [1]` give the `Mass` step,
+    receipt and stored energy to the bit.
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and

@@ -102,6 +102,8 @@ mod gap_field;
 pub use gap_field::{GapField, GapFieldState};
 mod modulated_transformer;
 pub use modulated_transformer::ModulatedTransformer;
+mod multiport_inertia;
+pub use multiport_inertia::MultiportInertia;
 mod resistance;
 pub use resistance::Resistance;
 mod sampled_controller;
