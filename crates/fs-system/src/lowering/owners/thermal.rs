@@ -15,7 +15,8 @@
 //! nothing. A `thermal-contact` between two cells is a link: its card's `R''`
 //! in series with each cell's bulk conduction to the contact face.
 //! A constant source on its [`HEAT_SOURCE_PORT`] is its applied
-//! heat. The timeline steps at most the time plan's step, checks energy to
+//! heat; a step source switches it at `t_switch` by one boundary event.
+//! The timeline steps at most the time plan's step, checks energy to
 //! the cells' shared absolute tolerance, and sends boundary heat through its
 //! `environment` port to a sink of that name. A cell a `TemperatureSource`
 //! names publishes its temperature at the start of each step as a signal.
@@ -401,7 +402,7 @@ fn lower(
         it.declare("fidelity.error_budget.absolute_tol", budget.absolute_tol);
         let work_units = QtyAny::dimensionless(work as f64);
         it.declare("fidelity.error_budget.max_work_units", work_units);
-        let source_w = sources.get(&cell).copied().unwrap_or(0.0);
+        let source_w = sources.get(&cell).map_or(0.0, |&(power, _)| power);
         let boundary = match boundaries.get(&cell) {
             Some(&[htc_w_m2_k, area_m2, conductance_w_k]) => {
                 let reservoir = Reservoir {
@@ -435,14 +436,16 @@ fn lower(
         cell_laws.push((MaterialId(cell as u64), caloric.law));
         out.parts.push(it.part(TIMELINE));
     }
-    let (cells, links) = (cell_laws.len(), contacts.len());
+    let switches = switched(&schedule, &sources);
+    let (cells, links, steps) = (cell_laws.len(), contacts.len(), switches.len());
     schedule.extend(contacts);
+    schedule.extend(switches);
     let fail =
         |err: &dyn std::fmt::Debug| Scoped::new("node", TIMELINE).invalid(format!("{err:?}"));
     let limits = DepositionBudget {
         max_cells: cells,
         max_links: cells + links,
-        max_events: cells + links,
+        max_events: cells + links + steps,
         max_substeps: work,
     };
     let simulation = DepositionSimulation::new_shared(schedule, &cell_laws, limits);
@@ -704,11 +707,15 @@ fn half_depth([x, y, z]: [f64; 3], area: f64) -> Option<f64> {
     faces.into_iter().find(matches).map(|(_, side)| 0.5 * side)
 }
 
-/// Each source's cell and constant power.
+/// Each source's cell, its power from the start and, for a step, when it
+/// switches and to what.
+type Sources = BTreeMap<usize, (f64, Option<[f64; 2]>)>;
+
+/// The draft's heat sources.
 fn sources(
     ctx: &GroupLoweringContext<'_>,
     out: &mut LoweredGroupOutput,
-) -> Result<BTreeMap<usize, f64>, LoweringError> {
+) -> Result<Sources, LoweringError> {
     let input = ctx.draft.input();
     let mut sources = BTreeMap::new();
     for &index in &ctx.selection.sources {
@@ -718,10 +725,20 @@ fn sources(
             return Err(it.invalid("a cell's heat source targets its port"));
         };
         let cell = slot(input, &ctx.selection.parts, *entity);
-        let (TimeHistory::Constant(power), Some(cell)) = (&source.history, cell) else {
-            return Err(it.invalid("a cell's heat source is constant"));
+        // The draft holds a step's `after` to its `before`'s units.
+        let held = match &source.history {
+            TimeHistory::Constant(power) => Some((power, None)),
+            TimeHistory::Step {
+                t_switch,
+                before,
+                after,
+            } => Some((before, Some([t_switch.value, after.value]))),
+            _ => None,
         };
-        if power.dims != POWER_DIMS || sources.insert(cell, power.value).is_some() {
+        let (Some((power, switch)), Some(cell)) = (held, cell) else {
+            return Err(it.invalid("a cell's heat source is constant or a step"));
+        };
+        if power.dims != POWER_DIMS || sources.insert(cell, (power.value, switch)).is_some() {
             return Err(it.invalid("a cell has at most one heat source, a power"));
         }
         record_time_history_provenance(&it.item, &source.history, &mut it.r);
@@ -733,6 +750,24 @@ fn sources(
         });
     }
     Ok(sources)
+}
+
+/// The stepping sources' events, in time order (fs-thermal's): each changes
+/// its cell's boundary at birth, the first `cells` of `births`, in its
+/// source alone.
+fn switched(births: &[TimedEvent], sources: &Sources) -> Vec<TimedEvent> {
+    let mut events = Vec::new();
+    for (&cell, &(_, switch)) in sources {
+        let (Some([time_s, source_w]), Event::Birth(born)) = (switch, &births[cell].event) else {
+            continue;
+        };
+        let mut boundary = born.boundary;
+        boundary.source_w = source_w;
+        let event = Event::Boundary(born.id, boundary);
+        events.push(TimedEvent { time_s, event });
+    }
+    events.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    events
 }
 
 /// A cell born at the start, and its law.

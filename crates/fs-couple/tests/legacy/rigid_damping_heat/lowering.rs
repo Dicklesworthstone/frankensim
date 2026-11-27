@@ -7,10 +7,10 @@
 //! with the fixture's reservoir (to the face of a stationary `lab` frame);
 //! loss routes of the fixture's fractions, each from the face of a bushing's
 //! first body; and a constant source on cell 0. Every interface joins faces. The oracle is `graph()` on the lowered mass
-//! properties, read back from the lowering's receipts. Only the source is
-//! declared: the fixture's contact and its 4 W at 0.35 s are thermal events
-//! that a draft does not declare. Fixture values; not a seed-dataset
-//! authority.
+//! properties, read back from the lowering's receipts. The source may step
+//! to the fixture's 4 W at 0.35 s; the fixture's contact (no conductance)
+//! has no card form, so neither side has it. Fixture values; not a
+//! seed-dataset authority.
 
 use super::*;
 use core::f64::consts::PI;
@@ -245,6 +245,29 @@ pub(crate) fn sourced(
         input.interfaces.push(source);
     }
     (admit(input), cards)
+}
+
+/// `pair`, its heater switching to 4 W at `t_s` when one is given.
+fn stepped(pair: (DraftAssembly, CardStore), t_s: Option<f64>) -> (DraftAssembly, CardStore) {
+    let Some(t_s) = t_s else {
+        return pair;
+    };
+    let mut input = pair.0.input().clone();
+    let TimeHistory::Constant(before) = input.sources[0].history else {
+        panic!("the heater is constant");
+    };
+    input.sources[0].history = TimeHistory::Step {
+        t_switch: QtyAny::new(t_s, TIME),
+        before,
+        after: QtyAny::new(4.0, POWER),
+    };
+    (admit(input), pair.1)
+}
+
+/// The fixture's event: cell 0's source to 4 W at `time_s`.
+fn four_watts(time_s: f64) -> TimedEvent {
+    let event = Event::Boundary(CellId(0), boundary(4.0));
+    TimedEvent { time_s, event }
 }
 
 pub(crate) fn admit(input: DraftAssemblyInput) -> DraftAssembly {
@@ -585,8 +608,11 @@ fn bushings_on_damping_curves_step_with_the_declared_graph_on_their_law_bit_for_
 /// `CurveLaw` on the same claims.
 fn steps_with_the_graph(curves: bool) {
     let laws = static_laws();
-    for source_w in [0.0, 2.0] {
-        let mut pair = pairing(fixture_cards(laws), source_w);
+    // The heater steps to 4 W at the fixture's 0.35 s, at 0.25 s (a step's
+    // end on the 0.125 s grid) and at 0.
+    let switches = [None, None, Some(0.35), Some(0.25), Some(0.0)];
+    for (source_w, switch) in [0.0, 2.0, 2.0, 2.0, 2.0].into_iter().zip(switches) {
+        let mut pair = stepped(pairing(fixture_cards(laws), source_w), switch);
         let mut law = None::<Rc<dyn DampingLaw>>;
         if curves {
             let claims = [0.7, 1.1].map(module_curve);
@@ -605,7 +631,8 @@ fn steps_with_the_graph(curves: bool) {
         let i = 2.0 * (1.0 / 12.0 + 1.0 / 12.0);
         let declared = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(i, i, i)).unwrap();
         assert_eq!(bodies.properties, [declared; 4]);
-        let schedule = vec![birth(0, 0.0, source_w), birth(1, 0.0, 0.0)];
+        let mut schedule = vec![birth(0, 0.0, source_w), birth(1, 0.0, 0.0)];
+        schedule.extend(switch.map(four_watts));
         let heat = DepositionSimulation::new(
             schedule,
             &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
@@ -617,7 +644,7 @@ fn steps_with_the_graph(curves: bool) {
             .unwrap()
             .0;
         for target_s in [0.5, 0.45] {
-            let case = format!("{source_w} W to {target_s} s");
+            let case = format!("{source_w} W to {target_s} s, to 4 W at {switch:?} s");
             let (mut oracle, network, cells) = graph(&bodies, &routes(), &heat, law.clone());
             let mut lowered = lower(&draft, &cards);
             let nodes = [
@@ -626,9 +653,11 @@ fn steps_with_the_graph(curves: bool) {
             ];
             let system = &mut lowered.system;
             let gate = CancelGate::new_clock_free();
+            let mut ends = Vec::new();
             with_cx(&gate, |cx| {
                 while oracle.time_s() < target_s {
                     let theirs = oracle.step(target_s - oracle.time_s(), cx).unwrap().dt_s;
+                    ends.push(oracle.time_s());
                     let step = system.step(target_s - system.time_s(), cx).unwrap().dt_s;
                     assert_eq!(step.to_bits(), theirs.to_bits(), "{case}: the step");
                     assert_eq!(
@@ -648,6 +677,9 @@ fn steps_with_the_graph(curves: bool) {
                 oracle.time_s().to_bits(),
                 "{case}"
             );
+            if switch.is_some() {
+                eprintln!("{case}: the steps end at {ends:?}");
+            }
             // The same accounts, and the lowered ledger closes.
             let (got, want) = (system.ledger(), oracle.ledger());
             let dissipated = node(want, "network").dissipated_j.value();
@@ -1048,6 +1080,21 @@ fn an_implicit_boundary_is_its_cards_total_coefficients_on_the_lumped_cell() {
         let at_port = (out - free_out - lost).abs() <= 1e-9;
         assert!(at_port, "{scheme:?}: {out} J - {free_out} J, not {lost} J");
     }
+}
+
+#[test]
+fn a_heat_source_neither_constant_nor_a_step_refuses_by_name() {
+    let (draft, cards) = pairing(fixture_cards(static_laws()), 2.0);
+    let mut input = draft.input().clone();
+    let (at, power) = (|t: f64| QtyAny::new(t, TIME), QtyAny::new(2.0, POWER));
+    input.sources[0].history = TimeHistory::PiecewiseLinear {
+        knots: vec![(at(0.0), power), (at(1.0), power)],
+    };
+    let mut registry = LoweringRegistry::with_kernel_defaults();
+    register_owners(&mut registry, fixture_laws());
+    let why = registry.lower(&admit(input), &cards).err().unwrap();
+    let want = "a cell's heat source is constant or a step";
+    assert!(why.to_string().contains(want), "{why}");
 }
 
 #[test]

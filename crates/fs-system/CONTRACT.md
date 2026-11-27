@@ -137,7 +137,10 @@ constructors:
   refused. The kernel's lumped contact is the card-only `d -> 0` form.
   A cell outside
   the product law's `T` band is refused at lowering or stops the run; nothing
-  clamps. The time plan's `scheme` is the timeline's; the mechanical owners
+  clamps. A cell's heat source is constant or a `Step`, whose one boundary
+  event at `t_switch` changes the source alone (at 0, before the first
+  step); any other history is refused by name. The time plan's `scheme` is
+  the timeline's; the mechanical owners
   run beside any scheme. Under `backward-euler` or `sdirk2` the cells step on
   fs-thermal's implicit conduction graph, with the step, tolerance and work
   limits above and the graph's other controls at their defaults. A contact
@@ -186,9 +189,10 @@ cell temperature and ledger account. The lowered ledger closes to 1e-12 of the
 dissipated energy. The bodies' mass properties are held to the boxes' own.
 The beds carry the fixture's reservoir, which exchanges nothing, so a nonzero
 exchange is not compared. Replacing any one group with an empty one is refused
-by name. Only the constant source is declared: the fixture's
-contact and its 4 W event at 0.35 s are thermal events a draft cannot
-declare, so both sides of the compare leave them out. Fixture values; not a
+by name. The source also steps to the fixture's 4 W at 0.35 s, at 0.25 s (a
+step's end) and at 0, bit for bit. The fixture's contact has no
+conductance, which no contact card can state, so both sides of the compare
+leave it out. Fixture values; not a
 seed-dataset authority.
 
 ## Live passive constitutive laws for scalar dissipation
