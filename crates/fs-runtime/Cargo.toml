@@ -1,0 +1,23 @@
+[package]
+name = "fs-runtime"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generic runtime binding over the composition kernel: load, interactive inputs, zero-allocation stepping and AudioWorklet rendering, generated probe descriptors, ledger, and refusals."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+fs-matdb = { path = "../fs-matdb" }
+fs-ports = { path = "../fs-ports" }
+fs-qty = { path = "../fs-qty" }
+fs-scenario = { path = "../fs-scenario" }
+fs-system = { path = "../fs-system" }
+
+[lints]
+workspace = true

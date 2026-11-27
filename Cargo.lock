@@ -2791,6 +2791,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-runtime"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-exec",
+ "fs-matdb",
+ "fs-ports",
+ "fs-qty",
+ "fs-scenario",
+ "fs-system",
+]
+
+[[package]]
 name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
