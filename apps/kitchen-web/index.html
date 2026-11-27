@@ -1245,6 +1245,72 @@
             </figcaption>
           </figure>
 
+          <figure class="fig reveal bo-fig hc-fig" id="hood">
+            <header class="fig-head">
+              <p class="todo">Keep the hood: move the broilers, then seal the gap behind them</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage bo-stage hc-stage" data-hc-stage>
+                <canvas data-hc-canvas tabindex="0" aria-label="A 10-foot stainless canopy hood on a kitchen wall over three gas broilers on stands, steaks on their grates and a cook turning them. Smoke rises off the grates. Air comes up the gap between the broilers and the wall, or from the front once that gap is closed with a steel sheet. The smoke goes up into the hood or, when its fan pulls too little, rolls out under the hood's front edge into the kitchen. Drag to look around."></canvas>
+                <div class="wk-hud bo-hud hc-hud" aria-hidden="true"><b data-hc-hud-set>Flush with the edge, gap open</b><span data-hc-hud-doing>…</span><em data-hc-hud-note data-kind="spill">…</em></div>
+                <span class="bo-tag" data-hc-tag="gap" style="--c:#7dd3fc" hidden aria-hidden="true"><i>Gap behind</i><b>…</b></span>
+                <span class="bo-tag" data-hc-tag="lip" style="--c:#fb7185" hidden aria-hidden="true"><i>Hood's edge</i><b>…</b></span>
+                <p class="wk-legend hc-legend" aria-hidden="true"><span style="--k:#d4d4d8">Smoke</span><span style="--k:#7dd3fc">Air the smoke draws in</span></p>
+              </div>
+              <div class="lab bo-lab hc-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles bo-tiles hc-tiles">
+                    <div class="wk-tile bo-tile" style="--c:#fbbf24"><span>This setup needs</span><b><i data-hc-need>…</i></b><small data-hc-need-s>…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#e2e8f0" data-hc-fan-box><span>The smoke</span><b><i data-hc-fan-t>…</i></b><small data-hc-fan-s>…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#7dd3fc"><span>Gap behind</span><b><i data-hc-gap>…</i></b><small data-hc-gap-s>…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#c084fc"><span>Air to warm</span><b><i data-hc-warm>…</i></b><small data-hc-warm-s>…</small></div>
+                  </div>
+                  <div class="bo-chart-wrap">
+                    <p class="rs-map-head"><b>The least air that catches all the smoke, as measured</b><span class="wk-keys bo-keys hc-keys"><span style="--k:#4ade80">Caught at the fan's setting</span><span style="--k:#fb7185">Escapes</span><span class="line" style="--k:#fbbf24" data-hc-key-fan>Fan, 4,000 cfm</span><span class="code">The code's least</span></span></p>
+                    <div class="bo-chart" data-hc-chart role="img" aria-label="The least exhaust that catches all the smoke, measured with the broilers flush with the hood's front edge, 6 inches back and 12 inches back, each with the gap behind them open and sealed, against the fan's setting and the building code's least for this hood."></div>
+                    <p class="rs-map-note">Rising smoke drags the room's air in with it. Air coming up an open gap behind the broilers pushes the smoke forward, toward the hood's front edge, where it escapes. With the gap sealed, the air comes from the front and pushes the smoke back into the hood. Standing the broilers further back leaves more hood in front of the smoke.</p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">The hood stays where it is. Three gas broilers stand under it, and its fan pulls 4,000 cubic feet of air a minute, the building code's least for broilers under a 10-foot hood. Stand them further back, close the gap behind them with a sheet of steel, turn the fan up or down, and see whether the smoke goes up the hood or out into the kitchen.</p>
+                  <div class="field">
+                    <p class="micro">The broilers' fronts</p>
+                    <div class="seg fill" role="group" aria-label="How far the broilers stand back from the hood's front edge">
+                      <button type="button" data-hc-at="0" aria-pressed="true">Flush</button>
+                      <button type="button" data-hc-at="1" aria-pressed="false">6 in back</button>
+                      <button type="button" data-hc-at="2" aria-pressed="false">12 in back</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The gap behind them</p>
+                    <div class="seg fill" role="group" aria-label="The gap between the broilers' backs and the wall">
+                      <button type="button" data-hc-seal="0" aria-pressed="true">Open</button>
+                      <button type="button" data-hc-seal="1" aria-pressed="false">Sealed</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>The hood's fan</b><output data-hc-fan-val>4,000 cfm</output></span><input type="range" min="2000" max="6000" step="100" value="4000" data-hc-fan aria-label="How much air the hood's fan pulls, in cubic feet a minute" /></label>
+                  <div class="status" data-hc-status data-state="warn">Setting up the line…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="hood-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>The rates are measured. At the Food Service Technology Center's laboratory, three 3-foot gas underfired broilers, cooking, stood under a 10-foot wall canopy hood, and the exhaust was turned down until hot air first escaped past the hood's edges, watched by schlieren imaging, which shows hot air against cool. The least rate that caught it all is the setup's capture and containment rate. Flush with the hood's front edge, a 16.5-inch gap behind them, the broilers needed 5,100 cubic feet a minute; 6 inches back, 4,400; 12 inches back, 4,000. With the gap closed by a sheet from the broilers' backs to the wall: 3,400, 2,900 and 2,800 (Swierczyna and colleagues; the ASHRAE Handbook's kitchen ventilation chapter gives the first two).</p>
+                <p>The building code's least for a wall canopy hood over broilers, unless the hood is tested and listed for less, is 400 cubic feet a minute for each foot of hood: 4,000 for this one. Every cubic foot the fan pulls out comes back in as outdoor air, warmed in winter and cooled in summer; the warming on a 40 °F morning is the sensible heat of standard air. The smoke on screen is drawn to show each verdict: when the fan pulls less than the lab measured, part of it rolls out under the hood's front edge, more of it the further short the fan is.</p>
+              </div>
+              <div>
+                <code class="formula">caught ⇔ fan ≥ capture rate (measured)<br />q_warm = 1.08 · cfm · (70 °F − T_out)   Btu/h</code>
+                <p class="model">Model: <code>hoodCapture</code>, the laboratory's six measured rates. Code: the International Mechanical Code's 400 cfm per foot of a wall canopy hood over heavy-duty appliances. Standard air: 0.075 lb/ft³ at 0.24 Btu/lb·°F, so 1.08 Btu/h for each cfm and °F.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
           <figure class="fig reveal rs-fig" id="rush">
             <header class="fig-head">
               <p class="todo">Pick a day, then pick what to cook before the doors open</p>

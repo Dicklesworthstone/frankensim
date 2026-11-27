@@ -4473,3 +4473,72 @@ button.wk-dish[aria-pressed="true"] {
 .hd-svg .lunch-t {
   fill: #fde68a;
 }
+/* Keep the hood (chapter 06, after the floor plan). */
+.hc-hud em[data-kind="spill"] {
+  color: #fecdd3;
+  background: rgb(251 113 133 / 0.22);
+}
+.hc-svg .bar {
+  cursor: pointer;
+}
+.hc-svg .bar .hit {
+  fill: transparent;
+}
+.hc-svg .bar .b {
+  fill: color-mix(in srgb, var(--c) 62%, transparent);
+  stroke: var(--c);
+  stroke-width: 1;
+}
+.hc-svg .bar .b.sealed {
+  fill: color-mix(in srgb, var(--c) 34%, transparent);
+}
+.hc-svg .bar .stripes {
+  pointer-events: none;
+}
+.hc-svg .hatch {
+  stroke: color-mix(in srgb, #fff 42%, transparent);
+  stroke-width: 2.4;
+}
+.hc-svg .bar.sel .b {
+  stroke: #fff;
+  stroke-width: 2;
+}
+.hc-svg .bar .v {
+  fill: var(--c);
+  font-weight: 600;
+}
+.hc-svg .fan {
+  stroke: var(--c);
+  stroke-width: 2;
+}
+.hc-svg .code {
+  stroke: rgb(255 255 255 / 0.45);
+  stroke-dasharray: 4 3;
+}
+.hc-svg .xa.sub {
+  fill: var(--muted);
+}
+.hc-hud b {
+  font-size: 1.15rem;
+}
+.hc-keys .line::before {
+  height: 2px;
+  vertical-align: 0.2em;
+}
+.hc-keys .code::before {
+  height: 2px;
+  vertical-align: 0.2em;
+  background: repeating-linear-gradient(90deg, rgb(255 255 255 / 0.6) 0 3px, transparent 3px 5px);
+}
+@media (max-width: 720px) {
+  .hc-hud b {
+    flex-basis: 100%;
+    font-size: 1rem;
+  }
+}
+.hc-legend span {
+  padding: 0.18rem 0.5rem;
+  border-radius: 99px;
+  color: var(--soft);
+  background: rgb(10 10 12 / 0.62);
+}

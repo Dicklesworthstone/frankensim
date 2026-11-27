@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -180,6 +180,7 @@ async function main() {
       "[data-cd-canvas]",
       "[data-hd-canvas]",
       "[data-floor-canvas]",
+      "[data-hc-canvas]",
       "[data-rush-canvas]",
       "[data-gl-canvas]",
       "[data-morning-canvas]",
@@ -638,6 +639,38 @@ async function main() {
         await page.$eval("[data-hd-stage]", (el) => el.hold.hold(null));
       }
 
+      if (sid === "hood") {
+        // Flush with the hood's edge and the gap open, the broilers need 5,100 cfm: at the code's 4,000 smoke rolls out
+        // under the edge. Pushed 12 inches back with the gap sealed they need 2,800: all of it caught, and none out in
+        // the kitchen once what was already out has cleared. At 4,000 cfm four of the six setups are caught, at 2,700
+        // none. No puff the hood caught is ever drawn as escaping.
+        const info = () => page.$eval("[data-hc-stage]", (el) => el.hood.info());
+        await page.$eval("[data-hc-stage]", (el) => {
+          el.hood.hold(true);
+          el.hood.set({ at: 0, sealed: false, fan: 4000 });
+          el.hood.settle();
+        });
+        await sleep(3500);
+        const flush = await info();
+        console.log(`[verify-chrome] Keep the hood, flush and open: need ${flush.need}, caught ${flush.caught}, ${JSON.stringify(flush.smoke)} | ${flush.status.slice(0, 90)}`);
+        if (flush.need !== 5100 || flush.caught || flush.caughtCount !== 4 || !(flush.smoke.escaping > 20) || flush.smoke.stray !== 0 || !/escapes/.test(flush.tags[1] ?? "")) throw new Error(`Keep the hood: flush and open at 4,000 cfm, the smoke is not shown escaping: ${JSON.stringify(flush)}`);
+        await page.click('[data-hc-at="2"]');
+        await page.click('[data-hc-seal="1"]');
+        await sleep(6000);
+        const sealed = await info();
+        console.log(`[verify-chrome] Keep the hood, 12 in back and sealed: need ${sealed.need}, caught ${sealed.caught}, front ${sealed.frontIn} in, seal ${sealed.sealK}, ${JSON.stringify(sealed.smoke)}`);
+        if (sealed.at !== 2 || !sealed.sealed || sealed.touring || sealed.need !== 2800 || !sealed.caught || sealed.frontIn !== 12 || sealed.sealK !== 1 || sealed.smoke.escaping !== 0 || sealed.smoke.stray !== 0 || !(sealed.smoke.live > 200) || !/all caught/.test(sealed.tags[1] ?? "") || !/sealed/.test(sealed.tags[0] ?? "")) throw new Error(`Keep the hood: 12 inches back and sealed at 4,000 cfm, the smoke is not all caught: ${JSON.stringify(sealed)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-hood.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-hood.png");
+        await page.$eval("[data-hc-stage]", (el) => el.hood.set({ fan: 2700 }));
+        const low = await info();
+        if (low.caughtCount !== 0 || low.caught) throw new Error(`Keep the hood: at 2,700 cfm a setup is still caught: ${JSON.stringify(low)}`);
+        await page.$eval("[data-hc-stage]", (el) => {
+          el.hood.set({ fan: 4000 });
+          el.hood.hold(false);
+        });
+      }
+
       if (sid === "boil") {
         // As set on arrival (30 litres, full flame): the two pots with lids boil in about 25 min, half the big pot's
         // 50 with its lid, for the same gas; the big pot without one in about 57. On half a flame the big open pot does
@@ -760,9 +793,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 23 WebGL canvases (19 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 24 WebGL canvases (20 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -776,6 +809,7 @@ async function main() {
         "[data-cd-canvas]",
         "[data-hd-canvas]",
         "[data-floor-canvas]",
+        "[data-hc-canvas]",
         "[data-rush-canvas]",
         "[data-gl-canvas]",
         "[data-morning-canvas]",
@@ -794,7 +828,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 23 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 24 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
