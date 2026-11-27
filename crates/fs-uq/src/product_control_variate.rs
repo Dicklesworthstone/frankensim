@@ -27,6 +27,8 @@ pub enum UqControlError {
     AlreadySampled,
     /// The frozen control belongs to a different complete plan.
     PlanMismatch,
+    /// The physical mean-control producer admits only uniform copula marginals.
+    EmpiricalMarginalUnsupported,
     /// A failed sample cannot be dropped to obtain a more convenient estimate.
     RefusedExecution,
     /// Sampling, centering or a statistic exceeded finite f64 arithmetic.
@@ -41,6 +43,7 @@ impl fmt::Display for UqControlError {
             Self::InvalidGradient => "control requires one finite derivative per declared parameter",
             Self::AlreadySampled => "freeze the control before any model observations",
             Self::PlanMismatch => "control and execution have different uncertainty plans",
+            Self::EmpiricalMarginalUnsupported => "physical copula mean controls require uniform marginals",
             Self::RefusedExecution => "a refused execution cannot publish a controlled mean",
             Self::NumericalRange => "control-variate arithmetic exceeds finite f64 range",
             Self::Cancelled => "control-variate assessment cancelled before publication",

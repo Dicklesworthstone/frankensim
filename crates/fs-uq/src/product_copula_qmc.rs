@@ -1,4 +1,4 @@
-//! Replicated randomized QMC for the existing uniform Gaussian-copula model.
+//! Replicated randomized QMC for uniform and empirical Gaussian-copula marginals.
 //!
 //! Shares marginal admission, the exact normal-CDF transform and physical
 //! checkpoint binding with `GaussianCopulaExecution`. `QmcExecution` continues
@@ -11,13 +11,13 @@
 
 use core::fmt::Display;
 use fs_blake3::ContentHash;
-use crate::{ParameterUncertainty, QmcConfig, QmcExecution, QmcReport, UqCheckpointError, UqPlan};
-use crate::product_copula::{EvaluationError, bound_model, latent_plan, physical_parameters};
+use crate::{EmpiricalMarginal, ParameterUncertainty, QmcConfig, QmcExecution, QmcReport, UqCheckpointError, UqPlan};
+use crate::product_copula::{CopulaMarginals, EvaluationError, admit_marginals};
 
 /// Resumable replicated Sobol sampling of bounded, dependent physical inputs.
 #[derive(Debug, Clone)]
 pub struct GaussianCopulaQmcExecution {
-    marginals: Vec<ParameterUncertainty>,
+    pub(super) marginals: CopulaMarginals,
     execution: QmcExecution,
 }
 
@@ -32,9 +32,9 @@ impl GaussianCopulaQmcExecution {
     pub fn new(marginal_plan: &UqPlan, latent_correlation: &[Vec<f64>], config: QmcConfig)
         -> Result<Self, &'static str>
     {
-        let latent = latent_plan(marginal_plan, latent_correlation)?;
+        let (marginals, latent) = admit_marginals(marginal_plan, latent_correlation)?;
         let execution = QmcExecution::new(&latent, config)?;
-        Ok(Self { marginals: marginal_plan.parameters.clone(), execution })
+        Ok(Self { marginals, execution })
     }
 
     // Read-only access for the shared physical mean-control implementation.
@@ -43,7 +43,13 @@ impl GaussianCopulaQmcExecution {
 
     /// Physical marginal supports and units in declaration order.
     #[must_use]
-    pub fn marginals(&self) -> &[ParameterUncertainty] { &self.marginals }
+    pub fn marginals(&self) -> &[ParameterUncertainty] { &self.marginals.parameters }
+
+    /// Empirical declarations in evaluator order, including source counts and
+    /// observed ranges. Draws are confined to the observed values.
+    pub fn empirical_marginals(&self) -> impl Iterator<Item = (&ParameterUncertainty, &EmpiricalMarginal)> {
+        self.marginals.empirical()
+    }
 
     /// Physical QoI observations, including an unfinished replicate's prefix.
     #[must_use]
@@ -72,7 +78,7 @@ impl GaussianCopulaQmcExecution {
     where F: FnMut(&[f64]) -> Result<Option<f64>, E>, E: Display, C: FnMut() -> bool {
         let marginals = &self.marginals;
         self.execution.advance_interruptible(allowance, cancelled, |latent| {
-            let physical = physical_parameters(marginals, latent).map_err(EvaluationError::Transform)?;
+            let physical = marginals.transform(latent).map_err(EvaluationError::Transform)?;
             evaluator(&physical).map_err(EvaluationError::Producer)
         })
     }
@@ -80,7 +86,7 @@ impl GaussianCopulaQmcExecution {
     /// Persist observations with the latent matrix, complete net layout,
     /// physical supports/units and caller-supplied physical model identity.
     pub fn checkpoint(&self, model: ContentHash) -> Result<Vec<u8>, UqCheckpointError> {
-        self.execution.checkpoint(bound_model(&self.marginals, model))
+        self.execution.checkpoint(self.marginals.bound_model(model))
     }
 
     /// Re-admit and restore without replaying any physical prefix.
@@ -89,10 +95,10 @@ impl GaussianCopulaQmcExecution {
     pub fn restore(marginal_plan: &UqPlan, latent_correlation: &[Vec<f64>], config: QmcConfig,
         model: ContentHash, bytes: &[u8]) -> Result<Self, UqCheckpointError>
     {
-        let latent = latent_plan(marginal_plan, latent_correlation).map_err(UqCheckpointError::InvalidPlan)?;
-        let execution = QmcExecution::restore(&latent, config,
-            bound_model(&marginal_plan.parameters, model), bytes)?;
-        Ok(Self { marginals: marginal_plan.parameters.clone(), execution })
+        let (marginals, latent) = admit_marginals(marginal_plan, latent_correlation)
+            .map_err(UqCheckpointError::InvalidPlan)?;
+        let execution = QmcExecution::restore(&latent, config, marginals.bound_model(model), bytes)?;
+        Ok(Self { marginals, execution })
     }
 }
 

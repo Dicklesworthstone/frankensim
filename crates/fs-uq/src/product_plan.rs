@@ -9,6 +9,8 @@
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::Color;
 
+use crate::EmpiricalMarginal;
+
 /// Classification of uncertainty for a physical parameter or boundary condition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UncertaintyKind {
@@ -26,6 +28,8 @@ pub enum UncertaintyKind {
         /// Upper interval bound.
         hi: f64,
     },
+    /// Equally weighted observed values, admitted by the Gaussian-copula executors.
+    AleatoryEmpirical(EmpiricalMarginal),
     /// Epistemic interval enclosure (no probability measure claimed).
     EpistemicInterval {
         /// Lower interval bound.
@@ -52,7 +56,9 @@ impl UncertaintyKind {
     pub fn has_probability_measure(&self) -> bool {
         matches!(
             self,
-            Self::AleatoryGaussian { .. } | Self::AleatoryUniform { .. }
+            Self::AleatoryGaussian { .. }
+                | Self::AleatoryUniform { .. }
+                | Self::AleatoryEmpirical(_)
         )
     }
 
@@ -62,6 +68,7 @@ impl UncertaintyKind {
         match self {
             Self::AleatoryGaussian { .. } => "aleatory-gaussian",
             Self::AleatoryUniform { .. } => "aleatory-uniform",
+            Self::AleatoryEmpirical(_) => "aleatory-empirical",
             Self::EpistemicInterval { .. } => "epistemic-interval",
             Self::StatisticalConfidence { .. } => "statistical-confidence",
             Self::Unstated => "unstated",
@@ -102,6 +109,20 @@ impl ParameterUncertainty {
         Self {
             name: name.into(),
             kind: UncertaintyKind::AleatoryUniform { lo, hi },
+            unit: unit.into(),
+        }
+    }
+
+    /// Declare an empirical Gaussian-copula marginal in physical units.
+    #[must_use]
+    pub fn empirical(
+        name: impl Into<String>,
+        marginal: EmpiricalMarginal,
+        unit: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: UncertaintyKind::AleatoryEmpirical(marginal),
             unit: unit.into(),
         }
     }
@@ -348,6 +369,9 @@ pub(crate) fn admit_plan(plan: &UqPlan) -> Result<Option<Vec<Vec<f64>>>, &'stati
                 if mean.is_finite() && std_dev.is_finite() && std_dev >= 0.0 => {}
             UncertaintyKind::AleatoryUniform { lo, hi }
                 if lo.is_finite() && hi.is_finite() && lo <= hi => {}
+            UncertaintyKind::AleatoryEmpirical(_) => {
+                return Err("empirical marginals require an explicit Gaussian-copula executor");
+            }
             _ => {
                 return Err(
                     "declare a finite Gaussian or uniform probability measure; bands and unstated inputs are not distributions",

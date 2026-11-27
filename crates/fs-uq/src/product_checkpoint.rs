@@ -11,7 +11,7 @@ use core::fmt;
 use fs_blake3::{ContentHash, hash_domain};
 
 use crate::product_plan::admit_plan;
-use crate::{CorrelationModel, PropagationMethod, UncertaintyKind, UqExecution, UqPlan, UqStatus};
+use crate::{CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqExecution, UqPlan, UqStatus};
 
 const MAGIC: &[u8; 8] = b"FSUQCP01";
 const HEADER_LEN: usize = 8 + 32 + 1 + 8;
@@ -166,6 +166,37 @@ fn numbers(bytes: &mut Vec<u8>, values: &[f64]) {
     }
 }
 
+/// Length-framed parameter identity, shared with physical copula checkpoints.
+pub(crate) fn encode_parameter(bytes: &mut Vec<u8>, parameter: &ParameterUncertainty) {
+    text(bytes, &parameter.name);
+    text(bytes, &parameter.unit);
+    match parameter.kind {
+        UncertaintyKind::AleatoryGaussian { mean, std_dev } => {
+            bytes.push(0);
+            numbers(bytes, &[mean, std_dev]);
+        }
+        UncertaintyKind::AleatoryUniform { lo, hi } => {
+            bytes.push(1);
+            numbers(bytes, &[lo, hi]);
+        }
+        UncertaintyKind::EpistemicInterval { lo, hi } => {
+            bytes.push(2);
+            numbers(bytes, &[lo, hi]);
+        }
+        UncertaintyKind::StatisticalConfidence { estimate, half_width, confidence } => {
+            bytes.push(3);
+            numbers(bytes, &[estimate, half_width, confidence]);
+        }
+        UncertaintyKind::Unstated => bytes.push(4),
+        UncertaintyKind::AleatoryEmpirical(ref marginal) => {
+            bytes.push(5);
+            text(bytes, marginal.rule_id());
+            bytes.extend_from_slice(&(marginal.sample_count() as u64).to_le_bytes());
+            bytes.extend_from_slice(marginal.sample_hash().as_bytes());
+        }
+    }
+}
+
 pub(crate) fn execution_identity(plan: &UqPlan, model_identity: ContentHash) -> ContentHash {
     // A length-framed, explicitly tagged encoding, not Debug/JSON formatting.
     // This domain also pins the Philox ordinal addressing and normal transform;
@@ -191,27 +222,7 @@ pub(crate) fn execution_identity(plan: &UqPlan, model_identity: ContentHash) -> 
     }
     bytes.extend_from_slice(&(plan.parameters.len() as u64).to_le_bytes());
     for parameter in &plan.parameters {
-        text(&mut bytes, &parameter.name);
-        text(&mut bytes, &parameter.unit);
-        match parameter.kind {
-            UncertaintyKind::AleatoryGaussian { mean, std_dev } => {
-                bytes.push(0);
-                numbers(&mut bytes, &[mean, std_dev]);
-            }
-            UncertaintyKind::AleatoryUniform { lo, hi } => {
-                bytes.push(1);
-                numbers(&mut bytes, &[lo, hi]);
-            }
-            UncertaintyKind::EpistemicInterval { lo, hi } => {
-                bytes.push(2);
-                numbers(&mut bytes, &[lo, hi]);
-            }
-            UncertaintyKind::StatisticalConfidence { estimate, half_width, confidence } => {
-                bytes.push(3);
-                numbers(&mut bytes, &[estimate, half_width, confidence]);
-            }
-            UncertaintyKind::Unstated => bytes.push(4),
-        }
+        encode_parameter(&mut bytes, parameter);
     }
     let matrix = match &plan.correlation {
         CorrelationModel::Unknown => { bytes.push(0); None }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ParameterUncertainty;
 
 fn config() -> QmcConfig { QmcConfig { replicates: 4, samples_per_replicate: 4 } }
 fn plan() -> UqPlan {

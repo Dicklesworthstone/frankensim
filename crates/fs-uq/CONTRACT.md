@@ -110,6 +110,78 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   bound is feasible. If none is admitted, the API returns
   `NoFeasibleChanceCandidate` rather than a penalized but uncertified design.
 
+## Gaussian-copula propagation
+
+`GaussianCopulaExecution` uses Philox Monte Carlo with 1 to 256 physical
+parameters. `GaussianCopulaQmcExecution` uses independently Owen-scrambled
+Sobol replicates with 1 to 10 parameters and an explicit `QmcConfig`. Both
+require an `Independent` marginal plan, distinct parameter names, physical
+units, and a separately declared correlation matrix in parameter order.
+The matrix specifies dependence between **latent standard normals**. Both
+executors validate it with the existing numerical PSD factorization, which
+admits consistent singular matrices. Neither estimates dependence from
+observations. The ordinary product executor continues to refuse a generic
+`Correlated` matrix as a joint law.
+
+Each coordinate first maps a correlated normal `z` to
+`u = 0.5 * erfc(-z / sqrt(2))`. A bounded uniform marginal uses its existing
+endpoint interpolation. An `AleatoryEmpirical` marginal returns the sample's
+order statistic at one-based rank `max(1, ceil(n * u))`. Thus an exact `k/n`
+selects observation `k`, and a probability just above it selects the next
+observation. Zero and one select the observed endpoints. Repeated values
+retain their multiplicity, and a one-observation distribution is constant.
+The empirical law puts all its mass on the observed values. It supplies no
+interpolation or tail estimates beyond the observed range.
+
+For example, a lead-time sample of 2, 2, 4 and 11 days assigns probability
+one half to 2 days. It can share a copula with a uniform quantity.
+
+```rust
+use fs_uq::{CorrelationModel, EmpiricalMarginal, GaussianCopulaExecution,
+    INVERSE_ECDF_RULE_ID, ParameterUncertainty, PropagationMethod, UqPlan};
+
+let lead_times = EmpiricalMarginal::new(vec![2.0, 2.0, 4.0, 11.0], INVERSE_ECDF_RULE_ID)?;
+let plan = UqPlan::new("delay", PropagationMethod::MonteCarlo, 4096)
+    .with_parameter(ParameterUncertainty::empirical("lead_time", lead_times, "days"))
+    .with_parameter(ParameterUncertainty::uniform("demand", 4.0, 10.0, "units/day"))
+    .with_correlation(CorrelationModel::Independent);
+let run = GaussianCopulaExecution::new(&plan, &[vec![1.0, 0.6], vec![0.6, 1.0]])?;
+let (_, history) = run.empirical_marginals().next().unwrap();
+assert_eq!(history.sample_count(), 4);
+assert_eq!(history.observed_support(), [2.0, 11.0]);
+```
+
+`EmpiricalMarginal::new` requires 1 through `MAX_EMPIRICAL_SAMPLES`
+(1,048,576) finite binary64 observations in ascending total order, including
+negative zero before positive zero. V1 admits only `inverse-ecdf-step-v1`.
+The sample identity hashes the concatenated little-endian observation bytes
+under `org.frankensim.uq.empirical-sample.v1`. Both executors expose empirical
+declarations through `empirical_marginals()`. For each marginal,
+`sample_count()` reports the number of source observations, while
+`observed_support()` reports the observed minimum and maximum. These describe
+the input data independently of the number or range of simulated outputs.
+Physical rank dependence can differ from latent correlation. For continuous
+marginals the Gaussian copula gives Spearman correlation
+`(6/π) asin(ρ/2)`. Ties induced by empirical steps can attenuate it.
+
+Plans containing empirical coordinates assign latent coordinates in parameter
+name order, permuting both matrix axes together. The evaluator receives
+physical coordinates in declaration order. Reordering parameters and the
+corresponding matrix rows and columns therefore permutes the same-seed draws.
+The `org.frankensim.uq.empirical-gaussian-copula.v1` checkpoint binding
+covers the declaration order, units, law for each
+coordinate, and each sample's rule ID, length and content hash, in addition
+to the latent plan, sampler configuration and caller's model identity.
+Reordering declarations requires a new checkpoint even when their joint law
+is equivalent. All-uniform plans retain their established coordinate order,
+transform and `org.frankensim.uq.uniform-gaussian-copula.v1` checkpoint
+binding.
+
+Both executors retain accepted observations across cancellation and replay an
+interrupted draw with the same physical parameters. QMC estimates and
+descriptive errors use complete independent replicates. The physical
+mean-control API refuses plans containing empirical marginals.
+
 ## Exact linear seismic response
 
 `seismic::linear_sdof_response` is an additive response path for

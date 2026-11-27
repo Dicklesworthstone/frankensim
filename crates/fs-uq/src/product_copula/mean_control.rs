@@ -7,7 +7,7 @@
 
 use fs_blake3::{ContentHash, hash_domain};
 
-use super::{GaussianCopulaExecution, physical_parameters};
+use super::GaussianCopulaExecution;
 use crate::product_checkpoint::execution_identity;
 use crate::product_control_variate::{LinearControlEstimate, LinearControlVariate,
     UqControlError, assess_with_parameters, checkpoint};
@@ -36,6 +36,7 @@ impl GaussianCopulaExecution {
     /// Freeze physical-unit coefficients before any accepted or failed sample.
     /// The latent matrix, physical supports/units, seed and lifetime policy are
     /// all bound. No sampler draw or model evaluation is consumed.
+    /// Empirical marginals return `UqControlError::EmpiricalMarginalUnsupported`.
     pub fn freeze_linear_control_variate(&self, gradient: &[f64])
         -> Result<CopulaLinearControlVariate, UqControlError>
     {
@@ -45,10 +46,13 @@ impl GaussianCopulaExecution {
         if self.execution.attempted != 0 || !self.execution.values.is_empty() {
             return Err(UqControlError::AlreadySampled);
         }
+        if self.empirical_marginals().next().is_some() {
+            return Err(UqControlError::EmpiricalMarginalUnsupported);
+        }
         // Admission only: this independent plan supplies PHYSICAL expectations
         // and coefficient validation. It never draws an independent sample.
         let mut marginal_plan = self.execution.plan().clone();
-        marginal_plan.parameters = self.marginals.clone();
+        marginal_plan.parameters = self.marginals().to_vec();
         marginal_plan.correlation = CorrelationModel::Independent;
         let fresh = UqExecution::new(&marginal_plan).map_err(|_| UqControlError::PlanMismatch)?;
         Ok(CopulaLinearControlVariate {
@@ -82,7 +86,7 @@ impl GaussianCopulaExecution {
         assess_with_parameters(&control.control, &self.execution.values, |ordinal| {
             let latent = sample_parameters(self.execution.plan(), self.execution.factor.as_deref(), ordinal)
                 .map_err(|_| UqControlError::NumericalRange)?;
-            physical_parameters(&self.marginals, &latent).map_err(|_| UqControlError::NumericalRange)
+            self.marginals.transform(&latent).map_err(|_| UqControlError::NumericalRange)
         }, &mut cancelled)
     }
 }

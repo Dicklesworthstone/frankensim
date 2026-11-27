@@ -14,8 +14,8 @@ use super::{QmcConfig, QmcEstimate, QmcExecution, scaled_mean_interruptible,
 use crate::product_checkpoint::execution_identity;
 use crate::product_control_variate::{LinearControlVariate, UqControlError,
     adjusted_samples, checkpoint, poll};
-use crate::product_copula::{bound_model, physical_parameters};
-use crate::{CorrelationModel, GaussianCopulaQmcExecution, ParameterUncertainty,
+use crate::product_copula::CopulaMarginals;
+use crate::{CorrelationModel, GaussianCopulaQmcExecution,
     PropagationMethod, UqCheckpointError, UqExecution, UqPlan, UqStatus};
 
 /// Mean-only predictor in physical parameter units, frozen before sampling.
@@ -56,17 +56,17 @@ pub struct QmcLinearControlEstimate {
     pub variance_ratio: Option<f64>,
 }
 
-fn identity(source: &QmcExecution, physical: Option<&[ParameterUncertainty]>) -> ContentHash {
+fn identity(source: &QmcExecution, physical: Option<&CopulaMarginals>) -> ContentHash {
     let mut layout = Vec::with_capacity(17);
     layout.push(u8::from(physical.is_some()));
     layout.extend_from_slice(&(source.config.replicates as u64).to_le_bytes());
     layout.extend_from_slice(&(source.config.samples_per_replicate as u64).to_le_bytes());
     let model = hash_domain("org.frankensim.uq.qmc-linear-control.v1", &layout);
-    let model = physical.map_or(model, |marginals| bound_model(marginals, model));
+    let model = physical.map_or(model, |marginals| marginals.bound_model(model));
     execution_identity(&source.plan, model)
 }
 
-fn freeze(source: &QmcExecution, physical: Option<&[ParameterUncertainty]>, gradient: &[f64])
+fn freeze(source: &QmcExecution, physical: Option<&CopulaMarginals>, gradient: &[f64])
     -> Result<QmcLinearControlVariate, UqControlError>
 {
     if source.status == UqStatus::Refused || source.failure.is_some() {
@@ -79,7 +79,10 @@ fn freeze(source: &QmcExecution, physical: Option<&[ParameterUncertainty]>, grad
     let mut marginal_plan = source.plan.clone();
     marginal_plan.method = PropagationMethod::MonteCarlo;
     if let Some(marginals) = physical {
-        marginal_plan.parameters = marginals.to_vec();
+        if marginals.empirical().next().is_some() {
+            return Err(UqControlError::EmpiricalMarginalUnsupported);
+        }
+        marginal_plan.parameters = marginals.parameters.clone();
         marginal_plan.correlation = CorrelationModel::Independent;
     }
     let fresh = UqExecution::new(&marginal_plan).map_err(|_| UqControlError::PlanMismatch)?;
@@ -90,7 +93,7 @@ fn freeze(source: &QmcExecution, physical: Option<&[ParameterUncertainty]>, grad
 }
 
 fn assess(
-    source: &QmcExecution, physical: Option<&[ParameterUncertainty]>,
+    source: &QmcExecution, physical: Option<&CopulaMarginals>,
     control: &QmcLinearControlVariate, mut cancelled: impl FnMut() -> bool,
 ) -> Result<QmcLinearControlEstimate, UqControlError> {
     if identity(source, physical) != control.sampling_identity {
@@ -108,7 +111,7 @@ fn assess(
         let parameters = source.parameters(ordinal).map_err(|_| UqControlError::NumericalRange)?;
         match physical {
             None => Ok(parameters),
-            Some(marginals) => physical_parameters(marginals, &parameters)
+            Some(marginals) => marginals.transform(&parameters)
                 .map_err(|_| UqControlError::NumericalRange),
         }
     }, &mut cancelled)?;
@@ -164,21 +167,22 @@ impl GaussianCopulaQmcExecution {
     /// Freeze PHYSICAL derivatives, not latent-normal derivatives. Means are
     /// the declared uniform midpoints; matrix and physical transformation stay
     /// bound separately. Another sample stream's control cannot be attached.
+    /// Empirical marginals return `UqControlError::EmpiricalMarginalUnsupported`.
     pub fn freeze_linear_control_variate(&self, gradient: &[f64])
         -> Result<QmcLinearControlVariate, UqControlError>
-    { freeze(self.control_source(), Some(self.marginals()), gradient) }
+    { freeze(self.control_source(), Some(&self.marginals), gradient) }
 
     /// Assess physical-coordinate controls on complete independent scrambles.
     pub fn assess_linear_control_variate(&self, control: &QmcLinearControlVariate)
         -> Result<QmcLinearControlEstimate, UqControlError>
-    { assess(self.control_source(), Some(self.marginals()), control, || false) }
+    { assess(self.control_source(), Some(&self.marginals), control, || false) }
 
     /// As the ordinary QMC assessment, replaying the exact original copula map.
     /// Cancellation never changes raw outcomes, compliance or checkpoints.
     pub fn assess_linear_control_variate_interruptible(
         &self, control: &QmcLinearControlVariate, cancelled: impl FnMut() -> bool,
     ) -> Result<QmcLinearControlEstimate, UqControlError>
-    { assess(self.control_source(), Some(self.marginals()), control, cancelled) }
+    { assess(self.control_source(), Some(&self.marginals), control, cancelled) }
 }
 
 impl QmcLinearControlVariate {
@@ -208,7 +212,7 @@ impl QmcLinearControlVariate {
     pub fn checkpoint_copula(&self, execution: &GaussianCopulaQmcExecution, model: ContentHash)
         -> Result<Vec<u8>, UqCheckpointError>
     {
-        if identity(execution.control_source(), Some(execution.marginals())) != self.sampling_identity {
+        if identity(execution.control_source(), Some(&execution.marginals)) != self.sampling_identity {
             return Err(UqCheckpointError::IdentityMismatch);
         }
         let mut bytes = checkpoint::encode_header(self.gradient());

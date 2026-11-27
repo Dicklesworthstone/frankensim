@@ -18,18 +18,29 @@ fn normal_cdf_matches_independent_reference_and_preserves_support() {
     for (z, expected) in [(-8.0, 6.220960574271784e-16), (-3.0, 0.0013498980316300945),
         (-1.0, 0.15865525393145705), (0.0, 0.5), (0.25, 0.5987063256829237),
         (1.0, 0.8413447460685429), (3.0, 0.9986501019683699), (8.0, 0.9999999999999993)] {
-        let value = physical_parameters(&plan(2).parameters[..1], &[z]).unwrap()[0];
+        let value = physical_value(&plan(2).parameters[0], z).unwrap();
         assert!((value - expected).abs() <= 2e-14 * expected.max(1e-15), "z={z}, value={value}");
     }
-    let parameters = [ParameterUncertainty::uniform("wide", -f64::MAX, f64::MAX, "W"),
+    let mut p = plan(2);
+    p.parameters = vec![ParameterUncertainty::uniform("wide", -f64::MAX, f64::MAX, "W"),
         ParameterUncertainty::uniform("constant", -0.0, 0.0, "K")];
+    let (marginals, _) = admit_marginals(&p, &matrix(0.0)).unwrap();
     for z in [-f64::MAX, -100.0, -8.0, 0.0, 8.0, 100.0, f64::MAX] {
-        let values = physical_parameters(&parameters, &[z, z]).unwrap();
+        let values = marginals.transform(&[z, z]).unwrap();
         assert!(values[0].is_finite());
         assert_eq!(values[1].to_bits(), (-0.0_f64).to_bits());
     }
     for latent in [vec![0.0], vec![f64::NAN, 0.0], vec![0.0, f64::INFINITY]] {
-        assert!(physical_parameters(&parameters, &latent).is_err());
+        assert!(marginals.transform(&latent).is_err());
+    }
+}
+
+#[test]
+fn empirical_median_jump_includes_zero_latent_and_reaches_both_endpoints() {
+    let law = EmpiricalMarginal::new(vec![2.0, 9.0], crate::INVERSE_ECDF_RULE_ID).unwrap();
+    let p = ParameterUncertainty::empirical("lead_time", law, "days");
+    for (z, expected) in [(-100.0, 2.0), (-1e-15, 2.0), (0.0, 2.0), (1e-15, 9.0), (100.0, 9.0)] {
+        assert_eq!(physical_value(&p, z).unwrap(), expected);
     }
 }
 
