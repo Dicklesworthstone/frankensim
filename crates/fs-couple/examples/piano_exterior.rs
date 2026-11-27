@@ -46,7 +46,7 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
     [--rt0425-string-damping]
     [--dampers estimated|point|pads.fspd]
-    [--string-polarization bridge-frames.fspp]
+    [--string-stretching strings.fspx] [--string-polarization bridge-frames.fspp | --legacy-axial-ratio]
     [--cavity enclosure.fspc]
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
@@ -67,6 +67,10 @@ partial to the upper first partial. When omitted, all supplied tensions are
 preserved, including the steinway-d source table. Length, mass, EI and contact
 geometry remain unchanged. See grand_piano/STRETCH_TUNING.md for the declared
 2:1 policy and sparse-scale requirements; this is not a perceptual calibration.
+With --string-stretching, waves keys on a flat unframed board derive axial motion
+from their string-side bridge geometry and each retained mode. Crowned boards
+need an explicit string frame. Use --legacy-axial-ratio for a comparison with
+the historical 0.06 vertical coupling on an unframed board.
 --string-polarization uses both transverse directions of each physical string,
 projected from the same full-vector board modes. Every key must supply its
 bridge site, 3-D arm, orthonormal string/hammer frame and lateral damper ratio.
@@ -291,7 +295,8 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let source_ports=controls.source_ports(&courses)?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
         options,source_ports.as_deref())?;
-    let controls=controls.in_air(spec.gas.as_ref())?;
+    let mut controls=controls.in_air(spec.gas.as_ref())?;
+    controls.bind_unframed_axial_rows(board_text,&board,options)?;
     let (mut piano,cavity_report)=controls.instrument_with_cavity_report(courses,&board.modes,board.motion.as_ref(),options)?;
     if let Some(report)=cavity_report {spec.source.push_str(&format!("; {report}"));}
     if let Some(c)=board.physical_damping.as_deref() {piano.configure_bare_board_damping(c)?;}

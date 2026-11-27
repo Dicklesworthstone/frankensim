@@ -22,8 +22,12 @@ fn axial_state_reaches_one_way_and_loaded_stereo_with_one_contact_clock() {
             substeps: 8,
             ..Options::default()
         };
+        let (mut board, courses, obj, _) = crate::tests::small_source_inputs();
+        // The string-side bridge runs diagonally from node 0 to the
+        // attachment at node 4, with positive eccentricity 2 mm.
+        board.push_str("stiffener,1000000,400000,0.00001,1e-11,2e-11,0.002,450,0,4\n");
         let make = |selection: Option<&str>| {
-            let (board, courses, obj, spec) = crate::tests::small_source_inputs();
+            let spec = crate::tests::small_source_inputs().3;
             let mut controls = Controls::from_texts(
                 &courses,
                 None,
@@ -34,7 +38,7 @@ fn axial_state_reaches_one_way_and_loaded_stereo_with_one_contact_clock() {
             if let Some(text) = selection {
                 controls = controls.with_string_stretching(text, &courses).unwrap();
             }
-            crate::prepare_controlled(&board, courses, &obj, spec, &options, controls).unwrap()
+            crate::prepare_controlled(&board, courses.clone(), &obj, spec, &options, controls).unwrap()
         };
         let waves = material(true);
         let mut scene = make(Some(&waves));
@@ -42,13 +46,18 @@ fn axial_state_reaches_one_way_and_loaded_stereo_with_one_contact_clock() {
         let mut reference = make(Some(&material(false)));
         // Attach through the direct physical API independently of the inline
         // Controls path used by render preparation.
-        let courses = crate::tests::small_source_inputs().1;
-        manual
-            .piano
-            .configure_string_stretching(
-                &linear::string_stretching::Specification::read(&waves, &courses).unwrap(),
-            )
-            .unwrap();
+        let mut direct = linear::string_stretching::Specification::read(&waves, &courses).unwrap();
+        let motion = manual.board.motion.as_ref().unwrap();
+        let unit = 1.0 / 2.0_f64.sqrt();
+        let arm = 0.002 + 0.5 * (12.0_f64 * 1e-11 / 1e-5).sqrt();
+        let analytic = motion.project_at(0, [0., 0., 1.], [0., 0., arm], [-unit, unit, 0.]).unwrap().0;
+        let attachment = crate::board_geometry::BoardGeometry::read(&board).unwrap().bridge_attachments(&[69]).unwrap()[0];
+        let axial = attachment.axial_row(motion).unwrap();
+        assert!(analytic.iter().zip(&axial).all(|(a,b)| (a-b).abs() < 1e-12 * (1.0 + b.abs())));
+        assert!(axial.iter().zip(&manual.board.modes)
+            .any(|(&a, mode)| (a - 0.06 * mode.bridge[48]).abs() > 1e-8));
+        direct.set_bridge_axial_rows(std::collections::BTreeMap::from([(69, axial)])).unwrap();
+        manual.piano.configure_string_stretching(&direct).unwrap();
         let count = scene.piano.bank.longitudinal_mode_count();
         assert!(count > 0);
         assert_eq!(reference.piano.bank.longitudinal_mode_count(), 0);
@@ -118,4 +127,23 @@ fn axial_state_reaches_one_way_and_loaded_stereo_with_one_contact_clock() {
             assert!(scene.piano.accounting.radiation_loss_j > 0.);
         }
     }
+}
+
+#[test]
+fn missing_attachment_requires_geometry_or_an_explicit_legacy_comparison() {
+    let make = |options: &Options, waves| {
+        let (board, courses, obj, spec) = crate::tests::small_source_inputs();
+        let controls = Controls::from_texts(&courses, None, None, None).unwrap()
+            .with_string_stretching(&material(waves), &courses).unwrap();
+        crate::prepare_controlled(&board, courses, &obj, spec, options, controls)
+    };
+    let parsed = |args: &[&str]| Options::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let options = parsed(&["--string-stretching", "waves.fspx", "--modes", "12", "--substeps", "8"]).unwrap();
+    assert!(make(&options, true).err().unwrap().contains("no string-side stiffener"));
+    let legacy = parsed(&["--string-stretching", "waves.fspx", "--legacy-axial-ratio", "--modes", "12", "--substeps", "8"]).unwrap();
+    let old = make(&legacy, true).unwrap();
+    assert!(legacy.report(&old.piano).contains("historical authored axial ratio 0.06"));
+    assert!(make(&legacy, false).err().unwrap().contains("at least one waves key"));
+    assert!(parsed(&["--legacy-axial-ratio"]).is_err());
+    assert!(parsed(&["--legacy-axial-ratio", "--string-polarization", "frames", "--string-stretching", "waves"]).is_err());
 }

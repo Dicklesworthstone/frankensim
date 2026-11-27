@@ -221,7 +221,7 @@ With reduction, selected axial forces participate in the complete source-mode
 snapshots alongside the two transverse forces. No vertical-ratio substitution
 occurs when a complete frame is supplied.
 
-Without a supplied frame, `grand_piano` derives rows from a **flat** board's
+Without a supplied frame, both renderers derive rows from a **flat** board's
 `BoardGeometry::bridge_attachments`:
 
 - **The arm** is the height of the outer fibre of the stiffener that contains the
@@ -237,11 +237,12 @@ Without a supplied frame, `grand_piano` derives rows from a **flat** board's
 - With `--board-reduction` the rotations are those of the reduced basis, built
   from vertical bridge-force snapshots only.
 
-Without a supplied frame, `piano_exterior` retains its labelled authored ratio
-(`EXTERIOR_AXIAL_RATIO`, 0.06 times the vertical row) for the legacy path. The
-live engine has its separate axial input/approximation policy. A crowned
-`grand_piano` with `waves` requires the explicit string frame and refuses
-without it; no flat-board geometry is substituted for a shell.
+A crowned board needs an explicit signed string frame. On a flat board, a
+missing or ambiguous string-side bridge segment also requires a supplied
+frame. To reproduce a historical unframed exterior render, add
+`--legacy-axial-ratio` alongside `--string-stretching`. This selects the
+authored 0.06 times vertical motion for all waves keys in that render. The
+mechanical report identifies the selected coupling.
 
 The retained axial sine modes have inertia, propagate their strain at the
 material wave speed, and exchange energy with transverse and bridge motion

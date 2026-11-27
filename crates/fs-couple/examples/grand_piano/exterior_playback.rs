@@ -10,13 +10,8 @@ use super::performance::midi;
 mod score;
 pub use score::Score;
 
-/// AUTHORED, and used only by `piano_exterior`: the axial participation row of a `waves` key is this fraction
-/// of the board's vertical bridge row. It is the former single scalar of `longitudinal_string.rs` (its comment
-/// read ~1.8 degrees of downbearing plus a 28 mm lever arm; no source was ever recorded), kept here until the
-/// exterior has no supplied string frame. With --string-polarization, its actual full-vector motion supplies
-/// every axial row instead. `grand_piano` has no such number: it derives each
-/// row from its board's retained rotations (`BoardGeometry::bridge_attachments`, bead pexfp.44). The live engine's
-/// matching divergence is bead frankensim-live-piano-axial-row-3eh0l; the exterior's is recorded on pexfp.44.
+/// Compatibility with historical exterior renders. New unframed flat boards
+/// project the bridge-top motion of each retained mode.
 const EXTERIOR_AXIAL_RATIO: f64 = 0.06;
 
 fn with_exterior_axial_rows(spec: &linear::string_stretching::Specification, board: &[linear::BoardMode])
@@ -47,6 +42,7 @@ pub struct Options {
     pub dampers: Option<String>,
     pub string_stretching: Option<String>,
     pub string_polarization: Option<String>,
+    pub legacy_axial_ratio: bool,
     pub cavity: Option<String>,
     pub radiation_ports: Option<usize>,
     pub rigid_assembly: Option<String>,
@@ -63,7 +59,7 @@ impl Default for Options {
         Self { substeps: 4, modes: super::linear::MAX_STRING_MODES, stretch_tuning: None, wav_format: None, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
-            hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None,
+            hammer_footprints: None, dampers: None, string_stretching: None, string_polarization: None, legacy_axial_ratio: false,
             rigid_assembly: None, cavity: None, radiation_ports: None,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             board_reduction: None,
@@ -130,6 +126,10 @@ impl Options {
             }
             if flag == "--rt0425-hammer-dissipation" {
                 result.rt0425_hammer_dissipation = true;
+                continue;
+            }
+            if flag == "--legacy-axial-ratio" {
+                result.legacy_axial_ratio = true;
                 continue;
             }
             if flag == "--rt0425-string-damping" {
@@ -221,6 +221,9 @@ impl Options {
         if self.rigid_assembly.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--rigid-assembly requires a nonempty assembly path".into());
         }
+        if self.legacy_axial_ratio && (self.string_stretching.is_none() || self.string_polarization.is_some()) {
+            return Err("--legacy-axial-ratio requires --string-stretching without --string-polarization".into());
+        }
         if self.string_stretching.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--string-stretching requires a nonempty complete material specification path".into());
         }
@@ -260,7 +263,7 @@ impl Options {
             format!("spatial viscous, {strings} speaking-string pads / {stations} quadrature stations; loss {} J included in total loss",
                 piano.accounting.damper_loss_j)
         } else { String::from("point viscous") };
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites; {} string-direction segments omit in-band partials at the count ceiling. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} (speaking ends drive the bridge axially); two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} transverse coordinates including duplex; {} contact sites; {} string-direction segments omit in-band partials at the count ceiling. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {} (source: {}); nonlinear string extension: {} (selection: {}); retained longitudinal coordinates: {} ({}); two transverse directions: {} (geometry/drag: {}); reciprocal cavity: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), piano.bank.capped_string_segments,
             self.hammers.as_deref().unwrap_or("source defaults"),
@@ -273,6 +276,10 @@ impl Options {
             dampers, self.dampers.as_deref().unwrap_or("inline or original point image"), piano.bank.has_string_stretching(),
             self.string_stretching.as_deref().unwrap_or("inline or original linear image"),
             piano.bank.longitudinal_mode_count(),
+            if self.legacy_axial_ratio { "historical authored axial ratio 0.06" }
+            else if piano.bank.longitudinal_mode_count() == 0 { "no retained axial modes" }
+            else if piano.bank.has_secondary_polarization() { "supplied signed bridge frames" }
+            else { "flat bridge-top motion, string axis perpendicular to bridge in plan" },
             piano.bank.has_secondary_polarization(),
             self.string_polarization.as_deref().unwrap_or("inline or original one-plane image"),
             piano.has_cavity(), self.cavity.as_deref().unwrap_or("inline or no enclosure"))
@@ -374,6 +381,29 @@ impl Controls {
             .unwrap_or_default();
         self.polarization.as_ref().map(|spec| spec.source_ports_with_axial(courses, &keys)).transpose()
     }
+    /// Bind waves to the very same bare board basis used by the boundary and
+    /// the mechanics. A supplied signed string frame is projected later with
+    /// the two transverse directions.
+    pub fn bind_unframed_axial_rows(&mut self, board_text: &str,
+        board: &super::board_geometry::PreparedBoard, options: &Options) -> Result<(), String> {
+        let Some(stretching) = self.stretching.as_mut().filter(|s| !s.waves.is_empty()) else {
+            if options.legacy_axial_ratio {
+                return Err("--legacy-axial-ratio requires at least one waves key".into());
+            }
+            return Ok(());
+        };
+        if self.polarization.is_some() || options.legacy_axial_ratio { return Ok(()); }
+        if super::crowned_board::is_crowned(board_text) {
+            return Err("crowned longitudinal waves require --string-polarization with the signed string frame, or --legacy-axial-ratio for the historical approximation".into());
+        }
+        let keys = stretching.waves.keys().copied().collect::<Vec<_>>();
+        let geometry = super::board_geometry::BoardGeometry::read(board_text)?;
+        let motion = board.motion.as_ref().ok_or("longitudinal waves need retained board motion")?;
+        let rows = geometry.bridge_attachments(&keys)?.into_iter()
+            .map(|attachment| Ok((attachment.midi, attachment.axial_row(motion)?)))
+            .collect::<Result<_, String>>()?;
+        stretching.set_bridge_axial_rows(rows)
+    }
     pub fn has_cavity(&self) -> bool { self.cavity.is_some() }
     /// Bind a `gas,ambient` cavity to the exterior's gas record. A bare
     /// `medium,RHO,C` exterior carries no gas, so such a cavity refuses.
@@ -434,11 +464,13 @@ impl Controls {
             piano.configure_source_hammer_dissipation(rates)?;
         }
         if let Some(stretching) = &self.stretching {
-            let stretching = match &polarization {
-                Some(frame) => frame.with_axial_projection(stretching)?,
-                None => with_exterior_axial_rows(stretching, board)?,
-            };
-            piano.configure_string_stretching(&stretching)?;
+            if let Some(frame) = &polarization {
+                piano.configure_string_stretching(&frame.with_axial_projection(stretching)?)?;
+            } else if options.legacy_axial_ratio {
+                piano.configure_string_stretching(&with_exterior_axial_rows(stretching, board)?)?;
+            } else {
+                piano.configure_string_stretching(stretching)?;
+            }
         }
         if let Some(cavity) = &cavity { piano.configure_cavity(&cavity.loaded(&piano.bank)?)?; }
         Ok((piano,cavity.as_ref().map(cavity::Projected::report)))
