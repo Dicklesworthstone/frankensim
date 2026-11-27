@@ -6305,6 +6305,26 @@ and 1e-12 J:
   constant one, a policy with no Newton budget, and a step from 440 K that
   would cross 450 K.
 
+`ConductionBody` offers the `StageResidual` tier, so a kernel can solve it
+monolithically with its neighbours. The unknowns are the end temperature
+field, one per vertex, started at the old field. The residual is the owner's
+own step residual `C (z - T_old) + dt (K(z) z - b)` [J] by vertex, after the
+step's admission. Its derivative `C + dt J(z)` is the owner's Newton matrix,
+which is `C + dt K` for a constant conductivity. The port loads enter `b`
+alone, so the derivative holds no input. `accept` runs the owner's energy
+accounts and gate on the supplied field and books the receipt `propose` would
+book for that endpoint, entropy generation included. The owner solves nothing
+there, so on the monolithic path the receipt's residual is zero, as in every
+closed-form receipt, and convergence belongs to the kernel's Newton-Krylov
+gate.
+
+Tests: the mean, trace and k(T) bodies pass `check_stage_residual` at their
+step's end field, the residual within 1e-8 J and the derivatives within 1e-6
+relative. The lump loop through the card wall, with every node offering its
+stage residual, takes the monolithic solve under the default policy. Over 100
+steps of 2 s it stays within 1e-9 K of interface Newton, and the body's
+monolithic receipt books its own `propose`'s entropy within 1e-9 relative.
+
 Two trace ports meet through a `TraceContact`: the quadrature points of the
 owner's contact between them, `(T_a - T_b) (v_a - v_b) / R''` integrated by
 the degree-two rule over the traces' common refinement. Each `ContactPoint`

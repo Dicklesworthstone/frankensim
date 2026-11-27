@@ -31,7 +31,9 @@
 //! [`ConductionBody::temperature_dependent`] with the owner's Newton policy:
 //! the step is then the owner's `advance_nonlinear` and the tangent
 //! `linearize_step` of that endpoint. Heat capacity stays independent of
-//! temperature, as in the owner.
+//! temperature, as in the owner. Either way the body also offers the step as
+//! the owner's residual in its end field (`StageResidual`), for a monolithic
+//! solve.
 //!
 //! [`EnthalpyBody`] puts the nonlinear enthalpy owner, whose capacity,
 //! reference mass and conductivity can all come from one material card,
@@ -60,7 +62,9 @@ use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 
 use crate::assemble::assemble_operator_scaled_with_interfaces;
 use crate::interface::InterfaceResistance;
@@ -68,7 +72,7 @@ use crate::interface::nonmatching::{
     NonmatchingOptions, TraceFace, degree_two_weights, trace_overlaps,
 };
 use crate::transient::backward_euler::{
-    BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization,
+    BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization, StepSolution,
 };
 use crate::transient::enthalpy::entropy::body_generation_j_k;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
@@ -1145,6 +1149,25 @@ impl Component for ConductionBody<'_> {
             }
         };
         self.port_readings(&step.temperature, outputs);
+        let receipt = self.step_receipt(cx, problem, old, dt_s, inputs, &step)?;
+        new.clear();
+        new.extend_from_slice(&step.temperature);
+        Ok(Proposal::Step(receipt))
+    }
+}
+
+impl ConductionBody<'_> {
+    /// The receipt of the owner's step `step` from `old` under the held port
+    /// inputs, whichever solver found its endpoint.
+    fn step_receipt(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        step: &StepSolution,
+    ) -> Result<Receipt, ConductionError> {
         // The operator the owner's energy equation uses at the endpoint.
         let end = &step.temperature;
         let system = assemble_operator_scaled_with_interfaces(
@@ -1168,7 +1191,7 @@ impl Component for ConductionBody<'_> {
         // flux rounds away of its loads is in the numerical loss with the
         // owner's own residual.
         let units = (self.weights.len() + 16) as f64 * f64::EPSILON;
-        let receipt = Receipt {
+        Ok(Receipt {
             stored_change_j: step.stored_energy_change_j,
             dissipated_j: 0.0,
             numerical_loss_j: heat_j - step.stored_energy_change_j,
@@ -1176,10 +1199,122 @@ impl Component for ConductionBody<'_> {
             energy_tolerance_j: units * (stored_old_j.abs() + stored_new_j.abs() + heat_j.abs()),
             residual: step.relative_residual,
             tolerance: self.config.linear.tolerance,
+        })
+    }
+}
+
+/// The step as the owner's residual in the nodal temperatures `z`: the
+/// unknowns are the end field, the residual `C (z - T_old) + dt (K(z) z - b)`
+/// [J] that `propose` solves, its derivative `C + dt J(z)` the owner's Newton
+/// matrix. `accept` books the owner's accounts on the supplied field; the
+/// owner solves nothing there, so its receipt's residual is zero, as every
+/// closed-form receipt's.
+impl StageResidual for ConductionBody<'_> {
+    fn unknowns(&self) -> usize {
+        self.weights.len()
+    }
+
+    fn initial_guess(
+        &self,
+        old: &Vec<f64>,
+        _dt_s: f64,
+        _inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        if old.len() != z.len() || z.len() != self.weights.len() {
+            return Err(invalid("a stage guess needs one entry per vertex".into()));
+        }
+        z.copy_from_slice(old);
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ConductionError> {
+        self.check_width("inputs", inputs.len())?;
+        self.check_width("outputs", outputs.len())?;
+        let boundary = self.boundary_for(inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
         };
+        let residual = self
+            .solver
+            .stage_residual(cx, problem, old, z, dt_s, self.config)?;
+        if r.len() != residual.len() {
+            return Err(invalid("a residual needs one entry per vertex".into()));
+        }
+        r.copy_from_slice(&residual);
+        self.port_readings(z, outputs);
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &Vec<f64>,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ConductionError> {
+        self.check_width("tangent outputs", d_outputs.len())?;
+        // The port loads enter `b` alone: the derivative holds no input.
+        let solver = &self.solver;
+        solver.stage_jacobian_apply(cx, self.problem, z, dt_s, false, dz, dr)?;
+        self.port_readings(dz, d_outputs);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &Vec<f64>,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ConductionError> {
+        self.check_width("adjoint outputs", bar_outputs.len())?;
+        let solver = &self.solver;
+        solver.stage_jacobian_apply(cx, self.problem, z, dt_s, true, bar_r, bar_z)?;
+        reading_weights(&self.patches, bar_outputs, bar_z);
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ConductionError> {
+        self.check_width("inputs", inputs.len())?;
+        let boundary = self.boundary_for(inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
+        };
+        let step = self
+            .solver
+            .stage_endpoint(cx, problem, old, z, dt_s, self.config)?;
+        let receipt = self.step_receipt(cx, problem, old, dt_s, inputs, &step)?;
         new.clear();
         new.extend_from_slice(&step.temperature);
-        Ok(Proposal::Step(receipt))
+        Ok(receipt)
     }
 }
 

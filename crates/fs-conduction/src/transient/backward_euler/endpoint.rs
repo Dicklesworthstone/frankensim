@@ -6,6 +6,10 @@
 
 use super::radiation::boundary_at_temperature;
 use super::{BackwardEuler, StepConfig, energy_balance, finite, invalid, poll, sum};
+#[cfg(feature = "component")]
+use super::{StepSolution, axpy_csr};
+#[cfg(feature = "component")]
+use crate::assemble::{DofMap, assemble_jacobian_with_optional_interfaces};
 use crate::{
     AmbientRadiationPatch, ConductionError, ConductionProblem, RobinFlux,
     ThermalBoundary, ThermalInterfaces,
@@ -242,6 +246,130 @@ impl BackwardEuler<'_> {
             convective_robin_fluxes,
             combined_boundary,
         }, pointwise.map(|(_, report)| report)))
+    }
+
+    /// The step's admission for a supplied endpoint `temperature`: every
+    /// vertex free and the endpoint as long as `old`.
+    #[cfg(feature = "component")]
+    fn admit_stage(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        temperature: &[f64],
+        dt_s: f64,
+        config: StepConfig,
+    ) -> Result<DofMap, ConductionError> {
+        let dofs = self.admit_step(cx, problem, old, dt_s, config)?;
+        if !dofs.fixed().is_empty() || temperature.len() != old.len() {
+            return Err(invalid(
+                "a stage endpoint needs every vertex free, one entry each",
+            ));
+        }
+        Ok(dofs)
+    }
+
+    /// The step's nodal residual `C (T - T_old) + dt (K(T) T - b)` [J] at a
+    /// supplied endpoint, by vertex, after the step's own admission: the
+    /// residual whose root `advance` and `advance_nonlinear` solve for. Every
+    /// vertex must be free. Nothing is solved and no gate is applied.
+    ///
+    /// # Errors
+    /// The step's admission; a fixed vertex or a mis-sized endpoint; the
+    /// endpoint assembly's refusals.
+    #[cfg(feature = "component")]
+    pub(crate) fn stage_residual(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        temperature: &[f64],
+        dt_s: f64,
+        config: StepConfig,
+    ) -> Result<Vec<f64>, ConductionError> {
+        let dofs = self.admit_stage(cx, problem, old, temperature, dt_s, config)?;
+        let endpoint = self.evaluate_endpoint(cx, problem, None, old, temperature, dt_s, &dofs)?;
+        Ok(endpoint.residual)
+    }
+
+    /// The step at a supplied endpoint, a root of [`Self::stage_residual`]
+    /// that another solver found: the owner's energy accounts and gate on
+    /// that field, as its own steps finish. The owner solves nothing, so the
+    /// step's relative residual and Krylov count are zero.
+    ///
+    /// # Errors
+    /// Those of [`Self::stage_residual`]; an endpoint outside the material's
+    /// temperature span; an energy residual over `config`'s tolerance.
+    #[cfg(feature = "component")]
+    pub(crate) fn stage_endpoint(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        temperature: &[f64],
+        dt_s: f64,
+        config: StepConfig,
+    ) -> Result<StepSolution, ConductionError> {
+        let dofs = self.admit_stage(cx, problem, old, temperature, dt_s, config)?;
+        let endpoint = self.evaluate_endpoint(cx, problem, None, old, temperature, dt_s, &dofs)?;
+        let (system, field) = (&endpoint.system, temperature.to_vec());
+        self.finish_step(
+            cx, problem, None, old, dt_s, config, &dofs, system, field, 0.0, 0,
+        )
+    }
+
+    /// `(C + dt J) v` into `out`, or its transpose when `transpose`, with `J`
+    /// the owner's Newton Jacobian at `temperature`: the derivative of
+    /// [`Self::stage_residual`]. A conductivity independent of temperature
+    /// has no derivative term, and `J` is then the operator `K`.
+    ///
+    /// # Errors
+    /// A mis-sized `v` or `out`; the assembly's refusals, a mis-sized
+    /// `temperature` and a vertex on a knot of a tabulated conductivity
+    /// among them.
+    #[cfg(feature = "component")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_jacobian_apply(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        temperature: &[f64],
+        dt_s: f64,
+        transpose: bool,
+        v: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        let n = self.mesh.vertex_count();
+        if v.len() != n || out.len() != n {
+            return Err(invalid(
+                "a stage direction and its product need one entry per vertex",
+            ));
+        }
+        let jacobian = assemble_jacobian_with_optional_interfaces(
+            cx,
+            self.mesh,
+            problem.boundary,
+            problem.material,
+            temperature,
+            None,
+            problem.element_materials,
+        )?;
+        let full = axpy_csr(&self.capacity, 1.0, &jacobian, dt_s);
+        if !transpose {
+            full.spmv(v, out);
+            return Ok(());
+        }
+        out.fill(0.0);
+        for (row, &weight) in v.iter().enumerate() {
+            if row % 512 == 0 {
+                poll(cx, row)?;
+            }
+            let (columns, entries) = full.row(row);
+            for (&column, &entry) in columns.iter().zip(entries) {
+                out[column] += entry * weight;
+            }
+        }
+        Ok(())
     }
 }
 

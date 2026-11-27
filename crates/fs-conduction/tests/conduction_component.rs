@@ -7,7 +7,9 @@
 //! from a contact interface card meets the step condensed from the owner's
 //! own responses and reaches the two bodies' shared equilibrium. A body whose
 //! conductivity depends on temperature passes the same kit and heater on the
-//! owner's Newton endpoint. The state codec reads what it wrote, and the
+//! owner's Newton endpoint. Every body passes the stage-residual laws too,
+//! and a loop of a lump and a body solved monolithically through them meets
+//! the same loop by interface Newton. The state codec reads what it wrote, and the
 //! identity a durable snapshot is bound to follows what fixes the body's
 //! steps. Run with
 //! `cargo test -p fs-conduction --features component --test conduction_component`.
@@ -35,10 +37,12 @@ use fs_matdb::{
     PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
     SystemContext, UncertaintyModel,
 };
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
 use fs_ports::component::{Component, Proposal};
-use fs_system::SystemBuilder;
 use fs_system::elements::{Conductance, HeatCapacity, Heater, SourceAccount, Waveform};
+use fs_system::{BlockSolveMode, BlockSolverPolicy, SystemBuilder};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -191,6 +195,10 @@ fn largest_gap(a: &[f64], b: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Claim, declared before its first run, of the stage residual in this test
+/// and in the trace and k(T) tests: at the step's own end field it passes
+/// the kit's `StageResidual` laws, vanishing within 1e-8 J and differentiated
+/// within 1e-6 relative.
 #[test]
 fn the_body_conforms_and_its_tangent_is_the_derivative_of_its_step() {
     with_cx(|cx| {
@@ -245,6 +253,9 @@ fn the_body_conforms_and_its_tangent_is_the_derivative_of_its_step() {
             let floor_k_w = 8.0 * f64::EPSILON * 400.0 / difference_step_w;
             check_port_tangent(&body, &case, 1.0e-6, floor_k_w, cx)
                 .unwrap_or_else(|failure| panic!("tangent at {dt_s} s, {heat_w:?} W: {failure}"));
+            let (end, _) = step(&body, &old, dt_s, &heat_w, cx);
+            check_stage_residual(&body, &case, &end, 1.0e-6, 1.0e-8, cx)
+                .unwrap_or_else(|failure| panic!("stage at {dt_s} s, {heat_w:?} W: {failure}"));
         }
         // Equal heat in and out stores nothing: the field only relaxes.
         let (end, _) = step(&body, &old, 4.0, &[30.0, -30.0], cx);
@@ -328,6 +339,9 @@ fn a_trace_port_conforms_and_steps_the_body_as_the_mean_port_under_a_uniform_flu
             let floor_k_w = 8.0 * f64::EPSILON * 400.0 / difference_step_w;
             check_port_tangent(&traced, &case, 1.0e-6, floor_k_w, cx)
                 .unwrap_or_else(|failure| panic!("tangent at {dt_s} s: {failure}"));
+            let (end, _) = step(&traced, &old, dt_s, &inputs, cx);
+            check_stage_residual(&traced, &case, &end, 1.0e-6, 1.0e-8, cx)
+                .unwrap_or_else(|failure| panic!("stage at {dt_s} s: {failure}"));
         }
     });
 }
@@ -578,6 +592,88 @@ fn a_lump_through_a_card_contact_meets_the_condensed_step_and_the_shared_equilib
     });
 }
 
+/// Claims, declared before the first run: with every node offering its
+/// stage residual, the kernel's default policy solves the loop of the lump,
+/// the card wall and the body monolithically. Over 100 steps of 2 s the
+/// body's field and the lump stay within 1e-9 K of the same loop solved by
+/// interface Newton, and on every step the body's monolithic receipt books
+/// the entropy its own `propose` books at the converged port heat within
+/// 1e-9 relative.
+#[test]
+fn a_monolithic_solve_of_the_lump_loop_meets_interface_newton_and_the_owner_receipt() {
+    const DT_S: f64 = 2.0;
+    with_cx(|cx| {
+        let parts = parts();
+        let probe = body(cx, parts, &["left"]);
+        let wall_w_k = card_wall_w_k(probe.patch_area_m2(0));
+        let build = || {
+            let mut builder = SystemBuilder::new();
+            let body = body(cx, parts, &["left"]);
+            let node = builder
+                .add_with_tangent_and_stage_residual("body", body, initial(parts))
+                .unwrap();
+            let capacity = HeatCapacity::new(20.0).unwrap();
+            let lump = builder
+                .add_with_tangent_and_stage_residual("lump", capacity, 420.0)
+                .unwrap();
+            let conductance = Conductance::new(wall_w_k).unwrap();
+            let wall = builder
+                .add_with_tangent_and_stage_residual("wall", conductance, ())
+                .unwrap();
+            let (a, b) = (
+                builder.port(wall, "a").unwrap(),
+                builder.port(wall, "b").unwrap(),
+            );
+            builder
+                .bond(builder.port(lump, "heat").unwrap(), a)
+                .unwrap();
+            let left = builder.port(node, "left").unwrap();
+            builder.bond(b, left).unwrap();
+            let mut system = builder.seal().unwrap();
+            assert!(system.guess(a, &[420.0]) && system.guess(b, &[300.0]));
+            (system, node, lump, left)
+        };
+        let (mut monolithic, node, lump, left) = build();
+        let (mut interface, ..) = build();
+        interface.set_solver_policy(BlockSolverPolicy::InterfaceNewton);
+        assert_eq!(
+            monolithic.block_modes(),
+            [BlockSolveMode::MonolithicNewtonKrylov]
+        );
+        assert_eq!(interface.block_modes(), [BlockSolveMode::InterfaceNewton]);
+        let (mut worst_k, mut worst_entropy) = (0.0_f64, 0.0_f64);
+        for index in 0..100 {
+            let old = monolithic.state::<Vec<f64>>(node).unwrap().clone();
+            monolithic.step(DT_S, cx).unwrap();
+            interface.step(DT_S, cx).unwrap();
+            let lumps = [&monolithic, &interface].map(|system| *system.state::<f64>(lump).unwrap());
+            let gap_k = largest_gap(
+                monolithic.state::<Vec<f64>>(node).unwrap(),
+                interface.state::<Vec<f64>>(node).unwrap(),
+            )
+            .max((lumps[0] - lumps[1]).abs());
+            let heat_w = monolithic.last_input(left).to_vec();
+            let (mut new, mut reading) = (Vec::new(), [0.0]);
+            let proposal = probe.propose(&old, DT_S, &heat_w, &mut new, &mut reading, cx);
+            let Ok(Proposal::Step(owner)) = proposal else {
+                panic!("step {index}: {proposal:?}");
+            };
+            let booked = monolithic.last_receipts()[node.index()].entropy_generated_j_per_k;
+            let owner_j_k = owner.entropy_generated_j_per_k;
+            let entropy = (booked - owner_j_k).abs() / owner_j_k;
+            worst_k = worst_k.max(gap_k);
+            worst_entropy = worst_entropy.max(entropy);
+            assert!(
+                gap_k <= 1.0e-9 && entropy <= 1.0e-9,
+                "step {index}: {gap_k} K; {booked} against {owner_j_k} J/K"
+            );
+        }
+        eprintln!(
+            "monolithic against interface Newton over 100 steps: largest gap {worst_k:e} K, entropy {worst_entropy:e} relative"
+        );
+    });
+}
+
 /// Claims, declared before the first run: 10 W from a heater into the left
 /// end leaves the right end through a 0.5 W/K wall into a 1e11 J/K lump. The
 /// run is steady at the first 500 s step that changes the body's stored
@@ -821,6 +917,9 @@ fn a_temperature_dependent_body_conforms_and_its_tangent_differentiates_its_newt
             let floor_k_w = (8.0 * f64::EPSILON * 400.0 + 1.0e-9) / difference_step_w;
             check_port_tangent(&body, &case, 1.0e-6, floor_k_w, cx)
                 .unwrap_or_else(|failure| panic!("tangent at {dt_s} s, {heat_w:?} W: {failure}"));
+            let (end, _) = step(&body, &old, dt_s, &heat_w, cx);
+            check_stage_residual(&body, &case, &end, 1.0e-6, 1.0e-8, cx)
+                .unwrap_or_else(|failure| panic!("stage at {dt_s} s, {heat_w:?} W: {failure}"));
         }
     });
 }
