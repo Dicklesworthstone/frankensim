@@ -3881,3 +3881,377 @@ button.wk-dish[aria-pressed="true"] {
     font-size: 0.7rem;
   }
 }
+
+/* One cook, two dishes (chapter 07, first figure): the stage, and beside it the camera glasses' own picture. */
+.gl-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.42fr);
+  gap: 0.9rem;
+  margin-bottom: 1.6rem;
+}
+.gl-stage {
+  aspect-ratio: 16 / 9;
+}
+.gl-hud {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  max-width: calc(100% - 1.8rem);
+}
+.gl-hud span {
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+.gl-hud em[hidden] {
+  display: none;
+}
+.gl-hud em[data-kind="full"] {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.22);
+}
+.gl-hud em[data-kind="half"] {
+  color: #fde68a;
+  background: rgb(251 191 36 / 0.2);
+}
+.gl-hud em[data-kind="walk"] {
+  color: var(--soft);
+  background: rgb(255 255 255 / 0.08);
+}
+.gl-hud em[data-kind="free"],
+.gl-hud em[data-kind="done"] {
+  color: #bbf7d0;
+  background: rgb(34 197 94 / 0.2);
+}
+.gl-legend .cam {
+  --k: #f5f7ff;
+}
+.gl-legend .cam::before {
+  border-radius: 50%;
+}
+/* The label on the stage, its point at the glasses. */
+.gl-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.35rem;
+  background: rgb(10 10 12 / 0.78);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.14);
+  font: 600 0.68rem/1 var(--mono);
+  letter-spacing: 0.03em;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+  translate: -50% calc(-100% - 7px);
+}
+.gl-tag::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: 7px;
+  background: rgb(255 255 255 / 0.6);
+}
+.gl-tag[hidden] {
+  display: none;
+}
+.gl-pov {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+}
+.gl-screen {
+  position: relative;
+  flex: 1;
+  min-height: 12rem;
+  overflow: hidden;
+  border: 2px solid #26272b;
+  border-radius: 0.9rem;
+  background: #050506;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05);
+}
+.gl-screen canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+/* The glasses' lens: a darker edge to the picture. */
+.gl-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 46%, transparent 62%, rgb(0 0 0 / 0.4));
+}
+.gl-ts,
+.gl-rec,
+.gl-seen {
+  position: absolute;
+  z-index: 1;
+  font: 600 0.66rem/1 var(--mono);
+  letter-spacing: 0.04em;
+  color: rgb(255 255 255 / 0.88);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.9);
+}
+.gl-ts {
+  left: 0.55rem;
+  top: 0.5rem;
+}
+.gl-rec {
+  right: 0.55rem;
+  top: 0.5rem;
+}
+.gl-rec i {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: #ef4444;
+  vertical-align: -0.04em;
+  animation: tp-rec 1s steps(2, jump-none) infinite;
+}
+.gl-seen {
+  left: 0.5rem;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 0.3rem;
+  background: rgb(10 10 12 / 0.72);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  text-shadow: none;
+  line-height: 1.3;
+}
+.gl-pov figcaption {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.gl-lab .wk-tile b {
+  font-size: 1.12rem;
+  white-space: nowrap;
+}
+.gl-dishes button {
+  font-size: 0.8rem;
+  line-height: 1.15;
+}
+.gl-dishes button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.gl-keys {
+  margin: 0;
+}
+.gl-keys .a {
+  --k: #f2b134;
+}
+.gl-keys .b {
+  --k: #5ec8f2;
+}
+.gl-keys .ov::before {
+  background: none;
+  border: 1px solid var(--soft);
+}
+.gl-chart-wrap {
+  margin-top: 0.3rem;
+}
+.gl-svg .nm {
+  fill: var(--soft);
+  font-family: var(--sans);
+  font-size: 11.5px;
+}
+.gl-svg .nm.on {
+  fill: #fff;
+  font-weight: 600;
+}
+.gl-svg .lane {
+  fill: rgb(255 255 255 / 0.03);
+  stroke: rgb(255 255 255 / 0.08);
+}
+.gl-svg .job {
+  stroke: rgb(0 0 0 / 0.35);
+  stroke-width: 0.5;
+}
+.gl-svg .ov {
+  fill: color-mix(in srgb, var(--c) 18%, transparent);
+  stroke: var(--c);
+  stroke-width: 1;
+}
+.gl-svg .ov.wait {
+  fill: none;
+  stroke-dasharray: 2 2;
+}
+.gl-svg .end {
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+.gl-svg .endl {
+  fill: var(--text);
+  font-size: 11px;
+}
+.gl-svg .saved {
+  stroke: #86efac;
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+.gl-svg .savedl {
+  fill: #86efac;
+  font-size: 11px;
+}
+.gl-svg .xa.st {
+  text-anchor: start;
+}
+.gl-svg .play {
+  stroke: var(--chapter);
+  stroke-width: 1.5;
+}
+/* The cards: what the glasses taught the twin about each dish. */
+.gl-cards-wrap {
+  margin-top: 1.2rem;
+}
+.gl-cards-sub {
+  font-size: 0.76rem;
+  color: var(--faint);
+}
+.gl-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+.gl-card {
+  padding: 0.7rem 0.8rem 0.6rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--dish);
+  border-radius: 0.7rem;
+  background: rgb(255 255 255 / 0.02);
+}
+.gl-card header {
+  display: grid;
+  gap: 0.15rem;
+  margin-bottom: 0.5rem;
+}
+.gl-card header b {
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.gl-card header small {
+  color: var(--faint);
+  font-size: 0.72rem;
+}
+.gl-card ol {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gl-card li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "v w" "m m" "h h" "e e";
+  gap: 0.12rem 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.45rem;
+  background: rgb(255 255 255 / 0.025);
+  opacity: 0.42;
+  transition:
+    opacity 0.3s,
+    background-color 0.3s,
+    box-shadow 0.3s;
+}
+.gl-card li[data-seen] {
+  opacity: 1;
+}
+.gl-card li[data-now] {
+  background: color-mix(in srgb, var(--dish) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dish) 55%, transparent);
+}
+.gl-card .v {
+  grid-area: v;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.84rem;
+}
+.gl-card .w {
+  grid-area: w;
+  align-self: center;
+  padding: 0.08rem 0.4rem;
+  border-radius: 0.3rem;
+  font: 600 0.64rem/1.3 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--soft);
+  background: rgb(255 255 255 / 0.07);
+}
+.gl-card .w[data-at="oven"] {
+  color: #bae6fd;
+  background: rgb(56 189 248 / 0.16);
+}
+.gl-card .w[data-at="range"] {
+  color: #fed7aa;
+  background: rgb(251 146 60 / 0.16);
+}
+.gl-card .m {
+  grid-area: m;
+  font: 500 0.74rem/1.3 var(--mono);
+  color: var(--muted);
+}
+.gl-card .h {
+  grid-area: h;
+  height: 0.34rem;
+  margin-top: 0.15rem;
+  border-radius: 0.2rem;
+  background: rgb(255 255 255 / 0.08);
+  overflow: hidden;
+}
+.gl-card .h i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--dish);
+}
+.gl-card li em {
+  grid-area: e;
+  font-style: normal;
+  font-size: 0.72rem;
+  color: var(--faint);
+}
+.gl-card footer {
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+@media (max-width: 720px) {
+  .gl-top {
+    grid-template-columns: 1fr;
+  }
+  .seg.fill.gl-dishes {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .gl-screen {
+    flex: none;
+    aspect-ratio: 4 / 3;
+    min-height: 0;
+  }
+  .gl-cards {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 599px) {
+  .gl-stage {
+    aspect-ratio: 1 / 1;
+  }
+  .gl-hud span {
+    font-size: 0.74rem;
+  }
+  .gl-ts,
+  .gl-rec,
+  .gl-seen {
+    font-size: 0.62rem;
+  }
+}

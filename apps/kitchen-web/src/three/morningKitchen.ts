@@ -15,7 +15,7 @@
  * the line when `setKit` buys them and out again when it does not.
  */
 import * as THREE from "three";
-import { KIT, RANGE_BURNERS, RANGE_PLACES, SLOTS, TABLE_SPOTS, menuDishes, type Job, type Kit, type Morning } from "../sim/cateringMorning";
+import { KIT, RANGE_BURNERS, RANGE_PLACES, SLOTS, TABLE_SPOTS, dishesOf, type Job, type Kit, type Morning } from "../sim/cateringMorning";
 import { makeTool, type ToolKind } from "./heroKitchen";
 import { buildFixture, type Model, type Piece } from "./models/all";
 import { Routine, makeStaff, type Cohort, type RoutineStep, type Staff, type WorkKind } from "./models/people";
@@ -893,7 +893,7 @@ export class MorningKitchen {
     if (minute) {
       this.lastMinute = m;
       // The table: a pan where a place is packing (its dish's food), else the board.
-      const dishes = morning ? menuDishes(morning.settings.menu) : [];
+      const dishes = morning ? dishesOf(morning.settings) : [];
       for (let k = 0; k < TABLE_SPOTS; k++) {
         const j = morning?.jobs.find((x) => x.at === "table" && x.spot === k && x.kind === "pack" && x.t0 <= t && x.t1 > t);
         this.packPans[k]!.group.visible = !!j;

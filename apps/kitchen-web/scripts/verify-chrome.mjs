@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -178,6 +178,7 @@ async function main() {
       "[data-week-canvas]",
       "[data-floor-canvas]",
       "[data-rush-canvas]",
+      "[data-gl-canvas]",
       "[data-morning-canvas]",
       "[data-crowd-canvas]",
       '[data-pair-canvas="hub"]',
@@ -556,6 +557,36 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-kit.png");
       }
 
+      if (sid === "glasses") {
+        // As set on arrival (thighs and risotto, 60 lunches of each, both at once): 1 h 01 together, 1 h 36 one after
+        // the other, 35 min saved; the cook at the left combi loading the thighs at 6:04, at the range stirring at 6:20;
+        // the glasses' screen draws.
+        const info = () => page.$eval("[data-gl-stage]", (el) => el.glasses.info());
+        const status = () => page.$eval("[data-gl-status]", (el) => el.textContent || "");
+        await page.waitForFunction(() => document.querySelector("[data-gl-pov]")?.dataset.drawn === "1", { timeout: 20000 });
+        const built = await info();
+        console.log(`[verify-chrome] One cook, two dishes: ${JSON.stringify({ dishes: built.dishes, end: built.end, endApart: built.endApart, saved: built.saved, free: built.free })} | ${(await status()).slice(0, 90)}`);
+        if (built.dishes.join() !== "thighs,risotto" || Math.round(built.end) !== 61 || Math.round(built.endApart) !== 96 || Math.round(built.saved) !== 35) throw new Error(`One cook, two dishes: the default pair does not save 35 min: ${JSON.stringify(built)}`);
+        const [load, stir] = await page.$eval("[data-gl-stage]", (el) => el.glasses.track([4.2, 20]));
+        if (!(load[2] < -1.2 && load[3] < 0.1) || !(stir[2] > -0.6 && stir[3] < 0)) throw new Error(`One cook, two dishes: the cook is not at the combi loading, or at the range stirring: ${JSON.stringify({ load, stir })}`);
+        // Piccata in place of the thighs: both cook at the range with the cook's hands on them, and pairing saves nothing.
+        await page.click('[data-gl-dishes="0"] button:nth-child(1)');
+        await sleep(400);
+        const bad = await info();
+        const badStatus = await status();
+        console.log(`[verify-chrome] One cook, piccata and risotto: ${JSON.stringify({ end: bad.end, endApart: bad.endApart })} | ${badStatus.slice(0, 90)}`);
+        if (bad.dishes.join() !== "piccata,risotto" || bad.saved !== 0 || !/no less than one after the other/.test(badStatus)) throw new Error(`One cook, two dishes: piccata and risotto do not save nothing: ${JSON.stringify(bad)} ${badStatus}`);
+        // A braise in a combi for hours leaves the cook's hands free for the tacos and more.
+        await page.$eval("[data-gl-stage]", (el) => el.glasses.set({ a: "braise", b: "tacos", portions: 120 }));
+        const braise = await info();
+        console.log(`[verify-chrome] One cook, braise and tacos: ${JSON.stringify({ end: braise.end, endApart: braise.endApart, free: braise.free })} | ${(await status()).slice(0, 90)}`);
+        if (!(braise.saved > 60) || !(braise.free > 30)) throw new Error(`One cook, two dishes: the braise does not free the cook for the tacos: ${JSON.stringify(braise)}`);
+        await page.$eval("[data-gl-stage]", (el) => el.glasses.set({ a: "thighs", b: "risotto", portions: 60, plan: "together" }));
+        await sleep(1200);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-glasses.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-glasses.png");
+      }
+
       if (sid === "trip") {
         // As set on arrival (800 meals, every swap, the left combi out 9:20 to 10:20): the van 18 min late; the map has
         // all 486 trips, most of them free. Held mid-trip, the stage marks the combi and the camera's screen flags it;
@@ -623,9 +654,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 18 WebGL canvases (15 figures; the two-kitchen figure has two, the combi trip has its two screens) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 20 WebGL canvases (16 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -637,6 +668,7 @@ async function main() {
         "[data-week-canvas]",
         "[data-floor-canvas]",
         "[data-rush-canvas]",
+        "[data-gl-canvas]",
         "[data-morning-canvas]",
         "[data-crowd-canvas]",
         '[data-pair-canvas="hub"]',
@@ -645,14 +677,15 @@ async function main() {
         '[data-pair-canvas="far"]',
         '[data-trip-cam="twin"]',
         '[data-trip-cam="seen"]',
+        "[data-gl-pov]",
       ];
-      ids.push("pair-far", "trip-twin", "trip-seen");
+      ids.push("pair-far", "trip-twin", "trip-seen", "glasses-pov");
       return ids.map((id, i) => {
         const c = document.querySelector(sels[i]);
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 18 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 20 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);
@@ -713,7 +746,7 @@ async function main() {
       );
     }
 
-    console.log("[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, 15/15 WebGL live, 0px overflow)!");
+    console.log(`[verify-chrome] ALL CHECKS PASSED (0 console errors, 0 page errors, 0 failed fetches, ${sectionIds.length}/${sectionIds.length} WebGL live, 0px overflow)!`);
   } finally {
     await browser.close();
     server.close();

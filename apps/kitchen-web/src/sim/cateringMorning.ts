@@ -187,7 +187,8 @@ export interface Outage {
   t1: number;
 }
 
-export type Crew = 2 | 3 | 4;
+/** Cooks on shift (one only where a figure follows a single cook: `soonest`). */
+export type Crew = 1 | 2 | 3 | 4;
 export interface MorningSettings {
   meals: number;
   cooks: Crew;
@@ -203,7 +204,12 @@ export interface MorningSettings {
   kit?: Kit;
   /** Combis out of use this morning. */
   out?: readonly Outage[];
+  /** The dishes, in place of the menu's (no sides unless listed), each with its entry in `portions`. */
+  dishes?: readonly MorningDish[];
 }
+
+/** The dishes cooked for these settings: the menu's three and the sides, unless the settings list their own. */
+export const dishesOf = (s: MorningSettings): readonly MorningDish[] => s.dishes ?? menuDishes(s.menu);
 
 /** When the van leaves for these settings. */
 export const doorOf = (s: MorningSettings): number => s.door ?? DOOR;
@@ -358,7 +364,7 @@ export function portionsFor(meals: number): number[] {
 }
 
 function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean, keep?: Keep): Morning {
-  const dishes = menuDishes(s.menu);
+  const dishes = dishesOf(s);
   /** Each combi's times out, in order. */
   const downs = Array.from({ length: kitOf(s).ovens }, (_, o) => (s.out ?? []).filter((u) => u.oven === o && u.t1 > u.t0).sort((a, b) => a.t0 - b.t0));
   const door = doorOf(s);
@@ -782,6 +788,17 @@ export function planMorning(s: MorningSettings): Morning {
  *  plan's settings with the outages added. */
 export function carryOn(s: MorningSettings, plan: Morning): Morning {
   return schedule(s, plan.shift, true, plan.batches.map((b) => Math.max(b.release, b.started)));
+}
+
+/**
+ * The work done as soon as it can be: every dish's cooking started the moment a cook and its station can take it,
+ * with no holding time to wait for and no van to make, so the plan's end is how long the work takes. The same cooks,
+ * stations and rules as a morning (`planMorning`).
+ */
+export function soonest(s: MorningSettings): Morning {
+  const portions = s.portions ?? portionsFor(s.meals);
+  const n = dishesOf(s).reduce((a, d, k) => a + batchesFor(d, k, portions[k] ?? 0, s.ahead).length, 0);
+  return schedule(s, [], true, new Array<number>(n).fill(0));
 }
 
 /** Whether a morning makes the van with everything still at its best at lunch. */

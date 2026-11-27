@@ -1146,11 +1146,86 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>07</b><i></i>The morning</p>
               <h2 class="d3" id="morning-title">Seven hundred lunches, <em class="g">one van</em>, 10:30.</h2>
               <p class="kicker">
-                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning. Or add one more combi, range or cook, and see which one moves the limit. And when a combi trips mid-morning, see what it costs the van, and know it the minute it happens.
+                A caterer's whole order leaves the kitchen at once, so the morning is one long crunch, and the menu decides how bad it gets. A risotto keeps a cook stirring at the range. A tray of thighs goes in the oven and leaves them free. A braise made the day before only needs reheating. Film one cook through camera glasses, and see which two dishes one pair of hands can make at once. Swap the dishes, raise the order and change the crew to find where this kitchen runs out. Then put more cooks on the floor and see when they start waiting for each other. And when one kitchen is not enough, borrow a second across town for the morning. Or add one more combi, range or cook, and see which one moves the limit. And when a combi trips mid-morning, see what it costs the van, and know it the minute it happens.
               </p>
             </div>
             <a class="more" href="#morning-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
           </div>
+
+          <figure class="fig reveal gl-fig" id="glasses">
+            <header class="fig-head">
+              <p class="todo">Film one cook through camera glasses, then give them two dishes at once</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="gl-top">
+                <div class="stage gl-stage" data-gl-stage>
+                  <canvas data-gl-canvas tabindex="0" aria-label="The morning's kitchen with one cook in it, wearing camera glasses: two combi ovens and a six-burner range along the back, a worktable in front. The cook makes the two dishes picked, as the plan has them. Drag to look around."></canvas>
+                  <div class="wk-hud rs-hud gl-hud" aria-hidden="true"><b data-gl-hud-clock>6:00</b><span data-gl-hud-doing>…</span><em data-gl-hud-note hidden></em></div>
+                  <span class="gl-tag" data-gl-tag hidden aria-hidden="true">Camera glasses</span>
+                  <p class="wk-legend gl-legend" aria-hidden="true"><span class="cam">The camera at the corner of the frame, its lamp lit while it films</span></p>
+                </div>
+                <figure class="gl-pov">
+                  <div class="gl-screen"><canvas data-gl-pov aria-label="What the camera glasses see: the cook's own view of the work in front of them"></canvas><span class="gl-ts" data-gl-ts>GLASSES · 06:00</span><span class="gl-rec"><i></i>REC</span><span class="gl-seen" data-gl-seen>…</span></div>
+                  <figcaption>Through the glasses</figcaption>
+                </figure>
+              </div>
+              <div class="lab gl-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles">
+                    <div class="wk-tile"><span>Both at once</span><b><i data-gl-both>…</i></b><small data-gl-both-s>…</small></div>
+                    <div class="wk-tile"><span>One, then the other</span><b><i data-gl-apart>…</i></b><small data-gl-apart-s>…</small></div>
+                    <div class="wk-tile"><span>Saved by pairing</span><b><i data-gl-saved>…</i></b><small data-gl-saved-s>…</small></div>
+                    <div class="wk-tile"><span>Hands free</span><b><i data-gl-free>…</i></b><small data-gl-free-s>…</small></div>
+                  </div>
+                  <div class="gl-chart-wrap">
+                    <p class="rs-map-head"><b>The cook's hands, both ways</b><span class="wk-keys gl-keys"><span class="a" data-gl-key-a>Thighs</span><span class="b" data-gl-key-b>Risotto</span><span class="ov">In a combi, nobody needed</span></span></p>
+                    <div class="gl-chart" data-gl-chart role="img" aria-label="The two plans on one clock, minutes from the start. For each, a lane of the cook's work, each job a bar coloured by its dish and as tall as the share of the cook it takes; above it, each dish's time in a combi. A line marks when each plan is done, and the time saved by making both at once."></div>
+                    <p class="rs-map-note" data-gl-chart-note></p>
+                  </div>
+                  <div class="gl-cards-wrap">
+                    <p class="rs-map-head"><b>What the glasses taught the twin</b><span class="gl-cards-sub">each step lights up the first time the cook does it</span></p>
+                    <div class="gl-cards" data-gl-cards></div>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">Film a cook once, and the twin knows how much of them each dish takes, and which two fit together.</p>
+                  <div class="field">
+                    <p class="micro">The first dish</p>
+                    <div class="seg fill gl-dishes" role="group" aria-label="The first dish" data-gl-dishes="0"></div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The second dish</p>
+                    <div class="seg fill gl-dishes" role="group" aria-label="The second dish" data-gl-dishes="1"></div>
+                  </div>
+                  <label class="range"><span><b>Lunches of each</b><output data-gl-portions-val>60 lunches</output></span><input type="range" min="20" max="160" step="10" value="60" data-gl-portions aria-label="Lunches of each dish" /></label>
+                  <div class="field">
+                    <p class="micro">On the stage</p>
+                    <div class="seg fill" role="group" aria-label="The plan on the stage">
+                      <button type="button" data-gl-plan="together" aria-pressed="true">Both at once</button>
+                      <button type="button" data-gl-plan="apart" aria-pressed="false">One, then the other</button>
+                    </div>
+                  </div>
+                  <div class="status" data-gl-status data-state="ok">Planning the two dishes…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="glasses-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>The glasses film one cook making each dish, and the twin keeps what it sees as a card: the dish's steps, where each happens, how long each takes, and how much of that time it needs the cook's hands. Work at the table needs them all the time, and so does a risotto stirred at the range. A pan only minded needs half of them, since one cook can mind two. A combi needs them only to load it and unload it; while its program runs, nobody.</p>
+                <p>Then the twin plans the two dishes for one cook, with the same planner as the morning below: this kitchen's two combis and six burners, each dish's steps in order, in batches, and never more than one pair of hands at a time. Both at once, every step starts as soon as the cook and its station can take it. One, then the other, the second dish starts when the first is done. What pairing saves is the time the cook would have spent waiting on a combi, filled with the other dish's work.</p>
+              </div>
+              <div>
+                <code class="formula">saved = one, then the other − both at once<br />hands free = both at once − minutes of hands-on work</code>
+                <p class="model">Model: <code>oneCook</code>, the morning's planner <code>soonest</code> for one cook with no van to make, from the two dishes' cards.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
 
           <figure class="fig reveal mo-fig">
             <header class="fig-head">

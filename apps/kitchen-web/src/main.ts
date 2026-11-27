@@ -21,6 +21,7 @@ import { PIVOT_PIECES, mountPivotLab } from "./three/pivotLab";
 import { CROWD_PIECES, mountCrowdLab } from "./three/crowdLab";
 import { PAIR_PIECES, mountPairLab } from "./three/pairLab";
 import { KIT_PIECES, mountKitLab } from "./three/kitLab";
+import { GLASSES_PIECES, mountGlassesLab } from "./three/glassesLab";
 import { TRIP_PIECES, mountTripLab } from "./three/tripLab";
 
 declare global {
@@ -305,6 +306,7 @@ function bootstrap(): void {
     { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false, pieces: WEEK_PIECES },
     { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false, pieces: floorPieces },
     { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false, pieces: RUSH_PIECES },
+    { id: "glasses", el: document.getElementById("glasses")!, mount: mountGlassesLab, done: false, pieces: GLASSES_PIECES },
     { id: "morning", el: document.getElementById("morning")!, mount: mountMorningLab, done: false, pieces: MORNING_PIECES },
     { id: "crowd", el: document.getElementById("crowd")!, mount: mountCrowdLab, done: false, pieces: CROWD_PIECES },
     { id: "pair", el: document.getElementById("pair")!, mount: mountPairLab, done: false, pieces: PAIR_PIECES },
