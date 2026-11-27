@@ -584,7 +584,14 @@ async function main() {
         await settle();
         const cheap = await status();
         if (!/costs nothing/.test(cheap)) throw new Error(`A combi trips: a short trip at 8:30 did not cost nothing: ${cheap}`);
-        await page.$eval("[data-trip-stage]", (el) => el.trip.set({ at: 200, mins: 60 }));
+        // A press on a map cell trips that combi then, for that long: the right combi at 7:00 for 30 min.
+        await page.click('[data-trip-map] rect.cell[data-o="1"][data-at="60"][data-mins="30"]');
+        await settle();
+        const picked = await info();
+        const pickedStatus = await status();
+        console.log(`[verify-chrome] A combi trips, a map cell: ${JSON.stringify(picked.trip)} | ${pickedStatus.slice(0, 90)}`);
+        if (picked.trip.oven !== 1 || picked.trip.at !== 60 || picked.trip.mins !== 30 || !/^The right combi trips at 7:00 .* back at 7:30\./.test(pickedStatus)) throw new Error(`A combi trips: a map cell did not trip the right combi at 7:00 for 30 min: ${JSON.stringify(picked.trip)} ${pickedStatus}`);
+        await page.$eval("[data-trip-stage]", (el) => el.trip.set({ oven: 0, at: 200, mins: 60 }));
         await settle();
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch7-trip.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-trip.png");
@@ -672,6 +679,29 @@ async function main() {
         await page.screenshot({ path: path.join(VERIFY_DIR, "mobile-390.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/mobile-390.png");
       }
+    }
+
+    // 7. A jump from the nav lands on its chapter: the figures it passes mount and grow above it on the way, and the
+    // page keeps the chapter where the jump put it (a fresh page each, desktop and phone).
+    for (const vp of [
+      { name: "desktop-1440", width: 1440, height: 900, mobile: false },
+      { name: "mobile-402", width: 402, height: 874, mobile: true },
+    ]) {
+      const jp = await browser.newPage();
+      jp.on("pageerror", (err) => pageErrors.push(`[jump ${vp.name}] ${err.message}`));
+      await jp.setViewport({ width: vp.width, height: vp.height, deviceScaleFactor: 1 });
+      await jp.goto(url, { waitUntil: "load" });
+      await sleep(2000);
+      if (vp.mobile) {
+        await jp.click(".menu > summary");
+        await sleep(400);
+        await jp.click('.menu a[href="#fleet"]');
+      } else await jp.click('nav a[href="#fleet"]');
+      await sleep(6000);
+      const landed = await jp.evaluate(() => ({ top: Math.round(document.getElementById("fleet").getBoundingClientRect().top), pad: parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0 }));
+      console.log(`[verify-chrome] Jump to Kitchens (${vp.name}): chapter top ${landed.top}px, header ${landed.pad}px`);
+      if (Math.abs(landed.top - landed.pad) > 6) throw new Error(`A nav jump on ${vp.name} did not land on its chapter: top ${landed.top}px, expected ${landed.pad}px`);
+      await jp.close();
     }
 
     if (consoleErrors.length > 0 || pageErrors.length > 0 || failedRequests.length > 0) {

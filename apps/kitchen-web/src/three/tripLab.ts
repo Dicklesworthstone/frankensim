@@ -4,7 +4,7 @@
  *
  * The kitchen on the stage is the morning with the trip: the combi that is out stands dark, its screen off and its
  * program stopped, the floor in front of it red, and a cook with free hands while work waits for a combi wears a pause
- * badge. A camera on a stand at the front right watches the line. Under the stage are two screens from its place:
+ * badge. A camera on a stand at the front left watches the line. Under the stage are two screens from its place:
  * the twin's picture of the planned morning, and the morning with the trip as the camera shows it; they part the
  * minute the combi goes dark, and the twin marks what differs. Under them, a map of every trip on the grid and what
  * it costs the van.
@@ -232,7 +232,7 @@ export function mountTripLab(root: HTMLElement): void {
   const kitchen = new MorningKitchen(COOKS);
   const twin = new MorningKitchen(COOKS);
   const scene = makeScene(kitchen, phone ? 1024 : 2048);
-  const twinScene = makeScene(twin, 1024);
+  const twinScene = makeScene(twin, phone ? 1024 : 2048);
 
   /* What only the stage shows: the camera on its stand and its view's edges, the red floor, the pause badges. */
   const marks = new THREE.Group();
@@ -365,10 +365,11 @@ export function mountTripLab(root: HTMLElement): void {
   };
   const gate = shaderGate(renderer, camera);
   const twinGate = shaderGate(rTwin, cctv);
+  const seenGate = shaderGate(rSeen, cctv);
   bindCanvasResize(stageEl, renderer, camera, gate);
   const screenEl = { twin: camCanvas.twin.parentElement!, seen: camCanvas.seen.parentElement! };
   bindCanvasResize(screenEl.twin, rTwin, cctv, twinGate);
-  bindCanvasResize(screenEl.seen, rSeen, cctv, gate);
+  bindCanvasResize(screenEl.seen, rSeen, cctv, seenGate);
   frame();
   new ResizeObserver(() => {
     const w = stageEl.clientWidth;
@@ -448,6 +449,8 @@ export function mountTripLab(root: HTMLElement): void {
   let shown: TripDone | null = null;
   let shownKey = "";
   let actual: Morning | null = null;
+  /** The trip of the morning on the stage. */
+  let shownTrip: Trip = { ...trip };
   const ready = () => shown !== null && shownKey === tripKey(settings);
 
   /* The menu card: each place's dish, where it cooks and how long it holds; a press swaps it. */
@@ -510,11 +513,11 @@ export function mountTripLab(root: HTMLElement): void {
   };
   const cellClass = (c: { late: number; pastBest: number }) => (c.late > 0.5 ? (c.late >= 59.5 ? "l4" : c.late >= 29.5 ? "l3" : c.late >= 9.5 ? "l2" : "l1") : c.pastBest > 0 ? "pb" : "ok");
   const costText = (c: { late: number; pastBest: number }) =>
-    !Number.isFinite(c.late) ? `the van still waiting at ${CUTOFF}` : c.late > 0.5 ? `the van ${fmtLate(c.late).toLowerCase()}${c.pastBest ? `, ${num(c.pastBest)} more portions past their best` : ""}` : c.pastBest ? `on time, ${num(c.pastBest)} more portions past their best` : "costs nothing";
+    !Number.isFinite(c.late) ? `the van still waiting at ${CUTOFF}` : c.late > 0.5 ? `the van ${span(c.late)} later than planned${c.pastBest ? `, ${num(c.pastBest)} more portions past their best` : ""}` : c.pastBest ? `the van as planned, ${num(c.pastBest)} more portions past their best` : "costs nothing";
   function renderMap(): void {
     if (!mapEl) return;
     const stale = !ready();
-    const W = Math.max(300, Math.round(mapEl.clientWidth));
+    const W = Math.max(260, Math.round(mapEl.clientWidth));
     const narrow = W < 520;
     const L = narrow ? 52 : 112;
     const R = W - 6;
@@ -550,9 +553,9 @@ export function mountTripLab(root: HTMLElement): void {
         for (let c = 0; c < AT_N; c++) {
           const at = TRIP_AT.from + c * TRIP_AT.step;
           const k = r * AT_N + c;
-          const cost = map ? costAt(map, o, k) : null;
+          const cost = map && plan?.finished ? costAt(map, o, k) : null;
           const on = trip.oven === o && trip.at === at && trip.mins === dur;
-          svg += `<rect class="cell ${cost ? cellClass(cost) : "pend"}${on ? " on" : ""}" data-o="${o}" data-at="${at}" data-for="${dur}" x="${(xOf(at) + 0.5).toFixed(1)}" y="${(gy + r * ch + 0.5).toFixed(1)}" width="${(cw - 1).toFixed(1)}" height="${ch - 1}"><title>${cap(OVEN_NAME[o]!)} out ${clockOf(at)} to ${clockOf(at + dur)}: ${cost ? costText(cost) : "…"}</title></rect>`;
+          svg += `<rect class="cell ${cost ? cellClass(cost) : plan && !plan.finished ? "na" : "pend"}${on ? " on" : ""}" data-o="${o}" data-at="${at}" data-mins="${dur}" x="${(xOf(at) + 0.5).toFixed(1)}" y="${(gy + r * ch + 0.5).toFixed(1)}" width="${(cw - 1).toFixed(1)}" height="${ch - 1}"><title>${cap(OVEN_NAME[o]!)} out ${clockOf(at)} to ${clockOf(at + dur)}: ${cost ? costText(cost) : plan && !plan.finished ? `no van to set it against: the plan is not packed by ${CUTOFF}` : "…"}</title></rect>`;
         }
       }
     }
@@ -567,6 +570,7 @@ export function mountTripLab(root: HTMLElement): void {
     mapEl.innerHTML = svg;
     if (mapNote) {
       if (!map || !plan) mapNote.textContent = "Mapping every trip…";
+      else if (!plan.finished) mapNote.textContent = `Across, when the combi trips; down, how long it is out. This order is not packed by ${CUTOFF} even with both combis, so there is no van to set a trip against.`;
       else {
         const { n, of } = freeShare(map);
         const braise = plan.loads.filter((l) => l.verb === "Braise");
@@ -574,7 +578,8 @@ export function mountTripLab(root: HTMLElement): void {
         let shortest = Infinity;
         for (let o = 0; o < OVENS; o++) for (let k = 0; k < AT_N * FOR_N; k++) if (!free(costAt(map, o, k))) shortest = Math.min(shortest, TRIP_FOR.from + Math.floor(k / AT_N) * TRIP_FOR.step);
         let text = `Across, when the combi trips; down, how long it is out. ${num(n)} of the ${num(of)} trips cost nothing at ${num(settings.meals)} meals.`;
-        if (n / of < 0.3 && new Set(braise.map((l) => l.oven)).size > 1) text += ` The braise takes both combis${braise.every((l) => l.t0 < 30) ? " from the start" : ""}, and leaves little room to lose.`;
+        if (n === of) text += plan.loads.length === 0 ? " No dish on this menu goes in a combi." : " The combis have time to spare all morning.";
+        else if (n / of < 0.3 && new Set(braise.map((l) => l.oven)).size > 1) text += ` The braise takes both combis${braise.every((l) => l.t0 < 30) ? " from the start" : ""}, and leaves little room to lose.`;
         else if (n / of > 0.8 && shortest > TRIP_FOR.from) text += ` The combis have time to spare: no trip shorter than ${shortest} min costs anything.`;
         mapNote.textContent = `${text} Pick a cell to trip it.`;
       }
@@ -590,9 +595,10 @@ export function mountTripLab(root: HTMLElement): void {
   });
 
   /* Tiles and status: the morning with the trip, against the plan. */
-  /** What the combi held when it tripped, as planned. */
+  /** What the combi held when it tripped, as planned. A load the plan starts that very minute is the one due in: with
+   * the combi out it never goes in. */
   const heldAt = (plan: Morning, o: number, t: number) => {
-    const l = plan.loads.find((x) => x.oven === o && x.t0 <= t && x.t3 > t);
+    const l = plan.loads.find((x) => x.oven === o && x.t0 < t && x.t3 > t);
     const dishes = menuDishes(plan.settings.menu);
     if (!l) {
       const next = plan.loads.filter((x) => x.oven === o && x.t0 >= t).sort((a, b) => a.t0 - b.t0)[0];
@@ -600,8 +606,9 @@ export function mountTripLab(root: HTMLElement): void {
     }
     const name = shortName(dishes[l.slot]!.name).toLowerCase();
     if (t < l.t1) return { load: l, text: `while a cook loads it with the ${name}` };
-    if (t < l.t2) return { load: l, text: `with the ${name} in it, ${span(t - l.t1)} into ${span(l.t2 - l.t1)} of cooking` };
-    return { load: l, text: `with the ${name} done in it, coming out` };
+    if (t < l.t2) return { load: l, text: t - l.t1 < 0.5 ? `with the ${name} in it, its cooking just started` : `with the ${name} in it, ${span(t - l.t1)} into ${span(l.t2 - l.t1)} of cooking` };
+    if (t < l.tu) return { load: l, text: `with the ${name} done in it, waiting for a cook to take it out` };
+    return { load: l, text: `while a cook takes the ${name} out` };
   };
   function renderTiles(): void {
     tilesEl?.toggleAttribute("data-stale", !ready());
@@ -614,11 +621,14 @@ export function mountTripLab(root: HTMLElement): void {
       const d = Math.round(actual.depart) - Math.round(plan.depart);
       if (!actual.finished) setTile(tiles.van, "Not yet", `still waiting at ${CUTOFF}, some dishes not packed`);
       else setTile(tiles.van, clockOf(actual.depart), actual.late > 0.5 ? fmtLate(actual.late).toLowerCase() : "on time", d > 0 && plan.finished ? `+${d} min` : null, false);
-      if (free(c)) setTile(tiles.known, clockOf(trip.at), "and the van still leaves as planned");
-      else setTile(tiles.known, clockOf(trip.at), trip.at < DOOR ? `${span(DOOR - trip.at)} before the van is due` : "as the van is due");
-      setTile(tiles.best, c.pastBest ? `+${num(c.pastBest)}` : "+0", c.pastBest ? "portions past their best at lunch" : "no portion more past its best", null);
+      const at = shownTrip.at;
+      if (free(c)) setTile(tiles.known, clockOf(at), "and the van still leaves as planned");
+      else setTile(tiles.known, clockOf(at), at < DOOR ? `${span(DOOR - at)} before the van is due` : "as the van is due");
+      if (!plan.finished || !actual.finished) setTile(tiles.best, "–", `the van not away by ${CUTOFF}`);
+      else setTile(tiles.best, c.pastBest ? `+${num(c.pastBest)}` : "+0", c.pastBest ? "portions past their best at lunch" : "no portion more past its best", null);
     }
     if (!shown) setTile(tiles.free, "…", "");
+    else if (!shown.plan.finished) setTile(tiles.free, "–", `not packed by ${CUTOFF} even with both combis`);
     else {
       const { n, of } = freeShare(shown.map);
       setTile(tiles.free, `${Math.round((100 * n) / of)}%`, `${num(n)} of ${num(of)} trips mapped, both combis`);
@@ -639,8 +649,9 @@ export function mountTripLab(root: HTMLElement): void {
     }
     const { plan } = shown!;
     const c = costOf(actual, plan);
-    const held = heldAt(plan, trip.oven, trip.at);
-    let text = `${cap(OVEN_NAME[trip.oven]!)} trips at ${clockOf(trip.at)} ${held.text}, and is back at ${clockOf(trip.at + trip.mins)}.`;
+    const tr = shownTrip;
+    const held = heldAt(plan, tr.oven, tr.at);
+    let text = `${cap(OVEN_NAME[tr.oven]!)} trips at ${clockOf(tr.at)} ${held.text}, and is back at ${clockOf(tr.at + tr.mins)}.`;
     if (!plan.finished) text = `This order does not make the van even without a trip: the plan is still waiting at ${CUTOFF}.`;
     else if (!madeIt(plan)) text += ` The plan itself ${plan.late > 0.5 ? `leaves at ${clockOf(plan.depart)}, ${fmtLate(plan.late).toLowerCase()}` : `has ${num(plan.pastBest)} portions past their best`} for this order; against it,`;
     else text += " Against the plan,";
@@ -653,8 +664,10 @@ export function mountTripLab(root: HTMLElement): void {
         const after = held.load ? actual.loads.find((x) => x.oven === held.load!.oven && x.t0 === held.load!.t0) : undefined;
         const dish = after ? shortName(menuDishes(plan.settings.menu)[after.slot]!.name).toLowerCase() : "";
         const out = after && held.load && after.t2 > held.load.t2 + 0.5 ? ` The ${dish} come${/s$/.test(dish) ? "" : "s"} out at ${clockOf(after.t2)}, not ${clockOf(held.load.t2)}.` : "";
-        text += `${late ? ` the van leaves at ${clockOf(actual.depart)}, ${fmtLate(c.late).toLowerCase()}` : " the van leaves on time"}${c.pastBest ? `${late ? " and" : " but"} ${num(c.pastBest)} more portions are past their best at lunch` : ""}.${out}`;
-        if (trip.at < DOOR) text += ` The camera shows it dark at ${clockOf(trip.at)}, ${span(DOOR - trip.at)} before the van is due, and the map's ${clockOf(trip.at)} column shows what it costs the van however long it stays out.`;
+        // Against a plan that is itself late, the trip's minutes are minutes later, not minutes late.
+        const planLate = plan.late > 0.5;
+        text += `${late ? ` the van leaves at ${clockOf(actual.depart)}, ${planLate ? `${span(c.late)} later` : fmtLate(c.late).toLowerCase()}` : planLate ? " the van leaves as planned" : " the van leaves on time"}${c.pastBest ? `${late ? " and" : " but"} ${num(c.pastBest)} more portions are past their best at lunch` : ""}.${out}`;
+        if (tr.at < DOOR) text += ` The camera shows it dark at ${clockOf(tr.at)}, ${span(DOOR - tr.at)} before the van is due, and the map's ${clockOf(tr.at)} column shows what it costs the van however long it stays out.`;
       }
     }
     statusEl.textContent = text;
@@ -675,6 +688,7 @@ export function mountTripLab(root: HTMLElement): void {
         worker = new Worker(new URL("../sim/tripRuns.worker.ts", import.meta.url), { type: "module" });
       } catch {
         failed = "This browser could not start the planner for the kitchen.";
+        renderStatus();
         return;
       }
       worker.onerror = () => {
@@ -713,6 +727,7 @@ export function mountTripLab(root: HTMLElement): void {
       shown = r;
       shownKey = key;
       actual = tripMorning(r.plan, trip);
+      shownTrip = { ...trip };
       let last = 0;
       for (const m of [r.plan, actual]) for (const j of m.jobs) last = Math.max(last, j.t1);
       // On past the last work, and past each van until its carriers are out of the door.
@@ -726,7 +741,7 @@ export function mountTripLab(root: HTMLElement): void {
       loopS = Math.max(loop, twinLoop);
       tMin = frac * endMin;
       loopT = tMin * SEC_PER_MIN;
-      placeBox(trip.oven);
+      placeBox(shownTrip.oven);
     }
     renderControls();
     renderMap();
@@ -777,8 +792,9 @@ export function mountTripLab(root: HTMLElement): void {
     const plan = shown?.plan ?? null;
     const m = actual;
     const k = Math.floor(t);
-    const out = t >= trip.at && t < trip.at + trip.mins;
-    const seen = t >= trip.at;
+    const tr = shownTrip;
+    const out = t >= tr.at && t < tr.at + tr.mins;
+    const seen = t >= tr.at;
     let van = "…";
     let note = "";
     let kind = "idle";
@@ -787,20 +803,23 @@ export function mountTripLab(root: HTMLElement): void {
       // From the minute the camera shows the combi dark, the twin's forecast is the morning with the trip: while it
       // is out, if it is back when picked.
       const forecast = seen ? m : plan;
-      van = !forecast.finished ? `Van: not by ${CUTOFF}` : `Van ${clockOf(forecast.depart)}${!seen || free(c) ? " as planned" : out ? ` if back at ${clockOf(trip.at + trip.mins)}` : ""}`;
+      van = !forecast.finished ? `Van: not by ${CUTOFF}` : `Van ${clockOf(forecast.depart)}${!seen || free(c) ? " as planned" : out ? ` if back at ${clockOf(tr.at + tr.mins)}` : ""}`;
       if (t >= m.depart && m.finished) {
         note = `Van gone at ${clockOf(m.depart)}`;
         kind = m.late > 0.5 ? "late" : "held";
       } else if (out) {
-        note = `${cap(OVEN_NAME[trip.oven]!)} out until ${clockOf(trip.at + trip.mins)}`;
+        note = `${cap(OVEN_NAME[tr.oven]!)} out until ${clockOf(tr.at + tr.mins)}`;
         kind = "full";
       } else if (t >= DOOR) {
         note = "The van is waiting";
         kind = "late";
-      } else if (m.waits.some((w) => w.t0 <= t && w.t1 > t)) {
-        const n = m.waits.find((w) => w.t0 <= t && w.t1 > t)!.cooks.length;
-        note = `${n === 1 ? "A cook" : `${n} cooks`} waiting for a combi`;
-        kind = "wait";
+      } else {
+        // Waits for a combi only: a cook waiting for a range or the table is the menu's, not the trip's.
+        const w = m.waits.find((x) => x.at === "oven" && x.t0 <= t && x.t1 > t);
+        if (w) {
+          note = `${w.cooks.length === 1 ? "A cook" : `${w.cooks.length} cooks`} waiting for a combi`;
+          kind = "wait";
+        }
       }
     }
     const sig = `${k}|${van}|${note}`;
@@ -822,7 +841,7 @@ export function mountTripLab(root: HTMLElement): void {
       flagEl.hidden = !differs;
       if (differs && plan && m) {
         const c = costOf(m, plan);
-        flagEl.textContent = out ? `Not as planned: ${OVEN_NAME[trip.oven]} is dark` : free(c) ? "Combi back: the van on time" : `Combi back: van ${m.finished ? clockOf(m.depart) : `not by ${CUTOFF}`}`;
+        flagEl.textContent = out ? `Not as planned: ${OVEN_NAME[tr.oven]} is dark` : free(c) ? "Combi back: the van as planned" : `Combi back: van ${m.finished ? clockOf(m.depart) : `not by ${CUTOFF}`}`;
       }
     }
   }
@@ -831,14 +850,14 @@ export function mountTripLab(root: HTMLElement): void {
   function showMarks(t: number, dt: number): void {
     const m = actual;
     outPads.forEach((p, o) => {
-      const want = m && o === trip.oven && t >= trip.at && t < trip.at + trip.mins ? 1 : 0;
+      const want = m && o === shownTrip.oven && t >= shownTrip.at && t < shownTrip.at + shownTrip.mins ? 1 : 0;
       p.on += (want - p.on) * Math.min(1, dt * 6);
       if (p.on < 0.01 && want === 0) p.on = 0;
       p.mesh.visible = p.on > 0;
       p.mat.opacity = 0.62 * p.on;
     });
     // A cook free while work waits for a combi: their badge, where the routine has them now.
-    const waits = m ? m.waits.filter((w) => w.t0 <= t && w.t1 > t) : [];
+    const waits = m ? m.waits.filter((w) => w.at === "oven" && w.t0 <= t && w.t1 > t) : [];
     kitchen.cooks.forEach((c, i) => {
       const b = badges[i]!;
       const on = c.st.group.visible && !!c.routine && waits.some((w) => w.cooks.includes(kitchen.whoAt(i, loopT)));
@@ -848,8 +867,8 @@ export function mountTripLab(root: HTMLElement): void {
         b.position.set(at.x, c.st.dims.standing_height_m + 0.3, at.z);
       }
     });
-    // The camera's red lamp: on while it records, blinking once a second of the morning.
-    rig.led.color.setHex(Math.floor(t) % 2 === 0 ? 0xff2b2b : 0x3a0a0a);
+    // The camera's red lamp: on while it records, blinking on its own clock, once a second.
+    rig.led.color.setHex(Math.floor(performance.now() / 500) % 2 === 0 ? 0xff2b2b : 0x3a0a0a);
   }
 
   renderControls();
@@ -863,8 +882,8 @@ export function mountTripLab(root: HTMLElement): void {
       renderMap();
     }).observe(mapEl);
   }
-  new ResizeObserver(() => placeBox(trip.oven)).observe(screenEl.seen);
-  for (const k of kitchen.cooks) void k.st.ready.then(() => void gate.refresh(scene));
+  new ResizeObserver(() => placeBox(shownTrip.oven)).observe(screenEl.seen);
+  for (const k of kitchen.cooks) void k.st.ready.then(() => void gate.refresh(scene).then(() => void seenGate.refresh(scene)));
   for (const k of twin.cooks) void k.st.ready.then(() => void twinGate.refresh(twinScene));
 
   let inView = false;
@@ -908,16 +927,24 @@ export function mountTripLab(root: HTMLElement): void {
         twin.show(tMin, SCREEN_S * 2);
         if (twinGate.ready()) rTwin!.render(twinScene, cctv);
       }
-      if (screenNext === "seen" || frozen !== null) {
+      if ((screenNext === "seen" || frozen !== null) && seenGate.ready()) {
+        const fog = scene.fog as THREE.Fog;
+        const near = fog.near;
+        const far = fog.far;
+        const twinFog = twinScene.fog as THREE.Fog;
+        fog.near = twinFog.near;
+        fog.far = twinFog.far;
         marks.visible = false;
         rSeen!.render(scene, cctv);
         marks.visible = true;
+        fog.near = near;
+        fog.far = far;
       }
       screenNext = screenNext === "twin" ? "seen" : "twin";
     }
   }
   requestAnimationFrame(animate);
-  void gate.refresh(scene).then(() => void twinGate.refresh(twinScene));
+  void gate.refresh(scene).then(() => void twinGate.refresh(twinScene).then(() => void seenGate.refresh(scene)));
 
   // A hook for checking the page by script.
   Object.assign(stageEl, {

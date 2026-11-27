@@ -260,8 +260,11 @@ export interface Wait {
 }
 export interface BatchOut {
   slot: number;
-  /** The earliest its cooking could start, minutes from 6:00: the plan's hold on it. */
+  /** The earliest its cooking could start, minutes from 6:00: the plan's hold on it (in a morning carried on from a
+   * plan, when the plan started it). */
   release: number;
+  /** When its cooking started, or -1 if it never did. */
+  started: number;
   portions: number;
   pans: number;
   /** When its cooking finished, and when it was packed. `pans`: the hotel pans its packing fills (a pan part filled
@@ -314,6 +317,8 @@ interface Batch {
   ready: number;
   /** The earliest the first stage off the table may start (its holding time counted back from lunch). */
   release: number;
+  /** When that stage did start, or -1. */
+  started: number;
   firstCook: number;
   cooked: number;
   packed: number;
@@ -339,7 +344,7 @@ function batchesFor(d: MorningDish, slot: number, portions: number, ahead: boole
     const p = Math.round(left / (n - i));
     left -= p;
     const firstCook = stages.findIndex((s) => s.at !== "table");
-    out.push({ id: 0, slot, i, portions: p, pans: Math.ceil(p / d.pan - EPS), stages, next: 0, busy: false, ready: 0, release: 0, firstCook, cooked: -1, packed: -1 });
+    out.push({ id: 0, slot, i, portions: p, pans: Math.ceil(p / d.pan - EPS), stages, next: 0, busy: false, ready: 0, release: 0, started: -1, firstCook, cooked: -1, packed: -1 });
   }
   return out;
 }
@@ -519,6 +524,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean, 
       onRange[c]!++;
       where[c] = { at: "range", col: side, spot: where[c]!.spot };
       b.busy = true;
+      if (b.next === b.firstCook) b.started = t;
       jobs.push({ cook: c, batch: b.id, at: "range", spot: bi, side, slot: b.slot, verb: st.verb, kind: "range", t0: t, t1: t + d, hands });
       burns.push({ burner: bi, batch: b.id, slot: b.slot, vessel: st.vessel ?? "pot", t0: t, t1: t + d });
       handsMin += d * hands;
@@ -557,7 +563,10 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean, 
     ov.load = load;
     ov.batches = group;
     ov.stage = st;
-    for (const x of group) x.busy = true;
+    for (const x of group) {
+      x.busy = true;
+      if (x.next === x.firstCook) x.started = t;
+    }
     spare[c] = 0;
     where[c] = { at: "oven", col: where[c]!.col, spot: o };
     jobs.push({ cook: c, batch: b.id, at: "oven", spot: o, slot: b.slot, verb: `Load: ${st.verb.toLowerCase()}`, kind: "load", t0: t, t1: t + tl, hands: 1 });
@@ -706,7 +715,7 @@ function schedule(s: MorningSettings, shift: readonly number[], fresh: boolean, 
     burns,
     loads,
     waits,
-    batches: batches.map((b, i) => ({ slot: b.slot, release: b.release, portions: b.portions, pans: packPans[i]!, cooked: b.cooked, packed: b.packed })),
+    batches: batches.map((b, i) => ({ slot: b.slot, release: b.release, started: b.started, portions: b.portions, pans: packPans[i]!, cooked: b.cooked, packed: b.packed })),
     depart,
     late,
     finished,
@@ -772,7 +781,7 @@ export function planMorning(s: MorningSettings): Morning {
  *  starts no earlier than the plan had it, and the cooks take the work as it comes, as they would have. `s` is the
  *  plan's settings with the outages added. */
 export function carryOn(s: MorningSettings, plan: Morning): Morning {
-  return schedule(s, plan.shift, true, plan.batches.map((b) => b.release));
+  return schedule(s, plan.shift, true, plan.batches.map((b) => Math.max(b.release, b.started)));
 }
 
 /** Whether a morning makes the van with everything still at its best at lunch. */

@@ -3781,7 +3781,8 @@ button.wk-dish[aria-pressed="true"] {
   cursor: pointer;
   stroke: none;
 }
-.tp-svg .cell.pend {
+.tp-svg .cell.pend,
+.tp-svg .cell.na {
   fill: rgb(255 255 255 / 0.05);
 }
 .tp-svg .cell.ok,

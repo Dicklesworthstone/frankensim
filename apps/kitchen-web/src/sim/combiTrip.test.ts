@@ -18,12 +18,21 @@ const PLANS: Morning[] = (
 const TRIPS: Trip[] = [];
 for (let oven = 0; oven < OVENS; oven++) for (let at = TRIP_AT.from; at <= TRIP_AT.to; at += 40) for (let dur = TRIP_FOR.from; dur <= TRIP_FOR.to; dur += 40) TRIPS.push({ oven, at, mins: dur });
 const overlap = (a0: number, a1: number, b0: number, b1: number) => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
-/** A morning's record without its settings, for comparing two runs. */
-const record = (m: Morning) => JSON.stringify({ ...m, settings: null });
+/**
+ * A morning's record without its settings, for comparing two runs; without its waits and its dishes' holds too,
+ * which carrying on changes on purpose: each dish is held to when the plan started it, so a dish the plan left
+ * waiting for its station is not waiting yet.
+ */
+const record = (m: Morning) => JSON.stringify({ ...m, settings: null, waits: null, batches: m.batches.map(({ release: _, ...b }) => b) });
 
 describe("combiTrip", () => {
   test("with no combi out, carrying on is the plan itself, job for job", () => {
-    for (const plan of PLANS) expect(record(carryOn(plan.settings, plan))).toBe(record(plan));
+    for (const plan of PLANS) {
+      const m = carryOn(plan.settings, plan);
+      expect(record(m)).toBe(record(plan));
+      // Its waits are the plan's, less those before a dish's start.
+      for (const w of m.waits) expect(plan.waits.some((x) => x.at === w.at && x.t0 <= w.t0 + 1e-6 && x.t1 >= w.t1 - 1e-6 && w.cooks.every((c) => x.cooks.includes(c)))).toBe(true);
+    }
   });
 
   test("a combi that is out takes nothing in, and holds up only the program running in it", () => {
@@ -44,7 +53,7 @@ describe("combiTrip", () => {
     }
   });
 
-  test("up to the trip the morning is the plan's, and every dish keeps the plan's hold on it", () => {
+  test("up to the trip the morning is the plan's, and no dish starts sooner than the plan started it", () => {
     for (const plan of PLANS)
       for (const trip of TRIPS) {
         const m = tripMorning(plan, trip);
@@ -52,7 +61,11 @@ describe("combiTrip", () => {
         expect(JSON.stringify(m.jobs.filter(before))).toBe(JSON.stringify(plan.jobs.filter(before)));
         const start = ({ oven, batches, slot, verb, pans, t0, t1 }: Morning["loads"][number]) => ({ oven, batches, slot, verb, pans, t0, t1 });
         expect(m.loads.filter(before).map(start)).toEqual(plan.loads.filter(before).map(start));
-        expect(m.batches.map((b) => b.release)).toEqual(plan.batches.map((b) => b.release));
+        expect(m.batches.map((b) => b.release)).toEqual(plan.batches.map((b) => Math.max(b.release, b.started)));
+        m.batches.forEach((b, i) => {
+          const p = plan.batches[i]!;
+          if (p.started >= 0 && b.started >= 0) expect(b.started).toBeGreaterThanOrEqual(p.started - 1e-6);
+        });
       }
   });
 

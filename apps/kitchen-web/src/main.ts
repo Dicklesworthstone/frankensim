@@ -194,6 +194,50 @@ function initHowLinks(): void {
   fromAddress();
 }
 
+/**
+ * A jump to a chapter (the nav, a link, an address ending in #) passes figures that mount on the way and grow above
+ * its target as they do (their charts, maps and menus are built when they mount), and a smooth scroll ends where its
+ * target was when it set off: on a phone the reader landed a screen or more short of the chapter. For a few seconds
+ * after a jump, until the reader scrolls themselves, each change in a chapter's or a figure's size puts the target
+ * back where the jump puts it.
+ */
+function initJumpPin(): void {
+  if (!("ResizeObserver" in window)) return;
+  let target: HTMLElement | null = null;
+  let since = 0;
+  let until = 0;
+  const pin = (id: string) => {
+    let el: HTMLElement | null = null;
+    try {
+      el = id ? document.getElementById(decodeURIComponent(id)) : null;
+    } catch {
+      /* a broken escape in the address: no target */
+    }
+    target = el;
+    since = performance.now();
+    until = since + 2500;
+  };
+  // The reader's own scroll ends it. (A tap or a key on a link comes before its click, which pins again.)
+  for (const ev of ["wheel", "touchstart", "pointerdown", "keydown"]) window.addEventListener(ev, () => (target = null), { passive: true, capture: true });
+  document.addEventListener("click", (e) => {
+    const a = (e.target as Element | null)?.closest?.<HTMLAnchorElement>('a[href^="#"]');
+    if (a && a.hash.length > 1) pin(a.hash.slice(1));
+  });
+  if (location.hash.length > 1) pin(location.hash.slice(1));
+  const ro = new ResizeObserver(() => {
+    if (!target) return;
+    const now = performance.now();
+    if (now > until) {
+      target = null;
+      return;
+    }
+    // A figure that mounts late still grows under the pin: each change holds it a little longer, to 12 s at most.
+    until = Math.min(since + 12000, now + 2500);
+    target.scrollIntoView({ block: "start" });
+  });
+  for (const el of document.querySelectorAll("section[id], figure.fig")) ro.observe(el);
+}
+
 /** Mount one 3D chapter. A chapter that fails (no WebGL, a lost context) leaves its section's text and controls in
  * place and never stops the rest of the page from starting. */
 function tryMount<T>(id: string, mount: () => T): T | null {
@@ -226,6 +270,7 @@ function bootstrap(): void {
   for (const el of document.querySelectorAll<HTMLInputElement>("input")) el.value = el.defaultValue;
   initRangeTrackFills();
   initHowLinks();
+  initJumpPin();
   // The stove chapter's ribeye texture is the heaviest single build on the page: start it on another thread now,
   // while the hero kitchen builds, and mount the stove once it has arrived. The oven's loaf crust is the next
   // heaviest; the oven waits for it only to build the loaf, after its own mount.
