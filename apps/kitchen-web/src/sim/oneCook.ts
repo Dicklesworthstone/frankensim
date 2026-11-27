@@ -49,11 +49,14 @@ const plan = (dishes: readonly MorningDish[], portions: number): Morning =>
 
 /**
  * Two plans one after the other: `b`'s, from the minute `a`'s work is done, as the second dish (place 1) of the same
- * morning, with its batches numbered after `a`'s.
+ * morning, with its batches numbered after `a`'s. Its van leaves when the last of `b` is packed (at `a`'s time at the
+ * soonest); `use` and `bottleneck` are `a`'s (nothing reads them for one after the other).
  */
 export function oneAfterOther(a: Morning, b: Morning, dishes: readonly MorningDish[]): Morning {
   const at = endOf(a);
   const nb = a.batches.length;
+  const door = a.depart - a.late;
+  const depart = a.finished && b.finished ? Math.max(door, at + endOf(b)) : Math.max(a.depart, b.depart + at);
   const job = (j: Job): Job => ({ ...j, batch: j.batch + nb, slot: 1, t0: j.t0 + at, t1: j.t1 + at });
   /** A time in `b`'s plan, moved on (-1, never, stays). */
   const on = (x: number) => (x < 0 ? x : x + at);
@@ -65,8 +68,8 @@ export function oneAfterOther(a: Morning, b: Morning, dishes: readonly MorningDi
     loads: [...a.loads, ...b.loads.map((x) => ({ ...x, batches: x.batches.map((i) => i + nb), slot: 1, t0: x.t0 + at, t1: x.t1 + at, t2: x.t2 + at, tu: x.tu + at, t3: x.t3 + at }))],
     waits: [...a.waits, ...b.waits.map((w) => ({ ...w, t0: w.t0 + at, t1: w.t1 + at }))],
     batches: [...a.batches, ...b.batches.map((x) => ({ ...x, slot: 1, release: x.release + at, started: on(x.started), cooked: on(x.cooked), packed: on(x.packed) }))],
-    depart: Math.max(a.depart, b.depart + at),
-    late: Math.max(a.late, b.late + at),
+    depart,
+    late: depart - door,
     finished: a.finished && b.finished,
     pastBest: 0,
     pastBestBySlot: [0, 0],

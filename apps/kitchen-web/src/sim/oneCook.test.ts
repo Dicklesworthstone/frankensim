@@ -68,7 +68,7 @@ describe("one cook, two dishes", () => {
     }
   });
 
-  test("two dishes that need the cook's hands at the range the whole time they cook save nothing together", () => {
+  test("two dishes that cook at the range with the cook at them, and never in a combi, save nothing together", () => {
     for (const p of ORDERS)
       for (const [a, b] of [
         [DISHES.risotto, DISHES.piccata],

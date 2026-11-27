@@ -4,12 +4,12 @@
  * needs the cook's hands) and plans the two together for one pair of hands (sim/oneCook.ts).
  *
  * The stage acts out the plan picked: both at once, or one then the other. Beside it, the glasses' own picture, from
- * the camera at the corner of the frame. Under them, the two cards, each step lit the first time the glasses see it;
- * and a chart of the cook's hands over both plans, the work of each dish stacked as much of the cook as it takes.
+ * the camera at the corner of the frame. Under them, a chart of the cook's hands over both plans, the work of each dish
+ * stacked as much of the cook as it takes; and the two cards, each step lit the first time the glasses see it.
  */
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { clockOf, type Morning, type MorningDish } from "../sim/cateringMorning";
+import { clockOf, type Job, type Morning, type MorningDish } from "../sim/cateringMorning";
 import { COOK_DISHES, cardOf, oneCook, type CardStep, type OneCook } from "../sim/oneCook";
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { CARRIER, CARRIER_X0, END_HOLD_S, LINE_Z, MORNING_PIECES, MorningKitchen, OVEN, OVEN_X0, RANGE, SEC_PER_MIN, SLOT_COLOR, TABLE, TABLE_Z, rangeX0, shortName, type CookSpec } from "./morningKitchen";
@@ -33,8 +33,10 @@ const span = (m: number) => {
 const dishName = (d: MorningDish) => shortName(d.name).toLowerCase();
 /** Whether a dish's short name takes a plural verb ("the thighs roast", "the braise bakes"). */
 const plural = (d: MorningDish) => /s$/.test(dishName(d));
-/** The glasses' camera: its field of view up and down (a portrait picture, 3 by 4), and how far it looks down. */
+/** The glasses' camera: its field of view up and down for a portrait picture (3 by 4, beside the stage), and for a
+ * landscape one (4 by 3, under it on a phone) the same across the diagonal; and how far it looks down. */
 const POV_FOV = 76;
+const POV_FOV_WIDE = 61;
 const POV_TILT = THREE.MathUtils.degToRad(6);
 /** Seconds between frames of the glasses' picture. */
 const POV_S = 1 / 30;
@@ -43,19 +45,25 @@ const POV_S = 1 / 30;
  * The stage's clock. At the morning's pace a step of a minute or two would be over before the cook got to it, so each
  * step is slowed to at least STEP_MIN minutes of the stage's clock; and the plan's clock stands still while the cook
  * walks from one station to the next (the plan counts no time for it): the stage's cook sets off for a station as its
- * work starts (routineFor), so each walk is put at the start of the stretch it walks to. The rest runs at the
- * morning's pace, or faster where the loop would run past LOOP_S. `at` takes a minute of the plan to the stage's (a
- * station's first minute to the cook setting off for it), `back` the stage's to the plan's, and `walk` says where the
- * cook is walking to at a minute of the stage's.
+ * work starts (routineFor), so each walk is put at the start of the stretch it walks to. Where that would make the loop
+ * longer than LOOP_S, only each step's first time plays so (the first time the glasses see it); its later times, the
+ * same work again for the next batch, play fast forward, all of them in FF_S at the most, and the stretches with no
+ * work in them (a dish in a combi, the cook waiting) go faster, down to a quarter of the morning's pace.
+ *
+ * `at` takes a minute of the plan to the stage's (a station's first minute to the cook setting off for it), `back` the
+ * stage's to the plan's; `walk` says where the cook is walking to at a minute of the stage's, and `fast` whether the
+ * plan is playing fast forward then.
  */
 const STEP_MIN = 10;
 const LOOP_S = 75;
+const FF_S = 15;
 /** A walk's seconds, until the stage has walked it (routineFor's walks are the same every time). */
 const WALK_GUESS_S = 5;
 interface Warp {
   at(t: number): number;
   back(u: number): number;
   walk(u: number): string | null;
+  fast(u: number): boolean;
   /** The walks it took, by their routine's key ("table:0>oven:0"), and the seconds it gave each. */
   walked: Map<string, number>;
 }
@@ -80,38 +88,82 @@ function warpOf(m: Morning, end: number, walkS: (key: string) => number): Warp {
   for (const l of m.loads) raw.push(l.t0, l.t1, l.t2, l.tu, l.t3);
   const ts: number[] = [];
   for (const t of raw.filter((t) => t >= 0 && t <= end).sort((a, b) => a - b)) if (!ts.length || t - ts[ts.length - 1]! > 1e-6) ts.push(t);
-  // Each stretch between two cuts: a walk (stage minutes), or work slowed or not (minutes of the plan, and the factor).
-  const parts: { a: number; b: number; f: number; walk?: string; g?: number }[] = [];
+  // The first job of each kind (a step of a dish): the first time the glasses see that step.
+  const kind = (j: Job) => `${j.slot}|${j.verb}`;
+  const first = new Map<string, number>();
+  const firstEnd = new Map<string, number>();
+  for (const j of m.jobs) {
+    const k = kind(j);
+    if (j.t0 < (first.get(k) ?? Infinity)) {
+      first.set(k, j.t0);
+      firstEnd.set(k, j.t1);
+    }
+  }
+  // When every step has been seen through once.
+  const seenAll = Math.max(0, ...firstEnd.values());
+  // Each stretch between two cuts: a walk to it (stage minutes), and its minutes of the plan, slowed to STEP_MIN for
+  // the shortest job in it (`floor`, stage minutes to the plan's); `again` when every job in it has been seen before
+  // (with none, once every step has been), `idle` when there is none.
+  const parts: { a: number; b: number; floor: number; again: boolean; idle: boolean; walk?: string; key?: string; g?: number }[] = [];
   const walked = new Map<string, number>();
   let last: Place | null = null;
   for (let i = 0; i + 1 < ts.length; i++) {
     const [a, b] = [ts[i]!, ts[i + 1]!];
     const mid = (a + b) / 2;
+    const on = m.jobs.filter((j) => j.t0 <= mid && j.t1 > mid);
     const here = placeAt(m, mid);
+    let walk: string | undefined;
+    let key: string | undefined;
+    let g: number | undefined;
     if (here && last && here.key !== last.key) {
-      const key = `${last.key}>${here.key}`;
-      const g = walkS(key) / SEC_PER_MIN;
-      walked.set(key, g * SEC_PER_MIN);
-      parts.push({ a, b: a, f: 0, walk: here.name, g });
+      key = `${last.key}>${here.key}`;
+      g = walkS(key) / SEC_PER_MIN;
+      walk = here.name;
     }
     if (here) last = here;
-    let f = 1;
-    for (const j of m.jobs) if (j.t0 <= mid && j.t1 > mid) f = Math.max(f, STEP_MIN / Math.max(1e-6, j.t1 - j.t0));
-    parts.push({ a, b, f });
+    const floor = on.reduce((f, j) => Math.max(f, STEP_MIN / Math.max(1e-6, j.t1 - j.t0)), 0);
+    const again = on.length ? on.every((j) => j.t0 > first.get(kind(j))! + 1e-9) : a >= seenAll - 1e-9;
+    parts.push({ a, b, floor, again, idle: !on.length, walk, key, g });
   }
-  // Past LOOP_S, the plain stretches go faster (down to a quarter of the morning's pace).
-  const fixed = parts.reduce((s, p) => s + (p.walk ? p.g! : p.f > 1 ? (p.b - p.a) * p.f : 0), 0);
-  const plain = parts.reduce((s, p) => s + (!p.walk && p.f <= 1 ? p.b - p.a : 0), 0);
-  const room = LOOP_S / SEC_PER_MIN - fixed;
-  const c = plain > 0 && fixed + plain > LOOP_S / SEC_PER_MIN ? Math.max(0.25, room / plain) : 1;
+  const target = LOOP_S / SEC_PER_MIN;
+  /** The stage's minutes: walks and work slowed, the stretches with no work in them at `c` of the morning's pace, and
+   * (`ff`) the work seen before at `k` of it with no walks. */
+  const total = (c: number, ff: boolean, k: number) =>
+    parts.reduce((s, p) => s + (ff && p.again ? (p.b - p.a) * k : (p.walk ? p.g! : 0) + (p.b - p.a) * (p.idle ? c : Math.max(1, p.floor))), 0);
+  const againMin = parts.reduce((s, p) => s + (p.again ? p.b - p.a : 0), 0);
+  let c = 1;
+  let ff = false;
+  let k = 1;
+  if (total(1, false, 1) > target) {
+    ff = againMin > 0;
+    k = ff ? Math.min(1, FF_S / SEC_PER_MIN / againMin) : 1;
+    if (total(1, ff, k) > target) {
+      let [lo, hi] = [0.25, 1];
+      for (let n = 0; n < 30; n++) {
+        const mid = (lo + hi) / 2;
+        if (total(mid, ff, k) > target) hi = mid;
+        else lo = mid;
+      }
+      c = lo;
+    }
+  }
   const xs = [ts[0]!];
   const us = [0];
   const walks: [number, number, string][] = [];
+  const fasts: [number, number][] = [];
   for (const p of parts) {
-    const u = us[us.length - 1]!;
-    if (p.walk) walks.push([u, u + p.g!, p.walk]);
+    let u = us[us.length - 1]!;
+    const fast = ff && p.again;
+    if (p.walk && !fast) {
+      walks.push([u, u + p.g!, p.walk]);
+      walked.set(p.key!, p.g! * SEC_PER_MIN);
+      xs.push(p.a);
+      us.push((u += p.g!));
+    }
+    const d = (p.b - p.a) * (fast ? k : p.idle ? c : Math.max(1, p.floor));
+    if (fast) fasts.push([u, u + d]);
     xs.push(p.b);
-    us.push(u + (p.walk ? p.g! : (p.b - p.a) * (p.f > 1 ? p.f : c)));
+    us.push(u + d);
   }
   /** Piecewise straight from xs (rising, two equal at a walk) to ys, the first of equal xs, and at the morning's pace
    * past either end. */
@@ -131,7 +183,13 @@ function warpOf(m: Morning, end: number, walkS: (key: string) => number): Warp {
     const d = xs[lo]! - xs[lo - 1]!;
     return ys[lo - 1]! + ((v - xs[lo - 1]!) / d) * (ys[lo]! - ys[lo - 1]!);
   };
-  return { at: (t) => map(xs, us, t), back: (u) => map(us, xs, u), walk: (u) => walks.find(([a, b]) => u >= a && u < b)?.[2] ?? null, walked };
+  return {
+    at: (t) => map(xs, us, t),
+    back: (u) => map(us, xs, u),
+    walk: (u) => walks.find(([a, b]) => u >= a && u < b)?.[2] ?? null,
+    fast: (u) => fasts.some(([a, b]) => u >= a && u < b),
+    walked,
+  };
 }
 /** A plan on the stage's clock: its every time taken through `at` (-1, never, stays). */
 function onStage(m: Morning, at: (t: number) => number): Morning {
@@ -153,7 +211,7 @@ function onStage(m: Morning, at: (t: number) => number): Morning {
  * two rounded lenses, temples back over the ears, a camera in the left-hand corner piece and a capture lamp in the
  * right. `eye`: the middle of the wearer's left eye's front, in that frame; `half`: half the head's width at the temples.
  */
-function cameraGlasses(eye: THREE.Vector3, half: number): { group: THREE.Group; lens: THREE.Object3D; led: THREE.MeshBasicMaterial } {
+function cameraGlasses(eye: THREE.Vector3, half: number): { group: THREE.Group; lens: THREE.Object3D; bridge: THREE.Object3D; led: THREE.MeshBasicMaterial } {
   const group = new THREE.Group();
   const acetate = new THREE.MeshPhysicalMaterial({ color: 0x0b0b0c, roughness: 0.28, clearcoat: 0.8, clearcoatRoughness: 0.18 });
   const tint = new THREE.MeshPhysicalMaterial({ color: 0x2c3138, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.32, clearcoat: 1, clearcoatRoughness: 0.03, depthWrite: false });
@@ -231,7 +289,7 @@ function cameraGlasses(eye: THREE.Vector3, half: number): { group: THREE.Group; 
     const curve = new THREE.CatmullRomCurve3([a, a.clone().lerp(b, 0.5), b, c], false, "centripetal");
     group.add(mesh(new THREE.TubeGeometry(curve, 40, 0.0026, 8, false), acetate));
   }
-  return { group, lens: lensObj, led };
+  return { group, lens: lensObj, bridge, led };
 }
 
 export function mountGlassesLab(root: HTMLElement): void {
@@ -307,6 +365,12 @@ export function mountGlassesLab(root: HTMLElement): void {
     face.half = half;
     face.measured = true;
     head.remove(glasses.group);
+    glasses.group.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        o.geometry.dispose();
+        (o.material as THREE.Material).dispose();
+      }
+    });
     glasses = cameraGlasses(face.eye, face.half);
     head.add(glasses.group);
   };
@@ -391,7 +455,7 @@ export function mountGlassesLab(root: HTMLElement): void {
     controls.update();
   };
   const gate = shaderGate(renderer, camera);
-  /* The glasses' camera: a portrait picture from the corner of the frame, looking where the head looks. */
+  /* The glasses' camera: from the corner of the frame, looking where the head looks. */
   const pov = new THREE.PerspectiveCamera(POV_FOV, 3 / 4, 0.012, 30);
   const povGate = shaderGate(rPov, pov);
   bindCanvasResize(stageEl, renderer, camera, gate);
@@ -410,6 +474,11 @@ export function mountGlassesLab(root: HTMLElement): void {
     }).observe(hudEl);
   const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -POV_TILT));
   const placePov = () => {
+    const fov = pov.aspect < 1 ? POV_FOV : POV_FOV_WIDE;
+    if (pov.fov !== fov) {
+      pov.fov = fov;
+      pov.updateProjectionMatrix();
+    }
     glasses.lens.updateWorldMatrix(true, false);
     glasses.lens.getWorldPosition(pov.position);
     glasses.lens.getWorldQuaternion(pov.quaternion).multiply(FLIP);
@@ -529,19 +598,19 @@ export function mountGlassesLab(root: HTMLElement): void {
     );
   let lastCardSig = "";
   function showCards(t: number): void {
-    const sig = `${Math.floor(t * 2)}`;
+    // Each row: 1 seen, 2 now.
+    const state = stretches.map((steps) => steps.map((xs) => (xs.some(([a]) => a <= t) ? 1 : 0) + (xs.some(([a, b]) => a <= t && b > t) ? 2 : 0)));
+    const sig = state.map((r) => r.join("")).join("|");
     if (sig === lastCardSig) return;
     lastCardSig = sig;
-    stretches.forEach((steps, k) => {
+    state.forEach((steps, k) => {
       let seen = 0;
-      steps.forEach((xs, i) => {
+      steps.forEach((bits, i) => {
         const li = cardRows[k]?.[i];
         if (!li) return;
-        const was = xs.some(([a]) => a <= t);
-        const now = xs.some(([a, b]) => a <= t && b > t);
-        if (was) seen++;
-        li.toggleAttribute("data-seen", was);
-        li.toggleAttribute("data-now", now);
+        if (bits & 1) seen++;
+        li.toggleAttribute("data-seen", !!(bits & 1));
+        li.toggleAttribute("data-now", !!(bits & 2));
       });
       const el = cardSeen[k];
       if (el) el.textContent = seen === 0 ? "Not seen yet" : seen === steps.length ? `Every step seen: ${steps.length} of ${steps.length}` : `Seen so far: ${seen} of ${steps.length} steps`;
@@ -626,16 +695,17 @@ export function mountGlassesLab(root: HTMLElement): void {
   }
 
   /* Tiles and status. */
+  /** A dish's longest program in a combi, minutes (0: none). */
+  const combiMin = (d: MorningDish) => d.stages.reduce((m, s) => (s.at === "oven" ? Math.max(m, s.min) : m), 0);
   function renderTiles(): void {
     const [a, b] = run.dishes;
     const saved = run.endApart - run.end;
     setTile(tiles.both, span(run.end), `both done at ${clockOf(run.end)}`);
     setTile(tiles.apart, span(run.endApart), `${dishName(a)} ${span(run.endA)}, then ${dishName(b)} ${span(run.endB)}`);
-    setTile(tiles.saved, saved > 0.5 ? span(saved) : "None", saved > 0.5 ? `${Math.round((100 * saved) / run.endApart)}% of one after the other` : "both need the cook's hands to cook");
-    setTile(tiles.free, run.free > 0.5 ? span(run.free) : "None", run.free > 0.5 ? "of the cook's hands, both at once: room for more work" : "the cook busy from start to finish");
+    const noCombi = !combiMin(a) && !combiMin(b);
+    setTile(tiles.saved, saved > 0.5 ? span(saved) : "None", saved > 0.5 ? `${Math.round((100 * saved) / run.endApart)}% of one after the other` : noCombi ? "neither cooks in a combi" : "nothing of one fits in the other");
+    setTile(tiles.free, run.free > 0.5 ? span(run.free) : "None", run.free >= 5 ? "of the cook's hands, both at once: room for more work" : run.free > 0.5 ? "of the cook's hands, both at once" : "the cook busy from start to finish");
   }
-  /** A dish's longest program in a combi, minutes (0: none). */
-  const combiMin = (d: MorningDish) => d.stages.reduce((m, s) => (s.at === "oven" ? Math.max(m, s.min) : m), 0);
   function renderStatus(): void {
     if (!statusEl) return;
     const [a, b] = run.dishes;
@@ -643,7 +713,10 @@ export function mountGlassesLab(root: HTMLElement): void {
     let text: string;
     if (saved <= 0.5) {
       const both = !combiMin(a) && !combiMin(b);
-      text = `${both ? `The ${dishName(a)} and the ${dishName(b)} both cook at the range with the cook's hands on them, so neither leaves the cook free while it cooks. ` : ""}Together they take ${span(run.end)}, no less than one after the other.${both ? " Give the cook one dish that cooks in a combi instead." : ""}`;
+      const free = run.free > 0.5 ? `, with the cook's hands free for ${span(run.free)} of it` : "";
+      text = both
+        ? `Neither the ${dishName(a)} nor the ${dishName(b)} spend${plural(b) ? "" : "s"} any time in a combi: both cook at the range with the cook at them, so there is little to fit together. Together they take ${span(run.end)}, no less than one after the other${free}. Give the cook a dish that cooks in a combi instead.`
+        : `Together they take ${span(run.end)}, no less than one after the other${free}.`;
       statusEl.dataset.state = "warn";
     } else {
       const w = combiMin(a) >= combiMin(b) ? a : b;
@@ -660,13 +733,12 @@ export function mountGlassesLab(root: HTMLElement): void {
    * the stage's (`warp`), and in seconds. */
   let endMin = 0;
   let endStage = 0;
-  let warp: Warp = { at: (t) => t, back: (u) => u, walk: () => null, walked: new Map() };
+  let warp: Warp = { at: (t) => t, back: (u) => u, walk: () => null, fast: () => false, walked: new Map() };
   let loopS = 0;
   let tMin = 0;
   let loopT = 0;
   function stage(): void {
     const m = shown();
-    const frac = endMin > 0 ? tMin / endMin : 0;
     const end = playing === "together" ? run.end : run.endApart;
     endMin = end + 4;
     // Laid out once with the walks guessed, then again with them as long as the stage's cook takes, if any differ.
@@ -677,8 +749,8 @@ export function mountGlassesLab(root: HTMLElement): void {
       loopS = kitchen.plan(onStage(m, warp.at), 1, endStage, endStage * SEC_PER_MIN + END_HOLD_S);
       if (![...warp.walked].some(([k, g]) => Math.abs(walkS(k) - g) > 0.05)) break;
     }
-    tMin = frac * endMin;
-    loopT = warp.at(tMin) * SEC_PER_MIN;
+    tMin = 0;
+    loopT = 0;
     stretches = stretchesOf(m);
     lastCardSig = "";
     lastHud = "";
@@ -710,8 +782,6 @@ export function mountGlassesLab(root: HTMLElement): void {
       const p = b.dataset.glPlan === "apart" ? "apart" : "together";
       if (p === playing) return;
       playing = p;
-      tMin = 0;
-      endMin = 0;
       stage();
       renderControls();
       renderChart();
@@ -719,39 +789,51 @@ export function mountGlassesLab(root: HTMLElement): void {
 
   /* The readouts: the clock, what the cook is doing, and what the glasses are seeing. */
   let lastHud = "";
+  let hudAt = 0;
   const doingAt = (m: Morning, t: number) => m.jobs.filter((j) => j.t0 <= t && j.t1 > t);
   /** What the cook is doing at minute `t` of the plan (`walking`: to where, while the plan's clock stands still). */
-  function showHud(t: number, walking: string | null): void {
+  function showHud(t: number, walking: string | null, fast: boolean, now: number): void {
     const m = shown();
     const end = playing === "together" ? run.end : run.endApart;
+    if (fast && t < end && now - hudAt < 250 && lastHud) return;
     const jobs = walking ? [] : doingAt(m, t);
     const hands = jobs.reduce((a, j) => a + j.hands, 0);
     const words = [...new Set(jobs.map((j) => `${j.verb} · ${dishName(run.dishes[j.slot]!)}`))];
     const inOven = m.loads.filter((l) => l.t1 <= t && l.t2 > t);
-    const ovenWords = inOven.map((l) => `${cap(dishName(run.dishes[l.slot]!))} in a combi, ${span(l.t2 - t)} to go`);
+    const ovenWords = inOven.map((l) => `${cap(dishName(run.dishes[l.slot]!))} in a combi, ${span(Math.ceil(l.t2 - t - 1e-9))} to go`);
     let doing = walking ? `Walking to ${walking}` : words.length ? words.join(" + ") : t >= end ? "Both dishes done" : inOven.length ? "Waiting on the combi" : "Waiting";
     if (ovenWords.length && t < end) doing += ` · ${ovenWords.join(" · ")}`;
+    // In fast forward, the batches packed so far: the steps themselves go by too fast to read.
+    if (fast && t < end)
+      doing = `Packed so far: ${run.dishes
+        .map((d, k) => {
+          const bs = m.batches.filter((b) => b.slot === k);
+          return `${dishName(d)} ${bs.filter((b) => b.packed >= 0 && b.packed <= t).length} of ${bs.length}`;
+        })
+        .join(" · ")}`;
     let note: string;
     let kind: string;
     if (t >= end) [note, kind] = [`Done at ${clockOf(end)}`, "done"];
+    else if (fast) [note, kind] = ["Fast forward", "ff"];
     else if (walking) [note, kind] = ["On the move", "walk"];
     else if (hands >= 1 - 1e-9) [note, kind] = ["Hands full", "full"];
     else if (hands > 0) [note, kind] = ["Hands half free", "half"];
     else [note, kind] = ["Hands free", "free"];
     const where = { table: "table", range: "range", oven: "combi" } as const;
     const j0 = jobs[0];
-    const seen = walking ? `Walking to ${walking}` : j0 ? `${j0.verb} · ${dishName(run.dishes[j0.slot]!)} · ${where[j0.at]}` : t >= end ? "Done" : inOven.length ? "Combi running · hands free" : "Waiting";
+    const seen = fast && t < end ? "Fast forward" : walking ? `Walking to ${walking}` : j0 ? `${j0.verb} · ${dishName(run.dishes[j0.slot]!)} · ${where[j0.at]}` : t >= end ? "Done" : inOven.length ? "Combi running · hands free" : "Waiting";
     const sig = `${Math.floor(t)}|${doing}|${note}|${seen}`;
     if (sig === lastHud) return;
     lastHud = sig;
-    if (hudClock) hudClock.textContent = clockOf(t);
+    hudAt = now;
+    const mm = Math.max(0, Math.floor(t));
+    if (hudClock) hudClock.textContent = clockOf(mm);
     if (hudDoing) hudDoing.textContent = doing;
     if (hudNote) {
       hudNote.textContent = note;
       hudNote.hidden = false;
       hudNote.dataset.kind = kind;
     }
-    const mm = Math.max(0, Math.floor(t));
     if (tsEl) tsEl.textContent = `GLASSES · ${String(6 + Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
     if (seenEl) seenEl.textContent = seen;
   }
@@ -759,9 +841,7 @@ export function mountGlassesLab(root: HTMLElement): void {
   const tagAt = new THREE.Vector3();
   function showTag(): void {
     if (!tagEl) return;
-    glasses.group.getWorldPosition(tagAt);
-    tagAt.y += 0.1;
-    tagAt.project(camera);
+    glasses.bridge.getWorldPosition(tagAt).project(camera);
     const on = cook.st.group.visible && tagAt.z < 1 && Math.abs(tagAt.x) < 0.95 && Math.abs(tagAt.y) < 0.95;
     tagEl.hidden = !on;
     if (on) tagEl.style.transform = `translate(${(((tagAt.x + 1) / 2) * stageEl!.clientWidth).toFixed(1)}px, ${(((1 - tagAt.y) / 2) * stageEl!.clientHeight).toFixed(1)}px)`;
@@ -796,13 +876,13 @@ export function mountGlassesLab(root: HTMLElement): void {
     last = now;
     if ((!inView && !povInView) || document.hidden || !gate.ready()) return;
     if (frozen === null) loopT = (loopT + dt) % loopS;
-    else loopT = warp.at(frozen) * SEC_PER_MIN;
+    else loopT = warp.at(frozen + 1e-6) * SEC_PER_MIN;
     const u = Math.min(endStage, loopT / SEC_PER_MIN);
     tMin = Math.min(endMin, warp.back(u));
     const walking = warp.walk(u);
     kitchen.pose(loopT);
     kitchen.show(u, dt);
-    showHud(tMin, walking);
+    showHud(tMin, walking, warp.fast(u), now);
     // A step lights up as the cook gets to it.
     showCards(walking ? tMin - 1e-4 : tMin);
     if (playX && playLine) {
@@ -854,6 +934,12 @@ export function mountGlassesLab(root: HTMLElement): void {
         loopS: +loopS.toFixed(2),
         t: +tMin.toFixed(1),
       }),
+      /** What the stage plays over its loop, in `n` samples: "f" fast forward, "w" a walk, "." the rest. */
+      phases: (n = 120) =>
+        Array.from({ length: n }, (_, i) => {
+          const u = (endStage * (i + 0.5)) / n;
+          return warp.fast(u) ? "f" : warp.walk(u) ? "w" : ".";
+        }).join(""),
       /** Where the cook's head is at each of some minutes of the plan: [minute, the stage's minute, x, z, walking to]. */
       track: (ts: number[]) =>
         ts.map((t) => {
@@ -880,11 +966,7 @@ export function mountGlassesLab(root: HTMLElement): void {
         if (s.b !== undefined && ix(s.b) >= 0) pick[1] = ix(s.b);
         if (pick[0] === pick[1]) [pick[0], pick[1]] = was;
         if (s.portions !== undefined) portions = s.portions;
-        if (s.plan !== undefined && s.plan !== playing) {
-          playing = s.plan;
-          tMin = 0;
-          endMin = 0;
-        }
+        if (s.plan !== undefined) playing = s.plan;
         changed(true);
       },
     },

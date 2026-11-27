@@ -3912,6 +3912,10 @@ button.wk-dish[aria-pressed="true"] {
   color: #fde68a;
   background: rgb(251 191 36 / 0.2);
 }
+.gl-hud em[data-kind="ff"] {
+  color: #c7d2fe;
+  background: rgb(129 140 248 / 0.22);
+}
 .gl-hud em[data-kind="walk"] {
   color: var(--soft);
   background: rgb(255 255 255 / 0.08);
@@ -3942,7 +3946,7 @@ button.wk-dish[aria-pressed="true"] {
   color: #fff;
   white-space: nowrap;
   pointer-events: none;
-  translate: -50% calc(-100% - 7px);
+  translate: -50% calc(-100% - 22px);
 }
 .gl-tag::after {
   content: "";
@@ -3950,7 +3954,7 @@ button.wk-dish[aria-pressed="true"] {
   left: 50%;
   top: 100%;
   width: 1px;
-  height: 7px;
+  height: 22px;
   background: rgb(255 255 255 / 0.6);
 }
 .gl-tag[hidden] {
