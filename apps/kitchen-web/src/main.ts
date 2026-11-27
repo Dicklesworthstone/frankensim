@@ -11,6 +11,7 @@ import { OVEN_BOULE_DETAIL, OVEN_PIECES, mountOvenLab } from "./three/ovenLab";
 import { STOVE_PIECES, STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
 import { BOIL_PIECES, mountBoilLab } from "./three/boilLab";
 import { coolPieces, mountCoolLab } from "./three/coolLab";
+import { holdPieces, mountHoldLab } from "./three/holdLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { prefetchBouleLayers } from "./three/models/boulePrefetch";
 import { prefetchFoodTexels } from "./three/models/foodPrefetch";
@@ -308,6 +309,7 @@ function bootstrap(): void {
     { id: "pivot", el: document.getElementById("pivot")!, mount: mountPivotLab, done: false, pieces: PIVOT_PIECES },
     { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false, pieces: WEEK_PIECES },
     { id: "cool", el: document.getElementById("cool")!, mount: mountCoolLab, done: false, pieces: coolPieces() },
+    { id: "hold", el: document.getElementById("hold")!, mount: mountHoldLab, done: false, pieces: holdPieces() },
     { id: "floor", el: document.getElementById("floor")!, mount: mountFloorLab, done: false, pieces: floorPieces },
     { id: "rush", el: document.getElementById("rush")!, mount: mountRushLab, done: false, pieces: RUSH_PIECES },
     { id: "glasses", el: document.getElementById("glasses")!, mount: mountGlassesLab, done: false, pieces: GLASSES_PIECES },

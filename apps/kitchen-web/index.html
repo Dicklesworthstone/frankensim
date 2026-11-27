@@ -1129,6 +1129,65 @@
             </figcaption>
           </figure>
 
+          <figure class="fig reveal bo-fig cd-fig hd-fig" id="hold">
+            <header class="fig-head">
+              <p class="todo">Pack the chili hot, and keep it hot until lunch</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage bo-stage cd-stage hd-stage" data-hd-stage>
+                <canvas data-hd-canvas tabindex="0" aria-label="Four insulated food carriers side by side, each cut through the middle from front to back. Two hold six lidded hotel pans of chili on their rails, two hold a single pan in the bottom slot. Before the chili is packed, the two primed carriers hold a pan of near-boiling water. The chili's cut faces and the carriers' foam walls are coloured by their temperature through the morning. A cook stands behind them. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud bo-hud cd-hud" aria-hidden="true"><b data-hd-hud-clock>6:30 am</b><span data-hd-hud-doing>…</span><em data-hd-hud-note data-kind="hot">Priming</em></div>
+                <span class="bo-tag" data-hd-tag="fullPrimed" style="--c:#4ade80" hidden aria-hidden="true"><i>Full, primed</i><b>…</b></span>
+                <span class="bo-tag" data-hd-tag="fullCold" style="--c:#e2e8f0" hidden aria-hidden="true"><i>Full, cold</i><b>…</b></span>
+                <span class="bo-tag" data-hd-tag="onePrimed" style="--c:#c084fc" hidden aria-hidden="true"><i>1 pan, primed</i><b>…</b></span>
+                <span class="bo-tag" data-hd-tag="oneCold" style="--c:#f472b6" hidden aria-hidden="true"><i>1 pan, cold</i><b>…</b></span>
+              </div>
+              <div class="lab bo-lab cd-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles bo-tiles cd-tiles">
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#4ade80" data-hd-tile-box="fullPrimed"><span>Six pans, primed</span><b><i data-hd-tile="fullPrimed">…</i></b><small data-hd-tile-s="fullPrimed">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#e2e8f0" data-hd-tile-box="fullCold"><span>Six pans, cold</span><b><i data-hd-tile="fullCold">…</i></b><small data-hd-tile-s="fullCold">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#c084fc" data-hd-tile-box="onePrimed"><span>One pan, primed</span><b><i data-hd-tile="onePrimed">…</i></b><small data-hd-tile-s="onePrimed">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#f472b6" data-hd-tile-box="oneCold"><span>One pan, cold</span><b><i data-hd-tile="oneCold">…</i></b><small data-hd-tile-s="oneCold">…</small></div>
+                  </div>
+                  <div class="bo-chart-wrap">
+                    <p class="rs-map-head"><b>Each carrier's coolest pan, an inch in from its corner</b><span class="wk-keys bo-keys"><span style="--k:#4ade80">Six, primed</span><span style="--k:#e2e8f0">Six, cold</span><span style="--k:#c084fc">One, primed</span><span style="--k:#f472b6">One, cold</span></span></p>
+                    <div class="bo-chart" data-hd-chart role="img" aria-label="Each carrier's coolest pan, read an inch in from its corner, against the clock from packing to 1 pm, with the van's ride from 10:30 to 11:15, lunch at 11:30, and the shading below 135 °F."></div>
+                    <p class="rs-map-note">The corners cool first: heat leaves a pan through its sides and ends as well as its lid, so a probe an inch in from a corner reads lowest, and that is what is judged. Below 135 °F the chili has left hot holding.</p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">The chili cooled overnight is reheated in the morning and packed at 185 °F into insulated carriers for a lunch at 11:30 across town. Six pans fill a carrier; an order of one pan rides in a carrier of its own. Prime a carrier first with a pan of near-boiling water, or load it straight from the shelf, and the twin shows the morning in each.</p>
+                  <label class="range"><span><b>Chili done at</b><output data-hd-done-val>7:00 am</output></span><input type="range" min="360" max="630" step="15" value="420" data-hd-done aria-label="When the chili is done and packed" /></label>
+                  <div class="field">
+                    <p class="micro">Packed at</p>
+                    <div class="seg fill" role="group" aria-label="The chili's temperature when it is packed">
+                      <button type="button" data-hd-pack="185" aria-pressed="true">185 °F</button>
+                      <button type="button" data-hd-pack="165" aria-pressed="false">165 °F</button>
+                    </div>
+                  </div>
+                  <div class="status" data-hd-status data-state="warn">Working out the morning…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="hold-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>Each pan's chili carries its heat to its faces by conduction, followed cell by cell through a quarter of the pan in three dimensions; its conductivity, density and heat capacity at each temperature come from its makeup, by the Choi and Okos equations. Under each lid, steam rises off the chili and condenses on the steel, carrying heat up to it. A pan's floor faces the lid below across a finger's width of air, warmer side down or up, by convection and radiation. The pans' sides and ends face the carrier's inner skin across the gap to it, and their rims pass heat into the rails.</p>
+                <p>The carrier's wall is a polyethylene skin, 1.2 inches of polyurethane foam and another skin, followed in layers, its outside losing heat to the room's 72 °F air. Priming is 7 kg of water at 190 °F in the bottom slot with the door shut for half an hour, then taken out. Nothing is fitted: the carrier's patent, US 7,134,552, says such a carrier keeps food hot for at least about six hours and as much as fifteen. In the model, a lone pan in a primed carrier keeps its middle above 141 °F for about six hours, and six pans for more than fifteen.</p>
+              </div>
+              <div>
+                <code class="formula">ρc · ∂T/∂t = ∇ · (k ∇T)<br />q_gap = h_air (T_a − T_b) + σ (T_a⁴ − T_b⁴) / (1/ε_a + 1/ε_b − 1)</code>
+                <p class="model">Model: <code>holdHot</code>, each quarter pan in 288 cells, the wall in eight layers, stepped a minute at a time. Food properties: Choi and Okos, by temperature. Limits: FDA Food Code 3-501.16, hot food held at 135 °F or above; 3-403.11, food reheated for hot holding brought to 165 °F. The verdict is read in the carrier's coolest pan, an inch in from its corner, halfway down.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
           <figure class="fig reveal fl-fig" id="floor">
             <header class="fig-head">
               <p class="todo">Pick a menu, then move the blast chiller</p>

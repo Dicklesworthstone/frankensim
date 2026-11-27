@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -178,6 +178,7 @@ async function main() {
       "[data-pivot-canvas]",
       "[data-week-canvas]",
       "[data-cd-canvas]",
+      "[data-hd-canvas]",
       "[data-floor-canvas]",
       "[data-rush-canvas]",
       "[data-gl-canvas]",
@@ -602,6 +603,41 @@ async function main() {
         await page.$eval("[data-cd-stage]", (el) => el.cool.hold(null));
       }
 
+      if (sid === "hold") {
+        // As set on arrival (done at 7:00, packed at 185 °F): both full carriers and the lone pan in a primed carrier
+        // are hot at lunch, the lone pan in a cold carrier is under 135 °F before it; full beats one pan, and primed
+        // beats cold. Packed at 165 °F every carrier falls under 135 °F sooner, and neither lone pan is hot at lunch.
+        // Held an hour after packing, every label is up, under the packing temperature and over 135 °F.
+        const info = () => page.$eval("[data-hd-stage]", (el) => el.hold.info());
+        const ready = (f) =>
+          page.waitForFunction((f) => {
+            const i = document.querySelector("[data-hd-stage]")?.hold?.info();
+            return !!i && i.ready && i.startF === f;
+          }, { timeout: 30000 }, f);
+        const keys = ["fullPrimed", "fullCold", "onePrimed", "oneCold"];
+        const by = (i, k) => i.runs.find((r) => r.key === k);
+        await ready(185);
+        const hot = await info();
+        console.log(`[verify-chrome] Keep it hot: ${JSON.stringify(hot.runs.map((r) => [r.key, r.hotMin, r.lunchF]))} | ${hot.status.slice(0, 90)}`);
+        const h = keys.map((k) => by(hot, k).hotMin);
+        if (hot.done !== 420 || keys.map((k) => by(hot, k).ok).join() !== "true,true,true,false" || !(h[0] > h[1] && h[1] > h[2] && h[2] > h[3])) throw new Error(`Keep it hot: done at 7:00 and packed at 185 °F, the carriers do not hold in the order or verdicts expected: ${JSON.stringify(hot)}`);
+        await page.click('[data-hd-pack="165"]');
+        await ready(165);
+        const warm = await info();
+        console.log(`[verify-chrome] Keep it hot, packed at 165 °F: ${JSON.stringify(warm.runs.map((r) => [r.key, r.hotMin, r.ok]))}`);
+        if (keys.some((k) => !(by(warm, k).hotMin < by(hot, k).hotMin)) || by(warm, "onePrimed").ok || by(warm, "oneCold").ok || !by(warm, "fullPrimed").ok) throw new Error(`Keep it hot: packed at 165 °F, the carriers do not fall sooner, or the verdicts are not as expected: ${JSON.stringify(warm.runs)}`);
+        await page.click('[data-hd-pack="185"]');
+        await ready(185);
+        await page.$eval("[data-hd-stage]", (el) => el.hold.hold(60));
+        await sleep(1200);
+        const held = await info();
+        const tagF = (t) => Number(/(-?\d+) °F$/.exec(t ?? "")?.[1] ?? NaN);
+        if (held.t !== 60 || held.tags.some((t) => !(tagF(t) < 185 && tagF(t) > 135))) throw new Error(`Keep it hot: held an hour after packing, the labels are not all up and between 135 °F and 185 °F: ${JSON.stringify(held.tags)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-hold.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-hold.png");
+        await page.$eval("[data-hd-stage]", (el) => el.hold.hold(null));
+      }
+
       if (sid === "boil") {
         // As set on arrival (30 litres, full flame): the two pots with lids boil in about 25 min, half the big pot's
         // 50 with its lid, for the same gas; the big pot without one in about 57. On half a flame the big open pot does
@@ -724,9 +760,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 22 WebGL canvases (18 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 23 WebGL canvases (19 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -738,6 +774,7 @@ async function main() {
         "[data-pivot-canvas]",
         "[data-week-canvas]",
         "[data-cd-canvas]",
+        "[data-hd-canvas]",
         "[data-floor-canvas]",
         "[data-rush-canvas]",
         "[data-gl-canvas]",
@@ -757,7 +794,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 22 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 23 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);

@@ -4453,3 +4453,23 @@ button.wk-dish[aria-pressed="true"] {
     height: 170px;
   }
 }
+/* Kept hot until lunch (chapter 06, third figure). */
+.hd-svg .van {
+  fill: rgb(148 163 184 / 0.12);
+}
+.hd-svg .van-t,
+.hd-svg .lunch-t {
+  font-size: 10px;
+  font-weight: 600;
+}
+.hd-svg .van-t {
+  fill: #cbd5e1;
+}
+.hd-svg .lunch {
+  stroke: rgb(250 204 21 / 0.75);
+  stroke-width: 1.2;
+  stroke-dasharray: 4 3;
+}
+.hd-svg .lunch-t {
+  fill: #fde68a;
+}

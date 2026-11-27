@@ -77,9 +77,9 @@ export const START_C = fToC(190);
 
 /** Water vapour's saturation pressure (Pa) at `c` °C (Magnus, Alduchov and Eskridge), its density at relative
  *  humidity `rh` (kg/m³), and the heat it takes to evaporate (J/kg). */
-const psat = (c: number) => 610.94 * Math.exp((17.625 * c) / (c + 243.04));
+export const psat = (c: number) => 610.94 * Math.exp((17.625 * c) / (c + 243.04));
 const vapour = (c: number, rh: number) => (rh * psat(c)) / (461.5 * (c + 273.15));
-const latent = (c: number) => (2501 - 2.37 * c) * 1000;
+export const latent = (c: number) => (2501 - 2.37 * c) * 1000;
 /** Water activity at the chili's surface. */
 const AW = 0.98;
 
@@ -106,7 +106,7 @@ export type Face =
   /** A cover `gap` above the food: film (0.9 both sides), a stainless lid (0.25 outside) or foil (0.05 outside); its
    *  inside, beaded with condensate, 0.9. */
   | { kind: "cover"; gap: number; epsOut: number };
-const EPS_FOOD = 0.94;
+export const EPS_FOOD = 0.94;
 export const EPS_STEEL = 0.25;
 export const EPS_ALUMINIUM = 0.1;
 
@@ -130,7 +130,7 @@ function faceFlux(ts: number, f: Face, box: Box, cover: number): { q: number; st
 }
 /** Heat (W/m²) across an air layer `gap` m deep from food at `ts` up to a cover at `tc`: the layer's convection
  *  (Hollands, heated from below), radiation, and steam carried up that condenses on the cover. */
-function across(ts: number, tc: number, gap: number): number {
+export function across(ts: number, tc: number, gap: number): number {
   const fm = (ts + tc) / 2 + 273.15;
   const nu = 1.516e-5 * (fm / 293.15) ** 1.75;
   const ka = 0.02587 * (fm / 293.15) ** 0.85;
