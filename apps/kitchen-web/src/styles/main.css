@@ -4506,13 +4506,19 @@ button.wk-dish[aria-pressed="true"] {
 .hc-svg .bar .v {
   fill: var(--c);
   font-weight: 600;
+  /* A dark halo, so the fan's line can cross a figure and leave it legible. */
+  paint-order: stroke;
+  stroke: rgb(14 13 11 / 0.92);
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
 }
 .hc-svg .fan {
   stroke: var(--c);
   stroke-width: 2;
 }
 .hc-svg .code {
-  stroke: rgb(255 255 255 / 0.45);
+  stroke: rgb(255 255 255 / 0.62);
+  stroke-width: 1.4;
   stroke-dasharray: 4 3;
 }
 .hc-svg .xa.sub {

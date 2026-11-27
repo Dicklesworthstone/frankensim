@@ -1511,7 +1511,7 @@ const charbroiler: Builder = (s, e) => {
     const gw = sec - 0.004;
     // The grate: one casting of five bars on three ribs, a front lip the bars run over into the trough and a back
     // lug that sits on the rear rail; sloped, so the fat runs forward along the bars.
-    s.at([cx, yf, zg0], [-slope, 0, 0], () => {
+    s.at([cx, yf, zg0], [slope, 0, 0], () => {
       const pitch = (gw - bw) / (nb - 1);
       for (let k = 0; k < nb; k++) {
         const x = -gw / 2 + bw / 2 + k * pitch;

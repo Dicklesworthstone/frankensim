@@ -38,8 +38,11 @@ const PLENUM = 0.2;
 const CAPTURE_Z = HOOD.d - PLENUM;
 const FILTER_Z = 0.36;
 const HOOD_TOP_IN = EDGE_Y + HOOD.h - 0.12;
-/** The broilers' grates, in their own frame (models/cooking.ts charbroiler): their top, and front to back. */
-const GRATE_Y = 0.327;
+/** The broilers' grates, in their own frame (models/cooking.ts charbroiler): their top at the front, how much higher
+ *  at the back, their middle, and front to back. */
+const GRATE_YF = 0.318;
+const GRATE_RISE = 0.018;
+const GRATE_Y = GRATE_YF + GRATE_RISE / 2;
 const GRATE_Z0 = -0.072;
 const GRATE_Z1 = -0.698;
 const COOK_Y = STAND.h + GRATE_Y;
@@ -191,6 +194,7 @@ function puffMaterial(tex: THREE.Texture, cool: string, warm: string): THREE.Sha
         if (a < 0.003) discard;
         vec3 c = mix(uCool, uWarm, vWarm) * (0.78 + 0.22 * t.r);
         gl_FragColor = vec4(c, a);
+        #include <colorspace_fragment>
       }`,
     transparent: true,
     depthWrite: false,
@@ -224,19 +228,30 @@ export function mountHoodLab(root: HTMLElement): void {
   lights.hemi.intensity = 0.5;
   const p = palette();
   {
-    const floor = tilePlane(9, 6);
+    const floor = tilePlane(16, 6);
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(0, 0, 2.6);
     scene.add(floor);
     // The wall: charcoal glazed tile from the floor to the hood's top, painted above.
     const top = EDGE_Y + HOOD.h;
-    const tiled = new THREE.Mesh(new THREE.PlaneGeometry(9, top), tileWall(9, top));
+    const tiled = new THREE.Mesh(new THREE.PlaneGeometry(16, top), tileWall(16, top));
     tiled.position.set(0, top / 2, -0.002);
     tiled.receiveShadow = true;
     scene.add(tiled);
-    const paint = new THREE.Mesh(new THREE.PlaneGeometry(9, 1.2), new THREE.MeshStandardMaterial({ color: 0x34312c, roughness: 0.94 }));
+    const paint = new THREE.Mesh(new THREE.PlaneGeometry(16, 1.2), new THREE.MeshStandardMaterial({ color: 0x34312c, roughness: 0.94 }));
     paint.position.set(0, top + 0.6, -0.002);
     scene.add(paint);
+    // The room's corner, 2.7 m past the hood's end: the same tile and paint, running out into the kitchen.
+    const SIDE = 7;
+    const sideTile = new THREE.Mesh(new THREE.PlaneGeometry(SIDE, top), tileWall(SIDE, top));
+    sideTile.rotation.y = -Math.PI / 2;
+    sideTile.position.set(HOOD_HALF + 2.7, top / 2, SIDE / 2 - 0.002);
+    sideTile.receiveShadow = true;
+    scene.add(sideTile);
+    const sidePaint = new THREE.Mesh(new THREE.PlaneGeometry(SIDE, 1.2), paint.material);
+    sidePaint.rotation.y = -Math.PI / 2;
+    sidePaint.position.set(HOOD_HALF + 2.7, top + 0.6, SIDE / 2 - 0.002);
+    scene.add(sidePaint);
     const s = new Shop(detail, "hood_duct");
     // The exhaust duct from the hood's collar up through the ceiling.
     s.add(p.ssDull, rbox(s, 0.52, 1.2, 0.27, 0.004), [0, top + 0.6, 0.18]);
@@ -274,9 +289,10 @@ export function mountHoodLab(root: HTMLElement): void {
       const holder = new THREE.Group();
       s.position.set(-STEAK.w / 2, 0, STEAK.d / 2);
       holder.add(s);
-      // On the sloped grates: they fall 18 mm toward the front over their length.
-      holder.position.set(x + dx + i * 0.01, COOK_Y + 0.003 + ((-dz - 0.072) / 0.626) * 0.018 - 0.009, dz);
-      holder.rotation.set(-Math.atan2(0.018, 0.626), yaw, 0);
+      // On the sloped grates, which fall toward the trough at the front, settled a millimetre into the bars.
+      const L = GRATE_Z0 - GRATE_Z1;
+      holder.position.set(x + dx + i * 0.01, STAND.h + GRATE_YF + ((GRATE_Z0 - dz) / L) * GRATE_RISE - 0.001, dz);
+      holder.rotation.set(Math.atan2(GRATE_RISE, L), yaw, 0);
       g.add(holder);
     }
     scene.add(g);
@@ -298,6 +314,16 @@ export function mountHoodLab(root: HTMLElement): void {
   /* The cook at the middle broiler, tongs in hand, turning the steaks. */
   const cook = makeStaff("p50", 2, { seed: 47, apron: 0x2b3a55, sleeves: "cuffed" });
   scene.add(cook.group);
+  const COOK_X = 0.05;
+  // Locking tongs in the right hand: their hinge end in the fist, the cups 0.185 m on down the grip (as the hero
+  // kitchen's grill cook holds them).
+  const tongs = new THREE.Group();
+  {
+    const m = buildFixture("NSF-TONGS-12IN", { w: 0.055, d: 0.305, h: 0.038 }, 1);
+    m.group.rotation.y = Math.PI;
+    m.group.position.set(0.0275, -0.019, -0.09);
+    tongs.add(m.group);
+  }
   const grateAt = new THREE.Vector3();
 
   /* The smoke as soft points and the air it draws in as faint streaks, updated each frame. */
@@ -351,6 +377,7 @@ export function mountHoodLab(root: HTMLElement): void {
       void main() {
         if (vA < 0.003) discard;
         gl_FragColor = vec4(uColor, vA);
+        #include <colorspace_fragment>
       }`,
     transparent: true,
     depthWrite: false,
@@ -389,8 +416,9 @@ export function mountHoodLab(root: HTMLElement): void {
       keep.push(new THREE.Vector3(sx * HOOD_HALF, EDGE_Y + HOOD.h, 0), new THREE.Vector3(sx * HOOD_HALF, EDGE_Y, HOOD.d));
       keep.push(new THREE.Vector3(sx * LINE_HALF, 0, HOOD.d));
     }
-    // The smoke that escapes, over the hood's front, and the cook's head.
+    // The smoke that escapes, over the hood's front along its length, and the cook's head.
     keep.push(new THREE.Vector3(-0.6, EDGE_Y + HOOD.h + 0.25, HOOD.d + 0.4));
+    keep.push(new THREE.Vector3(HOOD_HALF - 0.3, EDGE_Y + HOOD.h + 0.3, HOOD.d + 0.5));
     keep.push(new THREE.Vector3(0, 1.8, HOOD.d + 0.5));
   };
   const controls = createScrollSafeOrbit(camera, canvas, [TARGET.x, TARGET.y, TARGET.z], { minDistance: 1, maxDistance: 14, maxPolarAngle: Math.PI * 0.49 });
@@ -496,25 +524,28 @@ export function mountHoodLab(root: HTMLElement): void {
 
   let setup: Setup = { ...TOUR[0]! };
   let fan = CODE_CFM;
-  /** The tour runs until the reader picks where the broilers stand or the seal. */
-  let touring = true;
+  /** The tour runs until the reader picks where the broilers stand or the seal, moves the fan or takes hold of the
+   *  view; with reduced motion asked for, it does not run. */
+  let touring = !(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
   let tourT = 0;
   /** What is drawn, eased toward the setup: the broilers' fronts (m), the seal let down (0..1). */
   let frontZ = frontOf(setup.at);
   let sealK = setup.sealed ? 1 : 0;
 
-  function longestHud(): [string, string, string][] {
-    return [
-      ["Flush with the edge, gap open", "Needs 5,100 cfm; the fan pulls 6,000", "Smoke escapes"],
-      ["12 in back, gap sealed", "Needs 2,800 cfm; the fan pulls 2,000", "All the smoke caught"],
-    ];
-  }
   const setName = (s: Setup) => `${SHORT_AT[s.at]}, gap ${s.sealed ? "sealed" : "open"}`;
+  const hudLines = (s: Setup, f: number): [string, string, string] => [setName(s), `Needs ${cfm(needCfm(s))}; the fan pulls ${cfm(f)}`, catches(f, s) ? "All the smoke caught" : "Smoke escapes"];
+  /** The longest the HUD's lines get (the figures are set in even widths). */
+  function longestHud(): [string, string, string][] {
+    return [hudLines({ at: 0, sealed: true }, 6000), hudLines({ at: 0, sealed: false }, 2000)];
+  }
 
   function renderControls(): void {
     for (const b of atBtns) b.setAttribute("aria-pressed", String(Number(b.dataset.hcAt) === setup.at));
     for (const b of sealBtns) b.setAttribute("aria-pressed", String((b.dataset.hcSeal === "1") === setup.sealed));
-    if (fanIn) fanIn.value = String(fan);
+    if (fanIn) {
+      fanIn.value = String(fan);
+      fanIn.style.setProperty("--p", `${(((fan - 2000) / 4000) * 100).toFixed(2)}%`);
+    }
     if (fanVal) fanVal.textContent = cfm(fan);
   }
   function renderTiles(): void {
@@ -528,8 +559,8 @@ export function mountHoodLab(root: HTMLElement): void {
     const set = SETS[setup.at];
     if (tiles.gap.v) tiles.gap.v.textContent = setup.sealed ? "Sealed" : `${set.gapIn} in`;
     if (tiles.gap.s) tiles.gap.s.textContent = `${setup.sealed ? `a ${set.gapIn} in gap, closed` : "open to the floor"}\nbroilers ${SHORT_AT[setup.at].toLowerCase()}`;
-    if (tiles.warm.v) tiles.warm.v.textContent = btuh(warmBtuh(need, COLD_OUT_F));
-    if (tiles.warm.s) tiles.warm.s.textContent = `to warm ${cfm(need)}\nfrom ${COLD_OUT_F} °F to 70 °F`;
+    if (tiles.warm.v) tiles.warm.v.textContent = btuh(warmBtuh(fan, COLD_OUT_F));
+    if (tiles.warm.s) tiles.warm.s.textContent = `the fan's ${cfm(fan)}\nfrom ${COLD_OUT_F} °F to 70 °F`;
   }
   function renderStatus(): void {
     if (!statusEl) return;
@@ -549,13 +580,13 @@ export function mountHoodLab(root: HTMLElement): void {
     if (n === 0) parts.push(`At ${cfm(fan)} no setup is caught; the least that catches one is ${cfm(needCfm({ at: 2, sealed: true }))}, 12 inches back and sealed.`);
     else if (n === 6) parts.push(`At ${cfm(fan)} every setup is caught, even flush with the edge and open.`);
     else {
-      const where = (at: SetIndex | null, how: string) => (at === null ? `${how}, nowhere under this hood` : at === 0 ? `${how}, anywhere, even flush with the edge` : `${how}, ${SETS[at].backIn} inches back or more`);
+      const where = (at: SetIndex | null, how: string) => (at === null ? `${how}, nowhere under this hood` : at === 0 ? `${how}, anywhere, even flush with the edge` : at === 1 ? `${how}, 6 or 12 inches back` : `${how}, 12 inches back`);
       parts.push(`At ${cfm(fan)} the broilers can stand: ${where(open, "with the gap open")}; ${where(sealed, "with it sealed")}.`);
     }
-    // What the cheapest setup saves against the worst, in air and in heat.
+    // What the worst setup costs over the code's least, and how low the best one goes.
     const worst = needCfm({ at: 0, sealed: false });
     const best = needCfm({ at: 2, sealed: true });
-    parts.push(`Pushed 12 inches back and sealed, the broilers need ${cfm(best)} against ${cfm(worst)} flush and open: ${cfm(worst - best)} less outdoor air to bring in, ${btuh(warmBtuh(worst - best, COLD_OUT_F))} less to warm on a ${COLD_OUT_F} °F morning.`);
+    parts.push(`Flush and open, catching it all takes ${cfm(worst)}, ${(worst - CODE_CFM).toLocaleString("en-US")} more than the code's ${CODE_CFM.toLocaleString("en-US")} and ${btuh(warmBtuh(worst - CODE_CFM, COLD_OUT_F))} more to warm on a ${COLD_OUT_F} °F morning; 12 inches back and sealed, ${cfm(best)} catches it all, for a hood listed to run that low.`);
     statusEl.textContent = parts.join(" ");
     statusEl.dataset.state = ok ? "ok" : "warn";
   }
@@ -577,6 +608,7 @@ export function mountHoodLab(root: HTMLElement): void {
       svg += `<line class="grid" x1="${L}" x2="${R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" />`;
       svg += `<text class="ya" x="${L - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v ? `${v / 1000}k` : "0"}</text>`;
     }
+    svg += `<text class="ya" x="${L - 6}" y="${T - 8}" text-anchor="end">cfm</text>`;
     const gw = (R - L) / 3;
     const bw = Math.min(46, gw * 0.3);
     for (const s of SETUPS) {
@@ -595,8 +627,8 @@ export function mountHoodLab(root: HTMLElement): void {
     for (let at = 0; at < 3; at++) svg += `<text class="xa" x="${(L + gw * at + gw / 2).toFixed(1)}" y="${H - 18}" text-anchor="middle">${narrow && at === 0 ? "Flush" : SHORT_AT[at]}</text>`;
     svg += `<text class="xa sub" x="${(L + (R - L) / 2).toFixed(1)}" y="${H - 4}" text-anchor="middle">Solid: gap open · striped: sealed</text>`;
     // The code's least, and the fan (named in the keys above, where no bar's figure can sit on them).
-    svg += `<line class="code" x1="${L}" x2="${R}" y1="${y(CODE_CFM).toFixed(1)}" y2="${y(CODE_CFM).toFixed(1)}" />`;
     svg += `<line class="fan" x1="${L}" x2="${R}" y1="${y(fan).toFixed(1)}" y2="${y(fan).toFixed(1)}" style="--c:${FAN}" />`;
+    svg += `<line class="code" x1="${L}" x2="${R}" y1="${y(CODE_CFM).toFixed(1)}" y2="${y(CODE_CFM).toFixed(1)}" />`;
     svg += `</svg>`;
     if (fanKey) fanKey.textContent = `Fan, ${cfm(fan)}`;
     chartEl.innerHTML = svg;
@@ -614,11 +646,22 @@ export function mountHoodLab(root: HTMLElement): void {
     renderChart();
     lastHud = "";
   }
-  /** The smoke still rising when the setup or the fan changes goes where the new one sends it; what is already out
-   *  in the kitchen stays out. */
+  /** When the setup or the fan changes, the smoke still low in the plume goes where the new one sends it: only as
+   *  much of it changes course as the share escaping changes, and none already near the hood's edge or out. */
+  let fateShare = spillShare(fan, needCfm(setup));
   function refate(): void {
     const sp = spillShare(fan, needCfm(setup));
-    for (let i = 0; i < NS; i++) if (sAge[i]! >= 0 && sEsc[i]! < 0 && smoke.pos[i * 3 + 1]! < EDGE_Y - 0.002) sOut[i] = rnd() < sp ? 1 : 0;
+    const was = fateShare;
+    fateShare = sp;
+    if (sp === was) return;
+    const toCaught = sp < was ? 1 - sp / was : 0;
+    const toOut = sp > was ? (sp - was) / (1 - was) : 0;
+    for (let i = 0; i < NS; i++) {
+      if (sAge[i]! < 0 || sEsc[i]! >= 0 || smoke.pos[i * 3 + 1]! > EDGE_Y - 0.25) continue;
+      if (sOut[i]) {
+        if (rnd() < toCaught) sOut[i] = 0;
+      } else if (rnd() < toOut) sOut[i] = 1;
+    }
   }
   function pick(s: Setup): void {
     touring = false;
@@ -634,14 +677,11 @@ export function mountHoodLab(root: HTMLElement): void {
   /* The readouts on the stage. */
   let lastHud = "";
   function showHud(): void {
-    const need = needCfm(setup);
-    const ok = catches(fan, setup);
-    const a = setName(setup);
-    const b = `Needs ${cfm(need)}; the fan pulls ${cfm(fan)}`;
-    const c = ok ? "All the smoke caught" : "Smoke escapes";
-    const sig = `${a}|${b}|${c}`;
+    const sig = `${setup.at}${setup.sealed ? "s" : "o"}${fan}`;
     if (sig === lastHud) return;
     lastHud = sig;
+    const ok = catches(fan, setup);
+    const [a, b, c] = hudLines(setup, fan);
     if (hudSet) hudSet.textContent = a;
     if (hudDoing) hudDoing.textContent = b;
     if (hudNote) {
@@ -651,7 +691,8 @@ export function mountHoodLab(root: HTMLElement): void {
   }
   const tagAt = new THREE.Vector3();
   const tagSize = new Map<HTMLElement, { w: number; h: number }>();
-  function placeTag(el: HTMLElement | null, at: THREE.Vector3, text: [string, string], warn: boolean, colour: string): void {
+  const STEM = 26;
+  function placeTag(el: HTMLElement | null, at: THREE.Vector3, text: [string, string], warn: boolean, colour: string, W: number, H: number): void {
     if (!el) return;
     tagAt.copy(at).project(camera);
     const on = tagAt.z < 1 && Math.abs(tagAt.x) < 0.96 && Math.abs(tagAt.y) < 0.96;
@@ -666,28 +707,31 @@ export function mountHoodLab(root: HTMLElement): void {
       if (b) b.textContent = text[1];
       el.toggleAttribute("data-boiled", warn);
       el.style.setProperty("--c", colour);
+      el.style.setProperty("--stem", `${STEM}px`);
       tagSize.set(el, { w: el.offsetWidth, h: el.offsetHeight });
     }
-    const W = stageEl!.clientWidth;
-    const H = stageEl!.clientHeight;
     const sz = tagSize.get(el)!;
     const px = ((tagAt.x + 1) / 2) * W;
     const py = ((1 - tagAt.y) / 2) * H;
-    const stem = 26;
     const x = Math.min(W - sz.w / 2 - 4, Math.max(sz.w / 2 + 4, px));
-    el.style.transform = `translate(${x.toFixed(1)}px, ${(py - stem).toFixed(1)}px)`;
-    el.style.setProperty("--stem", `${stem}px`);
-    el.style.setProperty("--sx", `${Math.round(px - x)}px`);
+    el.style.transform = `translate(${x.toFixed(1)}px, ${(py - STEM).toFixed(1)}px)`;
+    const sx = `${Math.round(px - x)}px`;
+    if (el.dataset.sx !== sx) {
+      el.dataset.sx = sx;
+      el.style.setProperty("--sx", sx);
+    }
   }
   const gapPoint = new THREE.Vector3();
   const lipPoint = new THREE.Vector3();
   function showTags(): void {
+    const W = stageEl!.clientWidth;
+    const H = stageEl!.clientHeight;
     const back = frontZ - BROILER.d;
     gapPoint.set(-LINE_HALF + 0.12, SEAL_Y + 0.01, Math.max(0.02, back / 2));
-    placeTag(tagGap, gapPoint, setup.sealed ? ["Gap behind", "sealed"] : ["Gap behind", `${SETS[setup.at].gapIn} in, open`], false, AIR);
+    placeTag(tagGap, gapPoint, setup.sealed ? ["Gap behind", "sealed"] : ["Gap behind", `${SETS[setup.at].gapIn} in, open`], false, AIR, W, H);
     lipPoint.set(-0.55, EDGE_Y - 0.02, HOOD.d);
     const ok = catches(fan, setup);
-    placeTag(tagLip, lipPoint, ok ? ["Hood's edge", "all caught"] : ["Hood's edge", "smoke escapes"], !ok, ok ? OK : SPILL);
+    placeTag(tagLip, lipPoint, ok ? ["Hood's edge", "all caught"] : ["Hood's edge", "smoke escapes"], !ok, ok ? OK : SPILL, W, H);
   }
 
   /* The stage: the broilers and the seal eased to the setup, the cook, the smoke and the air. */
@@ -701,6 +745,7 @@ export function mountHoodLab(root: HTMLElement): void {
     };
   })();
   let emitAcc = 0;
+  let nextUnit = 0;
   let airAcc = 0;
   /** How far forward the smoke leans as it rises (horizontal over vertical): the air up an open gap pushes it
    *  forward, the more the wider the gap; sealed, the air from the front pushes it back. */
@@ -734,16 +779,16 @@ export function mountHoodLab(root: HTMLElement): void {
       aP[k + 2] = 0.03 + rnd() * Math.max(0.01, back - 0.06);
     } else {
       aLife[i] = 3.2;
-      aP[k + 1] = COOK_Y - 0.12 + rnd() * 0.4;
+      aP[k + 1] = STAND.h + BROILER.h + 0.03 + rnd() * 0.3;
       aP[k + 2] = frontZ + 0.5 + rnd() * 0.4;
+      // Not through the cook, who stands in front of the middle broiler.
+      if (Math.abs(aP[k]! - COOK_X) < 0.34) aP[k] = COOK_X + Math.sign(aP[k]! - COOK_X || 1) * (0.34 + rnd() * 0.1);
     }
     aV[k] = aV[k + 1] = aV[k + 2] = 0;
   }
   /** The kitchen's stirring: one slow field that every puff moves in, so that neighbours move together into wisps. */
-  const swirl = (x: number, y: number, z: number, t: number, sd: number): [number, number] => [
-    0.11 * Math.sin(1.3 * t + 3.1 * y + 2.3 * x) + 0.05 * Math.sin(2.9 * t - 5.3 * y + 1.7 * z + sd),
-    0.07 * Math.cos(1.1 * t + 2.7 * y - 1.9 * x) + 0.04 * Math.sin(3.3 * t + 4.1 * y + 2 * sd),
-  ];
+  const swirlX = (x: number, y: number, z: number, t: number, sd: number) => 0.11 * Math.sin(1.3 * t + 3.1 * y + 2.3 * x) + 0.05 * Math.sin(2.9 * t - 5.3 * y + 1.7 * z + sd);
+  const swirlZ = (x: number, y: number, t: number, sd: number) => 0.07 * Math.cos(1.1 * t + 2.7 * y - 1.9 * x) + 0.04 * Math.sin(3.3 * t + 4.1 * y + 2 * sd);
   function stepSmoke(dt: number, t: number): void {
     const need = needCfm(setup);
     const spill = spillShare(fan, need);
@@ -751,10 +796,10 @@ export function mountHoodLab(root: HTMLElement): void {
     const draw = 0.35 + 0.55 * (fan / CODE_CFM);
     // Emission: each broiler's share, steady.
     emitAcc += dt * (phone ? 190 : 300);
-    let free = 0;
     for (let i = 0; i < NS && emitAcc >= 1; i++) {
       if (sAge[i]! >= 0) continue;
-      emitSmoke(i, XS[free++ % 3]!, spill);
+      emitSmoke(i, XS[nextUnit]!, spill);
+      nextUnit = (nextUnit + 1) % 3;
       emitAcc -= 1;
     }
     emitAcc = Math.min(emitAcc, 4);
@@ -772,7 +817,8 @@ export function mountHoodLab(root: HTMLElement): void {
       let z = smoke.pos[k + 2]!;
       const sd = sSeed[i]!;
       const rise = 0.62 * (0.85 + 0.3 * sd);
-      const [tx, tz] = swirl(x, y, z, t, sd);
+      const tx = swirlX(x, y, z, t, sd);
+      const tz = swirlZ(x, y, t, sd);
       // Positions are kept in single precision: a puff put at the edge reads back a hair under it, so the test allows it.
       const inHood = y >= EDGE_Y - 0.002 && z < CAPTURE_Z && Math.abs(x) < HOOD_HALF - 0.02;
       let vx: number;
@@ -921,7 +967,7 @@ export function mountHoodLab(root: HTMLElement): void {
     seal.position.set(0, SEAL_Y + drop, back / 2);
     lip.position.set(0, SEAL_Y + drop - 0.025, back - 0.0008);
     // The cook a step in front of the middle broiler, reaching to the steaks.
-    cook.place(0.05, frontZ + 0.44, Math.PI);
+    cook.place(COOK_X, frontZ + 0.44, Math.PI);
     grateAt.set(0.1 + 0.08 * Math.sin(t * 0.9), COOK_Y + 0.02, frontZ - 0.35);
     cook.work("plate", t, { at: grateAt, surfaceY: COOK_Y });
   }
@@ -946,12 +992,19 @@ export function mountHoodLab(root: HTMLElement): void {
   }
   for (const b of atBtns) b.addEventListener("click", () => pick({ at: Number(b.dataset.hcAt) as SetIndex, sealed: setup.sealed }));
   for (const b of sealBtns) b.addEventListener("click", () => pick({ at: setup.at, sealed: b.dataset.hcSeal === "1" }));
+  canvas.addEventListener("pointerdown", () => {
+    touring = false;
+  });
   fanIn?.addEventListener("input", () => {
+    touring = false;
     fan = Math.max(2000, Math.min(6000, Math.round(Number(fanIn.value) / 100) * 100));
     refate();
     renderAll();
   });
-  void cook.ready.then(() => void gate.refresh(scene));
+  void cook.ready.then(() => {
+    cook.hand("R").add(tongs);
+    void gate.refresh(scene);
+  });
 
   let inView = false;
   observeInView(stageEl, (v) => {
@@ -971,15 +1024,14 @@ export function mountHoodLab(root: HTMLElement): void {
       const k = Math.floor(tourT / TOUR_S) % TOUR.length;
       show(TOUR[k]!);
     }
-    // Ease the broilers and the seal: the broilers slide back at about a foot a second; the seal follows them.
+    // Ease the broilers and the seal: the seal comes out before the broilers move and goes in once they have stopped;
+    // they slide at about a foot a second.
     const zTo = frontOf(setup.at);
     const dz = zTo - frontZ;
-    frontZ += Math.sign(dz) * Math.min(Math.abs(dz), dt * 0.3);
-    const sTo = setup.sealed ? 1 : 0;
-    // The seal goes in once the broilers have stopped, and comes out before they move.
-    const moving = Math.abs(zTo - frontZ) > 1e-4;
-    const sGo = moving ? 0 : sTo;
+    const moving = Math.abs(dz) > 1e-4;
+    const sGo = moving ? 0 : setup.sealed ? 1 : 0;
     sealK += Math.sign(sGo - sealK) * Math.min(Math.abs(sGo - sealK), dt * 1.4);
+    if (moving && sealK <= 0) frontZ += Math.sign(dz) * Math.min(Math.abs(dz), dt * 0.3);
     placeLine(t);
     stepAir(dt, t);
     stepSmoke(dt, t);
@@ -1007,6 +1059,9 @@ export function mountHoodLab(root: HTMLElement): void {
         }
         return {
           mountMs: Math.round(mountMs),
+          running: inView && !document.hidden && gate.ready(),
+          inView,
+          gateReady: gate.ready(),
           at: setup.at,
           sealed: setup.sealed,
           fan,
