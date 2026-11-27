@@ -18,7 +18,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
-fs-system = { path = "../fs-system", features = ["slices"] }
+fs-system = { path = "../fs-system", features = ["plate-slices"] }
 
 [lints]
 workspace = true

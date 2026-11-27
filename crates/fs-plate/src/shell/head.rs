@@ -49,6 +49,7 @@ pub struct TensionedDisk {
     pub model:PlateModel,
     /// Film mass in the sampled polygon [kg], before eliminating the rim DOFs.
     pub mass_kg:f64,
+    outer_nodes: Vec<usize>,
 }
 impl TensionedDisk {
     /// Construct a fixed-rim film without any authored resonant frequencies.
@@ -86,7 +87,21 @@ impl TensionedDisk {
             pretension:if uniform {spec.tension_n_m}else{0.0},support:EdgeSupport::SimplySupported,
         })?;
         if !uniform { variation.add_to(spec.tension_n_m,&mesh,&mut model)?; }
-        Ok(Self{spec,tension_variation:variation,mesh,section,model,mass_kg:generated.mass_kg})
+        Ok(Self {
+            spec,
+            tension_variation: variation,
+            mesh,
+            section,
+            model,
+            mass_kg: generated.mass_kg,
+            outer_nodes: generated.outer_nodes,
+        })
+    }
+
+    /// Outer rim node indices constrained with `w = 0` and free slope.
+    #[must_use]
+    pub fn outer_nodes(&self) -> &[usize] {
+        &self.outer_nodes
     }
     /// Project one unit pressure into a supplied mass-normalized mode. Using
     /// the SAME weights for volume displacement gives reciprocal cavity work.

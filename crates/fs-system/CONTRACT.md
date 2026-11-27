@@ -5133,3 +5133,7 @@ interfaces to `common_flow_ratios`. `fs-gas` retains a `[dev-dependencies]` edge
 (L3 dev-only cycle; non-dev deps acyclic). No hidden ambient force is attached; exterior pressure
 is declared explicitly as a `SourceDecl`. `lower_cavity` registers an `Observed::Cell`
 observer reading the parcel's temperature [K].
+
+## Modal circular plate owner lowering (`owners::plate`, bead `frankensim-rc-1109-root-3gc12.11.9.2`)
+
+Under `plate-slices` (`slices`, `modal-slices`, `fs-plate`, `fs-modal`), `owners::register_owner_defaults` registers `PartLoweringKey(Shell, {Mechanics}, Modal)` lowering `TensionedDisk` onto `ModalStructure` via `fs_modal::slice_window` (bounded Weyl doubling `MAX_WINDOW_DOUBLINGS = 24`, refusing at bound and refusing split degenerate pairs with `(lambda_{N+1} - lambda_N) / lambda_N <= 1e-6`, naming nearest counts). Damping requires `loss_tangent_tensile` only and sets `zeta_k = 0.5 * eta(f_k) * (phi_k^T K_bend phi_k) / lambda_k` on the zero-prestress DKT bending matrix: film material bending loss only, with no air loading, radiation, or rim loss.

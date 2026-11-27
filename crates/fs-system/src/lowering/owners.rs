@@ -36,6 +36,8 @@ use crate::{HeatSink, PortRef, RouteTemperature, heat_sink};
 pub mod contact;
 pub mod gas;
 pub mod mbd;
+#[cfg(feature = "plate-slices")]
+pub mod plate;
 pub mod thermal;
 
 /// Card family of a passive viscous bushing between two rigid bodies (a
@@ -69,6 +71,8 @@ pub fn register_owners(registry: &mut LoweringRegistry, caloric: thermal::Calori
     thermal::register(registry, caloric);
     gas::register(registry);
     contact::register(registry);
+    #[cfg(feature = "plate-slices")]
+    plate::register(registry);
     registry.register_group(LOSS_ROUTES, select_loss_routes, lower_loss_routes);
 }
 

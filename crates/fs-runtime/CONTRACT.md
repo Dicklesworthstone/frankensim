@@ -32,7 +32,7 @@ Each runtime owns a private `CancelGate::new_clock_free()` passed into `Cx` on e
 `#![deny(unsafe_code)]` across the crate. Zero `unsafe` blocks in library code (only the test-only `GlobalAlloc` counter in `tests/no_alloc.rs`).
 
 ## Feature flags
-None. `fs-system` is built with `features = ["slices"]`; all dependencies are pure Franken workspace crates and `wasm32-unknown-unknown` compilation is checked.
+None. `fs-system` is built with `features = ["plate-slices"]`; all dependencies are pure Franken workspace crates and `wasm32-unknown-unknown` compilation is checked.
 
 ## Conformance tests
 - `descriptor::tests::canonical_json_writers_pin_exact_bytes`: byte-pin JSON checks.

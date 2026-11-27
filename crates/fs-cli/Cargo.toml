@@ -58,7 +58,7 @@ fs-report = { path = "../fs-report" }
 fs-scenario = { path = "../fs-scenario" }
 fs-session = { path = "../fs-session" }
 fs-solver = { path = "../fs-solver" }
-fs-system = { path = "../fs-system", features = ["constitutive", "phs", "slices"] }
+fs-system = { path = "../fs-system", features = ["constitutive", "phs", "plate-slices"] }
 fs-thermal = { path = "../fs-thermal" }
 fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }

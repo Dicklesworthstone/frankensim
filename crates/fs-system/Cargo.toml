@@ -21,6 +21,8 @@ phs = ["dep:fs-phs"]
 # Owner slice for the linear modal structure of fs-nlmodal, kept apart from `slices` so that
 # neither build pulls in the other's owners.
 modal-slices = ["dep:fs-nlmodal"]
+# Owner slice for modal circular plates (TensionedDisk + slice_window -> ModalStructure).
+plate-slices = ["slices", "modal-slices", "dep:fs-plate", "dep:fs-modal"]
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
@@ -34,8 +36,10 @@ fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd", optional = true }
+fs-modal = { path = "../fs-modal", optional = true }
 fs-nlmodal = { path = "../fs-nlmodal", optional = true }
 fs-phs = { path = "../fs-phs", optional = true }
+fs-plate = { path = "../fs-plate", optional = true }
 fs-orbit = { path = "../fs-orbit" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
