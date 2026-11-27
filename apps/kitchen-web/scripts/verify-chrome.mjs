@@ -562,8 +562,9 @@ async function main() {
       if (sid === "cool") {
         // As set on arrival (30 litres, uncovered): of the four ways only the 2-inch pans started in the freezer meet
         // both of the Food Code's limits, the slower the deeper, and the pot is still over 41 °F a day after it went
-        // in. Covered, every way is slower. Held at 5 h, the freezer pans stand in the walk-in, their middle at or
-        // under 41 °F, while the pot's is still over 135 °F.
+        // in. Covered, every way is slower. Held at 5 h, the freezer pans' rack stands in the walk-in, their middle at
+        // or under 41 °F, while the pot's is still over 135 °F; partway through the move the rack is outside, in front of
+        // the boxes. A way not at 41 °F within its run has a null total: counted as never.
         const info = () => page.$eval("[data-cd-stage]", (el) => el.cool.info());
         const ready = (covered) =>
           page.waitForFunction((c) => {
@@ -572,16 +573,17 @@ async function main() {
           }, { timeout: 30000 }, covered);
         const by = (i, k) => i.runs.find((r) => r.key === k);
         const inTime = (r) => r.ok1 && r.ok2;
+        const tot = (r) => r.total ?? Infinity;
         await ready(false);
         const open = await info();
         console.log(`[verify-chrome] Cool the chili: ${JSON.stringify(open.runs.map((r) => [r.key, r.stage1, r.total, r.dayF]))} | ${open.status.slice(0, 90)}`);
         const [pot, deep, shallow, freezer] = ["pot", "deep", "shallow", "freezer"].map((k) => by(open, k));
-        if (open.litres !== 30 || !inTime(freezer) || [pot, deep, shallow].some(inTime) || !(pot.total > deep.total && deep.total > shallow.total && shallow.total > freezer.total) || !(pot.dayF > 41) || !/^Only 2-inch pans started in the freezer/.test(open.status)) throw new Error(`Cool the chili: 30 litres uncovered do not cool in the order or verdicts expected: ${JSON.stringify(open)}`);
+        if (open.litres !== 30 || !inTime(freezer) || [pot, deep, shallow].some(inTime) || !(tot(pot) > tot(deep) && tot(deep) > tot(shallow) && tot(shallow) > tot(freezer)) || !(pot.dayF > 41) || !/^Only 2-inch pans started in the freezer/.test(open.status)) throw new Error(`Cool the chili: 30 litres uncovered do not cool in the order or verdicts expected: ${JSON.stringify(open)}`);
         await page.click('[data-cd-cover="on"]');
         await ready(true);
         const film = await info();
         console.log(`[verify-chrome] Cool the chili, covered: ${JSON.stringify(film.runs.map((r) => [r.key, r.total]))}`);
-        if (["pot", "deep", "shallow", "freezer"].some((k) => !(by(film, k).total > by(open, k).total))) throw new Error(`Cool the chili: covered, a way is not slower: ${JSON.stringify(film.runs)}`);
+        if (["pot", "deep", "shallow", "freezer"].some((k) => !(tot(by(film, k)) > tot(by(open, k))))) throw new Error(`Cool the chili: covered, a way is not slower: ${JSON.stringify(film.runs)}`);
         await page.click('[data-cd-cover="off"]');
         await ready(false);
         await page.$eval("[data-cd-stage]", (el) => el.cool.hold(300));
@@ -589,6 +591,12 @@ async function main() {
         const held = await info();
         const tagF = (t) => Number(/(-?\d+) °F$/.exec(t ?? "")?.[1] ?? NaN);
         if (held.t !== 300 || !(tagF(held.tags[3]) <= 41) || !(tagF(held.tags[0]) > 135)) throw new Error(`Cool the chili: held at 5 h, the labels are not the freezer pans cold and the pot hot: ${JSON.stringify(held.tags)}`);
+        if (Math.abs(held.rack.x - -0.4) > 1e-3 || held.rack.y !== 0) throw new Error(`Cool the chili: held at 5 h, the freezer pans' rack is not in the walk-in: ${JSON.stringify(held.rack)}`);
+        const moveMin = by(held, "freezer").movedMin;
+        await page.$eval("[data-cd-stage]", (el, m) => el.cool.hold(m, 0.45), moveMin);
+        await sleep(600);
+        const mid = await info();
+        if (!(mid.rack.z > 1.3) || mid.rack.y !== 0) throw new Error(`Cool the chili: partway through the move the rack is not outside the boxes: ${JSON.stringify(mid.rack)}`);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-cool.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-cool.png");
         await page.$eval("[data-cd-stage]", (el) => el.cool.hold(null));

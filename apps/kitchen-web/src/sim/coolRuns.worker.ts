@@ -1,26 +1,33 @@
 /**
  * The cooling figure's runs, off the page's main thread (sim/coolDown.ts): the four ways for a batch, open or
- * covered. The pans cool the same however many there are, so their runs are kept and only the pot runs again for a
- * new batch. Only the newest ask is kept: a slider's steps come faster than a pot is run.
+ * covered. A full pan cools the same however many there are, so its run is kept, and so is each part-filled pan's by
+ * what it holds; only the pot runs again for every new batch. Only the newest ask is kept: a slider's steps come
+ * faster than a pot is run.
  */
-import { DAY_MIN, WAYS, coolKey, coolWay, pansFor, type WayRun } from "./coolDown";
+import { PAGE_RUN, PAN_2, PAN_3, WAYS, coolKey, coolRest, coolWay, pansFor, restLitres, wayOf, type CoolRun, type WayRun } from "./coolDown";
 
 export type CoolAsk = { litres: number; covered: boolean };
 export type CoolDone = { key: string; runs: WayRun[] };
 
 const scope = self as unknown as { onmessage: ((e: MessageEvent<CoolAsk>) => void) | null; postMessage(m: CoolDone): void };
 const pans = new Map<string, WayRun>();
+const rests = new Map<string, CoolRun | null>();
 let ask: CoolAsk | null = null;
 let busy = false;
 
 function runs(a: CoolAsk): WayRun[] {
   return WAYS.map((w) => {
-    const o = { minMin: DAY_MIN, maxMin: 72 * 60 };
-    if (w.key === "pot") return coolWay(w.key, a.litres, a.covered, o);
+    if (w.key === "pot") return coolWay(w.key, a.litres, a.covered, PAGE_RUN);
+    // The first pan's run: a full pan's, or the one pan's when the batch is less than a pan.
+    const first = Math.min(a.litres, (w.key === "deep" ? PAN_3 : PAN_2).litres);
     const k = `${w.key}|${a.covered}`;
-    let r = pans.get(k);
-    if (!r) pans.set(k, (r = coolWay(w.key, a.litres, a.covered, o)));
-    return { ...r, pans: pansFor(w.key, a.litres) };
+    const fk = `${k}|${first.toFixed(3)}`;
+    let r = pans.get(fk);
+    if (!r) pans.set(fk, (r = coolWay(w.key, first, a.covered, PAGE_RUN)));
+    const rk = `${k}|${restLitres(w.key, a.litres).toFixed(3)}`;
+    let rest = rests.get(rk);
+    if (rest === undefined) rests.set(rk, (rest = coolRest(w.key, a.litres, a.covered, r.run.movedMin, PAGE_RUN)));
+    return wayOf(w, r.run, pansFor(w.key, a.litres), rest);
   });
 }
 

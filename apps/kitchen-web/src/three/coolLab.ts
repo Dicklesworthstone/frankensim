@@ -12,10 +12,12 @@
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import {
+  CHART_MIN,
   COLD_C,
   DAY_MIN,
   HOT_C,
   MAX_LITRES,
+  MAX_MIN,
   MIN_LITRES,
   PAN_2,
   PAN_3,
@@ -29,6 +31,7 @@ import {
   centreAt,
   coolAll,
   coolKey,
+  panDepth,
   pansFor,
   potFill,
   type CoolRun,
@@ -69,8 +72,9 @@ const CUT_Y = 0.3;
 const ROW_Z = -0.55;
 /** The racks' x. The freezer pans' rack stands in line with the freezer's door, and once moved, at the cooler's right. */
 const RACK_X = { deep: -1.56, shallow: -0.98, moved: -0.4, freezer: FREEZER_X0 + 0.76 + 0.457 } as const;
-/** The pot, on an aluminium dunnage rack 8 in off the floor, its handles fore and aft; cut through its axis. */
-const POT_AT = { x: -1.45, z: 0.6 };
+/** The pot, on an aluminium dunnage rack 8 in off the floor, its handles fore and aft; cut through its axis. It stands
+ *  at the cooler's right front, clear of the way in from the door to the moved rack's place behind it. */
+const POT_AT = { x: -0.4, z: 0.75 };
 const DUN = { w: 0.61, d: 0.46, h: 0.2 };
 const RACK_SLIDES = speedRackSlides(RACK.h);
 /** A sheet pan's rim rides the slide; the hotel pan's floor stands this far below it, on the sheet pan's floor. */
@@ -79,8 +83,8 @@ const PAN_DROP = -0.0236;
 const EVERY: Record<PanWay, number> = { deep: 3, shallow: 2, freezer: 2 };
 type PanWay = Exclude<WayKey, "pot">;
 const PAN_OF: Record<PanWay, typeof PAN_2> = { deep: PAN_3, shallow: PAN_2, freezer: PAN_2 };
-/** The cook, outside, between the two doors. */
-const COOK = { x: 0, z: 2.05 };
+/** The cook, outside, between the two doors, back from the way the rack goes along the front. */
+const COOK = { x: 0.3, z: 2.55 };
 
 /** Each way's colour, on the labels, the tiles and the chart. Kept off the temperature colours. */
 export const WAY_COLOR: Record<WayKey, string> = { pot: "#f472b6", deep: "#c084fc", shallow: "#4ade80", freezer: "#e2e8f0" };
@@ -90,18 +94,18 @@ export function coolPieces(): readonly Piece[] {
   const d = roomDetail();
   return [[COOLER.id, COOLER, d], [FREEZER_BOX.id, FREEZER_BOX, d], ...Array.from({ length: 3 }, (): Piece => [RACK.id, RACK, d]), [POT.id, POT, 2]];
 }
-/** The rooms close up on a laptop, a step coarser on a phone. */
-const roomDetail = () => (Math.min(window.innerWidth, window.innerHeight) < 600 ? 1 : 2);
+/** The rooms close up on a laptop, a step coarser on a phone: chosen once, so what main.ts builds ahead is used. */
+let detailNow: 1 | 2 | null = null;
+const roomDetail = (): 1 | 2 => (detailNow ??= Math.min(window.innerWidth, window.innerHeight) < 600 ? 1 : 2);
 
 /** The day: the pans go in at 2 pm (minutes after midnight); the stage plays 24 hours from then. */
 const START_TOD = 14 * 60;
 /** The loop: going in, the day, the move from the freezer (the clock held), and a hold on the end (seconds). */
 const IN_S = 1.6;
 const DAY_S = 34;
-const MOVE_S = 2.4;
 const END_S = 4;
 /** The chart's hours from 135 °F. */
-const CHART_H = 24;
+const CHART_H = CHART_MIN / 60;
 
 /* ------------------------------------------------------------------------------------------------------------ */
 /* Words and colours.                                                                                            */
@@ -130,6 +134,67 @@ const smooth = (x: number) => {
   const t = Math.min(1, Math.max(0, x));
   return t * t * (3 - 2 * t);
 };
+
+/* The move: the freezer pans' rack wheeled to the walk-in (the clock held). Out of the freezer's door and aside, clear
+ * of that door as it shuts; along the front; in at the cooler's door, along in front of the other racks and back to
+ * its place. Each door opens before the rack reaches it and shuts once it is through. Points are (x, z). */
+type XZ = readonly [number, number];
+/** Along the front, clear of the doors' hardware; inside the cooler, between the racks' row and the pot. */
+const OUT_Z = FRONT_OUT + 0.47;
+const IN_Z = 0.13;
+const LEG1: readonly XZ[] = [[RACK_X.freezer, ROW_Z], [RACK_X.freezer, OUT_Z], [FREEZER_X0 + 2.0, OUT_Z]];
+const LEG2: readonly XZ[] = [LEG1[2]!, [COOLER_X0 + 0.76 + 0.457, OUT_Z], [COOLER_X0 + 0.76 + 0.457, IN_Z], [RACK_X.moved, IN_Z], [RACK_X.moved, ROW_Z]];
+const legLen = (l: readonly XZ[], upTo = l.length - 1) => {
+  let d = 0;
+  for (let i = 1; i <= upTo; i++) d += Math.hypot(l[i]![0] - l[i - 1]![0], l[i]![1] - l[i - 1]![1]);
+  return d;
+};
+/** The point `d` metres along a leg. */
+function along(l: readonly XZ[], d: number): XZ {
+  for (let i = 1; i < l.length; i++) {
+    const a = l[i - 1]!;
+    const b = l[i]!;
+    const s = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (d <= s || i === l.length - 1) {
+      const f = s > 0 ? Math.min(1, Math.max(0, d / s)) : 1;
+      return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    }
+    d -= s;
+  }
+  return l[l.length - 1]!;
+}
+/** Metres a second rolling (the stage's quickened time), and the seconds a door takes to open or to shut. */
+const ROLL_V = 2.2;
+const DOOR_S = 0.55;
+const MOVE = (() => {
+  const roll1 = 0.45;
+  const shut1 = roll1 + legLen(LEG1) / ROLL_V;
+  const roll2 = shut1 + DOOR_S + 0.05;
+  const end2 = roll2 + legLen(LEG2) / ROLL_V;
+  // When the rack is through the cooler's door (at the turn inside): the eased roll's time there.
+  const f = legLen(LEG2, 2) / legLen(LEG2);
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (smooth(mid) < f) lo = mid;
+    else hi = mid;
+  }
+  return { roll1, shut1, roll2, end2, inside: roll2 + lo * (end2 - roll2), total: end2 + 0.3 };
+})();
+const MOVE_S = MOVE.total;
+/** Where the rack is, and how far open each door, `t` seconds into the move. */
+function movePose(t: number): { x: number; z: number; fz: number; co: number } {
+  const p =
+    t < MOVE.shut1
+      ? along(LEG1, legLen(LEG1) * smooth((t - MOVE.roll1) / (MOVE.shut1 - MOVE.roll1)))
+      : t < MOVE.roll2
+        ? LEG1[LEG1.length - 1]!
+        : along(LEG2, legLen(LEG2) * smooth((t - MOVE.roll2) / (MOVE.end2 - MOVE.roll2)));
+  const fz = smooth(t / DOOR_S) * (1 - smooth((t - MOVE.shut1) / DOOR_S));
+  const co = smooth((t - MOVE.roll2) / DOOR_S) * (1 - smooth((t - MOVE.inside) / DOOR_S));
+  return { x: p[0], z: p[1], fz, co };
+}
 
 /** The temperature colours (°F): deep blue frozen, sky at 41 °F, yellow at 70 °F, orange at 135 °F, red off the stove. */
 const HEAT: readonly (readonly [number, number, number, number])[] = [
@@ -209,6 +274,9 @@ export function mountCoolLab(root: HTMLElement): void {
   const frontCut = [new THREE.Plane(new THREE.Vector3(0, -1, 0), CUT_Y), new THREE.Plane(new THREE.Vector3(0, 0, -1), FRONT_IN - 0.001)];
   // The racks' pans and the pot: their near halves.
   const rowCut = [new THREE.Plane(new THREE.Vector3(0, 0, -1), ROW_Z)];
+  /** The freezer pans' rack's own, which moves with it. */
+  const fzCut = [new THREE.Plane(new THREE.Vector3(0, 0, -1), ROW_Z)];
+  const cutOf = (w: PanWay) => (w === "freezer" ? fzCut : rowCut);
   const potCut = [new THREE.Plane(new THREE.Vector3(0, 0, -1), POT_AT.z)];
   /** Every material under `o`, its own clipped copy: one copy per material and set of planes. */
   const clipCopies = new Map<THREE.Plane[], Map<THREE.Material, THREE.Material>>();
@@ -234,10 +302,12 @@ export function mountCoolLab(root: HTMLElement): void {
     });
   }
 
-  function box(spec: typeof COOLER, x0: number): Model {
+  function box(spec: typeof COOLER, x0: number, frost = 0): Model {
     const m = buildFixture(spec.id, spec, detail);
     m.group.position.set(x0, 0, spec.d / 2);
     m.hooks.set?.("roof", 1);
+    // Before the clip, which gives every mesh its own copy of its material: set after, it would change the originals.
+    if (frost) m.hooks.set?.("frost", frost);
     // The strip curtain hangs from the door's head, which is cut away.
     for (const [name, j] of m.joints) if (name.startsWith("pvc_strip_")) j.visible = false;
     clip(m.group, frontCut, true);
@@ -255,8 +325,7 @@ export function mountCoolLab(root: HTMLElement): void {
   }
   const foam = new THREE.MeshStandardMaterial({ color: 0xd8b75e, roughness: 0.93 });
   const cooler = box(COOLER, COOLER_X0);
-  const freezer = box(FREEZER_BOX, FREEZER_X0);
-  freezer.hooks.set?.("frost", 0.45);
+  const freezer = box(FREEZER_BOX, FREEZER_X0, 0.45);
   // One box of two: the cooler's own right wall, and the shelving on it, give way to the freezer's left wall.
   {
     const j = cooler.joints.get("part_wall_right");
@@ -276,19 +345,23 @@ export function mountCoolLab(root: HTMLElement): void {
     /** The rack's centre now (it moves, for the freezer's). */
     x: number;
     y: number;
+    z: number;
   }
   const racks: Rack[] = (["deep", "shallow", "freezer"] as const).map((way) => {
     const model = buildFixture(RACK.id, RACK, detail);
     model.hooks.set?.("pans", 0);
     model.hooks.set?.("swivel", 0.25);
     scene.add(model.group);
-    const r: Rack = { way, model, slots: [], x: RACK_X[way], y: way === "freezer" ? FZ_FLOOR : 0 };
+    const r: Rack = { way, model, slots: [], x: RACK_X[way], y: way === "freezer" ? FZ_FLOOR : 0, z: ROW_Z };
     return r;
   });
   const rackOf = (w: PanWay) => racks.find((r) => r.way === w)!;
   function placeRack(r: Rack, x: number, y: number, z: number): void {
     r.x = x;
     r.y = y;
+    r.z = z;
+    // Its pans are cut through their middles wherever it stands.
+    if (r.way === "freezer") fzCut[0]!.constant = z;
     r.model.group.position.set(x - RACK.w / 2, y, z + RACK.d / 2);
     r.slots.forEach((s, i) => s.group.position.set(x, y + RACK_SLIDES[RACK_SLIDES.length - 1 - i * EVERY[r.way]]!, z));
   }
@@ -302,15 +375,15 @@ export function mountCoolLab(root: HTMLElement): void {
   };
   const fullFill = (pan: typeof PAN_2) => pan.foodM / (pan.panM - insideOf(pan.panM).floorY - 0.008);
   const loads = new Map<string, THREE.Group>();
-  function load(pan: typeof PAN_2, fill: number): THREE.Group {
-    const key = `${pan.panM}|${fill.toFixed(3)}`;
+  function load(pan: typeof PAN_2, fill: number, planes: THREE.Plane[]): THREE.Group {
+    const key = `${pan.panM}|${fill.toFixed(3)}|${planes === fzCut ? "f" : "r"}`;
     let g = loads.get(key);
     if (!g) {
       const s = new Shop(detail, `cool_pan_${key}`);
       sheetPan(s);
       s.at([0, PAN_DROP, 0], [0, Math.PI / 2, 0], () => hotelPan(s, "1/1", pan.panM, fill, 4));
       g = s.build(true).group;
-      clip(g, rowCut);
+      clip(g, planes);
       loads.set(key, g);
     }
     return g;
@@ -337,6 +410,8 @@ export function mountCoolLab(root: HTMLElement): void {
   }
   // Cling film over each covered pan, beaded with what condenses under it.
   const filmM = new THREE.MeshPhysicalMaterial({ color: 0xf2f6f8, transparent: true, opacity: 0.32, roughness: 0.42, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.18, depthWrite: false, side: THREE.DoubleSide, clippingPlanes: rowCut, clipShadows: true });
+  const filmFz = filmM.clone();
+  filmFz.clippingPlanes = fzCut;
   const filmGeos = new Map<number, THREE.BufferGeometry>();
   const filmGeo = (panM: number) => {
     let g = filmGeos.get(panM);
@@ -359,8 +434,11 @@ export function mountCoolLab(root: HTMLElement): void {
     t.needsUpdate = true;
     return t;
   }
-  // Unseen until the runs come.
-  const cutMats = new Map<WayKey, THREE.MeshBasicMaterial>(WAYS.map((w) => [w.key, new THREE.MeshBasicMaterial({ toneMapped: false, visible: false })]));
+  // Unseen until the runs come. A way's last pan, when it holds less than the rest, shows its own run ("deep:rest").
+  const restKey = (w: PanWay) => `${w}:rest`;
+  const cutMats = new Map<string, THREE.MeshBasicMaterial>(
+    [...WAYS.map((w) => w.key as string), ...(["deep", "shallow", "freezer"] as const).map(restKey)].map((k) => [k, new THREE.MeshBasicMaterial({ toneMapped: false, visible: false })]),
+  );
 
   /** Each rack's pans for the batch: each filled to its depth, the last with what is left. */
   function loadRacks(litres: number, covered: boolean): void {
@@ -371,14 +449,16 @@ export function mountCoolLab(root: HTMLElement): void {
       const n = pansFor(r.way, litres);
       for (let i = 0; i < n; i++) {
         const left = litres - i * pan.litres;
+        // As coolDown's restLitres has it: a last pan short of the full ones before it has its own run.
+        const part = i > 0 && left < pan.litres - 1e-6;
         const fill = fullFill(pan) * Math.min(1, left / pan.litres);
         const group = new THREE.Group();
-        group.add(load(pan, fill).clone());
-        const film = new THREE.Mesh(filmGeo(pan.panM), filmM);
+        group.add(load(pan, fill, cutOf(r.way)).clone());
+        const film = new THREE.Mesh(filmGeo(pan.panM), r.way === "freezer" ? filmFz : filmM);
         film.visible = covered;
         film.renderOrder = 3;
         group.add(film);
-        const cut = new THREE.Mesh(panCut(pan, fill), cutMats.get(r.way)!);
+        const cut = new THREE.Mesh(panCut(pan, fill), cutMats.get(part ? restKey(r.way) : r.way)!);
         cut.position.set(0, PAN_DROP, 0.0004);
         group.add(cut);
         scene.add(group);
@@ -508,7 +588,7 @@ export function mountCoolLab(root: HTMLElement): void {
   // The cook, outside, by the freezer, an eye on the boxes.
   const cook = makeStaff("p50", 2, { seed: 23, apron: 0x2b3a55, sleeves: "cuffed" });
   {
-    const look = new THREE.Vector3(-1.2, 0, 0.6);
+    const look = new THREE.Vector3(POT_AT.x - 0.3, 0, POT_AT.z);
     cook.place(COOK.x, COOK.z, Math.atan2(look.x - COOK.x, look.z - COOK.z));
   }
   scene.add(cook.group);
@@ -631,22 +711,30 @@ export function mountCoolLab(root: HTMLElement): void {
   /** The loop's clock (seconds), a minute held by the hook, the minute on show. */
   let loopT = 0;
   let frozen: number | null = null;
+  let frozenMove: number | null = null;
   let playMin = 0;
 
   /** The doings the HUD may show, longest first, for its room. */
   function longestDoings(): string[] {
     const out = ["Into the walk-in and the freezer at 190 °F", "Freezer first: at 41 °F, wheeled to the walk-in"];
-    for (const w of WAYS) out.push(`${w.name}: 6 hours, middle at 188 °F`, `${w.name}: middle down to 135 °F, the clock starts`);
+    for (const w of WAYS) out.push(`${w.name}: 6 h on the clock, middle at 188 °F, over 41 °F`, `${w.name}: middle down to 135 °F, the clock starts`);
     return out;
   }
 
   /* The runs: off the main thread, kept by batch. */
   const cache = new Map<string, WayRun[]>();
+  /** Kept: the last few batches (a covered 32 litres' pot alone is a megabyte). */
+  const keep_ = (key: string, r: WayRun[]) => {
+    cache.delete(key);
+    cache.set(key, r);
+    while (cache.size > 8) cache.delete(cache.keys().next().value!);
+  };
+  const figEl = stageEl.closest("figure");
   let worker: Worker | null = null;
   try {
     worker = new Worker(new URL("../sim/coolRuns.worker.ts", import.meta.url), { type: "module" });
     worker.onmessage = (e: MessageEvent<CoolDone>) => {
-      cache.set(e.data.key, e.data.runs);
+      keep_(e.data.key, e.data.runs);
       if (e.data.key === coolKey(litres, covered)) take(e.data.runs, e.data.key);
     };
     worker.onerror = () => {
@@ -660,42 +748,54 @@ export function mountCoolLab(root: HTMLElement): void {
   function ask(): void {
     const key = coolKey(litres, covered);
     const hit = cache.get(key);
-    if (hit) return take(hit, key);
+    if (hit) {
+      keep_(key, hit);
+      return take(hit, key);
+    }
+    // Until the batch's runs come, what shows is the last batch's: dimmed.
+    figEl?.setAttribute("data-stale", "");
     if (statusEl) statusEl.textContent = "Working out the night…";
     if (worker) worker.postMessage({ litres, covered } satisfies CoolAsk);
     else {
       const r = coolAll(litres, covered);
-      cache.set(key, r);
+      keep_(key, r);
       take(r, key);
     }
   }
 
+  /** Each cut's run: the ways', and the part-filled last pans'. */
+  function cutRuns(): [string, CoolRun][] {
+    const out: [string, CoolRun][] = [];
+    for (const r of runs ?? []) {
+      out.push([r.way.key, r.run]);
+      if (r.rest && r.way.key !== "pot") out.push([restKey(r.way.key), r.rest]);
+    }
+    return out;
+  }
   /** Heat textures and the fields they show, made to each run's shape. */
-  const fields = new Map<WayKey, { tex: THREE.DataTexture; f: Float32Array; w: number; h: number }>();
+  const fields = new Map<string, { tex: THREE.DataTexture; f: Float32Array; w: number; h: number }>();
   function shapeFields(): void {
-    if (!runs) return;
-    for (const r of runs) {
-      const s = r.run.shape;
+    for (const [key, run] of cutRuns()) {
+      const s = run.shape;
       const [w, h, n] = s.kind === "slab" ? [1, s.n, s.n] : [2 * s.nr, s.nz, s.nr * s.nz];
-      const had = fields.get(r.way.key);
+      const had = fields.get(key);
       if (had && had.w === w && had.h === h) continue;
       had?.tex.dispose();
       const tex = heatTex(w, h);
-      fields.set(r.way.key, { tex, f: new Float32Array(n), w, h });
-      const m = cutMats.get(r.way.key)!;
+      fields.set(key, { tex, f: new Float32Array(n), w, h });
+      const m = cutMats.get(key)!;
       m.map = tex;
       m.visible = true;
       m.needsUpdate = true;
     }
   }
   function paintFields(m: number): void {
-    if (!runs) return;
-    for (const r of runs) {
-      const fd = fields.get(r.way.key);
+    for (const [key, run] of cutRuns()) {
+      const fd = fields.get(key);
       if (!fd) continue;
-      fieldAt(r.run, m, fd.f);
+      fieldAt(run, m, fd.f);
       const px = fd.tex.image.data as Uint8Array;
-      const s = r.run.shape;
+      const s = run.shape;
       if (s.kind === "slab") for (let i = 0; i < s.n; i++) heatRGB(fd.f[i]!, px, i * 4);
       else
         for (let j = 0; j < s.nz; j++)
@@ -710,6 +810,7 @@ export function mountCoolLab(root: HTMLElement): void {
   function take(r: WayRun[], key: string): void {
     runs = r;
     runsKey = key;
+    figEl?.removeAttribute("data-stale");
     shapeFields();
     loopT = 0;
     renderTiles();
@@ -740,10 +841,14 @@ export function mountCoolLab(root: HTMLElement): void {
       if (!t) continue;
       const ok = r.ok1 && r.ok2;
       t.el?.setAttribute("data-ok", String(ok));
-      if (t.v) t.v.textContent = r.total === null ? "Over 3 days" : span(r.total);
+      // Not there within the run: over what was left of it after 135 °F.
+      const over = r.run.t135 === null ? "over 3 days" : `over ${Math.floor((MAX_MIN - r.run.t135) / 60)} h`;
+      if (t.v) t.v.textContent = r.total === null ? over.replace(/^./, (c) => c.toUpperCase()) : span(r.total);
       const lines: string[] = ["to 41 °F"];
-      lines.push(r.stage1 === null ? "70 °F: over 3 days" : `70 °F in ${span(r.stage1)}`);
-      lines.push(r.way.key === "pot" ? `${inches(potFill(litres).fill)} deep` : `${r.pans} pan${r.pans === 1 ? "" : "s"}, ${r.way.key === "deep" ? 3 : 2} in deep`);
+      lines.push(r.stage1 === null ? `70 °F: ${over}` : `70 °F in ${span(r.stage1)}`);
+      const deep = r.way.key === "pot" ? potFill(litres).fill : panDepth(r.way.key, litres);
+      const full = r.way.key !== "pot" && deep >= PAN_OF[r.way.key].foodM - 1e-9;
+      lines.push(r.way.key === "pot" ? `${inches(deep)} deep` : `${r.pans} pan${r.pans === 1 ? "" : "s"}, ${full ? `${r.way.key === "deep" ? 3 : 2} in` : inches(deep)} deep`);
       lines.push(ok ? "In time" : r.ok1 ? "Too slow to 41 °F" : "Too slow to 70 °F");
       if (t.s) t.s.textContent = lines.join("\n");
     }
@@ -763,11 +868,13 @@ export function mountCoolLab(root: HTMLElement): void {
     const fill = potFill(litres).fill;
     const far = Math.min(fill / 2, potFill(litres).r);
     const day = centreAt(p.run, DAY_MIN);
-    parts.push(
-      `In its pot, the middle of the chili is ${inches(far)} from the nearest face, against 1 in in a 2-inch pan: it takes ${span(p.run.t135!)} just to fall to 135 °F, when the clock starts, and is ${cToF(day) > cToF(COLD_C) + 0.5 ? "still " : ""}${degF(day)} a day after it went in.`,
-    );
+    const then = p.run.t41 !== null && p.run.t41 <= DAY_MIN ? `and ${span(p.total!)} more to reach 41 °F` : `and is still ${degF(day)} a day after it went in`;
+    parts.push(`In its pot, the middle of the chili is ${inches(far)} from the nearest face, against 1 in in a 2-inch pan: it takes ${span(p.run.t135!)} just to fall to 135 °F, when the clock starts, ${then}.`);
+    const dp = runOf("deep")!;
+    if (p.total !== null && (dp.total === null || p.total < dp.total))
+      parts.push(`At ${litres} litres the chili stands ${inches(fill)} deep in the pot, ${fill < PAN_3.foodM ? "shallower than" : "little deeper than"} in a 3-inch pan, and the pot beats the 3-inch pans on the clock.`);
     if (!covered && sh.run.heatOut > 0) {
-      const steamShare = (sh.run.steamKg * 2.39e6) / sh.run.heatOut;
+      const steamShare = sh.run.steamJ / sh.run.heatOut;
       parts.push(`Uncovered, about ${Math.round(steamShare * 20) * 5}% of the heat leaving the 2-inch pans goes off as steam. Covered hot, the steam condenses on the film instead and the pans cool more slowly.`);
     } else if (covered) parts.push(`Covered, the steam condenses under the film and runs back, and every way cools more slowly than uncovered.`);
     statusEl.textContent = parts.join(" ");
@@ -831,11 +938,20 @@ export function mountCoolLab(root: HTMLElement): void {
         const h = (t - r.run.t135!) / 60;
         if (h <= CHART_H) svg += `<circle class="bp" cx="${x(h).toFixed(1)}" cy="${y(+line).toFixed(1)}" r="3.2" style="--c:${WAY_COLOR[r.way.key]}" />`;
       }
+    // Each line still over 41 °F at the end, labelled there; labels that would overprint stacked apart.
+    const ends: { y: number; text: string; c: string }[] = [];
     for (const r of drawn) {
       const tEnd = r.run.t135! + CHART_H * 60;
       if (r.run.t41 !== null && r.run.t41 <= tEnd) continue;
       const c = centreAt(r.run, tEnd);
-      svg += `<text class="bpl" x="${(R - 2).toFixed(1)}" y="${(y(cToF(c)) - 7).toFixed(1)}" text-anchor="end" style="--c:${WAY_COLOR[r.way.key]}">${degF(c)} at ${CHART_H} h</text>`;
+      ends.push({ y: y(cToF(c)) - 7, text: `${degF(c)} at ${CHART_H} h`, c: WAY_COLOR[r.way.key] });
+    }
+    ends.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) ends[i]!.y = Math.max(ends[i]!.y, ends[i - 1]!.y + 12);
+    const spill = ends.length ? ends[ends.length - 1]!.y - (B - 3) : 0;
+    for (const e of ends) {
+      if (spill > 0) e.y -= spill;
+      svg += `<text class="bpl" x="${(R - 2).toFixed(1)}" y="${e.y.toFixed(1)}" text-anchor="end" style="--c:${e.c}">${e.text}</text>`;
     }
     for (const r of drawn) svg += `<circle class="now" r="4.2" cx="-20" cy="-20" data-cd-dot="${r.way.key}" style="--c:${WAY_COLOR[r.way.key]}" />`;
     svg += `</svg>`;
@@ -902,10 +1018,14 @@ export function mountCoolLab(root: HTMLElement): void {
       for (let j = 0; j < fd.h; j++) img.data.set(src.subarray(j * fd.w * 4, (j + 1) * fd.w * 4), (fd.h - 1 - j) * fd.w * 4);
       cg.putImageData(img, 0, 0);
       const s = r.run.shape;
-      const wM = widthOf(r.way.key);
+      // Its slot is a full pan's width; a pan filled less is narrower at its top (the pan tapers).
+      const slot = widthOf(r.way.key) * sc;
+      const ins = s.kind === "slab" ? insideOf(PAN_OF[r.way.key as PanWay].panM) : null;
+      const wM = ins && s.kind === "slab" ? 2 * ins.halfW(ins.floorY + s.depth) : widthOf(r.way.key);
       const hM = s.kind === "pot" ? s.fill : s.depth;
       const w = wM * sc;
       const h = hM * sc;
+      x0 += (slot - w) / 2;
       const outline = () => {
         g.beginPath();
         if (s.kind === "pot") g.rect(x0, base - h, w, h);
@@ -948,7 +1068,7 @@ export function mountCoolLab(root: HTMLElement): void {
       g.fillText(narrow ? TINY[r.way.key] : r.way.short, x0 + w / 2, base + font + 4);
       g.fillStyle = "#e7e5e4";
       g.fillText(`${narrow ? "" : "middle "}${degF(centreAt(r.run, m))}`, x0 + w / 2, base + 2 * font + 7);
-      x0 += w + gapPx;
+      x0 += w + (slot - w) / 2 + gapPx;
     }
     // The key.
     const kw = Math.min(cssW - 16, 360);
@@ -989,8 +1109,9 @@ export function mountCoolLab(root: HTMLElement): void {
       note(r.run.t70, () => `${n}: middle at 70 °F`);
       note(r.run.t41, () => `${n}: middle at 41 °F`);
       if (t135 !== null) {
-        note(t135 + STAGE1_MIN, () => `${n}: 2 hours, middle at ${degF(centreAt(r.run, t135 + STAGE1_MIN))}`);
-        note(t135 + TOTAL_MIN, () => `${n}: 6 hours, middle at ${degF(centreAt(r.run, t135 + TOTAL_MIN))}`);
+        // The Food Code's two checks, as the clock reaches them: where the middle was, against the limit.
+        note(t135 + STAGE1_MIN, () => `${n}: 2 h on the clock, middle at ${degF(centreAt(r.run, t135 + STAGE1_MIN))}, ${r.ok1 ? "under" : "over"} 70 °F`);
+        note(t135 + TOTAL_MIN, () => `${n}: 6 h on the clock, middle at ${degF(centreAt(r.run, t135 + TOTAL_MIN))}, ${r.ok2 ? "under" : "over"} 41 °F`);
       }
     }
     if (best.s) return best.s;
@@ -1022,7 +1143,7 @@ export function mountCoolLab(root: HTMLElement): void {
   function anchorOf(k: WayKey): THREE.Vector3 {
     if (k === "pot") return tagAt.set(POT_AT.x, DUN.h + POT.h + 0.06, POT_AT.z);
     const r = rackOf(k);
-    return tagAt.set(r.x, r.y + RACK.h + 0.06, ROW_Z);
+    return tagAt.set(r.x, r.y + RACK.h + 0.06, r.z);
   }
   function showTags(m: number): void {
     const W = stageEl!.clientWidth;
@@ -1095,12 +1216,14 @@ export function mountCoolLab(root: HTMLElement): void {
    *  doors, open as it goes through them (`k` 0..1 through the move). */
   function showMove(moved: boolean, k: number | null): void {
     const r = rackOf("freezer");
-    const inCooler = k !== null ? k >= 0.5 : moved;
-    const x = inCooler ? RACK_X.moved : RACK_X.freezer;
-    const y = inCooler ? 0 : FZ_FLOOR;
-    if (r.x !== x || r.y !== y) placeRack(r, x, y, ROW_Z);
-    const fz = k === null ? 0 : smooth(k / 0.15) * (1 - smooth((k - 0.35) / 0.15));
-    const co = k === null ? 0 : smooth((k - 0.4) / 0.15) * (1 - smooth((k - 0.8) / 0.15));
+    let x = moved ? RACK_X.moved : RACK_X.freezer;
+    let z = ROW_Z;
+    let fz = 0;
+    let co = 0;
+    if (k !== null) ({ x, z, fz, co } = movePose(k * MOVE_S));
+    // On the freezer's own floor inside it, down its threshold on the way out.
+    const y = x > 0 ? FZ_FLOOR * (1 - Math.min(1, Math.max(0, (z - (FRONT_IN - RACK.d / 2)) / (FRONT_OUT - FRONT_IN + RACK.d)))) : 0;
+    if (r.x !== x || r.y !== y || r.z !== z) placeRack(r, x, y, z);
     freezer.hooks.open?.(fz);
     cooler.hooks.open?.(co);
   }
@@ -1163,7 +1286,7 @@ export function mountCoolLab(root: HTMLElement): void {
     const loopS = IN_S + DAY_S + MOVE_S + END_S;
     loopT = (loopT + dt) % loopS;
     const t = now / 1000;
-    const at = frozen !== null ? { m: Math.min(DAY_MIN, Math.max(0, frozen)), move: null } : minuteAt(loopT);
+    const at = frozen !== null ? { m: Math.min(DAY_MIN, Math.max(0, frozen)), move: frozenMove } : minuteAt(loopT);
     playMin = at.m;
     const mv = runOf("freezer")?.run.movedMin ?? null;
     showMove(mv !== null && playMin >= mv, at.move);
@@ -1203,11 +1326,22 @@ export function mountCoolLab(root: HTMLElement): void {
           movedMin: r.run.movedMin,
           dayF: +cToF(centreAt(r.run, DAY_MIN)).toFixed(1),
         })),
-        tags: WAYS.map((w) => tagEls.get(w.key)?.textContent ?? null),
+        // A label off the stage (hidden) is null: its words are stale.
+        tags: WAYS.map((w) => {
+          const el = tagEls.get(w.key);
+          return el && !el.hidden ? el.textContent : null;
+        }),
+        rack: (() => {
+          const r = rackOf("freezer");
+          return { x: +r.x.toFixed(3), y: +r.y.toFixed(3), z: +r.z.toFixed(3) };
+        })(),
+        stale: figEl?.hasAttribute("data-stale") ?? false,
         status: statusEl?.textContent ?? "",
       }),
-      hold(min: number | null) {
+      /** Hold the stage at minute `min` (null: play); `move` 0..1 holds it that far through the rack's move. */
+      hold(min: number | null, move: number | null = null) {
         frozen = min;
+        frozenMove = min === null ? null : move;
       },
       /** Look from `eye` at `at` (world), or back to the framed view. */
       view(eye: [number, number, number] | null, at?: [number, number, number]) {

@@ -4411,6 +4411,13 @@ button.wk-dish[aria-pressed="true"] {
 .cd-cuts-wrap {
   margin-bottom: 0.9rem;
 }
+/* While a new batch is worked out, the last batch's readouts stay up, dimmed. */
+.cd-fig :is(.cd-cuts-wrap, .cd-tiles, .bo-chart-wrap, .cd-hud, .bo-tag) {
+  transition: opacity 0.2s;
+}
+.cd-fig[data-stale] :is(.cd-cuts-wrap, .cd-tiles, .bo-chart-wrap, .cd-hud, .bo-tag) {
+  opacity: 0.4;
+}
 .cd-cuts {
   display: block;
   width: 100%;

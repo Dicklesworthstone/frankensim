@@ -1072,7 +1072,7 @@
             </header>
             <div class="fig-body">
               <div class="stage bo-stage cd-stage" data-cd-stage>
-                <canvas data-cd-canvas tabindex="0" aria-label="A walk-in cooler and a walk-in freezer side by side, their roofs off and their front walls cut away low. In the cooler, a 40-quart pot of chili on a dunnage rack and two speed racks of hotel pans of chili, 3 inches deep and 2 inches deep. In the freezer, a speed rack of 2-inch pans. Each pot and pan is cut through its middle, the cut coloured by the chili's temperature. A cook stands outside. Drag to look around."></canvas>
+                <canvas data-cd-canvas tabindex="0" aria-label="A walk-in cooler and a walk-in freezer side by side, their roofs off and their front walls cut away low. In the cooler, a 40-quart pot of chili on a dunnage rack and two speed racks of hotel pans of chili, 3 inches deep and 2 inches deep. In the freezer, a speed rack of 2-inch pans, wheeled into the cooler once they are cold. Each pot and pan is cut through its middle, the cut coloured by the chili's temperature. A cook stands outside. Drag to look around."></canvas>
                 <div class="wk-hud rs-hud bo-hud cd-hud" aria-hidden="true"><b data-cd-hud-clock>2:00 pm</b><span data-cd-hud-doing>…</span><em data-cd-hud-note data-kind="hot">Cooling</em></div>
                 <span class="bo-tag" data-cd-tag="pot" style="--c:#f472b6" hidden aria-hidden="true"><i>In its pot</i><b>…</b></span>
                 <span class="bo-tag" data-cd-tag="deep" style="--c:#c084fc" hidden aria-hidden="true"><i>3 in deep</i><b>…</b></span>
@@ -1122,7 +1122,7 @@
               </div>
               <div>
                 <code class="formula">ρc · ∂T/∂t = ∇ · (k ∇T)<br />q_face = h (T_s − T_air) + εσ (T_s⁴ − T_air⁴) + ṁ_steam · h_fg</code>
-                <p class="model">Model: <code>coolDown</code>, the pans in slices 2 mm deep and the pot in rings and layers, stepped a minute or less at a time. Food properties: Choi and Okos, by temperature. Limits: FDA Food Code 3-501.14, 135 °F to 70 °F within 2 hours and to 41 °F within 6. The pans' rack moves from the freezer to the walk-in once their middle is at 41 °F.</p>
+                <p class="model">Model: <code>coolDown</code>, the pans in slices 2 mm deep or less and the pot in rings and layers, stepped a minute or less at a time. Food properties: Choi and Okos, by temperature. Limits: FDA Food Code 3-501.14, 135 °F to 70 °F within 2 hours and to 41 °F within 6. The pans' rack moves from the freezer to the walk-in once their middle is at 41 °F. A last pan holding less than the others cools on its own, shallower and faster; the verdicts are the full pans'.</p>
               </div>
                 </div>
               </details>

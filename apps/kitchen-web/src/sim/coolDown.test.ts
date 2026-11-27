@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CHART_MIN,
   CHILI,
   DAY_MIN,
   EMPTY_WALK_IN,
   H_EMPTY,
   H_FULL,
   MEASURED,
+  PAGE_RUN,
   SAMPLE_MIN,
   SNAP_MIN,
   STAGE1_MIN,
@@ -17,6 +19,7 @@ import {
   coolWay,
   foodProps,
   hoursOf,
+  restLitres,
   type Face,
 } from "./coolDown";
 
@@ -136,6 +139,10 @@ describe("coolDown", () => {
         expect(Math.abs(w.run.heatOut / w.run.heatDrop - 1)).toBeLessThan(1e-3);
         if (covered) expect(w.run.steamKg).toBe(0);
         else expect(w.run.steamKg).toBeGreaterThan(0);
+        // The steam's heat: its water at the latent heat somewhere between 100 °C and 0 °C.
+        expect(w.run.steamJ).toBeGreaterThanOrEqual(2.25e6 * w.run.steamKg);
+        expect(w.run.steamJ).toBeLessThanOrEqual(2.51e6 * w.run.steamKg);
+        expect(w.run.steamJ).toBeLessThan(w.run.heatOut);
       }
   });
 
@@ -188,7 +195,7 @@ describe("coolDown", () => {
       expect(w.pot!.total!).toBeGreaterThan(w.deep!.total!);
       expect(w.deep!.total!).toBeGreaterThan(w.shallow!.total!);
       expect(w.shallow!.total!).toBeGreaterThan(w.freezer!.total!);
-      const small = at(10, covered);
+      const small = at(12, covered);
       expect(small.pot!.total!).toBeLessThan(w.pot!.total!);
       for (const k of ["deep", "shallow", "freezer"]) expect(small[k]!.total).toBe(w[k]!.total);
       expect(small.shallow!.pans).toBeLessThan(w.shallow!.pans);
@@ -196,6 +203,31 @@ describe("coolDown", () => {
     const open = at(30, false);
     const film = at(30, true);
     for (const k of ["pot", "deep", "shallow", "freezer"]) expect(film[k]!.total!).toBeGreaterThan(open[k]!.total!);
+  });
+
+  test("a part-filled last pan: shallower, faster, on the same rack; every page run reaches the chart's end", () => {
+    expect(restLitres("shallow", 22)).toBeCloseTo(1, 9);
+    expect(restLitres("shallow", 21)).toBe(0);
+    expect(restLitres("deep", 30)).toBeCloseTo(30 - 2 * 10.2, 9);
+    expect(restLitres("pot", 30)).toBe(0);
+    for (const key of ["shallow", "freezer"] as const) {
+      const w = coolWay(key, 22, false, PAGE_RUN);
+      expect(w.pans).toBe(4);
+      expect(w.rest).not.toBeNull();
+      expect(w.rest!.shape.kind === "slab" && w.rest!.shape.depth).toBeCloseTo((2 * 0.0254) / 7, 9);
+      expect(w.rest!.t41!).toBeLessThan(w.run.t41!);
+      // It moves with its rack, when the full pans are cold.
+      expect(w.rest!.movedMin).toBe(key === "freezer" ? w.run.movedMin : null);
+      for (const r of [w.run, w.rest!]) expect(r.endMin).toBeGreaterThanOrEqual(r.t135! + CHART_MIN);
+    }
+    expect(coolWay("shallow", 21, false, PAGE_RUN).rest).toBeNull();
+    // Less than a pan: the one pan, filled shallower, is the way's run.
+    const one = coolWay("deep", 8, false, PAGE_RUN);
+    expect(one.pans).toBe(1);
+    expect(one.rest).toBeNull();
+    expect(one.run.shape.kind === "slab" && one.run.shape.depth).toBeCloseTo((3 * 0.0254 * 8) / 10.2, 9);
+    expect(one.total!).toBeLessThan(coolWay("deep", 12, false, PAGE_RUN).total!);
+    expect(coolWay("pot", 22, false, PAGE_RUN).rest).toBeNull();
   });
 
   test("the page's batch: only the freezer gets it there in time; every run covers the day, sampled and snapped", () => {

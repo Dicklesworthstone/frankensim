@@ -210,8 +210,10 @@ const lookup = (a: Float64Array, c: number) => {
 /** What a run is cooled in, from which minute: the freezer, then the walk-in once its middle reaches 41 °F. */
 export interface Plan {
   box: Box;
-  /** Where it goes once its middle is at 41 °F, if anywhere. */
+  /** Where it goes once its middle is at 41 °F, if anywhere; or at minute `at`, if given (a pan on a rack moved when
+   *  the rack's other pans are cold). */
   then?: Box;
+  at?: number;
 }
 /** Every minute of a run that its samples and the stage need. */
 export const SAMPLE_MIN = 2;
@@ -238,14 +240,18 @@ export interface CoolRun {
    *  water it lost to steam (kg per m² of top, slab; kg, pot). For checking, and for the words. */
   heatOut: number;
   heatDrop: number;
+  /** Of heatOut, the heat the steam took (same units). */
+  steamJ: number;
   steamKg: number;
 }
 
-interface RunOpts {
+export interface RunOpts {
   food?: Makeup;
   startC?: number;
-  /** Run until both the middle is at 41 °F and this many minutes have passed, or for maxMin at most. */
+  /** Run until the middle is at 41 °F, this many minutes have passed, and pastHotMin more since it fell to 135 °F;
+   *  or for maxMin at most. */
   minMin?: number;
+  pastHotMin?: number;
   maxMin?: number;
   /** Test hook: hold the properties at those of this temperature. */
   constAt?: number;
@@ -299,17 +305,18 @@ export function coolSlab(depth: number, top: Face, bottom: Face, plan: Plan, o: 
       for (let i = 0; i < n; i++) T[i] = T[i]! + ((q[i]! - q[i + 1]!) * dt) / (rcAt(T[i]!) * dx);
       run.heatOut += (fb.q + ft.q) * dt;
       run.steamKg += ((ft.steam + fb.steam) / latent(tt)) * dt;
+      run.steamJ += (ft.steam + fb.steam) * dt;
       steamNow = ft.steam;
     }
     min += SAMPLE_MIN;
     record(min);
     const m = mid();
     marks(run, m, min);
-    if (plan.then && run.t41 !== null && run.movedMin === null) {
+    if (movesNow(run, plan, min)) {
       run.movedMin = min;
-      box = plan.then;
+      box = plan.then!;
     }
-    if (run.t41 !== null && min >= (o.minMin ?? 0)) break;
+    if (done(run, min, o)) break;
   }
   run.endMin = (run.centre.length - 1) * SAMPLE_MIN;
   run.heatDrop = heat0 - slabHeat(T, dx, tab, o.constAt);
@@ -409,16 +416,17 @@ export function coolPot(r: number, fill: number, top: Face, bottom: Face, side: 
       if (top.kind === "cover") cover = coverC(tTop, rings, top, box);
       run.heatOut += out * dt;
       run.steamKg += steamKg * dt;
+      run.steamJ += steamW * dt;
       steamNow = steamW / (Math.PI * r * r);
     }
     min += SAMPLE_MIN;
     record(min);
     marks(run, mid(), min);
-    if (plan.then && run.t41 !== null && run.movedMin === null) {
+    if (movesNow(run, plan, min)) {
       run.movedMin = min;
-      box = plan.then;
+      box = plan.then!;
     }
-    if (run.t41 !== null && min >= (o.minMin ?? 0)) break;
+    if (done(run, min, o)) break;
   }
   run.endMin = (run.centre.length - 1) * SAMPLE_MIN;
   run.heatDrop = heat0 - potHeat();
@@ -446,7 +454,15 @@ interface Building extends Omit<CoolRun, "centre" | "steam"> {
   steam: number[];
 }
 function newRun(shape: CoolRun["shape"]): Building {
-  return { centre: [], steam: [], snaps: [], shape, t135: null, t70: null, t41: null, movedMin: null, endMin: 0, heatOut: 0, heatDrop: 0, steamKg: 0 };
+  return { centre: [], steam: [], snaps: [], shape, t135: null, t70: null, t41: null, movedMin: null, endMin: 0, heatOut: 0, heatDrop: 0, steamKg: 0, steamJ: 0 };
+}
+/** Whether a run has gone far enough (RunOpts). */
+function done(run: Building, min: number, o: RunOpts): boolean {
+  return run.t41 !== null && min >= (o.minMin ?? 0) && (o.pastHotMin === undefined || (run.t135 !== null && min >= run.t135 + o.pastHotMin));
+}
+/** Whether a run moves out of its first box at this minute. */
+function movesNow(run: Building, plan: Plan, min: number): boolean {
+  return !!plan.then && run.movedMin === null && (plan.at !== undefined ? min >= plan.at : run.t41 !== null);
 }
 /** The minute (to a fraction, straight between samples) the middle crossed each line. */
 function marks(run: Building, m: number, min: number): void {
@@ -492,6 +508,8 @@ export interface WayRun {
   run: CoolRun;
   /** Pans it takes (0 for the pot). */
   pans: number;
+  /** The last pan's run when it holds less than the rest (coolRest), else null. */
+  rest: CoolRun | null;
   /** Minutes from 135 °F to 70 °F and to 41 °F, and whether each is in time. */
   stage1: number | null;
   total: number | null;
@@ -510,34 +528,73 @@ export function potFill(litres: number): { r: number; fill: number; gap: number 
 export function pansFor(key: WayKey, litres: number): number {
   return key === "pot" ? 0 : Math.ceil(litres / (key === "deep" ? PAN_3 : PAN_2).litres - 1e-9);
 }
+/** The litres in a way's last pan when it holds less than the full pans before it (0 when every pan is full, when
+ *  there is only the one pan, and for the pot). */
+export function restLitres(key: WayKey, litres: number): number {
+  const n = pansFor(key, litres);
+  if (key === "pot" || n < 2) return 0;
+  const cap = (key === "deep" ? PAN_3 : PAN_2).litres;
+  const r = litres - (n - 1) * cap;
+  return r < cap - 1e-6 ? r : 0;
+}
+/** How deep a pan way's first pan is filled (m): to the pan's depth, or less when the whole batch is less than a pan. */
+export function panDepth(key: Exclude<WayKey, "pot">, litres: number): number {
+  const pan = key === "deep" ? PAN_3 : PAN_2;
+  return pan.foodM * Math.min(1, litres / pan.litres);
+}
 /** The key a batch's runs go by. */
 export const coolKey = (litres: number, covered: boolean) => `${litres}|${covered ? "c" : "o"}`;
+
+const STEEL: Face = { kind: "wall", eps: EPS_STEEL };
+/** A pan way's run for `depthM` of chili in its pan, open or under film; freezer first, it moves at `movedAt` if given
+ *  (with its rack), else when its own middle is at 41 °F. */
+function panRun(key: Exclude<WayKey, "pot">, depthM: number, covered: boolean, o: RunOpts, movedAt?: number): CoolRun {
+  const pan = key === "deep" ? PAN_3 : PAN_2;
+  const top: Face = covered ? { kind: "cover", gap: pan.panM - depthM, epsOut: 0.9 } : { kind: "open" };
+  return coolSlab(depthM, top, STEEL, key === "freezer" ? { box: FREEZER, then: WALK_IN, at: movedAt } : { box: WALK_IN }, o);
+}
+/**
+ * The last pan's run when it holds less than the rest (restLitres): shallower, so it cools faster. It stands on the
+ * same rack, so freezer first it moves when the full pans do (`movedMin`, theirs; never, if null). Null when there is
+ * no such pan. Only the stage's colours use it: the full pans are the slowest, and the verdicts are theirs.
+ */
+export function coolRest(key: WayKey, litres: number, covered: boolean, movedMin: number | null, o: RunOpts = {}): CoolRun | null {
+  const rest = restLitres(key, litres);
+  if (key === "pot" || rest <= 0) return null;
+  const pan = key === "deep" ? PAN_3 : PAN_2;
+  return panRun(key, Math.max(0.003, (pan.foodM * rest) / pan.litres), covered, o, movedMin ?? Infinity);
+}
 
 /** One way's run, for `litres` of chili, open or covered. */
 export function coolWay(key: WayKey, litres: number, covered: boolean, o: RunOpts = {}): WayRun {
   const way = WAYS.find((w) => w.key === key)!;
-  const steel: Face = { kind: "wall", eps: EPS_STEEL };
   let run: CoolRun;
   let pans = 0;
   if (key === "pot") {
     const p = potFill(litres);
     const top: Face = covered ? { kind: "cover", gap: p.gap, epsOut: EPS_STEEL } : { kind: "open" };
-    run = coolPot(p.r, p.fill, top, steel, steel, { box: WALK_IN }, o);
+    run = coolPot(p.r, p.fill, top, STEEL, STEEL, { box: WALK_IN }, o);
   } else {
-    const pan = key === "deep" ? PAN_3 : PAN_2;
     pans = pansFor(key, litres);
-    const top: Face = covered ? { kind: "cover", gap: pan.panM - pan.foodM, epsOut: 0.9 } : { kind: "open" };
-    run = coolSlab(pan.foodM, top, steel, key === "freezer" ? { box: FREEZER, then: WALK_IN } : { box: WALK_IN }, o);
+    run = panRun(key, panDepth(key, litres), covered, o);
   }
+  return wayOf(way, run, pans, key === "pot" ? null : coolRest(key, litres, covered, run.movedMin, o));
+}
+/** A way's verdicts from its run. */
+export function wayOf(way: Way, run: CoolRun, pans: number, rest: CoolRun | null): WayRun {
   const stage1 = run.t135 !== null && run.t70 !== null ? run.t70 - run.t135 : null;
   const total = run.t135 !== null && run.t41 !== null ? run.t41 - run.t135 : null;
-  return { way, run, pans, stage1, total, ok1: stage1 !== null && stage1 <= STAGE1_MIN, ok2: total !== null && total <= TOTAL_MIN };
+  return { way, run, pans, rest, stage1, total, ok1: stage1 !== null && stage1 <= STAGE1_MIN, ok2: total !== null && total <= TOTAL_MIN };
 }
 
-/** The stage's day: every way run for at least DAY_MIN, and to 41 °F if that comes within three days. */
+/** The stage's day, and the chart's span from 135 °F: every way runs for at least both, and on to 41 °F if that
+ *  comes within MAX_MIN of going in. */
 export const DAY_MIN = 24 * 60;
+export const CHART_MIN = 24 * 60;
+export const MAX_MIN = 72 * 60;
+export const PAGE_RUN: RunOpts = { minMin: DAY_MIN, pastHotMin: CHART_MIN, maxMin: MAX_MIN };
 export function coolAll(litres: number, covered: boolean): WayRun[] {
-  return WAYS.map((w) => coolWay(w.key, litres, covered, { minMin: DAY_MIN, maxMin: 72 * 60 }));
+  return WAYS.map((w) => coolWay(w.key, litres, covered, PAGE_RUN));
 }
 
 /** The temperature of a run's middle at minute `t` (straight between samples; the last past its end). */
