@@ -12,8 +12,8 @@ use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
     DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
     FidelityPolicy, FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain,
-    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy, ThirdBodyDecl,
-    TimeHistory, TimePlan, TimeScheme, TimingEdge,
+    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy,
+    TensionedDiskGenerator, ThirdBodyDecl, TimeHistory, TimePlan, TimeScheme, TimingEdge,
 };
 use fs_scenario::assembly::{DimensionBound, MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::entity::ToleranceSource;
@@ -289,6 +289,7 @@ const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
 const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+const SURFACE_TENSION: Dims = Dims([0, 1, -2, 0, 0, 0]);
 
 /// Scalar summary statistic applied to a probe series by a requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,10 +604,8 @@ fn parse_memory(n: &Node, scope: &str) -> Result<Vec<(ParameterKey, QtyAny)>, So
 fn parse_fidelity(n: &Node, scope: &str) -> Result<FidelityRung, SolveRefusal> {
     match &n.kind {
         NodeKind::Symbol(s) if s == "lumped" => Ok(FidelityRung::Lumped),
-        NodeKind::List(v)
-            if v.len() == 2 && matches!(&v[0].kind, NodeKind::Symbol(s) if s == "one-d-field") =>
-        {
-            match v[1].kind {
+        NodeKind::List(v) if !v.is_empty() => match as_sym(&v[0], "fidelity")? {
+            "one-d-field" if v.len() == 2 => match v[1].kind {
                 NodeKind::Int(1) => Ok(FidelityRung::OneDField { cells: 1 }),
                 NodeKind::Int(n) => Err(err(format!(
                     "{scope}: :fidelity (one-d-field {n}) unsupported"
@@ -614,8 +613,23 @@ fn parse_fidelity(n: &Node, scope: &str) -> Result<FidelityRung, SolveRefusal> {
                 _ => Err(err(format!(
                     "{scope}: :fidelity (one-d-field ...) needs integer cells"
                 ))),
-            }
-        }
+            },
+            "modal" if v.len() == 2 => match v[1].kind {
+                NodeKind::Int(n) if n > 0 => u32::try_from(n)
+                    .map(|mode_count| FidelityRung::Modal { mode_count })
+                    .map_err(|_| err(format!("{scope}: :fidelity (modal {n}) exceeds u32"))),
+                NodeKind::Int(n) => Err(err(format!(
+                    "{scope}: :fidelity (modal {n}) requires positive mode_count"
+                ))),
+                _ => Err(err(format!(
+                    "{scope}: :fidelity (modal ...) requires integer mode_count"
+                ))),
+            },
+            "modal" => Err(err(format!(
+                "{scope}: :fidelity (modal <mode_count>) requires exactly one mode_count"
+            ))),
+            _ => Err(err(format!("{scope}: unsupported :fidelity"))),
+        },
         NodeKind::Symbol(s) => Err(err(format!("{scope}: unsupported :fidelity `{s}`"))),
         _ => Err(err(format!("{scope}: unsupported :fidelity"))),
     }
@@ -623,8 +637,46 @@ fn parse_fidelity(n: &Node, scope: &str) -> Result<FidelityRung, SolveRefusal> {
 
 fn parse_geom(n: &Node) -> Result<DraftGeometrySource, SolveRefusal> {
     let v = as_list(n, "geometry")?;
+    let head = v.first().ok_or_else(|| err("empty geometry"))?;
+    if as_sym(head, "geometry")? == "tensioned-disk" {
+        let scope = "geometry tensioned-disk";
+        let kw = kwargs(
+            &v[1..],
+            &[
+                "radius",
+                "thickness",
+                "tension",
+                "radial-intervals",
+                "azimuths",
+            ],
+            scope,
+        )?;
+        let pos_u32 = |k: &str| -> Result<u32, SolveRefusal> {
+            match req(&kw, k, scope)?.kind {
+                NodeKind::Int(i) if i > 0 => {
+                    u32::try_from(i).map_err(|_| err(format!("{scope}: :{k} `{i}` exceeds u32")))
+                }
+                _ => Err(err(format!("{scope}: :{k} requires a positive integer"))),
+            }
+        };
+        return Ok(DraftGeometrySource::TensionedDisk(TensionedDiskGenerator {
+            radius: as_qty_d(req(&kw, "radius", scope)?, LENGTH, "tensioned-disk.radius")?,
+            thickness: as_qty_d(
+                req(&kw, "thickness", scope)?,
+                LENGTH,
+                "tensioned-disk.thickness",
+            )?,
+            tension: as_qty_d(
+                req(&kw, "tension", scope)?,
+                SURFACE_TENSION,
+                "tensioned-disk.tension",
+            )?,
+            radial_intervals: pos_u32("radial-intervals")?,
+            azimuths: pos_u32("azimuths")?,
+        }));
+    }
     Ok(DraftGeometrySource::Primitive(
-        match (as_sym(&v[0], "geometry")?, v.len()) {
+        match (as_sym(head, "geometry")?, v.len()) {
             ("box", 4) => PrimitiveShape::Box {
                 lx: as_qty(&v[1], "lx")?,
                 ly: as_qty(&v[2], "ly")?,
@@ -950,6 +1002,7 @@ fn bind_envelopes(
                     DraftGeometrySource::Primitive(PrimitiveShape::Cylinder { .. }) => "cylinder",
                     DraftGeometrySource::Primitive(PrimitiveShape::Sphere { .. }) => "sphere",
                     DraftGeometrySource::Primitive(PrimitiveShape::Tube { .. }) => "tube",
+                    DraftGeometrySource::TensionedDisk(_) => "tensioned-disk",
                     _ => "non-box",
                 };
                 return Err(err(format!(
@@ -1217,6 +1270,7 @@ pub fn admit_assembly_source(
                     "spring-beam" => DraftPartKind::SpringBeam,
                     "driven-body" => DraftPartKind::DrivenBody,
                     "cavity" => DraftPartKind::Cavity,
+                    "shell" => DraftPartKind::Shell,
                     o => return Err(err(format!("{scope} unsupported kind `{o}`"))),
                 };
                 let mut materials = Vec::new();
@@ -2191,5 +2245,155 @@ mod tests {
         assert_eq!(reqs.requirements.len(), 3);
         assert!(admit(") (requirement \"b\" :analysis bogus :probe \"modal.frequency_hz\" :stat min :relation at-least :limit 1Hz").is_err());
         assert!(admit(") (requirement \"b\" :analysis modal :probe \"mass_pos\" :stat min :relation at-least :limit 1Hz").is_err());
+    }
+
+    const VALID_TENSIONED_DISK: &str = "(tensioned-disk :radius 0.1778m :thickness 0.00025m \
+:tension 2500N/m :radial-intervals 8 :azimuths 24)";
+
+    fn admit_drum_head(geom: &str, fid: &str) -> Result<AdmittedAssembly, SolveRefusal> {
+        let steel: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let packs = PackCatalog::from_raw_bytes(&[steel]).unwrap();
+        let src = format!(
+            "(assembly \"drum_head\" (version 1) (units \"SI\") (seed 0x1) \
+             (versions (constellation \"2026-07\") (workspace \"test\")) \
+             (budget (wall 60s) (mem 64MiB)) \
+             (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) \
+             (reference-state assembled) (environment earth-lab-air) \
+             (time-plan :horizon 0.01s :dt 0.0001s :sample-rate 10000Hz) \
+             (part \"head\" :kind shell :geometry {geom} \
+              :material \"steel-music-wire-ligo-p1400229\" :query-temp 293.15K \
+              :physics (mechanics) :fidelity {fid}))"
+        );
+        admit_assembly_source(src.as_bytes(), &packs)
+    }
+
+    #[test]
+    fn shell_modal_tensioned_disk_admits_roundtrips_and_pins_missing_lowering() {
+        let steel: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let packs = PackCatalog::from_raw_bytes(&[steel]).unwrap();
+        let ok = admit_drum_head(VALID_TENSIONED_DISK, "(modal 12)").unwrap();
+        let part = &ok.draft.input().parts[0];
+        assert_eq!(part.kind, DraftPartKind::Shell);
+        assert_eq!(
+            part.fidelity.rungs,
+            [FidelityRung::Modal { mode_count: 12 }]
+        );
+        assert_eq!(
+            part.geometry,
+            DraftGeometrySource::TensionedDisk(TensionedDiskGenerator {
+                radius: QtyAny::new(0.1778, LENGTH),
+                thickness: QtyAny::new(0.00025, LENGTH),
+                tension: QtyAny::new(2500.0, SURFACE_TENSION),
+                radial_intervals: 8,
+                azimuths: 24,
+            })
+        );
+        // Round-trip through canonical s-expr and isomorphic JSON preserves geometry & modal rung.
+        let ast = crate::sexpr::parse(std::str::from_utf8(&ok.canonical_source).unwrap()).unwrap();
+        let json = crate::json::print_checked(&ast).unwrap();
+        for src in [ok.canonical_source.as_slice(), json.as_bytes()] {
+            let again = admit_assembly_source(src, &packs).unwrap();
+            assert_eq!(again.draft.input().parts[0].geometry, part.geometry);
+            assert_eq!(
+                again.draft.input().parts[0].fidelity.rungs,
+                part.fidelity.rungs
+            );
+        }
+        // Condition 2: lowering refuses by name until .11.9.2 registers (Shell, {Mechanics}, Modal).
+        let low_err = fs_system::LoweringRegistry::with_kernel_defaults()
+            .lower(&ok.draft, &ok.card_store)
+            .err()
+            .expect("expected MissingPartConstructor refusal");
+        let msg = low_err.to_string();
+        assert!(
+            matches!(
+                low_err,
+                fs_system::LoweringError::MissingPartConstructor {
+                    ref part,
+                    kind: DraftPartKind::Shell,
+                    ref tried_rungs,
+                    ..
+                } if part == "head"
+                    && tried_rungs == &[fs_system::lowering::FidelityRungKind::Modal]
+            ),
+            "unexpected lowering error: {msg}"
+        );
+        for tok in ["head", "shell", "mechanics", "modal"] {
+            assert!(msg.contains(tok), "missing `{tok}` in `{msg}`");
+        }
+    }
+
+    #[test]
+    fn shell_modal_tensioned_disk_refuses_invalid_inputs() {
+        for (g, f, needle) in [
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 100N :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "tensioned-disk.tension has wrong SI dimensions",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 100Pa :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "tensioned-disk.tension has wrong SI dimensions",
+            ),
+            (
+                "(tensioned-disk :thickness 0.00025m :tension 2500N/m :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "missing `:radius`",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :tension 2500N/m :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "missing `:thickness`",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "missing `:tension`",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 2500N/m :azimuths 24)",
+                "(modal 12)",
+                "missing `:radial-intervals`",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 2500N/m :radial-intervals 8)",
+                "(modal 12)",
+                "missing `:azimuths`",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 0N/m :radial-intervals 8 :azimuths 24)",
+                "(modal 12)",
+                "tensioned_disk.tension",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 2500N/m :radial-intervals 0 :azimuths 24)",
+                "(modal 12)",
+                ":radial-intervals requires a positive integer",
+            ),
+            (
+                "(tensioned-disk :radius 0.17m :thickness 0.00025m :tension 2500N/m :radial-intervals 8 :azimuths 2)",
+                "(modal 12)",
+                "azimuths must be at least 3",
+            ),
+            (VALID_TENSIONED_DISK, "(modal)", "mode_count"),
+            (VALID_TENSIONED_DISK, "(modal 0)", "positive mode_count"),
+            (VALID_TENSIONED_DISK, "(modal -3)", "positive mode_count"),
+            (VALID_TENSIONED_DISK, "(modal 1.5)", "integer mode_count"),
+            (VALID_TENSIONED_DISK, "modal", "`modal`"),
+        ] {
+            let err = admit_drum_head(g, f)
+                .err()
+                .unwrap_or_else(|| panic!("expected err for {g} / {f}"));
+            assert!(
+                err.what.contains(needle),
+                "got `{}` expected `{needle}`",
+                err.what
+            );
+        }
     }
 }

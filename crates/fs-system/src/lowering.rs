@@ -1454,6 +1454,7 @@ pub fn resolve_geometry_fingerprint(geom: &DraftGeometrySource) -> ContentHash {
         }
         DraftGeometrySource::Gear(g) => hash_parametric_geometry(&g.to_geometry_source()),
         DraftGeometrySource::SpiralSpring(s) => hash_parametric_geometry(&s.to_geometry_source()),
+        DraftGeometrySource::TensionedDisk(d) => hash_parametric_geometry(&d.to_geometry_source()),
         DraftGeometrySource::Primitive(p) => hash_parametric_geometry(&p.to_geometry_source()),
     }
 }
@@ -1472,6 +1473,7 @@ pub fn geometry_generator_label(geom: &DraftGeometrySource) -> String {
         }) => format!("imported:{representation:?}:{ledger_row}"),
         DraftGeometrySource::Gear(_) => "Gear.draft.v1".to_owned(),
         DraftGeometrySource::SpiralSpring(_) => "SpiralSpring.draft.v1".to_owned(),
+        DraftGeometrySource::TensionedDisk(_) => "TensionedDisk.draft.v1".to_owned(),
         DraftGeometrySource::Primitive(p) => match p {
             PrimitiveShape::Box { .. } => "Primitive.Box.draft.v1".to_owned(),
             PrimitiveShape::Cylinder { .. } => "Primitive.Cylinder.draft.v1".to_owned(),
@@ -1522,6 +1524,10 @@ pub fn geometry_volume_m3(geom: &DraftGeometrySource) -> Option<(f64, &'static s
                 "volume = (2 * pi * r_mean * turns) * blade_thickness * blade_height",
             ))
         }
+        DraftGeometrySource::TensionedDisk(d) => Some((
+            PI * d.radius.value * d.radius.value * d.thickness.value,
+            "volume = pi * radius^2 * thickness",
+        )),
         DraftGeometrySource::Standard(_) => None,
     }
 }

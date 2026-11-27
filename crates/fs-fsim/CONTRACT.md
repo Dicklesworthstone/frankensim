@@ -7,7 +7,7 @@
 - `ast::{CountUnit, CountValue, Node, NodeKind, Span}`: span-bearing typed AST over `fs-qty` dimensions.
 - `sexpr` and `json`: deterministic total parsers and canonical checked printers with lossless round-trip isomorphism.
 - `IrError`, `IrErrorKind`: structured syntax and shape refusals carrying byte spans and fix hints.
-- `codec::{AdmittedAssembly, AssemblyAnalysisMode, CodecRefusal, MAX_PACK_BYTES, MAX_PACKS, PackCatalog, PackEntry, PackKind, admit_assembly_source}`: single shared `.fsim` parser, Five Explicits admission, and `fs-matdb` card-pack store builder used by both `fs-cli` and `fs-runtime`.
+- `codec::{AdmittedAssembly, AssemblyAnalysisMode, CodecRefusal, MAX_PACK_BYTES, MAX_PACKS, PackCatalog, PackEntry, PackKind, admit_assembly_source}`: single shared `.fsim` parser, Five Explicits admission, and `fs-matdb` card-pack store builder used by both `fs-cli` and `fs-runtime`. Supports `:kind shell`, `:fidelity (modal <mode_count>)`, and `(tensioned-disk :radius <m> :thickness <m> :tension <N/m> :radial-intervals <int> :azimuths <int>)`, refusing missing attributes or wrong tension dimensions (`N`/`Pa`) by name.
 - `UNIT_DIMS`, `dims_to_unit`: canonical 17-unit SI dimension-to-unit mapping (exact union of `fs-cli` and `fs-runtime` tables) re-exported by both crates.
 
 ## Invariants

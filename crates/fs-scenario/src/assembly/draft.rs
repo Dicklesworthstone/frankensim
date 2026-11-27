@@ -42,6 +42,7 @@ const ACCEL: Dims = Dims([1, 0, -2, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
+const SURFACE_TENSION: Dims = Dims([0, 1, -2, 0, 0, 0]);
 const MAGNETIC_FIELD_TESLA: Dims = Dims([0, 1, -2, 0, -1, 0]);
 
 /// Extended physical part kinds covering mechanical, acoustic, thermal, fluid,
@@ -352,6 +353,44 @@ impl PrimitiveShape {
     }
 }
 
+/// Parametric circular tensioned disk descriptor (drumhead / membrane shell).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TensionedDiskGenerator {
+    /// Vibrating disk radius [m] (positive finite).
+    pub radius: QtyAny,
+    /// Uniform film thickness [m] (positive finite).
+    pub thickness: QtyAny,
+    /// Installed isotropic membrane tension [N/m] (`[0, 1, -2, 0, 0, 0]`, positive finite).
+    pub tension: QtyAny,
+    /// Number of radial intervals, including the center fan (`>= 1`).
+    pub radial_intervals: u32,
+    /// Number of circumferential vertices per ring (`>= 3`).
+    pub azimuths: u32,
+}
+
+impl TensionedDiskGenerator {
+    /// Convert to the v1 `GeometrySource::Parametric` parameter table.
+    #[must_use]
+    pub fn to_geometry_source(&self) -> GeometrySource {
+        GeometrySource::Parametric {
+            generator: "TensionedDisk.draft.v1".to_owned(),
+            params: vec![
+                (ParameterKey::new("radius", LENGTH), self.radius),
+                (ParameterKey::new("thickness", LENGTH), self.thickness),
+                (ParameterKey::new("tension", SURFACE_TENSION), self.tension),
+                (
+                    ParameterKey::new("radial_intervals", Dims::NONE),
+                    QtyAny::dimensionless(f64::from(self.radial_intervals)),
+                ),
+                (
+                    ParameterKey::new("azimuths", Dims::NONE),
+                    QtyAny::dimensionless(f64::from(self.azimuths)),
+                ),
+            ],
+        }
+    }
+}
+
 /// Geometry source for a draft part: either any v1 `GeometrySource` (imported
 /// chart or bore/outline/arching parametric table) or one of the mechanical /
 /// primitive parametric generators.
@@ -363,6 +402,8 @@ pub enum DraftGeometrySource {
     Gear(GearGenerator),
     /// Parametric Archimedean spiral spring.
     SpiralSpring(SpiralSpringGenerator),
+    /// Parametric circular tensioned disk.
+    TensionedDisk(TensionedDiskGenerator),
     /// Parametric geometric primitive.
     Primitive(PrimitiveShape),
 }
@@ -1304,6 +1345,41 @@ fn check_geometry(
                     format!(
                         "coils overlap: turns * blade_thickness ({stacked} m) >= radial span ({radial_span} m)"
                     ),
+                ));
+            }
+        }
+        DraftGeometrySource::TensionedDisk(d) => {
+            check_qty(
+                d.radius,
+                LENGTH,
+                &format!("{item}.tensioned_disk.radius"),
+                true,
+                false,
+            )?;
+            check_qty(
+                d.thickness,
+                LENGTH,
+                &format!("{item}.tensioned_disk.thickness"),
+                true,
+                false,
+            )?;
+            check_qty(
+                d.tension,
+                SURFACE_TENSION,
+                &format!("{item}.tensioned_disk.tension"),
+                true,
+                false,
+            )?;
+            if d.radial_intervals == 0 {
+                return Err(DraftAssemblyError::new(
+                    format!("{item}.tensioned_disk.radial_intervals"),
+                    "radial_intervals must be at least 1",
+                ));
+            }
+            if d.azimuths < 3 {
+                return Err(DraftAssemblyError::new(
+                    format!("{item}.tensioned_disk.azimuths"),
+                    format!("azimuths must be at least 3, got {}", d.azimuths),
                 ));
             }
         }
