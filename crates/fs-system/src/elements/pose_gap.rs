@@ -30,10 +30,42 @@
 //! the gap shrinks) and started at the closure `-g` integrates `-g` at the pose, to rounding, at
 //! every step: its closure is the geometry's, not an integral of a frozen slope.
 //!
-//! No claim: one point and one straight face of unbounded extent. A face with ends, a curved face
-//! or a face on a second moving body is not this element. The gap's rate is the step's exact
-//! mean, and its end does not follow the midpoint relation (`EndOfStep::Untold`): it is joined
-//! to a load line only where the line reads mean flows only, as the contact does.
+//! A face may be given ends ([`PoseGap::bounded`]): a span `[lo, hi]` of the point's coordinate
+//! `z = t . (P - A)` along the face's tangent `t` (the normal turned a quarter turn
+//! anticlockwise), and the depth of the band behind the face in which a point counts as pressed
+//! into it. The face is then a thin plate, and with `x = n . (P - A)` and `y` the distance of `z`
+//! past the nearer end,
+//!
+//! ```text
+//! front:   lo <= z <= hi, x >= -depth   g = x
+//! behind:  lo <= z <= hi, x <  -depth   g = -x             (under the plate, open)
+//! outside: z < lo or z > hi             g = hypot(x, y)    (to the nearer end, open)
+//! ```
+//!
+//! `g` and its gradient are continuous across front and outside where `x >= 0`, and across
+//! behind and outside. A step from the front band to behind (pushed through) or across an end
+//! inside the band (the end struck sideways) is refused: a flank is another face. A step within
+//! the front or within the behind region takes the exact secant above, its sign flipped behind.
+//! A step with an end outside takes the discrete gradient
+//!
+//! ```text
+//! J = grad g(q_m) + (dg - grad g(q_m) . dq) W dq / (dq . W dq),    W = diag(1, r^2),
+//! ```
+//!
+//! with `dq` the step's move of `(s, theta)`, `q_m` its midpoint, `dg = g(q1) - g(q0)` and
+//! `r = |d|` the point's arm, so that `J . dq = dg` and the closure stays `-g`. Below
+//! `|dq|_W = 256 eps l`, with `l` the size of the terms `g` sums at both ends of the step, the
+//! correction is rounding and `J = grad g(q_m)`: the point then moves by at most
+//! `sqrt(2) |dq|_W`, and where `g` is continuous along the step, `|dg - J . dq|` is at most
+//! `2 sqrt(2) |dq|_W`. Such a step has `g >= 0` at both ends, so a contact started at `-g`
+//! carries no load over it (`R = 0`), and its `J` matters only to the closure and the tangents.
+//!
+//! No claim: one point and one straight face, unbounded or a thin plate. A flank, a curved face
+//! or a face on a second moving body is not this element. A step's regions are read at its two
+//! ends: a point that enters and leaves a region within one step, through the band or out of
+//! the span and back, is not seen. The gap's rate is the step's exact mean, and its
+//! end does not follow the midpoint relation (`EndOfStep::Untold`): it is joined to a load line
+//! only where the line reads mean flows only, as the contact does.
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
@@ -65,7 +97,45 @@ pub struct PoseGap {
     cos_m: f64,
     /// `k = n_y d_x - n_x d_y` [m].
     sin_m: f64,
+    /// `t . (p0 - A)` [m] and `t . u`: the terms of `z` that do not turn. Its turning terms are
+    /// `-k cos(theta) + c sin(theta)`.
+    tangent: [f64; 2],
+    /// The face's ends and the depth of the band behind it, for a face with ends.
+    span: Option<Span>,
     ports: [PortSpec; 3],
+}
+
+/// A face's ends along its tangent [m] and the depth of the band behind it [m].
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    ends_m: [f64; 2],
+    depth_m: f64,
+}
+
+/// Where a pose puts the point against a face with ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Region {
+    Front,
+    Behind,
+    Outside,
+}
+
+/// The gap at a pose: its region, `x`, `g`, the gradient of `g` by `(s, theta)` and its Hessian
+/// `[ss, s theta, theta theta]`.
+#[derive(Debug, Clone, Copy)]
+struct Jet {
+    region: Region,
+    x_m: f64,
+    value: f64,
+    grad: [f64; 2],
+    hess: [f64; 3],
+}
+
+/// A step's secant `J` and its derivative by the rates, `m[i][k] = d J_i / d rate_k`.
+#[derive(Debug, Clone, Copy)]
+struct Secant {
+    j: [f64; 2],
+    m: [[f64; 2]; 2],
 }
 
 impl PoseGap {
@@ -93,11 +163,17 @@ impl PoseGap {
         let [nx, ny] = unit("pose gap face normal length", normal)?;
         let [dx, dy] = point_m;
         let offset = nx * (pivot_m[0] - face_m[0]) + ny * (pivot_m[1] - face_m[1]);
+        let along_face = nx * (pivot_m[1] - face_m[1]) - ny * (pivot_m[0] - face_m[0]);
         Ok(Self {
             offset_m: finite("pose gap offset [m]", offset)?,
             along: nx * ux + ny * uy,
             cos_m: finite("pose gap cosine coefficient [m]", nx * dx + ny * dy)?,
             sin_m: finite("pose gap sine coefficient [m]", ny * dx - nx * dy)?,
+            tangent: [
+                finite("pose gap tangent offset [m]", along_face)?,
+                nx * uy - ny * ux,
+            ],
+            span: None,
             ports: [
                 port(
                     "s",
@@ -118,11 +194,190 @@ impl PoseGap {
         })
     }
 
-    /// The gap [m] at `pose`: `g0 + a s + c cos(theta) + k sin(theta)`.
+    /// This gap with its face cut to the span `ends_m = [lo, hi]` along the face's tangent from
+    /// the face point, with a band `depth_m` deep behind it: see the
+    /// [module documentation](self).
+    ///
+    /// # Errors
+    /// [`ElementError::Parameter`] when an end is not finite, when `lo` is not below `hi`, or
+    /// when `depth_m` is not finite and positive.
+    pub fn bounded(mut self, ends_m: [f64; 2], depth_m: f64) -> Result<Self, ElementError> {
+        let [lo, hi] = [
+            finite("pose gap face end [m]", ends_m[0])?,
+            finite("pose gap face end [m]", ends_m[1])?,
+        ];
+        positive("pose gap face span [m]", hi - lo)?;
+        let depth_m = positive("pose gap band depth [m]", depth_m)?;
+        self.span = Some(Span { ends_m, depth_m });
+        Ok(self)
+    }
+
+    /// The gap [m] at `pose`: `g0 + a s + c cos(theta) + k sin(theta)`, or for a face with ends
+    /// the distance by region in the [module documentation](self).
     #[must_use]
     pub fn gap_m(&self, pose: &Pose) -> f64 {
+        match &self.span {
+            None => self.normal_m(pose),
+            Some(span) => self.jet(span, pose).value,
+        }
+    }
+
+    /// `x = n . (P - A)` [m] at `pose`.
+    fn normal_m(&self, pose: &Pose) -> f64 {
         let (sin, cos) = pose.theta_rad.sin_cos();
         self.offset_m + self.along * pose.s_m + self.cos_m * cos + self.sin_m * sin
+    }
+
+    /// The gap's [`Jet`] at `pose` against a face with ends.
+    fn jet(&self, span: &Span, pose: &Pose) -> Jet {
+        let (sin, cos) = pose.theta_rad.sin_cos();
+        // h = c cos + k sin turns x, and h' = k cos - c sin; z turns by -h', and dz/dtheta = h.
+        let turned = self.cos_m * cos + self.sin_m * sin;
+        let slope = self.sin_m * cos - self.cos_m * sin;
+        let x = self.normal_m(pose);
+        let z = self.tangent[0] + self.tangent[1] * pose.s_m - slope;
+        let [lo, hi] = span.ends_m;
+        let front = Jet {
+            region: Region::Front,
+            x_m: x,
+            value: x,
+            grad: [self.along, slope],
+            hess: [0.0, 0.0, -turned],
+        };
+        if (lo..=hi).contains(&z) {
+            if x >= -span.depth_m {
+                return front;
+            }
+            return Jet {
+                region: Region::Behind,
+                value: -x,
+                grad: [-self.along, -slope],
+                hess: [0.0, 0.0, turned],
+                ..front
+            };
+        }
+        // Past `hi` the distance is `z - hi`, before `lo` it is `lo - z`.
+        let (sign, end) = if z > hi { (1.0, hi) } else { (-1.0, lo) };
+        let y = sign * (z - end);
+        let [dx, dy] = [[self.along, slope], [sign * self.tangent[1], sign * turned]];
+        let g = x.hypot(y);
+        let grad = [(x * dx[0] + y * dy[0]) / g, (x * dx[1] + y * dy[1]) / g];
+        let outer = |a: usize, b: usize| (dx[a] * dx[b] + dy[a] * dy[b] - grad[a] * grad[b]) / g;
+        Jet {
+            region: Region::Outside,
+            x_m: x,
+            value: g,
+            grad,
+            hess: [
+                outer(0, 0),
+                outer(0, 1),
+                outer(1, 1) + (y * sign * slope - x * turned) / g,
+            ],
+        }
+    }
+
+    /// The sum of the sizes of the terms `g` sums at `pose` [m], which bounds its rounding.
+    fn terms_m(&self, span: &Span, pose: &Pose) -> f64 {
+        let [lo, hi] = span.ends_m;
+        self.offset_m.abs()
+            + self.tangent[0].abs()
+            + (self.along.abs() + self.tangent[1].abs()) * pose.s_m.abs()
+            + 2.0 * (self.cos_m.abs() + self.sin_m.abs())
+            + lo.abs().max(hi.abs())
+    }
+
+    /// The secant of the step from `old` to `end` at `rates`, or the step's refusal.
+    fn secant(
+        &self,
+        old: &Pose,
+        end: &Pose,
+        dt_s: f64,
+        rates: [f64; 2],
+    ) -> Result<Secant, ElementError> {
+        let linear = |sign: f64| {
+            let (slope, by_turn) = self.turn_slope(old.theta_rad, dt_s * rates[1]);
+            Secant {
+                j: [sign * self.along, sign * slope],
+                m: [[0.0, 0.0], [0.0, sign * dt_s * by_turn]],
+            }
+        };
+        let Some(span) = &self.span else {
+            return Ok(linear(1.0));
+        };
+        let (from, to) = (self.jet(span, old), self.jet(span, end));
+        let through = |reason: &str| ElementError::Law {
+            reason: format!("pose gap step {reason}: a flank is another face"),
+        };
+        match (from.region, to.region) {
+            (Region::Front, Region::Front) => Ok(linear(1.0)),
+            (Region::Behind, Region::Behind) => Ok(linear(-1.0)),
+            (Region::Front, Region::Behind) | (Region::Behind, Region::Front) => {
+                Err(through("goes between the front band and behind the face"))
+            }
+            (Region::Front, Region::Outside) if from.x_m < 0.0 => {
+                Err(through("crosses an end of the face inside the band"))
+            }
+            (Region::Outside, Region::Front) if to.x_m < 0.0 => {
+                Err(through("crosses an end of the face inside the band"))
+            }
+            _ => Ok(self.discrete(span, old, [from, to], dt_s, rates)),
+        }
+    }
+
+    /// The discrete gradient of a step with an end outside: see the
+    /// [module documentation](self).
+    fn discrete(
+        &self,
+        span: &Span,
+        old: &Pose,
+        ends: [Jet; 2],
+        dt_s: f64,
+        rates: [f64; 2],
+    ) -> Secant {
+        let step = [dt_s * rates[0], dt_s * rates[1]];
+        let mid = self.jet(
+            span,
+            &Pose {
+                s_m: old.s_m + 0.5 * step[0],
+                theta_rad: old.theta_rad + 0.5 * step[1],
+            },
+        );
+        let (g, h) = (mid.grad, mid.hess);
+        let hessian = [[h[0], h[1]], [h[1], h[2]]];
+        let arm2 = self.cos_m * self.cos_m + self.sin_m * self.sin_m;
+        let w = [step[0], arm2 * step[1]];
+        let norm = step[0] * w[0] + step[1] * w[1];
+        let end = Pose {
+            s_m: old.s_m + step[0],
+            theta_rad: old.theta_rad + step[1],
+        };
+        let floor = 256.0 * f64::EPSILON * (self.terms_m(span, old) + self.terms_m(span, &end));
+        if !(norm > floor * floor) {
+            return Secant {
+                j: g,
+                m: hessian.map(|row| row.map(|entry| 0.5 * dt_s * entry)),
+            };
+        }
+        let [start, at_end] = ends;
+        let residual = (at_end.value - start.value) - (g[0] * step[0] + g[1] * step[1]);
+        let ratio = residual / norm;
+        // d J / d dq = H/2 + w rho^T / N - 2 D w w^T / N^2 + (D / N) W, with
+        // rho = grad g(q1) - grad g(q_m) - H dq / 2.
+        let rho: [f64; 2] = std::array::from_fn(|k| {
+            at_end.grad[k] - g[k] - 0.5 * (hessian[k][0] * step[0] + hessian[k][1] * step[1])
+        });
+        let weight = [1.0, arm2];
+        let m = std::array::from_fn(|i| {
+            std::array::from_fn(|k| {
+                let diagonal = if i == k { ratio * weight[i] } else { 0.0 };
+                let bend = w[i] * (rho[k] - 2.0 * ratio * w[k]) / norm;
+                dt_s * (0.5 * hessian[i][k] + bend + diagonal)
+            })
+        });
+        Secant {
+            j: [g[0] + ratio * w[0], g[1] + ratio * w[1]],
+            m,
+        }
     }
 
     /// `J_theta` over a turn `turn` from `theta0`, and its derivative with respect to the turn.
@@ -136,11 +391,24 @@ impl PoseGap {
         (sinc * slope, 0.5 * (sinc_slope * slope + sinc * curve))
     }
 
-    fn validate(dt_s: f64, old: &Pose, inputs: &[f64]) -> Result<(), ElementError> {
+    /// The step's end pose and its secant at `inputs`, after checking them.
+    fn advance(
+        &self,
+        old: &Pose,
+        dt_s: f64,
+        inputs: &[f64],
+    ) -> Result<(Pose, Secant), ElementError> {
         positive("pose gap timestep [s]", dt_s)?;
         finite("pose gap translation [m]", old.s_m)?;
         finite("pose gap turn [rad]", old.theta_rad)?;
-        inputs_finite(inputs)
+        inputs_finite(inputs)?;
+        let rates = [inputs[0], inputs[1]];
+        let end = Pose {
+            s_m: finite("pose gap translation [m]", old.s_m + dt_s * rates[0])?,
+            theta_rad: finite("pose gap turn [rad]", old.theta_rad + dt_s * rates[1])?,
+        };
+        let secant = self.secant(old, &end, dt_s, rates)?;
+        Ok((end, secant))
     }
 }
 
@@ -200,8 +468,13 @@ impl Component for PoseGap {
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
-        // The four coefficients decide every method; the ports are fixed.
+        // The four coefficients decide every method of a face without ends; the ports are fixed.
         words.extend([self.offset_m, self.along, self.cos_m, self.sin_m].map(f64::to_bits));
+        if let Some(span) = &self.span {
+            let [lo, hi] = span.ends_m;
+            let terms = [self.tangent[0], self.tangent[1], lo, hi, span.depth_m];
+            words.extend(terms.map(f64::to_bits));
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -230,21 +503,12 @@ impl Component for PoseGap {
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
-        Self::validate(dt_s, old, inputs)?;
+        let (end, Secant { j, .. }) = self.advance(old, dt_s, inputs)?;
         let [rate_s, rate_theta, effort] = [inputs[0], inputs[1], inputs[2]];
-        let turn = dt_s * rate_theta;
-        let (slope, _) = self.turn_slope(old.theta_rad, turn);
-        let end = Pose {
-            s_m: finite("pose gap translation [m]", old.s_m + dt_s * rate_s)?,
-            theta_rad: finite("pose gap turn [rad]", old.theta_rad + turn)?,
-        };
         let response = [
-            finite("pose gap force [N]", -effort * self.along)?,
-            finite("pose gap torque [N m]", -effort * slope)?,
-            finite(
-                "pose gap rate [m/s]",
-                self.along * rate_s + slope * rate_theta,
-            )?,
+            finite("pose gap force [N]", -effort * j[0])?,
+            finite("pose gap torque [N m]", -effort * j[1])?,
+            finite("pose gap rate [m/s]", j[0] * rate_s + j[1] * rate_theta)?,
         ];
         // Each port's work by its own size: they cancel, so their sum says nothing of rounding.
         let work = inputs
@@ -271,15 +535,15 @@ impl PortTangent for PoseGap {
         cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         cx.checkpoint()?;
-        Self::validate(dt_s, old, inputs)?;
+        let (_, Secant { j, m }) = self.advance(old, dt_s, inputs)?;
         inputs_finite(d_inputs)?;
-        let [rate_theta, effort] = [inputs[1], inputs[2]];
-        let (slope, by_turn) = self.turn_slope(old.theta_rad, dt_s * rate_theta);
-        // d J_theta / d rate_theta = dt by_turn.
-        let bend = dt_s * by_turn;
-        d_outputs[0] = -self.along * d_inputs[2];
-        d_outputs[1] = -effort * bend * d_inputs[1] - slope * d_inputs[2];
-        d_outputs[2] = self.along * d_inputs[0] + (slope + rate_theta * bend) * d_inputs[1];
+        let [rate_s, rate_theta, effort] = [inputs[0], inputs[1], inputs[2]];
+        // The efforts are -R J and the rate J . v, with J a function of the rates v.
+        let loaded = |i: usize| -effort * m[i][0] * d_inputs[0] - effort * m[i][1] * d_inputs[1];
+        let carried = |k: usize| j[k] + (rate_s * m[0][k] + rate_theta * m[1][k]);
+        d_outputs[0] = loaded(0) - j[0] * d_inputs[2];
+        d_outputs[1] = loaded(1) - j[1] * d_inputs[2];
+        d_outputs[2] = carried(0) * d_inputs[0] + carried(1) * d_inputs[1];
         Ok(())
     }
 
@@ -293,15 +557,15 @@ impl PortTangent for PoseGap {
         cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         cx.checkpoint()?;
-        Self::validate(dt_s, old, inputs)?;
+        let (_, Secant { j, m }) = self.advance(old, dt_s, inputs)?;
         inputs_finite(bar_outputs)?;
-        let [rate_theta, effort] = [inputs[1], inputs[2]];
-        let (slope, by_turn) = self.turn_slope(old.theta_rad, dt_s * rate_theta);
-        let bend = dt_s * by_turn;
-        bar_inputs[0] = self.along * bar_outputs[2];
-        bar_inputs[1] =
-            -effort * bend * bar_outputs[1] + (slope + rate_theta * bend) * bar_outputs[2];
-        bar_inputs[2] = -self.along * bar_outputs[0] - slope * bar_outputs[1];
+        let [rate_s, rate_theta, effort] = [inputs[0], inputs[1], inputs[2]];
+        let [bar_force, bar_torque, bar_rate] = [bar_outputs[0], bar_outputs[1], bar_outputs[2]];
+        let loaded = |k: usize| -effort * m[0][k] * bar_force - effort * m[1][k] * bar_torque;
+        let carried = |k: usize| j[k] + (rate_s * m[0][k] + rate_theta * m[1][k]);
+        bar_inputs[0] = loaded(0) + carried(0) * bar_rate;
+        bar_inputs[1] = loaded(1) + carried(1) * bar_rate;
+        bar_inputs[2] = -j[0] * bar_force - j[1] * bar_torque;
         Ok(())
     }
 }

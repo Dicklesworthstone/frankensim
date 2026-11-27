@@ -990,8 +990,24 @@ physics owners below fs-couple can be composed without it.
     with a rounding allowance from each port's work. The gap's end does not
     follow the midpoint relation (`EndOfStep::Untold`), so the element sits
     only beside lines that read mean flows only, such as fs-dcontact's
-    contact. One point and one unbounded straight face: a face with ends, a
-    curved face or a face on a second moving body is not this element.
+    contact. `bounded(ends, depth)` cuts the face to a thin plate: a span of
+    the point's coordinate `z` along the face and a band `depth` deep behind
+    it. In the span `g = x` in front and in the band, `-x` behind it; past an
+    end `g` is the distance to that end, `hypot(x, y)`. A step within one
+    region takes the exact secant (its sign flipped behind); a step with an
+    end outside takes the discrete gradient `grad g(q_m) + (dg - grad g(q_m)
+    . dq) W dq / (dq . W dq)`, `W = diag(1, |d|^2)`, so `J . dq = dg`, and
+    below `|dq|_W = 256 eps l` (`l` the size of the terms of `g` at both
+    ends) `grad g(q_m)`, with `|dg - J . dq| <= 2 sqrt(2) |dq|_W` where `g`
+    is continuous along the step. `g >= 0` at both ends of such a step, so a
+    contact started at `-g` carries no load over it. A step from the band to
+    behind (pushed through) or across an end inside the band (an end struck
+    sideways) is refused (`ElementError::Law`); in a block with a load line
+    the kernel proposes at every trial iterate, and a refusal there ends the
+    step. One point and one straight face, unbounded or a plate: a flank, a
+    curved face or a face on a second moving body is not this element; a
+    step's regions are read at its ends, and a point that enters and leaves
+    a region within one step is not seen.
     `tests/pose_gap.rs` (under `slices`) swings a rotor on a torsional spring
     (`I = 1e-3 kg m^2`, `k = 1 N m/rad`, released at rest from 0.3 rad) whose
     arm tip meets a Hertz wall at 0.15 rad. The contact closes in the step
@@ -1004,7 +1020,12 @@ physics owners below fs-couple can be composed without it.
     them), the rate against the geometry's change and the slope at a pose
     that does not turn, the codec, and the refusals; and that a contact that
     reads an end input at `a` is refused beside the gap (`LineEnd` on
-    `wall.a`).
+    `wall.a`). For a plate it checks one step of each kind (within the
+    front, the band and behind, outside, and each allowed crossing) for
+    conformance, tangents, `g` and the rate against the geometry's distance
+    and the ports' power; the four refused crossings; a closure that stays
+    `-g` over twelve steps that leave the span and come back; and one step
+    below the threshold.
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and
@@ -1338,10 +1359,10 @@ relation allows there.
   - Refused (`AdmissionError::LineEnd`, the port named, and what does not
     go together), except at a port without an end input on a line that
     reads mean flows only: a neighbour that answers `Untold`; a neighbour
-    that tells its end beside a port that takes none; an end input beside neighbours
-    that all keep the midpoint promise; neighbours of both kinds in one
-    port's flow; an end input that is already connected, or is not a signal
-    input of the port's width; an end input on a port whose flow is
+    that tells its end beside a port that takes none; an end input beside
+    neighbours that all keep the midpoint promise; neighbours of both kinds in
+    one port's flow; an end input that is already connected, or is not a
+    signal input of the port's width; an end input on a port whose flow is
     prescribed (a prescribed flow is held over its step, or the component
     is told its span).
 - A block with one or more components on lines keeps no factors between steps and
@@ -3866,8 +3887,10 @@ resume through the binary).
 
 The end of a step. The step is exact for a held input, not the midpoint rule,
 so the default `Component::end_of_step` promise (the midpoint relation) is not
-this owner's: its ports answer `EndOfStep::Untold`, and a system does not join
-one to a load line that reads ends. `publishing_ends()` adds one signal output per power port
+this owner's: its ports answer `EndOfStep::Untold`, and a system joins one
+only to a load line that reads mean flows only
+(`LoadLine::reads_mean_flows_only`); a line that reads ends, a `Slider` among
+them, needs `publishing_ends()`. That adds one signal output per power port
 after `heat`, `<id>.end`, of width one, carrying that port's output at the end
 state of the same native step, `y1 = G^T grad H(x1)`; the port then answers
 `EndOfStep::Told` with it, and a load line that reads ends (fs-dcontact's

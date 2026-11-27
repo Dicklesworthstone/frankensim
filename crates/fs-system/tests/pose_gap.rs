@@ -16,7 +16,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::conformance::{Case, check_component, check_port_tangent};
 use fs_ports::component::{Component, LoadLine};
-use fs_system::elements::{Mass, Motion, Pose, PoseGap, Spring};
+use fs_system::elements::{ElementError, Mass, Motion, Pose, PoseGap, Spring};
 use fs_system::{AdmissionError, NodeId, SystemBuilder};
 
 const INERTIA_KG_M2: f64 = 1.0e-3;
@@ -328,4 +328,164 @@ fn pose_gap_geometry_tangents_and_refusals() {
     assert!(PoseGap::new(pivot, [0.0, 0.0], point, face, normal).is_err());
     assert!(PoseGap::new(pivot, axis, point, face, [0.0, 0.0]).is_err());
     assert!(PoseGap::new([f64::NAN, 0.0], axis, point, face, normal).is_err());
+}
+
+/// The plate tests' body: pivot, axis, point, face point and normal.
+const BODY: [[f64; 2]; 5] = [
+    [0.02, -0.01],
+    [0.6, 0.8],
+    [0.07, 0.03],
+    [0.1, 0.05],
+    [-0.8, 0.6],
+];
+/// The pose a plate test steps from, and a stale candidate.
+const FROM: Pose = Pose {
+    s_m: 0.004,
+    theta_rad: 0.4,
+};
+const STALE: Pose = Pose {
+    s_m: 1.0,
+    theta_rad: -2.0,
+};
+/// Over a step of 1 ms from `FROM`, `FORWARD` moves x by -1.5e-4 m and z by -2.8e-4 m; `BACK`
+/// about undoes it.
+const FORWARD: [f64; 3] = [0.3, -2.0, 15.0];
+const BACK: [f64; 3] = [-0.3, 2.0, 15.0];
+const PLATE_DT_S: f64 = 1.0e-3;
+/// The rounding of `g` and of its change: sixteen units of the 0.2 m its terms reach.
+const ROUNDING_M: f64 = 16.0 * f64::EPSILON * 0.2;
+
+/// The point from the geometry: x along the normal from the face, z along the tangent.
+fn coordinates(pose: &Pose) -> [f64; 2] {
+    let [pivot, axis, point, face, normal] = BODY;
+    let (sin, cos) = pose.theta_rad.sin_cos();
+    let p = [
+        pivot[0] + pose.s_m * axis[0] + cos * point[0] - sin * point[1] - face[0],
+        pivot[1] + pose.s_m * axis[1] + sin * point[0] + cos * point[1] - face[1],
+    ];
+    [
+        normal[0] * p[0] + normal[1] * p[1],
+        normal[0] * p[1] - normal[1] * p[0],
+    ]
+}
+
+/// A plate whose face is moved along its normal to put the point at `x` at `FROM`, its ends at
+/// `z0 + ends`, its band 1 cm deep, and the distance to it from the geometry.
+fn plate(x: f64, ends: [f64; 2]) -> (PoseGap, impl Fn(&Pose) -> f64) {
+    let [pivot, axis, point, face, normal] = BODY;
+    let [x0, z0] = coordinates(&FROM);
+    let (lift, depth) = (x0 - x, 0.01);
+    let at = [face[0] + lift * normal[0], face[1] + lift * normal[1]];
+    let [lo, hi] = [z0 + ends[0], z0 + ends[1]];
+    let shape = PoseGap::new(pivot, axis, point, at, normal).unwrap();
+    let distance = move |pose: &Pose| {
+        let [x, z] = coordinates(pose);
+        let x = x - lift;
+        match (z < lo, z > hi) {
+            (true, _) => x.hypot(lo - z),
+            (_, true) => x.hypot(z - hi),
+            _ if x >= -depth => x,
+            _ => -x,
+        }
+    };
+    (shape.bounded([lo, hi], depth).unwrap(), distance)
+}
+
+/// One step of `shape` from `old`: the new pose and the outputs.
+fn plate_step(
+    shape: &PoseGap,
+    old: &Pose,
+    inputs: &[f64; 3],
+    cx: &Cx<'_>,
+) -> Result<(Pose, [f64; 3]), ElementError> {
+    let (mut new, mut out) = (STALE, [0.0; 3]);
+    shape.propose(old, PLATE_DT_S, inputs, &mut new, &mut out, cx)?;
+    Ok((new, out))
+}
+
+#[test]
+fn a_plate_step_of_each_kind_meets_the_geometry_or_is_refused() {
+    // Front, band, behind, outside above and beside the band, front to outside, outside to
+    // front, behind to outside.
+    let wide = [-0.05, 0.05];
+    let steps = [
+        (1.0e-3, wide, FORWARD),
+        (-1.0e-3, wide, FORWARD),
+        (-0.02, wide, FORWARD),
+        (1.0e-3, [2.0e-3, 0.05], FORWARD),
+        (-5.0e-3, [2.0e-3, 0.05], FORWARD),
+        (1.0e-3, [-8.0e-5, 0.05], FORWARD),
+        (1.0e-3, [2.0e-4, 0.05], BACK),
+        (-0.02, [-8.0e-5, 0.05], FORWARD),
+    ];
+    let refused = [
+        (-1.0e-3, [-8.0e-5, 0.05], FORWARD, "crosses an end"),
+        (-2.0e-3, [2.0e-4, 0.05], BACK, "crosses an end"),
+        (-9.95e-3, wide, FORWARD, "between the front band and behind"),
+        (-1.01e-2, wide, BACK, "between the front band and behind"),
+    ];
+    with_cx(|cx| {
+        for (x, ends, inputs) in steps {
+            let (shape, distance) = plate(x, ends);
+            let case = Case {
+                state: &FROM,
+                stale: &STALE,
+                dt_s: PLATE_DT_S,
+                inputs: &inputs,
+            };
+            check_component(&shape, &case, cx).unwrap();
+            check_port_tangent(&shape, &case, 1.0e-6, 1.0e-12, cx).unwrap();
+            let (new, out) = plate_step(&shape, &FROM, &inputs, cx).unwrap();
+            for pose in [&FROM, &new] {
+                let error = shape.gap_m(pose) - distance(pose);
+                assert!(error.abs() <= ROUNDING_M, "{x} {ends:?}: {error}");
+            }
+            let error = PLATE_DT_S * out[2] - (distance(&new) - distance(&FROM));
+            assert!(error.abs() <= ROUNDING_M, "{x} {ends:?}: {error}");
+            let power: f64 = out.iter().zip(&inputs).map(|(e, f)| e * f).sum();
+            assert!(power.abs() <= 8.0 * f64::EPSILON * 15.0 * 2.0, "{power}");
+        }
+        for (x, ends, inputs, reason) in refused {
+            match plate_step(&plate(x, ends).0, &FROM, &inputs, cx) {
+                Err(ElementError::Law { reason: law }) => assert!(law.contains(reason), "{law}"),
+                other => panic!("{x} {ends:?}: {other:?}"),
+            }
+        }
+    });
+}
+
+#[test]
+fn a_plate_closure_stays_its_distance_out_past_an_end_and_back() {
+    let [_, z0] = coordinates(&FROM);
+    with_cx(|cx| {
+        // The closure a contact integrates, over a path above the face that leaves the span past
+        // `lo` and comes back.
+        let (shape, distance) = plate(1.0e-3, [-4.0e-4, 0.05]);
+        let (mut pose, mut closure, mut left) = (FROM, -distance(&FROM), false);
+        for (k, inputs) in [FORWARD; 6].into_iter().chain([BACK; 6]).enumerate() {
+            let (new, out) = plate_step(&shape, &pose, &inputs, cx).unwrap();
+            (pose, closure) = (new, closure - PLATE_DT_S * out[2]);
+            left |= coordinates(&pose)[1] < z0 - 4.0e-4;
+            let error = closure + distance(&pose);
+            let bound = ROUNDING_M * (k + 2) as f64;
+            assert!(error.abs() <= bound, "step {k}: {error}");
+        }
+        assert!(left, "the path stayed in the span");
+        // Below the threshold, 1e-6 m from an end: |dg - J . dq| <= 2 sqrt(2) |dq|_W.
+        let (shape, distance) = plate(1.0e-6, [1.0e-6, 0.05]);
+        let (new, out) = plate_step(&shape, &FROM, &[1.0e-12, 0.0, 15.0], cx).unwrap();
+        let error = PLATE_DT_S * out[2] - (distance(&new) - distance(&FROM));
+        assert!(error.abs() <= 2.0 * std::f64::consts::SQRT_2 * 1.0e-15 + ROUNDING_M);
+    });
+    let [pivot, axis, point, face, normal] = BODY;
+    let base = PoseGap::new(pivot, axis, point, face, normal).unwrap();
+    assert!(base.clone().bounded([0.1, 0.1], 0.01).is_err());
+    assert!(base.clone().bounded([0.0, f64::NAN], 0.01).is_err());
+    assert!(base.clone().bounded([0.0, 0.1], 0.0).is_err());
+    let (mut plain, mut cut) = (Vec::new(), Vec::new());
+    base.identity_words(&mut plain);
+    base.bounded([0.0, 0.1], 0.01)
+        .unwrap()
+        .identity_words(&mut cut);
+    assert!(cut.starts_with(&plain) && cut.len() == plain.len() + 5);
 }
