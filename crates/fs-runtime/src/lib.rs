@@ -5,7 +5,9 @@
 #![warn(missing_docs)]
 
 pub mod descriptor;
+mod draft;
 pub mod live_source;
+mod probes;
 mod runtime;
 
 pub use descriptor::{

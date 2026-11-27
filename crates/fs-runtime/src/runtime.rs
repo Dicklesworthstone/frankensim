@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_system::{Ledger, StepReport, System};
+use fs_system::elements::Motion;
+use fs_system::lowering::{Observed, Observer};
+use fs_system::{BlockSolveMode, Ledger, NodeId, StepReport, System};
 
 use crate::descriptor::{
     InputDescriptor, ProbeDescriptor, RuntimeRefusal, SNAPSHOT_DESCRIPTOR_SCHEMA,
@@ -33,6 +35,12 @@ pub struct ProbeBinding {
 }
 
 pub(crate) enum ProbeTarget {
+    MotionPos(NodeId),
+    MotionVel(NodeId),
+    ScalarState(NodeId),
+    ObserverCell(usize),
+    ObserverHeatRate(usize),
+    ObserverBody(usize, usize),
     Custom(CustomProbeFn),
 }
 
@@ -56,6 +64,7 @@ fn next_offset(d: &ProbeDescriptor, off: usize) -> Option<usize> {
 /// Generic deterministic runtime over a sealed [`System`].
 pub struct AssemblyRuntime {
     system: System,
+    observers: Vec<Observer>,
     pool: ArenaPool,
     gate: CancelGate,
     stream_key: StreamKey,
@@ -110,9 +119,34 @@ impl AssemblyRuntime {
             });
             off = next;
         }
-
-        Ok(Self {
+        Ok(Self::build(
+            assembly.into(),
             system,
+            Vec::new(),
+            input_descs,
+            input_cells,
+            probe_descs,
+            resolved,
+            off,
+            seed,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build(
+        assembly: String,
+        system: System,
+        observers: Vec<Observer>,
+        input_descs: Vec<InputDescriptor>,
+        input_cells: Vec<Arc<AtomicU64>>,
+        probe_descs: Vec<ProbeDescriptor>,
+        probes: Vec<ResolvedProbe>,
+        total_len: usize,
+        seed: u64,
+    ) -> Self {
+        Self {
+            system,
+            observers,
             pool: ArenaPool::new(ArenaConfig::default()),
             gate: CancelGate::new_clock_free(),
             stream_key: StreamKey {
@@ -125,14 +159,14 @@ impl AssemblyRuntime {
             input_cells,
             descriptor: SnapshotDescriptor {
                 schema: SNAPSHOT_DESCRIPTOR_SCHEMA.to_owned(),
-                assembly: assembly.into(),
-                total_len: off,
+                assembly,
+                total_len,
                 probes: probe_descs,
             },
-            probes: resolved,
+            probes,
             halted: false,
             last_refusal: None,
-        })
+        }
     }
 
     /// Declared interactive input descriptors.
@@ -303,6 +337,12 @@ impl AssemblyRuntime {
         self.system.steps()
     }
 
+    /// Per-block solve modes selected by the sealed kernel.
+    #[must_use]
+    pub fn block_modes(&self) -> Vec<BlockSolveMode> {
+        self.system.block_modes()
+    }
+
     fn halt(&mut self, code: &'static str, msg: String) -> RuntimeRefusal {
         let r = err(code, "step", msg);
         self.halted = true;
@@ -311,7 +351,44 @@ impl AssemblyRuntime {
     }
 
     fn eval_probe(&self, p: &ResolvedProbe, dst: &mut [f64]) {
-        let ProbeTarget::Custom(f) = &p.target;
-        f(&self.system, dst);
+        match &p.target {
+            ProbeTarget::MotionPos(n) => {
+                dst[0] = self
+                    .system
+                    .state::<Motion>(*n)
+                    .map_or(f64::NAN, |m| m.position_m);
+            }
+            ProbeTarget::MotionVel(n) => {
+                dst[0] = self
+                    .system
+                    .state::<Motion>(*n)
+                    .map_or(f64::NAN, |m| m.velocity_m_s);
+            }
+            ProbeTarget::ScalarState(n) => {
+                dst[0] = self.system.state::<f64>(*n).copied().unwrap_or(f64::NAN);
+            }
+            ProbeTarget::ObserverCell(i) => {
+                dst[0] = match (self.observers[*i])(&self.system) {
+                    Some(Observed::Cell(t)) => t,
+                    _ => f64::NAN,
+                };
+            }
+            ProbeTarget::ObserverHeatRate(i) => {
+                dst[0] = match (self.observers[*i])(&self.system) {
+                    Some(Observed::HeatRate(q)) => q,
+                    _ => f64::NAN,
+                };
+            }
+            ProbeTarget::ObserverBody(i, c) => {
+                dst[0] = match (self.observers[*i])(&self.system) {
+                    Some(Observed::Body {
+                        velocity_m_s: v,
+                        angular_velocity_rad_s: w,
+                    }) => [v[0], v[1], v[2], w[0], w[1], w[2]][*c],
+                    _ => f64::NAN,
+                };
+            }
+            ProbeTarget::Custom(f) => f(&self.system, dst),
+        }
     }
 }
