@@ -11,8 +11,12 @@ use std::sync::Arc;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_ports::StableId;
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 use fs_system::elements::{
     Conductance, ConductanceLaw, ConductanceMatrix, ElementError, GuardRow, InterfacePoint,
 };
@@ -548,6 +552,109 @@ fn four_points() -> ConductanceMatrix {
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn mapped_interfaces_share_their_native_law_and_receipt_with_the_residual_tier() {
+    with_cx(|cx| {
+        for element in [four_points(), four_points().following(Arc::new(SWEPT))] {
+            let temperatures = [420.0, 380.0, 460.0, 300.0, 330.0];
+            let case = Case {
+                state: &(),
+                stale: &(),
+                dt_s: 0.25,
+                inputs: &temperatures,
+            };
+            assert_eq!(element.unknowns(), 0);
+            check_stage_residual(&element, &case, &[], 1.0e-10, 1.0e-8, cx).unwrap();
+            let mut proposal_outputs = [0.0; 5];
+            let Proposal::Step(expected) = element
+                .propose(
+                    &(),
+                    case.dt_s,
+                    &temperatures,
+                    &mut (),
+                    &mut proposal_outputs,
+                    cx,
+                )
+                .unwrap()
+            else {
+                panic!("a memoryless interface takes the full step");
+            };
+            let mut residual_outputs = [f64::NAN; 5];
+            element
+                .residual(
+                    &(),
+                    case.dt_s,
+                    &temperatures,
+                    &[],
+                    &mut [],
+                    &mut residual_outputs,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(residual_outputs, proposal_outputs);
+            let accepted = element
+                .accept(&(), case.dt_s, &temperatures, &[], &mut (), cx)
+                .unwrap();
+            assert_eq!(accepted, expected);
+        }
+    });
+}
+
+#[test]
+fn residual_acceptance_preserves_guard_refusals_and_cancellation() {
+    let mean = [(0, 0.5), (1, 0.5)];
+    let guarded = ConductanceMatrix::new(2, 2, vec![point(&mean, &mean, 0.5)])
+        .unwrap()
+        .following(Arc::new(SWEPT))
+        .guarded_at(vec![GuardRow {
+            a: [(0, 1.0), (0, 0.0), (0, 0.0)],
+            b: [(0, 1.0), (0, 0.0), (0, 0.0)],
+        }])
+        .unwrap();
+    // The interface sees 350 K and 300 K, but its first trace point violates the card.
+    let invalid = [150.0, 550.0, 300.0, 300.0];
+    with_cx(|cx| {
+        let mut outputs = [f64::NAN; 4];
+        assert!(matches!(
+            guarded.residual(&(), 0.1, &invalid, &[], &mut [], &mut outputs, cx),
+            Err(ElementError::Law { .. })
+        ));
+        assert!(outputs.iter().all(|value| value.is_nan()));
+        assert!(matches!(
+            guarded.accept(&(), 0.1, &invalid, &[], &mut (), cx),
+            Err(ElementError::Law { .. })
+        ));
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        let cancelled = Cx::new(&gate, cx.arena(), cx.stream_key(), cx.budget(), cx.mode());
+        let valid = [400.0, 350.0, 300.0, 300.0];
+        assert!(
+            guarded
+                .accept(&(), 0.1, &valid, &[], &mut (), &cancelled)
+                .is_err()
+        );
+        assert!(
+            guarded
+                .jvp_z(
+                    &(),
+                    0.1,
+                    &valid,
+                    &[],
+                    &[],
+                    &mut [],
+                    &mut outputs,
+                    &cancelled
+                )
+                .is_err()
+        );
+        assert!(
+            guarded
+                .vjp_z(&(), 0.1, &valid, &[], &[], &[1.0; 4], &mut [], &cancelled)
+                .is_err()
+        );
+    });
 }
 
 #[test]

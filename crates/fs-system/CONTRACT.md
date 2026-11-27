@@ -41,7 +41,7 @@ keeps its lossless cross-domain power relation.
 constructors in `lowering.rs` use it. A cavity's integrated volume is its storage
 unknown, so the existing cavity/duct graph can participate in monolithic solves
 and stationary-analysis admission. Other elements such as `GapField`,
-`ControlledSource`, `Slider`, `Restriction`, `GasVolume` and `ConductanceMatrix`
+`ControlledSource`, `Slider`, `Restriction` and `GasVolume`
 still lack this tier. Direct `SystemBuilder::add` and `add_with_tangent` callers
 do not attach `StageResidual`, even when the concrete type implements it.
 
@@ -50,6 +50,22 @@ identities, current-driven capacitor transients and the independent equilibrium
 `V = I/G`, and refusal when the tier was not registered. The acoustic lowering
 test compares cavity/duct evolution with an independent midpoint recurrence,
 the interface solver, and the energy account.
+
+## Mapped thermal interfaces in monolithic composition
+
+`ConductanceMatrix` offers `StageResidual` with zero internal unknowns. Its
+field temperatures remain system inputs; its conservative loads, live
+conductance law, guard rows and entropy receipt use the same evaluation as
+`propose`. Acceptance computes that receipt without allocating a temporary
+trace. Callers register both optional tiers to include mapped thermal contact
+or gray radiation in monolithic and stationary graphs. This supplies no new
+material law or spatial accuracy claim.
+
+G0/G2/G4 coverage in `tests/conductance_matrix.rs` checks residual conformance on unequal trace
+widths, exact proposal/acceptance receipts and guard/cancellation refusals.
+`tests/radiation.rs` checks both interface and monolithic transient solves
+against an independent midpoint Stefan–Boltzmann solve, and the stationary
+heated-body temperature against its fourth-power equilibrium law.
 
 ## Assembly source admission
 

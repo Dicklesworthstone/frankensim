@@ -4,8 +4,13 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
 use fs_ports::component::{Class, Component, PortTangent, Receipt};
-use fs_system::SystemBuilder;
-use fs_system::elements::{ConductanceMatrix, ElementError, HeatCapacity};
+use fs_system::elements::{
+    ConductanceMatrix, ElementError, HeatCapacity, Heater, SourceAccount, Waveform,
+};
+use fs_system::{
+    AnalysisError, BlockSolverPolicy, MonolithicConfig, NodeId, StateMap, StationaryConfig, System,
+    SystemBuilder,
+};
 
 const SIGMA: f64 = 5.670_374_419e-8;
 
@@ -223,6 +228,15 @@ fn identity_keeps_authored_area_and_ordered_emissivities() {
 
 #[test]
 fn finite_bodies_radiate_on_the_generic_graph_against_an_independent_midpoint_solve() {
+    for policy in [
+        BlockSolverPolicy::InterfaceNewton,
+        BlockSolverPolicy::MonolithicNewtonKrylov(MonolithicConfig::default()),
+    ] {
+        check_radiating_pair(policy);
+    }
+}
+
+fn check_radiating_pair(policy: BlockSolverPolicy) {
     let capacity = [40.0, 80.0];
     let mut reference = [600.0_f64, 300.0];
     let initial_energy = capacity[0] * reference[0] + capacity[1] * reference[1];
@@ -230,13 +244,21 @@ fn finite_bodies_radiate_on_the_generic_graph_against_an_independent_midpoint_so
     let emissivities = [0.8, 0.6];
     let mut builder = SystemBuilder::new();
     let a = builder
-        .add_with_tangent("a", HeatCapacity::new(capacity[0]).unwrap(), reference[0])
+        .add_with_tangent_and_stage_residual(
+            "a",
+            HeatCapacity::new(capacity[0]).unwrap(),
+            reference[0],
+        )
         .unwrap();
     let b = builder
-        .add_with_tangent("b", HeatCapacity::new(capacity[1]).unwrap(), reference[1])
+        .add_with_tangent_and_stage_residual(
+            "b",
+            HeatCapacity::new(capacity[1]).unwrap(),
+            reference[1],
+        )
         .unwrap();
     let radiation = builder
-        .add_with_tangent(
+        .add_with_tangent_and_stage_residual(
             "radiation",
             ConductanceMatrix::gray_radiation(area, emissivities).unwrap(),
             (),
@@ -251,6 +273,7 @@ fn finite_bodies_radiate_on_the_generic_graph_against_an_independent_midpoint_so
         .bond(builder.port(b, "heat").unwrap(), radiation_b)
         .unwrap();
     let mut system = builder.seal().unwrap();
+    system.set_solver_policy(policy);
     assert!(system.guess(radiation_a, &[reference[0]]));
     assert!(system.guess(radiation_b, &[reference[1]]));
     let dt = 0.1;
@@ -296,4 +319,82 @@ fn finite_bodies_radiate_on_the_generic_graph_against_an_independent_midpoint_so
     assert!((capacity[0] * final_a + capacity[1] * final_b - initial_energy).abs() <= allowance);
     assert!(system.ledger().energy_residual_j().abs() <= allowance);
     assert!(system.ledger().entropy_generated_j_per_k() > 0.0);
+}
+
+struct TemperatureState(NodeId);
+
+impl StateMap for TemperatureState {
+    fn dim(&self) -> usize {
+        1
+    }
+
+    fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
+        out[0] = *system.state::<f64>(self.0).ok_or(AnalysisError::Invalid {
+            what: "thermal body state",
+        })?;
+        Ok(())
+    }
+
+    fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
+        system.set_accepted_state(self.0, state[0])?;
+        Ok(())
+    }
+}
+
+#[test]
+fn heated_body_reaches_the_stefan_boltzmann_stationary_temperature() {
+    let (ambient, power_w, area, emissivities) = (300.0_f64, 75.0, 0.2, [0.8, 0.6]);
+    let mut builder = SystemBuilder::new();
+    let body = builder
+        .add_with_tangent_and_stage_residual("body", HeatCapacity::new(50.0).unwrap(), 350.0)
+        .unwrap();
+    let radiation = builder
+        .add_with_tangent_and_stage_residual(
+            "radiation",
+            ConductanceMatrix::gray_radiation(area, emissivities).unwrap(),
+            (),
+        )
+        .unwrap();
+    let heater = builder
+        .add_with_tangent_and_stage_residual(
+            "heater",
+            Heater::new(Waveform::constant(power_w).unwrap()).unwrap(),
+            SourceAccount::default(),
+        )
+        .unwrap();
+    let (body_heat, radiation_a, radiation_b, heater_heat) = (
+        builder.port(body, "heat").unwrap(),
+        builder.port(radiation, "a").unwrap(),
+        builder.port(radiation, "b").unwrap(),
+        builder.port(heater, "heat").unwrap(),
+    );
+    builder
+        .common_effort(body_heat, &[radiation_a, heater_heat])
+        .unwrap();
+    builder
+        .boundary(radiation_b, Box::new(move |_, _, out| out[0] = ambient))
+        .unwrap();
+    let mut system = builder.seal().unwrap();
+    assert!(system.guess(radiation_a, &[350.0]) && system.guess(heater_heat, &[350.0]));
+    let expected = (ambient.powi(4) + power_w / coefficient(area, emissivities))
+        .sqrt()
+        .sqrt();
+    with_cx(|cx| {
+        let solution = system
+            .solve_stationary(&TemperatureState(body), StationaryConfig::default(), cx)
+            .unwrap();
+        assert!(solution.residual_norm <= 1.0e-10);
+        assert!(
+            (solution.state[0] - expected).abs() < 1.0e-7,
+            "stationary temperature {} K against {expected} K",
+            solution.state[0]
+        );
+    });
+    // A noncommitting analysis leaves the thermal state, source work and clock untouched.
+    assert_eq!(*system.state::<f64>(body).unwrap(), 350.0);
+    assert_eq!(
+        *system.state::<SourceAccount>(heater).unwrap(),
+        SourceAccount::default()
+    );
+    assert_eq!(system.time_s(), 0.0);
 }

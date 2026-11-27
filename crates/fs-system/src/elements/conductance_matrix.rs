@@ -27,7 +27,9 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 
 use super::{ElementError, temperature};
 
@@ -470,6 +472,82 @@ impl ConductanceMatrix {
             self.spread(point, point.conductance_w_k * (a - b), out);
         }
     }
+
+    /// One evaluation serves proposals, residual outputs and acceptance. Acceptance needs
+    /// the identical receipt but no output buffer, so it does not allocate a trace-sized vector.
+    fn evaluate(
+        &self,
+        dt_s: f64,
+        inputs: &[f64],
+        mut outputs: Option<&mut [f64]>,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ElementError> {
+        cx.checkpoint()?;
+        let n = self.widths[0] + self.widths[1];
+        for chunk in inputs[..n].chunks(256) {
+            cx.checkpoint()?;
+            for &kelvin in chunk {
+                temperature(kelvin)?;
+            }
+        }
+        // A law is asked at its guard rows first. No heat crosses there; a refusal there ends
+        // the evaluation before any load is formed, including on residual and acceptance calls.
+        if let Some(law) = &self.law {
+            for (index, row) in self.guards.iter().enumerate() {
+                if index % 256 == 0 {
+                    cx.checkpoint()?;
+                }
+                let here = InterfacePoint {
+                    a: row.a,
+                    b: row.b,
+                    conductance_w_k: 0.0,
+                };
+                let (kelvin_a, kelvin_b) = self.at(&here, inputs);
+                checked_factor(law.as_ref(), kelvin_a, kelvin_b)?;
+            }
+        }
+        if let Some(out) = outputs.as_deref_mut() {
+            for chunk in out[..n].chunks_mut(256) {
+                cx.checkpoint()?;
+                chunk.fill(0.0);
+            }
+        }
+        let (mut generated, mut crossing) = (0.0_f64, 0.0_f64);
+        for (index, point) in self.points.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()?;
+            }
+            // Both are weighted means of temperatures above zero. A positive law factor
+            // preserves hot-to-cold heat transfer and nonnegative generated entropy.
+            let (hot, cold) = self.at(point, inputs);
+            let conductance_w_k = match &self.law {
+                None => point.conductance_w_k,
+                Some(law) => point.conductance_w_k * checked_factor(law.as_ref(), hot, cold)?.0,
+            };
+            let rate_w = conductance_w_k * (hot - cold);
+            if let Some(out) = outputs.as_deref_mut() {
+                self.spread(point, rate_w, out);
+            }
+            generated += dt_s * conductance_w_k * (hot - cold) * (hot - cold) / (hot * cold);
+            crossing += rate_w.abs();
+        }
+        // The loads sum to `sum_q rate_q (s_a - s_b)_q`, with `s` the sums of a point's weights,
+        // each within 8 eps of one. A load is a sum of at most `depth` products and a port's
+        // energy a sum of its `n` loads, each sum within its length in roundoff units of the
+        // sizes summed (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., sec.
+        // 3.1); the two products with dt round once each. A law changes a point's rate and
+        // nothing in this count: both sides are handed the same rate.
+        let units = (2 * self.depth + n + 18) as f64 * f64::EPSILON;
+        Ok(Receipt {
+            stored_change_j: 0.0,
+            dissipated_j: 0.0,
+            numerical_loss_j: 0.0,
+            entropy_generated_j_per_k: generated,
+            energy_tolerance_j: units * dt_s * crossing,
+            residual: 0.0,
+            tolerance: 0.0,
+        })
+    }
 }
 
 impl Component for ConductanceMatrix {
@@ -542,57 +620,86 @@ impl Component for ConductanceMatrix {
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
+        self.evaluate(dt_s, inputs, Some(outputs), cx)
+            .map(Proposal::Step)
+    }
+}
+
+impl StageResidual for ConductanceMatrix {
+    fn unknowns(&self) -> usize {
+        // The interface stores nothing: its trace temperatures are retained system inputs,
+        // and all heat loads are algebraic outputs of those temperatures.
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        inputs: &[f64],
+        _z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        super::inputs_finite(inputs)
+    }
+
+    fn residual(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        self.evaluate(dt_s, inputs, Some(outputs), cx)?;
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _dz: &[f64],
+        _dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
         cx.checkpoint()?;
-        let n = self.widths[0] + self.widths[1];
-        for &kelvin in &inputs[..n] {
-            temperature(kelvin)?;
+        for chunk in d_outputs.chunks_mut(256) {
+            cx.checkpoint()?;
+            chunk.fill(0.0);
         }
-        // A law is asked at its guard rows first. No heat crosses there; a refusal there ends
-        // the proposal before any load is formed.
-        if let Some(law) = &self.law {
-            for row in &self.guards {
-                let here = InterfacePoint {
-                    a: row.a,
-                    b: row.b,
-                    conductance_w_k: 0.0,
-                };
-                let (kelvin_a, kelvin_b) = self.at(&here, inputs);
-                checked_factor(law.as_ref(), kelvin_a, kelvin_b)?;
-            }
-        }
-        outputs[..n].fill(0.0);
-        let (mut generated, mut crossing) = (0.0_f64, 0.0_f64);
-        for point in &self.points {
-            // Both are weighted means of temperatures above zero, by weights that are not
-            // negative and sum to one: above zero themselves.
-            let (hot, cold) = self.at(point, inputs);
-            // A law's factor is positive, so the scaled conductance is too: heat still crosses
-            // from the hotter side and the entropy below is still not negative.
-            let conductance_w_k = match &self.law {
-                None => point.conductance_w_k,
-                Some(law) => point.conductance_w_k * checked_factor(law.as_ref(), hot, cold)?.0,
-            };
-            let rate_w = conductance_w_k * (hot - cold);
-            self.spread(point, rate_w, outputs);
-            generated += dt_s * conductance_w_k * (hot - cold) * (hot - cold) / (hot * cold);
-            crossing += rate_w.abs();
-        }
-        // The loads sum to `sum_q rate_q (s_a - s_b)_q`, with `s` the sums of a point's weights,
-        // each within 8 eps of one. A load is a sum of at most `depth` products and a port's
-        // energy a sum of its `n` loads, each sum within its length in roundoff units of the
-        // sizes summed (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., sec.
-        // 3.1); the two products with dt round once each. A law changes a point's rate and
-        // nothing in this count: both sides are handed the same rate.
-        let units = (2 * self.depth + n + 18) as f64 * f64::EPSILON;
-        Ok(Proposal::Step(Receipt {
-            stored_change_j: 0.0,
-            dissipated_j: 0.0,
-            numerical_loss_j: 0.0,
-            entropy_generated_j_per_k: generated,
-            energy_tolerance_j: units * dt_s * crossing,
-            residual: 0.0,
-            tolerance: 0.0,
-        }))
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &(),
+        _dt_s: f64,
+        _inputs: &[f64],
+        _z: &[f64],
+        _bar_r: &[f64],
+        _bar_outputs: &[f64],
+        _bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        _z: &[f64],
+        _new: &mut (),
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ElementError> {
+        self.evaluate(dt_s, inputs, None, cx)
     }
 }
 
