@@ -250,17 +250,35 @@ fn lower_piston_face(
         ctx.interface.feature_b,
     );
     let port = |e, n| graph.resolve_entity_port(cat, e, n);
-    let (mech, press, cav) = match (
+    let (mech, press, mech_feat, cav) = match (
         port(fa, "mechanics"),
         port(fb, "pressure"),
         port(fb, "mechanics"),
         port(fa, "pressure"),
     ) {
-        (Some(m), Some(p), None, None) => (m, p, fb),
-        (None, None, Some(m), Some(p)) => (m, p, fa),
+        (Some(m), Some(p), None, None) => (m, p, fa, fb),
+        (None, None, Some(m), Some(p)) => (m, p, fb, fa),
         _ => return Err(it.invalid("piston-face requires `mechanics` and `pressure` ports")),
     };
-    let area = if let Some(q) = area_opt {
+    let mech_part = owning_part(inp, mech_feat)
+        .map(|i| &inp.parts[i])
+        .ok_or_else(|| it.invalid("missing mechanical part"))?;
+    let area = if mech_part.kind == DraftPartKind::Shell {
+        if area_opt.is_some() {
+            return Err(it.invalid(
+                "piston-face `area` override is refused on a modal shell (derived from finite-element disk)",
+            ));
+        }
+        let DraftGeometrySource::TensionedDisk(d) = &mech_part.geometry else {
+            return Err(it.invalid("piston-face on modal shell requires TensionedDisk geometry"));
+        };
+        if !(d.radius.value.is_finite() && d.radius.value > 0.0) {
+            return Err(it.invalid("modal shell radius must be positive finite"));
+        }
+        let a = PI * d.radius.value * d.radius.value;
+        it.derive(mech_part, "area", a, AREA_DIMS, "pi*r^2");
+        a
+    } else if let Some(q) = area_opt {
         if !(q.dims == AREA_DIMS && q.value.is_finite() && q.value > 0.0) {
             return Err(it.invalid("piston-face `area` must be positive [m^2]"));
         }
@@ -293,7 +311,25 @@ fn lower_piston_face(
             1.0
         }
     };
-    graph.attach_common_flow(mech, press, sign * area);
+    let cav_idx = owning_part(inp, cav);
+    let cav_faces = inp
+        .interfaces
+        .iter()
+        .filter(|i| {
+            matches!(i.kind, DraftInterfaceKind::PistonFace { .. })
+                && (owning_part(inp, i.feature_a) == cav_idx
+                    || owning_part(inp, i.feature_b) == cav_idx)
+        })
+        .count();
+    // Single-face cavities keep common_flow so a 1-port rigid piston (gas_cavity_slice) stays
+    // bit-identical and shares its mechanics port with an explicit ambient Force source; cavities
+    // with two or more PistonFace interfaces join all faces in one common_effort_ratios hub on
+    // the cavity pressure port.
+    if cav_faces > 1 {
+        graph.attach_common_effort(press, mech, sign * area);
+    } else {
+        graph.attach_common_flow(mech, press, sign * area);
+    }
     Ok(it.interface_output(None))
 }
 
