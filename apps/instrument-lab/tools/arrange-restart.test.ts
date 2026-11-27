@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { arrange, pianoEventsFrom, type PianoEvent } from "../src/midi/arrange";
-import type { DecodedMidi } from "../src/midi/smf";
+import { decodeMidi, type DecodedMidi } from "../src/midi/smf";
 
 test("piano restart restores held keys and pedal without inventing boundary strikes", () => {
   const events: PianoEvent[] = [
@@ -229,4 +229,64 @@ test("piano restart restores soft pedal before held strikes and respects exact-b
   assert.deepEqual(pianoEventsFrom(events, 2.5), [
     { t: 2.5, on: 60, speed: 2 }, events[3],
   ], "the released soft pedal must not be restored on a fresh engine");
+});
+
+test("a format-1 performance honors channel releases and controller resets across tracks", () => {
+  // At 50 ticks/quarter and 120 BPM, each tick is 10 ms. The second track
+  // controls both channels of the first, as in an SMF with an automation track.
+  const notes = [
+    0, 0x90, 60, 80, 0, 0x91, 72, 80,
+    5, 0x90, 61, 80, 15, 0x90, 62, 80, 10, 0x90, 64, 80,
+    10, 0x90, 65, 80, 10, 0x90, 67, 80,
+    50, 0x80, 60, 0, 0, 0x80, 61, 0, 0, 0x80, 62, 0,
+    0, 0x80, 64, 0, 0, 0x80, 65, 0, 0, 0x80, 67, 0, 0, 0x81, 72, 0,
+  ];
+  const controls = [
+    0, 0xb0, 64, 127, 0, 0xb0, 67, 127, 0, 0xb1, 67, 127,
+    5, 0xb0, 66, 127, 5, 0xb0, 123, 0,
+    1, 0xb0, 7, 64, 0, 0xb0, 11, 0,
+    18, 0xb0, 121, 0, 6, 0xb1, 67, 0,
+    4, 0xb0, 66, 127, 0, 0xb0, 67, 127, 0, 0xb0, 64, 127,
+    11, 0xb0, 120, 0,
+  ];
+  const track = (events: number[]) => [77, 84, 114, 107, 0, 0, 0, events.length + 4, ...events, 0, 255, 47, 0];
+  const result = decodeMidi(Uint8Array.from([
+    77, 84, 104, 100, 0, 0, 0, 6, 0, 1, 0, 2, 0, 50, ...track(notes), ...track(controls),
+  ]));
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error(result.message);
+  const a = arrange(result.midi, "channel-mode.mid");
+  assert.deepEqual(a.events.filter(e => e.off !== undefined).map(e => [e.off, e.t]), [
+    [60, 0.1], [61, 0.1], [64, 0.5], [65, 0.5], [67, 0.5], [72, 1.0],
+  ], "CC123 and CC120 release their channel even inside the 60 ms minimum; a later track can release a new attack at the same tick");
+  assert.deepEqual(a.pedal, [{ t: 0, value: 1 }, { t: 0.29, value: 0 }, { t: 0.39, value: 1 }, { t: 0.5, value: 0 }]);
+  assert.deepEqual(a.events.filter(e => e.unaCorda !== undefined).map(e => [e.t, e.unaCorda]), [
+    [0, true], [0.35, false], [0.39, true], [0.5, false],
+  ], "CC121 releases only its channel's pedal hold");
+  assert.deepEqual(a.events.filter(e => e.sostenuto !== undefined).map(e => [e.t, e.sostenuto]), [
+    [0.05, true], [0.29, false], [0.39, true], [0.5, false],
+  ]);
+  assert.equal(a.report.silencedByVolume, 1, "CC11 silences key 62 before the reset");
+  assert.equal(a.notes.find(n => n.key === 64)!.vel, Math.round(a.notes.find(n => n.key === 60)!.vel * 64 / 127),
+    "reset restores expression but preserves CC7 channel volume");
+});
+
+test("same-tick channel release and expression reset respect MIDI wire order", () => {
+  const bytes = [
+    0, 0x90, 60, 90, 0, 0xb0, 123, 0, 0, 0x90, 64, 90,
+    10, 0xb0, 11, 0, 0, 0x90, 65, 90, 0, 0xb0, 121, 0, 0, 0x90, 67, 90,
+    40, 0x80, 60, 0, 0, 0x80, 64, 0, 0, 0x80, 65, 0, 0, 0x80, 67, 0,
+    0, 255, 47, 0,
+  ];
+  const result = decodeMidi(Uint8Array.from([
+    77, 84, 104, 100, 0, 0, 0, 6, 0, 0, 0, 1, 0, 100,
+    77, 84, 114, 107, 0, 0, 0, bytes.length, ...bytes,
+  ]));
+  if (!result.ok) throw new Error(result.message);
+  const { events } = arrange(result.midi, "wire-order.mid");
+  assert.deepEqual(events.filter(e => e.on === 60 || e.off === 60).map(e => [e.t, e.on ?? "off"]),
+    [[0, 60], [0, "off"]], "an immediate release follows the strike on the engine frame");
+  assert.equal(events.find(e => e.off === 64)?.t, 0.25, "the strike after the release survives");
+  assert.equal(events.some(e => e.on === 65), false, "the note before the reset is silent");
+  assert.equal(events.some(e => e.on === 67), true, "the note after the reset is audible");
 });

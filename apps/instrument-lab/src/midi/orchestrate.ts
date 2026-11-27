@@ -14,6 +14,8 @@ export type Role = "percussion" | "bass" | "melody" | "harmony" | "silent" | "or
 export interface SourceNote {
   t: number;
   off: number;
+  /** A channel-wide release also bounds any minimum-duration extension. */
+  releaseAt?: number;
   key: number;
   /** written velocity 1..127 */
   vel: number;
@@ -143,11 +145,11 @@ export function orchestrate(parts: SourcePart[]): { notes: PlayedNote[]; plans: 
     }
     let lengthened = 0;
     ns.forEach((n, k) => {
-      const off = Math.max(n.off, n.t + MIN_DUR);
+      const off = Math.min(Math.max(n.off, n.t + MIN_DUR), n.releaseAt ?? Infinity);
       if (off > n.off) lengthened++;
       out.push({ key: n.key, t: n.t, off, vel: Math.max(8, Math.min(118, Math.round(vels[k]!))), part: i, prio: PRIO[plan.role] ?? 3 });
     });
-    if (lengthened > ns.length * 0.2) plan.actions.push(`${lengthened} notes shorter than ${MIN_DUR * 1000} ms held to ${MIN_DUR * 1000} ms`);
+    if (lengthened > ns.length * 0.2) plan.actions.push(`${lengthened} notes shorter than ${MIN_DUR * 1000} ms lengthened toward ${MIN_DUR * 1000} ms`);
     plan.notesOut = ns.length;
     if (!plan.actions.length) plan.actions.push("played as written");
   }

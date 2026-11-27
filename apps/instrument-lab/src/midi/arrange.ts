@@ -277,29 +277,54 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   // MIDI controllers are per channel, whichever track sends them; a note plays at its written
   // velocity times the channel's volume (CC7) and expression (CC11) when it starts. A file that
   // sends neither plays as written.
-  const cc = new Map<number, { t: number; c: number; v: number }[]>();
+  const cc = new Map<number, { tick: number; order: number; c: number; v: number }[]>();
+  const releasesByChannel = new Map<number, { tick: number; order: number }[]>();
   const pedalByChannel = new Map<number, { t: number; value: number }[]>();
   const switchedPedals: { t: number; channel: number; controller: 66 | 67; on: boolean }[] = [];
   for (const track of midi.tracks) for (const c of track.controls) {
-    if (c.controller === 7 || c.controller === 11) {
-      const list = cc.get(c.channel) ?? [];
-      list.push({ t: sec(c.tick), c: c.controller, v: c.value });
-      cc.set(c.channel, list);
-    } else if (c.controller === 64 && c.channel !== 9) {
-      const list = pedalByChannel.get(c.channel) ?? [];
-      list.push({ t: sec(c.tick), value: c.value / 127 });
-      pedalByChannel.set(c.channel, list);
-    } else if ((c.controller === 66 || c.controller === 67) && c.channel !== 9) {
-      // Sostenuto and soft pedal are switches (0..63 off, 64..127 on).
-      switchedPedals.push({ t: sec(c.tick), channel: c.channel, controller: c.controller, on: c.value >= 64 });
-    } else if (c.controller !== 0 && c.controller !== 32 && c.controller < 120) report.ignoredControllers++;
+    const { controller, channel, value } = c;
+    const t = sec(c.tick);
+    const order = c.order ?? 0;
+    const reset = controller === 121;
+    const soundOff = controller === 120;
+    if (controller === 7 || controller === 11 || reset) {
+      const list = cc.get(channel) ?? [];
+      // Reset All Controllers restores expression to full and leaves channel volume alone.
+      list.push({ tick: c.tick, order, c: reset ? 11 : controller, v: reset ? 127 : value });
+      cc.set(channel, list);
+      if (!reset) continue;
+    }
+    if (channel !== 9) {
+      if (soundOff || controller === 123) {
+        const releases = releasesByChannel.get(channel) ?? [];
+        releases.push({ tick: c.tick, order });
+        releasesByChannel.set(channel, releases);
+      }
+      if (controller === 64 || reset || soundOff) {
+        const list = pedalByChannel.get(channel) ?? [];
+        list.push({ t, value: controller === 64 ? value / 127 : 0 });
+        pedalByChannel.set(channel, list);
+        if (controller === 64) continue;
+        switchedPedals.push({ t, channel, controller: 66, on: false }, { t, channel, controller: 67, on: false });
+      } else if (controller === 66 || controller === 67) {
+        switchedPedals.push({ t, channel, controller, on: value >= 64 });
+        continue;
+      }
+    }
+    if (controller !== 0 && controller !== 32 && controller < 120) report.ignoredControllers++;
   }
-  for (const list of cc.values()) list.sort((a, b) => a.t - b.t);
-  const levelAt = (ch: number, t: number): number => {
-    const list = cc.get(ch);
+  const bySource = (a: { tick: number; order: number }, b: { tick: number; order: number }) =>
+    a.tick - b.tick || a.order - b.order;
+  for (const list of releasesByChannel.values()) list.sort(bySource);
+  for (const list of cc.values()) list.sort(bySource);
+  const levelAt = (note: PairedNote): number => {
+    const list = cc.get(note.channel);
     if (!list) return 1;
     let vol = 127, expr = 127;
-    for (const e of list) { if (e.t > t + 1e-6) break; if (e.c === 7) vol = e.v; else expr = e.v; }
+    for (const e of list) {
+      if (e.tick > note.onTick || (e.tick === note.onTick && e.order > (note.onOrder ?? Infinity))) break;
+      if (e.c === 7) vol = e.v; else expr = e.v;
+    }
     return (vol / 127) * (expr / 127);
   };
   report.pitchBends = midi.counters.pitchBends;
@@ -327,8 +352,21 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
       } else {
         report.pianoNotesIn += notes.length;
         sourceOf.push(parts.length - 1);
+        const releases = releasesByChannel.get(ch) ?? [];
         sources.push({ track: track.index, channel: ch, name, program, baseRole: role,
-          notes: notes.map((n) => ({ t: sec(n.onTick), off: sec(n.offTick), key: n.key, vel: n.onVelocity, level: levelAt(ch, sec(n.onTick)) })) });
+          notes: notes.map((n) => {
+            const t = sec(n.onTick);
+            // A release after an attack can end it at that same tick.
+            const onset = { tick: n.onTick, order: n.onOrder ?? Infinity };
+            let lo = 0, hi = releases.length;
+            while (lo < hi) {
+              const mid = (lo + hi) >>> 1;
+              if (bySource(releases[mid]!, onset) <= 0) lo = mid + 1; else hi = mid;
+            }
+            const releaseAt = lo < releases.length ? sec(releases[lo]!.tick) : undefined;
+            return { t, off: Math.min(sec(n.offTick), releaseAt ?? Infinity), releaseAt,
+              key: n.key, vel: n.onVelocity, level: levelAt(n) };
+          }) });
       }
     }
   }
@@ -347,7 +385,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
         continue;
       }
       const t = sec(n.onTick);
-      const eff = n.onVelocity * levelAt(9, t);
+      const eff = n.onVelocity * levelAt(n);
       if (eff < 6) { silenced++; continue; }
       const vel = flat ? (DRUM_WEIGHT[rule.piece] ?? 90) * (eff / n.onVelocity) : eff;
       if (rule.label) report.drumsMapped[rule.label] = (report.drumsMapped[rule.label] ?? 0) + 1;
@@ -494,16 +532,23 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   // one key, one set of strings: a key struck again while still held is re-struck, and released
   // only when the last of its overlapping notes ends
   const events: PianoEvent[] = [];
+  const postStrikeReleases = new Set<PianoEvent>();
   const perKey = new Map<number, PianoNote[]>();
   for (const n of notes) { const l2 = perKey.get(n.key) ?? []; l2.push(n); perKey.set(n.key, l2); }
   for (const [key, list] of perKey) {
-    let end = -Infinity;
+    let end = -Infinity, lastStrike = -Infinity;
+    const release = () => {
+      const e = { t: end, off: key };
+      if (end === lastStrike) postStrikeReleases.add(e);
+      events.push(e);
+    };
     for (const n of list) {
-      if (n.t >= end && end > -Infinity) events.push({ t: end, off: key });
+      if (n.t >= end && end > -Infinity) release();
       events.push({ t: n.t, on: key, speed: n.speed });
+      lastStrike = n.t;
       end = n.t >= end ? n.off : Math.max(end, n.off);
     }
-    if (end > -Infinity) events.push({ t: end, off: key });
+    if (end > -Infinity) release();
   }
   for (const p of pedal) events.push({ t: p.t, sustain: p.value });
   // One shared grand: either pitched hand/part can keep either switch down.
@@ -530,7 +575,8 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     }
   }
   // releases before strikes at the same instant, so a repeated key is struck after it is let go
-  events.sort((a, b) => a.t - b.t || rank(a) - rank(b));
+  const eventRank = (e: PianoEvent) => postStrikeReleases.has(e) ? 4 : rank(e);
+  events.sort((a, b) => a.t - b.t || eventRank(a) - eventRank(b));
 
   // Control-based overlap estimate, before quiet-key retirement and the mode budget.
   report.peakKeys = peakSounding(events);

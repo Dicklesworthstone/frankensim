@@ -23,8 +23,8 @@ const MAX_NOTES = 131_072;
 
 export interface TempoEntry { tick: number; microsecondsPerQuarter: number }
 export interface MeterEntry { tick: number; numerator: number; denominatorPower: number }
-export interface PairedNote { channel: number; key: number; onTick: number; offTick: number; onVelocity: number }
-export interface ControlEvent { tick: number; channel: number; controller: number; value: number }
+export interface PairedNote { channel: number; key: number; onTick: number; offTick: number; onVelocity: number; onOrder?: number }
+export interface ControlEvent { tick: number; channel: number; controller: number; value: number; order?: number }
 export interface ProgramEvent { tick: number; channel: number; program: number }
 export interface TextEvent { tick: number; kind: "marker" | "text" | "lyric" | "cue"; text: string }
 export interface DecodedTrack {
@@ -115,6 +115,7 @@ function decode(input: Uint8Array): DecodeResult {
   if (division < 1) return { ok: false, message: "The file declares zero ticks per quarter note." };
 
   const lenient = { missingEndOfTrack: 0, truncatedChunks: 0, openNotesClosed: 0, zeroLengthNotes: 0 };
+  // Event order follows track index and then source order within each track.
   const counters = { bytes: bytes.byteLength, events: 0, notes: 0, sysex: 0, ignoredMeta: 0, pitchBends: 0 };
   const tempoMap: TempoEntry[] = [];
   const meterMap: MeterEntry[] = [];
@@ -131,7 +132,7 @@ function decode(input: Uint8Array): DecodeResult {
     if (t !== "MTrk") continue; // alien chunks are tolerated, as in M0
     if (tracks.length >= MAX_TRACKS) return { ok: false, message: `More than ${MAX_TRACKS} tracks.` };
     const track: DecodedTrack = { index: tracks.length, name: null, instrumentName: null, notes: [], controls: [], programs: [], texts: [] };
-    const open = new Map<number, { tick: number; velocity: number }>(); // channel*128+key
+    const open = new Map<number, { tick: number; velocity: number; order: number }>(); // channel*128+key
     let tick = 0;
     let running = -1;
     let p = start;
@@ -192,13 +193,13 @@ function decode(input: Uint8Array): DecodeResult {
         const slot = channel * 128 + a;
         const prior = open.get(slot);
         if (prior) close(track, channel, a, prior, tick, lenient); // salvage normally ended it already
-        open.set(slot, { tick, velocity: b });
+        open.set(slot, { tick, velocity: b, order: counters.events });
       } else if (high === 0x80 || high === 0x90) {
         const slot = channel * 128 + a;
         const prior = open.get(slot);
         if (prior) { close(track, channel, a, prior, tick, lenient); open.delete(slot); }
       } else if (high === 0xb0) {
-        track.controls.push({ tick, channel, controller: a, value: b });
+        track.controls.push({ tick, channel, controller: a, value: b, order: counters.events });
       } else if (high === 0xc0) {
         track.programs.push({ tick, channel, program: a });
       } else if (high === 0xe0 && (a !== 0 || b !== 64)) {
@@ -221,10 +222,10 @@ function decode(input: Uint8Array): DecodeResult {
   return { ok: true, midi: { format: format === 0 ? 0 : 1, division, tempoMap, meterMap, tracks, salvageNote, lenient, counters } };
 }
 
-function close(track: DecodedTrack, channel: number, key: number, on: { tick: number; velocity: number }, offTick: number, lenient: DecodedMidi["lenient"]): void {
+function close(track: DecodedTrack, channel: number, key: number, on: { tick: number; velocity: number; order: number }, offTick: number, lenient: DecodedMidi["lenient"]): void {
   let off = offTick;
   if (off <= on.tick) { lenient.zeroLengthNotes++; off = on.tick + 1; }
-  track.notes.push({ channel, key, onTick: on.tick, offTick: off, onVelocity: on.velocity });
+  track.notes.push({ channel, key, onTick: on.tick, offTick: off, onVelocity: on.velocity, onOrder: on.order });
 }
 
 /** Seconds at every tick, from the file's tempo map (120 bpm until the first tempo, as SMF says). */
