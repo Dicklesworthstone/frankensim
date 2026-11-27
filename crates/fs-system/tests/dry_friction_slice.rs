@@ -1423,4 +1423,110 @@ mod hertz {
         assert!(q > 0.0 && ((dua / q) - BETA_316).abs() <= 1e-12);
         assert!(lo_after.system.ledger().energy_residual_j().abs() <= 1e-12);
     }
+
+    fn lower_eff_pair(
+        cards: &CardStore,
+        (s316, fcard): (ContentHash, ContentHash),
+        st: Vec<Kv>,
+        tb_therm: bool,
+        mb: MatSpec,
+    ) -> Result<LoweredSystem, LoweringError> {
+        let mut cat = EntityCatalog::new();
+        let root = cat.declare(EntityDeclaration::assembly("ef")).unwrap();
+        let pa = cat.declare(EntityDeclaration::part(root, "ta")).unwrap();
+        let pb = cat.declare(EntityDeclaration::part(root, "tb")).unwrap();
+        let face_a = cat.declare(EntityDeclaration::surface(pa, "p")).unwrap();
+        let face_b = cat.declare(EntityDeclaration::surface(pb, "p")).unwrap();
+        let mc = d::DraftInterfaceKind::MechanicalContact {
+            law_card: fcard,
+            third_body: None,
+            state: st,
+        };
+        let built = (
+            vec![],
+            vec![add_iface(&mut cat, root, "p", (face_a, face_b), mc)],
+            vec![],
+        );
+        let rb = d::DraftPartKind::RigidBody;
+        let side_a = ("ta", rb, s316, true, Some(init_st(V_T0, Some(T0))));
+        let b0 = init_st(0.0, tb_therm.then_some(T0));
+        let side_b = ("tb", rb, mb.0, tb_therm, Some(b0));
+        let parts = vec![
+            shaped_part(&side_a, pa, box_g(), qp_316()),
+            shaped_part(&side_b, pb, box_g(), mb.1),
+        ];
+        let reg = LoweringRegistry::with_kernel_defaults();
+        admit_and_lower((root, cat), parts, built, (1e-4, 4e-3, T0), cards, &reg)
+    }
+
+    #[test]
+    fn hertz_effusivity_partition_model_and_refusals() {
+        let mut cards = CardStore::new();
+        let (ss_card, stainless) = load_seed_mat("stainless-316-20c-engineering-reference");
+        let (carbon_card, carbon) = load_seed_mat("steel-a36-onlinemetals-reference");
+        let s316 = cards.insert_material(ss_card);
+        let a36 = cards.insert_material(carbon_card);
+        let no_k = cards.insert_material(unit_mat(1.0, 100.0));
+        let fcard = cards
+            .insert_interface("dry-friction", friction_card(MU_S, MU_K, 20.0, 1.0))
+            .unwrap();
+        let eff = |m: &BTreeMap<String, f64>| {
+            (m["density"] * m["specific_heat_capacity"] * m["thermal_conductivity"]).sqrt()
+        };
+        let beta_ex = eff(&stainless) / (eff(&stainless) + eff(&carbon));
+        let n5 = || kv("normal_force", F_PRE, F_DIM);
+        let e1 = || kv("heat_partition_effusivity", 1.0, Dims::NONE);
+        let run = |st, t, mb| lower_eff_pair(&cards, (s316, fcard), st, t, mb);
+        let mut lo = run(vec![n5(), e1()], true, (a36, qp_a36())).unwrap();
+        let rcpt = lo.receipt.canonical_json();
+        for s in [
+            "model: effusivity partition",
+            "Carslaw & Jaeger",
+            "t << L^2/alpha",
+            "Pe << 1",
+            "thermal_conductivity",
+        ] {
+            assert!(rcpt.contains(s), "missing `{s}`");
+        }
+        assert!(!rcpt.contains("measured: effusivity"));
+        with_cx(|cx| {
+            for _ in 0..40 {
+                lo.system.step(1e-4, cx).unwrap();
+            }
+        });
+        let nodes = &lo.system.ledger().nodes;
+        let du = |n| {
+            nodes
+                .iter()
+                .find(|x| x.name == n)
+                .unwrap()
+                .stored_change_j
+                .value()
+        };
+        let (dua, dub) = (du("ta.thermal"), du("tb.thermal"));
+        let q = dua + dub;
+        assert!(q > 0.0 && ((dua / q) - beta_ex).abs() <= 1e-12);
+        assert!(lo.system.ledger().energy_residual_j().abs() <= 1e-12);
+        let bad = kv("heat_partition_effusivity", 0.0, Dims::NONE);
+        let half = kv("heat_partition_a", 0.5, Dims::NONE);
+        for (st, t, mb, want) in [
+            (vec![n5(), e1(), half], true, (a36, qp_a36()), "both"),
+            (
+                vec![n5(), bad],
+                true,
+                (a36, qp_a36()),
+                "heat_partition_effusivity",
+            ),
+            (vec![n5(), e1()], false, (a36, qp_a36()), "both sides"),
+            (
+                vec![n5(), e1()],
+                true,
+                (no_k, vec![]),
+                "thermal_conductivity",
+            ),
+        ] {
+            let msg = run(st, t, mb).err().expect(want).to_string();
+            assert!(msg.contains(want), "expected `{want}` in: {msg}");
+        }
+    }
 }

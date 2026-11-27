@@ -5133,12 +5133,104 @@ fn owning_part_decl(
     None
 }
 
+const EFFUSIVITY_MODEL_SOURCE: &str = "model: effusivity partition beta_a = e_a/(e_a+e_b) (Carslaw & Jaeger 1959 / Blok 1937 stationary semi-infinite contact; valid for t << L^2/alpha and Pe << 1; lumped bodies take as declared split)";
+
+fn dry_friction_heat_mode(
+    state: &[(ParameterKey, QtyAny)],
+    scope: &str,
+) -> Result<(Option<f64>, bool), LoweringError> {
+    let inv = |d: &str| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d.to_owned(),
+    };
+    let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
+    let beta = match find("heat_partition_a") {
+        Some(q) if q.dims == Dims::NONE && (0.0..=1.0).contains(&q.value) => Some(q.value),
+        Some(_) => return Err(inv("heat_partition_a must be dimensionless in [0, 1]")),
+        None => None,
+    };
+    let use_eff = match find("heat_partition_effusivity") {
+        Some(q) if q.dims == Dims::NONE && (q.value - 1.0).abs() == 0.0 => true,
+        Some(_) => return Err(inv("heat_partition_effusivity must be dimensionless 1")),
+        None => false,
+    };
+    if beta.is_some() && use_eff {
+        return Err(inv(
+            "cannot set both heat_partition_a and heat_partition_effusivity",
+        ));
+    }
+    Ok((beta, use_eff))
+}
+
+fn route_effusivity_heat(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    rec: &mut ProvenanceRecorder,
+    heat: PortRef,
+    (ta, tb): (Option<PortRef>, Option<PortRef>),
+    scope: &str,
+) -> Result<(), LoweringError> {
+    let inv = |d: String| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d,
+    };
+    let (Some(pa), Some(pb)) = (ta, tb) else {
+        return Err(inv(
+            "heat_partition_effusivity requires thermal physics on both sides".into(),
+        ));
+    };
+    let (inp, env) = (ctx.draft.input(), ctx.query_env());
+    let mut eff = |feat: EntityId, side: &str| -> Result<f64, LoweringError> {
+        let part = owning_part_decl(inp, feat).ok_or_else(|| inv(format!("{side} has no part")))?;
+        let mr = part
+            .materials
+            .first()
+            .ok_or_else(|| inv(format!("{side} has no material")))?;
+        let kp = ctx
+            .cards
+            .material(&mr.card)
+            .filter(|c| !c.claims().claims_for("thermal-conductivity").is_empty())
+            .map_or("thermal_conductivity", |_| "thermal-conductivity");
+        let props = [
+            ("density", Dims([-3, 1, 0, 0, 0, 0])),
+            ("specific_heat_capacity", Dims([2, 0, -2, -1, 0, 0])),
+            (kp, THERMAL_CONDUCTIVITY_DIMS),
+        ];
+        let mut prod = 1.0_f64;
+        for (p, dims) in props {
+            let lbl = format!("{side}.{p}");
+            let (s, _) = rec.query_material_property(scope, ctx.cards, mr, p, &lbl, env)?;
+            if s.dims != dims || !(s.value.is_finite() && s.value > 0.0) {
+                return Err(inv(format!("{lbl} invalid")));
+            }
+            prod *= s.value;
+        }
+        let e = prod.sqrt();
+        if !(e.is_finite() && e > 0.0) {
+            return Err(inv(format!("{side} effusivity invalid")));
+        }
+        Ok(e)
+    };
+    let ea = eff(ctx.interface.feature_a, "side_a")?;
+    let eb = eff(ctx.interface.feature_b, "side_b")?;
+    let beta = ea / (ea + eb);
+    if !(beta.is_finite() && beta > 0.0 && beta < 1.0) {
+        return Err(inv("effusivity partition must lie in (0, 1)".into()));
+    }
+    let m = EFFUSIVITY_MODEL_SOURCE;
+    rec.record_declared_field("heat_partition_a", beta, Dims::NONE, scope, m);
+    rec.record_declared_field("heat_partition_b", 1.0 - beta, Dims::NONE, scope, m);
+    let rt = RouteTemperature::SinkEquivalent;
+    graph.add_heat_route(heat, vec![(pa, beta), (pb, 1.0 - beta)], None, rt);
+    Ok(())
+}
+
 fn route_friction_heat(
     ctx: &InterfaceLoweringContext<'_>,
     graph: &mut LoweringGraph,
     rec: &mut ProvenanceRecorder,
     heat: PortRef,
-    beta: Option<f64>,
+    (beta, use_eff): (Option<f64>, bool),
     scope: &str,
 ) -> Result<(), LoweringError> {
     let (cat, root, t_amb) = (
@@ -5155,6 +5247,9 @@ fn route_friction_heat(
         therm(ctx.interface.feature_a),
         therm(ctx.interface.feature_b),
     );
+    if use_eff {
+        return route_effusivity_heat(ctx, graph, rec, heat, (ta, tb), scope);
+    }
     let inv = |d: &str| LoweringError::Invalid {
         item: scope.to_owned(),
         detail: d.to_owned(),
@@ -5266,7 +5361,10 @@ fn dry_friction_query_mu(
         .filter(|(k, _)| {
             !matches!(
                 k.name.as_str(),
-                "heat_partition_a" | "initial_slip" | "reference_normal_force"
+                "heat_partition_a"
+                    | "heat_partition_effusivity"
+                    | "initial_slip"
+                    | "reference_normal_force"
             )
         })
         .cloned()
@@ -5487,16 +5585,7 @@ fn lower_dry_friction_interface(
         return Err(inv("dry-friction refuses a third-body lubricant film"));
     }
     let (normal_n, live_normal) = dry_friction_normal(ctx, state, &scope)?;
-    let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
-    let beta = match find("heat_partition_a") {
-        Some(q)
-            if q.dims == Dims::NONE && q.value.is_finite() && (0.0..=1.0).contains(&q.value) =>
-        {
-            Some(q.value)
-        }
-        Some(_) => return Err(inv("heat_partition_a must be dimensionless in [0, 1]")),
-        None => None,
-    };
+    let (beta, use_eff) = dry_friction_heat_mode(state, &scope)?;
     let (t_init, v_rel0, slip) = dry_friction_end_state(ctx, state, &scope)?;
     let mut rec = ProvenanceRecorder::default();
     let (mu_s, mu_k) = dry_friction_query_mu(
@@ -5559,7 +5648,7 @@ fn lower_dry_friction_interface(
         }
     }
     let heat = graph.port(node, "heat")?;
-    route_friction_heat(ctx, graph, &mut rec, heat, beta, &scope)?;
+    route_friction_heat(ctx, graph, &mut rec, heat, (beta, use_eff), &scope)?;
     let (property_receipts, parameter_sources) = rec.finish();
     Ok(LoweredInterfaceOutput {
         created_nodes: vec![node_name],

@@ -201,7 +201,12 @@ wires `Slider` on the non-smooth `LoadLine` tier with automatic
 initial slip (breakaway and re-catch resolve on step boundaries, so stick-slip
 period error is below `dt` by design), and routes friction heat via explicit
 `heat_partition_a` (required when both ends are thermal; 100% to a sole thermal
-end when omitted; remainder to ambient sink). Card-less `HertzContact` (under
+end when omitted; remainder to ambient sink). Opt-in `heat_partition_effusivity = 1`
+(mutually exclusive with `heat_partition_a`, two thermal bodies only) derives
+`beta_a = e_a / (e_a + e_b)` from both parts' `density`, `specific_heat_capacity`,
+and `thermal_conductivity` cards and records it as a Carslaw & Jaeger / Blok
+stationary semi-infinite contact model (valid for `t << L^2/alpha` and `Pe << 1`;
+lumped bodies take as declared split, not a measured interface property). Card-less `HertzContact` (under
 `slices`, `owners::contact`) lowers `Sphere`/`Box` primitives and both parts'
 `young_modulus` and `poisson_ratio` cards to `fs_dcontact::ContactInterface`
 with `publishing_reaction()` (refusing missing `poisson_ratio` or flat-on-flat
