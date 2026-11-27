@@ -18,8 +18,8 @@ use fs_ports::component::conformance::{Case, Observed, check_component, check_lo
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 use fs_system::elements::{
-    Damper, ElementError, FlowSource, Force, Gyrator, HeatCapacity, Mass, Motion, Slider,
-    SliderEnd, SliderRow, Slip, SourceAccount, Spring, Waveform,
+    Damper, ElementError, FlowSource, Force, Gyrator, HeatCapacity, IdealDiode, IdealSwitch, Mass,
+    Motion, Slider, SliderEnd, SliderRow, Slip, SourceAccount, Spring, Waveform,
 };
 use fs_system::{
     AdmissionError, Checkpoint, NodeId, RouteTemperature, SolveConfig, System, SystemBuilder,
@@ -5684,6 +5684,11 @@ fn a_line_port_and_its_neighbours_must_agree_on_how_a_step_ends() {
         .unwrap();
     on_the_ground(&mut builder, rubbing);
     refused(builder, "does not tell its end");
+    // The slider's stick reads the end, and the ideal diode and switch have
+    // not been read for it: none of them reads mean flows only.
+    assert!(!slider().reads_mean_flows_only());
+    assert!(!IdealDiode::new().reads_mean_flows_only());
+    assert!(!IdealSwitch::new().reads_mean_flows_only());
 
     // One that tells its end, beside a port that takes none.
     let mut builder = SystemBuilder::new();

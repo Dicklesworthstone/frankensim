@@ -1765,12 +1765,14 @@ impl SystemBuilder {
         // taken over what its neighbours return as the END of their flows:
         // the same outputs' companions, with the same signs and ratios. A
         // port that names none is joined only to neighbours whose flow ends
-        // the step by the midpoint relation.
+        // the step by the midpoint relation, unless its line reads only the
+        // means of its flows: then it is joined to any.
         for node in 0..count {
             let Some(line_ports) = self.nodes[node].line_ports() else {
                 continue;
             };
             let ends = self.nodes[node].line_ends();
+            let mean_only = self.nodes[node].reads_mean_flows_only();
             for (position, &port) in line_ports.iter().enumerate() {
                 let refuse = |reason: &'static str| AdmissionError::LineEnd {
                     port: self.label(PortRef { node, port }),
@@ -1797,6 +1799,7 @@ impl SystemBuilder {
                         }
                         Some(range)
                     }
+                    None if mean_only => continue,
                     None => None,
                 };
                 for (offset, flow) in flows.enumerate() {

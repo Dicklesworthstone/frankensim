@@ -280,6 +280,11 @@ changes with it.
 - `reading_ends([a, b])` adds signal inputs `a.end` and `b.end` for
   neighbours that tell the end of their flow; the law uses only the mean
   closure rate, so the end flows are checked finite and not otherwise used.
+  For the same reason an interface that reads no end input answers
+  `LoadLine::reads_mean_flows_only` with `true`: its ends are joined to
+  neighbours of any `EndOfStep`, one whose flow does not end its step by the
+  midpoint relation and does not tell its end included. One that reads an end
+  input answers `false` and is joined as before.
 
 ## Conformance tests
 

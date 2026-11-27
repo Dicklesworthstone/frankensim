@@ -1609,13 +1609,30 @@ pub trait LoadLine: Component {
     ///
     /// A port with none takes the flow it is given to end the step by the
     /// midpoint relation ([`EndOfStep::Midpoint`]), and a system joins it
-    /// only to neighbours that promise that. A port with an end input is
-    /// joined only to neighbours that tell the end of their flow
+    /// only to neighbours that promise that, unless the line reads mean
+    /// flows only ([`Self::reads_mean_flows_only`]). A port with an end
+    /// input is joined only to neighbours that tell the end of their flow
     /// ([`EndOfStep::Told`]); the system makes the wire, with the signs and
     /// ratios of the port's own junction, and nothing else is connected to
     /// the input. It has the width of its port.
     fn line_ends(&self) -> &[Option<usize>] {
         &[]
+    }
+
+    /// Whether the line reads its ports' flows only through their means:
+    /// its proposal and its new state are functions of its own state and of
+    /// its ports' mean flows over the step, and its state stores no flow. A
+    /// contact's closure moves by `dt` times the mean closure rate; a
+    /// dry-friction pair's stick depends on how the flow ends the step.
+    ///
+    /// A system joins a port of such a line that names no end input to
+    /// neighbours of every [`EndOfStep`]. A wrong `true` admits a neighbour
+    /// whose end the line would then misread, so only a line whose law has
+    /// been read for it answers `true`, per instance, and a line that names
+    /// any end input ([`Self::line_ends`]) answers `false`. The default is
+    /// `false`.
+    fn reads_mean_flows_only(&self) -> bool {
+        false
     }
 
     /// [`Component::propose`] on the load line.

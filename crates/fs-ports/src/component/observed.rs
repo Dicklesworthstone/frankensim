@@ -347,6 +347,9 @@ where
     fn line_ends(&self) -> &[Option<usize>] {
         self.inner.line_ends()
     }
+    fn reads_mean_flows_only(&self) -> bool {
+        self.inner.reads_mean_flows_only()
+    }
     fn propose_on_line(
         &self,
         old: &Self::State,

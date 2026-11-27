@@ -168,8 +168,11 @@ port that returns a flow:
 
 `LoadLine::line_ends` names, per port of the line, the signal input that
 receives that port's flow at the step's end, or none (the default: none). A
-port with none takes its flow to end the step by the midpoint relation. A port
-with an end input is handed, after the line's square matrix, one more row of
+port with none takes its flow to end the step by the midpoint relation, unless
+`LoadLine::reads_mean_flows_only` (default `false`) says the line reads its
+flows only through their means over the step: then the end is not read at such
+a port, and nothing is promised of it. A port with an end input is handed,
+after the line's square matrix, one more row of
 `compliance` per coefficient of the input: `end[k] = released_end[k] -
 sum(compliance[n + k][j] * effort[j])`, with the released end flows in
 `inputs` there. A component that names none is handed the square matrix alone,

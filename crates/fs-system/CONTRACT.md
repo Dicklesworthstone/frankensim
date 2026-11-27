@@ -1268,7 +1268,10 @@ relation allows there.
   of a load line to it:
   - A line port that names no end input (`LoadLine::line_ends`) is joined
     only to neighbours whose flow ends the step by the midpoint relation.
-    `Slider` names none.
+    `Slider` names none. The exception is a line that reads its flows only
+    through their means (`LoadLine::reads_mean_flows_only`, fs-dcontact's
+    `ContactInterface`): such a port is joined to neighbours of every
+    `EndOfStep`, `Untold` included.
   - A line port that names one is joined only to neighbours that tell the
     end of their flow. The kernel makes the wire: the end input is driven
     by the sum that drives the port's flow, taken over the neighbours' end
@@ -1283,8 +1286,9 @@ relation allows there.
     proposal is made that was not made before, and a block without end
     inputs runs the code it ran.
   - Refused (`AdmissionError::LineEnd`, the port named, and what does not
-    go together): a neighbour that answers `Untold`; a neighbour that tells
-    its end beside a port that takes none; an end input beside neighbours
+    go together), except at a port without an end input on a line that
+    reads mean flows only: a neighbour that answers `Untold`; a neighbour
+    that tells its end beside a port that takes none; an end input beside neighbours
     that all keep the midpoint promise; neighbours of both kinds in one
     port's flow; an end input that is already connected, or is not a signal
     input of the port's width; an end input on a port whose flow is
@@ -3813,7 +3817,7 @@ resume through the binary).
 The end of a step. The step is exact for a held input, not the midpoint rule,
 so the default `Component::end_of_step` promise (the midpoint relation) is not
 this owner's: its ports answer `EndOfStep::Untold`, and a system does not join
-one to a load line. `publishing_ends()` adds one signal output per power port
+one to a load line that reads ends. `publishing_ends()` adds one signal output per power port
 after `heat`, `<id>.end`, of width one, carrying that port's output at the end
 state of the same native step, `y1 = G^T grad H(x1)`; the port then answers
 `EndOfStep::Told` with it, and a load line that reads ends (fs-dcontact's

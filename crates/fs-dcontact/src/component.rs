@@ -48,7 +48,11 @@
 //! publishes its ends), an end reads that flow on a signal input
 //! ([`ContactInterface::reading_ends`]). The contact's law needs only the
 //! mean closure rate, so the end flows are checked to be finite and are not
-//! otherwise used.
+//! otherwise used. For the same reason an interface that reads no end input
+//! reads mean flows only ([`LoadLine::reads_mean_flows_only`]): its ends are
+//! joined to neighbours whatever their flows do at the step's end, ones that
+//! keep the midpoint relation, tell their ends or do neither. One that reads
+//! an end input answers `false`, and is joined as before.
 //!
 //! # Not covered
 //!
@@ -521,6 +525,10 @@ impl LoadLine for ContactInterface {
 
     fn line_ends(&self) -> &[Option<usize>] {
         &self.ends
+    }
+
+    fn reads_mean_flows_only(&self) -> bool {
+        self.told() == 0
     }
 
     fn propose_on_line(
