@@ -87,26 +87,41 @@ fn build_hertz(
     let max_f = get("maximum_force").ok_or_else(|| inv(scope, "missing maximum_force"))?;
     let max_p =
         get("maximum_penetration").ok_or_else(|| inv(scope, "missing maximum_penetration"))?;
-    let (gap, init_x) = (
-        get("gap").unwrap_or(0.0),
-        get("initial_closure").unwrap_or(0.0),
-    );
+    let (gap, gap_src) = match get("gap") {
+        Some(v) => (v, "state.gap"),
+        None => (0.0, "not declared: 0"),
+    };
+    let (init_x, init_src) = match get("initial_closure") {
+        Some(v) => (v, "state.initial_closure"),
+        None => (0.0, "not declared: 0"),
+    };
     let k_h = (4.0 / 3.0) * e_star * r_star.sqrt();
     let ef = "1/((1-nu_a^2)/E_a+(1-nu_b^2)/E_b)";
     for (k, v, d, f) in [
         ("effective_modulus", e_star, PRESSURE_DIMS, ef),
         ("hertz_exponent", 1.5, Dims::NONE, "Hertz spherical law"),
         ("maximum_force", max_f, FORCE_DIMS, "state.maximum_force"),
-        ("maximum_penetration", max_p, LENGTH_DIMS, "state.max_pen"),
-        ("gap", gap, LENGTH_DIMS, "state.gap"),
-        ("initial_closure", init_x, LENGTH_DIMS, "state.init_x"),
+        (
+            "maximum_penetration",
+            max_p,
+            LENGTH_DIMS,
+            "state.maximum_penetration",
+        ),
+        ("gap", gap, LENGTH_DIMS, gap_src),
+        ("initial_closure", init_x, LENGTH_DIMS, init_src),
     ] {
         rec.record_declared_field(k, v, d, scope, f);
     }
     let chi = match (get("restitution"), get("approach_speed")) {
         (Some(e), Some(v0)) => {
             rec.record_declared_field("restitution", e, Dims::NONE, scope, "state.restitution");
-            rec.record_declared_field("approach_speed", v0, VELOCITY_DIMS, scope, "state.v0");
+            rec.record_declared_field(
+                "approach_speed",
+                v0,
+                VELOCITY_DIMS,
+                scope,
+                "state.approach_speed",
+            );
             hunt_crossley_loss_from_restitution(e, v0).map_err(|err| inv(scope, err.to_string()))?
         }
         (None, None) => 0.0,

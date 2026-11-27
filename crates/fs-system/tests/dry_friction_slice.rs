@@ -901,7 +901,12 @@ fn normal_load_and_hertz_lowering_refusals() {
 mod hertz {
     use std::collections::BTreeMap;
 
+    use fs_dcontact::Obstacle;
+    use fs_dcontact::component::{ContactInterface, ContactSolve, ContactState};
+    use fs_ports::PortKind;
+    use fs_system::elements::{Force, HeatCapacity, Waveform};
     use fs_system::lowering::owners::register_owner_defaults;
+    use fs_system::{NodeId, RouteTemperature};
 
     use super::*;
 
@@ -910,6 +915,8 @@ mod hertz {
     const F_PRE: f64 = 5.0;
     const MU_S: f64 = 0.40;
     const MU_K: f64 = 0.25;
+    const V_T0: f64 = 2.5e-3;
+    const BETA_316: f64 = 0.363_297;
     const SEED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/matdb/seed-v1/");
 
     type Kv = (ParameterKey, QtyAny);
@@ -1076,6 +1083,12 @@ mod hertz {
         assert!(
             json.contains("reference_normal_force")
                 && json.contains("can leave card normal_force validity")
+                && json.contains("state.maximum_penetration")
+                && json.contains("state.approach_speed")
+                && json.contains("\"gap\"")
+                && json.contains("not declared: 0")
+                && !json.contains("state.gap")
+                && !json.contains("state.initial_closure")
         );
         with_cx(|cx| {
             for _ in 0..10 {
@@ -1091,5 +1104,323 @@ mod hertz {
         let du = by("a.thermal").stored_change_j.value() + by("b.thermal").stored_change_j.value();
         assert!(qh > 0.0 && qp > 0.0 && (du - (qh + qp)).abs() <= 1e-12);
         assert!(lo.system.ledger().energy_residual_j().abs() <= 1e-12);
+    }
+
+    fn hertz_params(
+        stainless: &BTreeMap<String, f64>,
+        carbon: &BTreeMap<String, f64>,
+    ) -> (f64, f64, f64) {
+        let (ea, nua) = (stainless["young_modulus"], stainless["poisson_ratio"]);
+        let (eb, nub) = (carbon["young_modulus"], carbon["poisson_ratio"]);
+        let e_star = 1.0 / ((1.0 - nua * nua) / ea + (1.0 - nub * nub) / eb);
+        let k_h = (4.0 / 3.0) * e_star * R_SPHERE.sqrt();
+        (e_star, k_h, (F_PRE / k_h).powf(2.0 / 3.0))
+    }
+
+    fn oracle1_draft(
+        cards: &CardStore,
+        [s316, a36, fcard]: [ContentHash; 3],
+        delta_eq: f64,
+        nl_first: bool,
+    ) -> LoweredSystem {
+        let mut cat = EntityCatalog::new();
+        let root = cat.declare(EntityDeclaration::assembly("o1")).unwrap();
+        let mut mk_p = |n| cat.declare(EntityDeclaration::part(root, n)).unwrap();
+        let (nb, nf, ta, tb) = (mk_p("nb"), mk_p("nf"), mk_p("ta"), mk_p("tb"));
+        let mut sf = |p, n| cat.declare(EntityDeclaration::surface(p, n)).unwrap();
+        let (ball_face, flat_face) = (sf(nb, "h"), sf(nf, "h"));
+        let (sled_face, base_face) = (sf(ta, "p"), sf(tb, "p"));
+        let hk = d::DraftInterfaceKind::HertzContact {
+            state: vec![
+                kv("maximum_force", 1e6, F_DIM),
+                kv("maximum_penetration", 1e-2, L),
+                kv("gap", 0.0, L),
+                kv("initial_closure", delta_eq, L),
+            ],
+        };
+        let mc = d::DraftInterfaceKind::MechanicalContact {
+            law_card: fcard,
+            third_body: None,
+            state: vec![
+                kv("reference_normal_force", F_PRE, F_DIM),
+                kv("heat_partition_a", BETA_316, Dims::NONE),
+            ],
+        };
+        let mut ifaces = Vec::new();
+        let nl = || d::DraftInterfaceKind::NormalLoad;
+        if nl_first {
+            ifaces.push(add_iface(
+                &mut cat,
+                root,
+                "nl",
+                (sled_face, ball_face),
+                nl(),
+            ));
+        }
+        ifaces.push(add_iface(&mut cat, root, "h", (ball_face, flat_face), hk));
+        ifaces.push(add_iface(&mut cat, root, "p", (sled_face, base_face), mc));
+        if !nl_first {
+            ifaces.push(add_iface(
+                &mut cat,
+                root,
+                "nl",
+                (sled_face, ball_face),
+                nl(),
+            ));
+        }
+        let sph = d::PrimitiveShape::Sphere {
+            radius: QtyAny::new(R_SPHERE, L),
+        };
+        let (rb, drv) = (d::DraftPartKind::RigidBody, d::DraftPartKind::DrivenBody);
+        let ball_side = ("nb", rb, s316, false, Some(init_st(0.0, None)));
+        let flat_side = ("nf", drv, a36, false, None);
+        let sled_side = ("ta", rb, s316, true, Some(init_st(V_T0, Some(T0))));
+        let base_side = ("tb", rb, a36, true, Some(init_st(0.0, Some(T0))));
+        let parts = vec![
+            shaped_part(&ball_side, nb, sph.clone(), qp_316()),
+            shaped_part(&flat_side, nf, box_g(), qp_a36()),
+            shaped_part(&sled_side, ta, sph, qp_316()),
+            shaped_part(&base_side, tb, box_g(), qp_a36()),
+        ];
+        let src = d::SourceDecl {
+            name: "preload".into(),
+            target: d::SourceTarget::Port {
+                entity: nb,
+                port: "mechanics".into(),
+            },
+            history: d::TimeHistory::Constant(QtyAny::new(-F_PRE, F_DIM)),
+        };
+        let mut reg = LoweringRegistry::with_kernel_defaults();
+        register_owner_defaults(&mut reg);
+        admit_and_lower(
+            (root, cat),
+            parts,
+            (vec![], ifaces, vec![src]),
+            (1e-4, 4e-3, T0),
+            cards,
+            &reg,
+        )
+        .unwrap()
+    }
+
+    fn hertz_comp(e_star: f64, k_h: f64) -> ContactInterface {
+        let prov = format!("hertz-contact:h:E*={e_star:.6e},R*={R_SPHERE:.6e}");
+        let law = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], k_h, 1.5, prov).unwrap();
+        let solve = ContactSolve {
+            max_iterations: 64,
+            maximum_force_n: 1e6,
+            maximum_penetration_m: 1e-2,
+            force_absolute_tolerance_n: 1e-12,
+            force_relative_tolerance: 1e-12,
+        };
+        ContactInterface::new(law, solve)
+            .unwrap()
+            .publishing_reaction()
+            .unwrap()
+    }
+
+    fn oracle1_kernel(
+        stainless: &BTreeMap<String, f64>,
+        carbon: &BTreeMap<String, f64>,
+        delta_eq: f64,
+        live: bool,
+    ) -> (System, [Option<NodeId>; 6]) {
+        let (e_star, k_h, _) = hertz_params(stainless, carbon);
+        let (v_s, v_b) = ((4.0 / 3.0) * PI * R_SPHERE.powi(3), 0.1 * 0.1 * 0.02);
+        let (m_a, m_b) = (stainless["density"] * v_s, carbon["density"] * v_b);
+        let (c_a, c_b) = (
+            m_a * stainless["specific_heat_capacity"],
+            m_b * carbon["specific_heat_capacity"],
+        );
+        let mut b = SystemBuilder::new();
+        let m0 = |v| Motion {
+            position_m: 0.0,
+            velocity_m_s: v,
+        };
+        let nb = live.then(|| {
+            b.add_with_tangent("nb.mechanics", Mass::new(m_a).unwrap(), m0(0.0))
+                .unwrap()
+        });
+        let sled_m = b
+            .add_with_tangent("ta.mechanics", Mass::new(m_a).unwrap(), m0(V_T0))
+            .unwrap();
+        let sled_th = b
+            .add_with_tangent("ta.thermal", HeatCapacity::new(c_a).unwrap(), T0)
+            .unwrap();
+        let base_m = b
+            .add_with_tangent("tb.mechanics", Mass::new(m_b).unwrap(), m0(0.0))
+            .unwrap();
+        let base_th = b
+            .add_with_tangent("tb.thermal", HeatCapacity::new(c_b).unwrap(), T0)
+            .unwrap();
+        let h_node = live.then(|| {
+            b.add_on_line(
+                "interface.h",
+                hertz_comp(e_star, k_h),
+                ContactState::at(delta_eq),
+            )
+            .unwrap()
+        });
+        let sl = if live {
+            Slider::loaded_by_signal(MU_S, MU_K).unwrap()
+        } else {
+            Slider::new(F_PRE, MU_S, MU_K).unwrap()
+        };
+        let p_node = b
+            .add_on_line("interface.p", sl, Slip::sliding(-V_T0))
+            .unwrap();
+        let pt = |b: &SystemBuilder, n, k| b.port(n, k).unwrap();
+        if let (Some(nb), Some(hn)) = (nb, h_node) {
+            let wf = Waveform::constant(-F_PRE).unwrap();
+            let f = Force::in_domain(PortKind::MechanicalForceVelocity, wf);
+            let fn_id = b
+                .add_with_tangent_and_stage_residual("source.preload", f, SourceAccount::default())
+                .unwrap();
+            b.common_flow(pt(&b, nb, "p"), &[pt(&b, hn, "a"), pt(&b, fn_id, "p")])
+                .unwrap();
+            b.boundary(pt(&b, hn, "b"), Box::new(|_, _, o| o.fill(0.0)))
+                .unwrap();
+            b.signal(pt(&b, hn, "reaction_n"), pt(&b, p_node, "normal_n"))
+                .unwrap();
+        }
+        b.common_flow(pt(&b, sled_m, "p"), &[pt(&b, p_node, "a")])
+            .unwrap();
+        b.common_flow(pt(&b, base_m, "p"), &[pt(&b, p_node, "b")])
+            .unwrap();
+        let sinks = [
+            (pt(&b, sled_th, "heat"), BETA_316),
+            (pt(&b, base_th, "heat"), 1.0 - BETA_316),
+        ];
+        b.heat_route(
+            pt(&b, p_node, "heat"),
+            &sinks,
+            None,
+            RouteTemperature::SinkEquivalent,
+        )
+        .unwrap();
+        let p_heat = pt(&b, p_node, "heat");
+        let mut sys = b.seal().unwrap();
+        let _ = sys.guess(p_heat, &[T0]);
+        let ids = [
+            h_node,
+            Some(p_node),
+            Some(sled_m),
+            Some(base_m),
+            Some(sled_th),
+            Some(base_th),
+        ];
+        (sys, ids)
+    }
+
+    fn snap_step(s: &System, [h, p, tam, tbm, tat, tbt]: [NodeId; 6]) -> ([u64; 8], Slip) {
+        let cs = *s.state::<ContactState>(h).unwrap();
+        let ma = *s.state::<Motion>(tam).unwrap();
+        let mb = *s.state::<Motion>(tbm).unwrap();
+        let ta = *s.state::<f64>(tat).unwrap();
+        let tb = *s.state::<f64>(tbt).unwrap();
+        let sl = *s.state::<Slip>(p).unwrap();
+        let bits = [
+            cs.closure_m,
+            cs.reaction_n,
+            ma.position_m,
+            ma.velocity_m_s,
+            mb.position_m,
+            mb.velocity_m_s,
+            ta,
+            tb,
+        ]
+        .map(f64::to_bits);
+        (bits, sl)
+    }
+
+    #[test]
+    fn hertz_preload_bit_for_bit_parity_and_order_independence() {
+        let mut cards = CardStore::new();
+        let (ss_card, stainless) = load_seed_mat("stainless-316-20c-engineering-reference");
+        let (carbon_card, carbon) = load_seed_mat("steel-a36-onlinemetals-reference");
+        let (s316, a36) = (
+            cards.insert_material(ss_card),
+            cards.insert_material(carbon_card),
+        );
+        let fcard = cards
+            .insert_interface("dry-friction", friction_card(MU_S, MU_K, 20.0, 1.0))
+            .unwrap();
+        let (_, _, delta_eq) = hertz_params(&stainless, &carbon);
+        let mut lo_after = oracle1_draft(&cards, [s316, a36, fcard], delta_eq, false);
+        let mut lo_before = oracle1_draft(&cards, [s316, a36, fcard], delta_eq, true);
+        let (mut kern, k_ids) = oracle1_kernel(&stainless, &carbon, delta_eq, true);
+        let (mut const_n, c_ids) = oracle1_kernel(&stainless, &carbon, delta_eq, false);
+        let rcpt = lo_after.receipt.canonical_json();
+        for needle in [
+            "effective_modulus",
+            "effective_radius",
+            "state.gap",
+            "state.initial_closure",
+            "reference_normal_force",
+            "can leave card normal_force validity",
+            "heat_partition_a",
+            "heat_partition_b",
+        ] {
+            assert!(rcpt.contains(needle), "missing {needle} in receipt");
+        }
+        let lo_ids = |lo: &LoweredSystem| {
+            [
+                "interface.h",
+                "interface.p",
+                "ta.mechanics",
+                "tb.mechanics",
+                "ta.thermal",
+                "tb.thermal",
+            ]
+            .map(|n| lo.node_map[n])
+        };
+        let (a_ids, b_ids) = (lo_ids(&lo_after), lo_ids(&lo_before));
+        let k6 = k_ids.map(Option::unwrap);
+        with_cx(|cx| {
+            for step in 1..=40 {
+                lo_after.system.step(1e-4, cx).unwrap();
+                lo_before.system.step(1e-4, cx).unwrap();
+                kern.step(1e-4, cx).unwrap();
+                const_n.step(1e-4, cx).unwrap();
+                let sa = snap_step(&lo_after.system, a_ids);
+                assert_eq!(
+                    sa,
+                    snap_step(&lo_before.system, b_ids),
+                    "order diff at step {step}"
+                );
+                assert_eq!(sa, snap_step(&kern, k6), "kernel diff at step {step}");
+                let cs = *lo_after.system.state::<ContactState>(a_ids[0]).unwrap();
+                assert!(
+                    (cs.reaction_n - F_PRE).abs() <= 1e-11,
+                    "step {step} R={}",
+                    cs.reaction_n
+                );
+                assert!(
+                    (cs.closure_m - delta_eq).abs() <= 1e-15,
+                    "step {step} x={}",
+                    cs.closure_m
+                );
+                let va = lo_after
+                    .system
+                    .state::<Motion>(a_ids[2])
+                    .unwrap()
+                    .velocity_m_s;
+                let vc = const_n
+                    .state::<Motion>(c_ids[2].unwrap())
+                    .unwrap()
+                    .velocity_m_s;
+                assert!((va - vc).abs() <= 1e-12, "step {step} va={va} vc={vc}");
+            }
+        });
+        assert!(lo_after.system.state::<Slip>(a_ids[1]).unwrap().is_stuck());
+        let nodes = &lo_after.system.ledger().nodes;
+        let by = |name| nodes.iter().find(|n| n.name == name).unwrap();
+        let (dua, dub) = (
+            by("ta.thermal").stored_change_j.value(),
+            by("tb.thermal").stored_change_j.value(),
+        );
+        let q = dua + dub;
+        assert!(q > 0.0 && ((dua / q) - BETA_316).abs() <= 1e-12);
+        assert!(lo_after.system.ledger().energy_residual_j().abs() <= 1e-12);
     }
 }
