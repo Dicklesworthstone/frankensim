@@ -1109,6 +1109,7 @@ impl StageResidual for SpringMassDamper {
         inputs: &[f64],
         z: &[f64],
         new: &mut Oscillator,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, Cancelled> {
         let (force_n, temperature_k) = (inputs[0], inputs[1]);
         let mean = z[0];

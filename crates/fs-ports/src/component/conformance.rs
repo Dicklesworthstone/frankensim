@@ -1547,6 +1547,7 @@ where
             case.inputs,
             z_solution,
             &mut accepted_state,
+            cx,
         )
         .map_err(Failure::Owner)?;
     if accepted_state != prop_state {

@@ -131,7 +131,8 @@ crate is `fs_mbd::component::RigidBody`.
 **Tiers.** `Component` is mandatory: ports, class, `stored_energy_j`,
 `limit_dt_s`, `next_event_s`, `propose`, `admit`. `PortTangent` adds the JVP and
 VJP of the port map. `StageResidual` adds a residual in the component's own
-unknowns. `LoadLine` is for a relation at power ports that is not a function of
+unknowns; its `accept` receives the step's `Cx`, as `propose` does, for any
+work the receipt needs. `LoadLine` is for a relation at power ports that is not a function of
 the flow (dry friction holds any force up to its limit at zero slip). The
 optional tiers require `Component`; three `compile_fail` doctests pin that.
 

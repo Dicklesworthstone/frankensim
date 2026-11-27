@@ -918,6 +918,7 @@ impl StageResidual for Mass {
         inputs: &[f64],
         z: &[f64],
         new: &mut Motion,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         inputs_finite(z)?;
@@ -1143,6 +1144,7 @@ impl StageResidual for Storage {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         inputs_finite(z)?;
@@ -1411,6 +1413,7 @@ impl StageResidual for Spring {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         inputs_finite(z)?;
@@ -1712,6 +1715,7 @@ impl StageResidual for Damper {
         inputs: &[f64],
         _z: &[f64],
         _new: &mut (),
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         let rate = inputs[0] - inputs[1];
@@ -1951,6 +1955,7 @@ impl StageResidual for Admittance {
         inputs: &[f64],
         _z: &[f64],
         _new: &mut (),
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         let difference = inputs[0] - inputs[1];
@@ -2243,6 +2248,7 @@ impl StageResidual for Force {
         inputs: &[f64],
         _z: &[f64],
         new: &mut SourceAccount,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         let force_n = prescribed(&self.force_n, old, dt_s)?;
@@ -2477,6 +2483,7 @@ impl StageResidual for FlowSource {
         inputs: &[f64],
         _z: &[f64],
         new: &mut SourceAccount,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         let flow = prescribed(&self.flow, old, dt_s)?;
@@ -2723,6 +2730,7 @@ impl StageResidual for HeatCapacity {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         let next = temperature(z[0])?;
@@ -2925,6 +2933,7 @@ impl StageResidual for Conductance {
         inputs: &[f64],
         _z: &[f64],
         _new: &mut (),
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         let (hot, cold) = (temperature(inputs[0])?, temperature(inputs[1])?);
         let rate_w = self.conductance_w_k * (hot - cold);
@@ -3132,6 +3141,7 @@ impl StageResidual for Heater {
         inputs: &[f64],
         _z: &[f64],
         new: &mut SourceAccount,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         let kelvin = temperature(inputs[0])?;
         let power_w = prescribed(&self.power_w, old, dt_s)?.max(0.0);
@@ -3337,6 +3347,7 @@ impl StageResidual for Gyrator {
         inputs: &[f64],
         _z: &[f64],
         _new: &mut (),
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         inputs_finite(inputs)?;
         Ok(Receipt::lossless(

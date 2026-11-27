@@ -423,6 +423,7 @@ impl StageResidual for Described {
         _: &[f64],
         z: &[f64],
         new: &mut Oscillator,
+        _: &Cx<'_>,
     ) -> Result<Receipt, Self::Error> {
         *new = Oscillator {
             position_m: z[0],
@@ -529,11 +530,11 @@ fn residual_tier_retains_original_unknowns_and_both_derivative_actions() {
         let (mut state, mut expected) = (STALE, STALE);
         assert_eq!(
             wrapped
-                .accept(&START, 0.01, &INPUTS, &z, &mut state)
+                .accept(&START, 0.01, &INPUTS, &z, &mut state, cx)
                 .unwrap(),
             wrapped
                 .inner()
-                .accept(&START, 0.01, &INPUTS, &z, &mut expected)
+                .accept(&START, 0.01, &INPUTS, &z, &mut expected, cx)
                 .unwrap()
         );
         assert_eq!(state, expected);

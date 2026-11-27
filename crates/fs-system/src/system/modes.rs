@@ -928,7 +928,7 @@ impl System {
             let (zr, inp_r) = (z_offsets[pos]..z_offsets[pos + 1], self.node_inputs(node));
             let (old, cand) = (self.accepted[node].as_ref(), self.candidate[node].as_mut());
             self.receipts[node] = self.nodes[node]
-                .stage_accept(old, dt_s, &self.inputs[inp_r], &sol.x[zr], cand)
+                .stage_accept(old, dt_s, &self.inputs[inp_r], &sol.x[zr], cand, cx)
                 .map_err(|error| self.refused(node, error, cx))?;
         }
         Ok(Ok(iters_u32))

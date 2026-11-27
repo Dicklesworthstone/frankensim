@@ -169,7 +169,7 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
                 assert_close(out_r[i], out_p[i], 1.0e-14, &format!("{tag} out[{i}]"));
             }
             let mut new_a = old;
-            let rec_a = mass.accept(&old, dt, &inputs, &z, &mut new_a).unwrap();
+            let rec_a = mass.accept(&old, dt, &inputs, &z, &mut new_a, cx).unwrap();
             assert_close(new_a.position_m, new_p.position_m, 1.0e-14, "Mass pos");
             assert_close(new_a.velocity_m_s, new_p.velocity_m_s, 1.0e-14, "Mass vel");
             assert_close(
@@ -205,7 +205,9 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
                 assert_close(out_r[i], out_p[i], 1.0e-13, &format!("{tag} out[{i}]"));
             }
             let mut new_a = 0.0;
-            let rec_a = spring.accept(&old, dt, &inputs, &z, &mut new_a).unwrap();
+            let rec_a = spring
+                .accept(&old, dt, &inputs, &z, &mut new_a, cx)
+                .unwrap();
             assert_close(new_a, new_p, 1.0e-14, "Spring ext");
             assert_close(
                 rec_a.stored_change_j,
@@ -245,7 +247,7 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
                 assert_close(out_r[i], out_p[i], 1.0e-13, &format!("{tag} out[{i}]"));
             }
             let mut new_a = 0.0;
-            let rec_a = hc.accept(&old, dt, &inputs, &z, &mut new_a).unwrap();
+            let rec_a = hc.accept(&old, dt, &inputs, &z, &mut new_a, cx).unwrap();
             assert_close(new_a, new_p, 1.0e-13, "HeatCapacity T");
             assert_close(
                 rec_a.stored_change_j,
@@ -283,7 +285,7 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
             for i in 0..3 {
                 assert_close(out_r[i], out_p[i], 1.0e-14, &format!("{tag} out[{i}]"));
             }
-            let rec_a = damper.accept(&(), dt, &inputs, &[], &mut ()).unwrap();
+            let rec_a = damper.accept(&(), dt, &inputs, &[], &mut (), cx).unwrap();
             assert_close(rec_a.dissipated_j, rec_p.dissipated_j, 1.0e-14, tag);
             assert_close(
                 rec_a.entropy_generated_j_per_k,
@@ -310,7 +312,9 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
             .unwrap();
         assert_close(out_fr[0], out_fp[0], 1.0e-14, "Force out");
         let mut new_fa = old_f;
-        let rec_fa = force.accept(&old_f, dt, &[0.9], &[], &mut new_fa).unwrap();
+        let rec_fa = force
+            .accept(&old_f, dt, &[0.9], &[], &mut new_fa, cx)
+            .unwrap();
         assert_close(
             rec_fa.stored_change_j,
             rec_fp.stored_change_j,
@@ -340,7 +344,9 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
         for i in 0..2 {
             assert_close(out_cr[i], out_cp[i], 1.0e-14, "Conductance out");
         }
-        let rec_ca = cond.accept(&(), dt, &[350.0, 295.0], &[], &mut ()).unwrap();
+        let rec_ca = cond
+            .accept(&(), dt, &[350.0, 295.0], &[], &mut (), cx)
+            .unwrap();
         assert_close(
             rec_ca.entropy_generated_j_per_k,
             rec_cp.entropy_generated_j_per_k,
@@ -366,7 +372,7 @@ fn residual_and_accept_match_propose_to_roundoff_for_all_seven_elements() {
         assert_close(out_hr[0], out_hp[0], 1.0e-14, "Heater out");
         let mut new_ha = old_h;
         let rec_ha = heater
-            .accept(&old_h, dt, &[312.0], &[], &mut new_ha)
+            .accept(&old_h, dt, &[312.0], &[], &mut new_ha, cx)
             .unwrap();
         assert_close(
             rec_ha.dissipated_j,
@@ -981,7 +987,7 @@ fn monolithic_equal_t_thermal_and_heat_capacity_endpoint_rejection() {
         cap.residual(&old_t, dt_s, &[q_w], &[z_bad], &mut r, &mut out, cx)
             .unwrap();
         let rec = cap
-            .accept(&old_t, dt_s, &[q_w], &[z_bad], &mut cand)
+            .accept(&old_t, dt_s, &[q_w], &[z_bad], &mut cand, cx)
             .unwrap();
         let lay = PortLayout::new(cap.ports()).unwrap();
         let (e0, e1) = (

@@ -1670,7 +1670,8 @@ pub trait LoadLine: Component {
 ///         -> Result<(), ()> { Ok(()) }
 ///     fn vjp_z(&self, _: &(), _: f64, _: &[f64], _: &[f64], _: &[f64], _: &[f64], _: &mut [f64], _: &Cx<'_>)
 ///         -> Result<(), ()> { Ok(()) }
-///     fn accept(&self, _: &(), _: f64, _: &[f64], _: &[f64], _: &mut ()) -> Result<Receipt, ()> {
+///     fn accept(&self, _: &(), _: f64, _: &[f64], _: &[f64], _: &mut (), _: &Cx<'_>)
+///         -> Result<Receipt, ()> {
 ///         Ok(Receipt::lossless(0.0, 0.0))
 ///     }
 /// }
@@ -1729,7 +1730,8 @@ pub trait StageResidual: Component {
         cx: &Cx<'_>,
     ) -> Result<(), Self::Error>;
 
-    /// Build the candidate state and receipt from converged unknowns.
+    /// Build the candidate state and receipt from converged unknowns. `cx`
+    /// serves any work the receipt needs, as it serves `propose`'s.
     fn accept(
         &self,
         old: &Self::State,
@@ -1737,6 +1739,7 @@ pub trait StageResidual: Component {
         inputs: &[f64],
         z: &[f64],
         new: &mut Self::State,
+        cx: &Cx<'_>,
     ) -> Result<Receipt, Self::Error>;
 }
 

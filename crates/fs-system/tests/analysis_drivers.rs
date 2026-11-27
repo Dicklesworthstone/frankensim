@@ -218,6 +218,7 @@ impl StageResidual for StageMass {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageErr> {
         *new = z[0];
         let v_mid = 0.5 * (old + *new);
@@ -402,6 +403,7 @@ impl StageResidual for StageSpring {
         _inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageErr> {
         *new = z[0];
         let f = self.discrete_force(*old, *new);
@@ -930,6 +932,7 @@ fn stationary_equilibrium_stage_residual_and_unified_analysis_switch() {
             inputs: &[f64],
             z: &[f64],
             new: &mut f64,
+            _cx: &Cx<'_>,
         ) -> Result<Receipt, StageErr> {
             let de = dt_s * z[0] * inputs[0];
             *new = old + de;

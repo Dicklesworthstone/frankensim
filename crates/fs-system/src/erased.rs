@@ -223,6 +223,7 @@ pub(crate) trait Node {
         _inputs: &[f64],
         _z: &[f64],
         _new: &mut dyn Any,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, OwnerError> {
         Err(OwnerError::stage_residual_not_offered())
     }
@@ -555,13 +556,14 @@ macro_rules! stage_residual_tier {
             inputs: &[f64],
             z: &[f64],
             new: &mut dyn Any,
+            cx: &Cx<'_>,
         ) -> Result<Receipt, OwnerError> {
             let old = state_of::<C::State>(old)?;
             let new = new
                 .downcast_mut::<C::State>()
                 .ok_or_else(OwnerError::state_type)?;
             self.0
-                .accept(old, dt_s, inputs, z, new)
+                .accept(old, dt_s, inputs, z, new, cx)
                 .map_err(OwnerError::new)
         }
     };

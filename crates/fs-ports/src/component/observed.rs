@@ -458,10 +458,11 @@ where
         inputs: &[f64],
         z: &[f64],
         new: &mut Self::State,
+        cx: &Cx<'_>,
     ) -> Result<Receipt, Self::Error> {
         self.length("inputs", self.inputs, inputs.len())?;
         self.inner
-            .accept(old, dt_s, inputs, z, new)
+            .accept(old, dt_s, inputs, z, new, cx)
             .map_err(ObservationError::Owner)
     }
 }

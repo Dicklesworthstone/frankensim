@@ -255,6 +255,7 @@ impl StageResidual for StageMass {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageOwnerRefusal> {
         *new = z[0];
         let v_mid = 0.5 * (old + *new);
@@ -446,6 +447,7 @@ impl StageResidual for StageDuffingSpring {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageOwnerRefusal> {
         *new = z[0];
         let f = self.force(*old, *new);
@@ -638,6 +640,7 @@ impl StageResidual for StageDamper {
         inputs: &[f64],
         _z: &[f64],
         (): &mut (),
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageOwnerRefusal> {
         let dv = inputs[0] - inputs[1];
         let t_k = inputs[2];
@@ -813,6 +816,7 @@ impl StageResidual for StageThermalBody {
         inputs: &[f64],
         z: &[f64],
         new: &mut f64,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, StageOwnerRefusal> {
         *new = z[0];
         let d_e = self.c_j_k * (*new - old);
@@ -1006,6 +1010,7 @@ impl StageResidual for AlgebraicSignal {
         _inputs: &[f64],
         _z: &[f64],
         new: &mut usize,
+        _cx: &Cx<'_>,
     ) -> Result<Receipt, Self::Error> {
         if self.fault.get() == 2 {
             return Err(StageOwnerRefusal(84));
