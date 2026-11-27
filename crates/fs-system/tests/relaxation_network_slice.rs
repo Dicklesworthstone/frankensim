@@ -18,6 +18,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::component::network::ViscousNetwork;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use fs_mbd::component::relaxation::{
@@ -992,6 +993,71 @@ fn the_relaxation_network_refuses_what_it_cannot_represent() {
         step(&start, &inputs, &cancelled).unwrap_err(),
         RelaxationNetworkRefusal::Cancelled
     );
+}
+
+/// A law that keeps every built form and factor and, once armed, requests
+/// cancellation on its gate whenever it is asked for one. Not a material.
+#[derive(Debug)]
+struct Tripwire {
+    gate: Cell<Option<&'static CancelGate>>,
+}
+
+impl Tripwire {
+    fn trip(&self) {
+        if let Some(gate) = self.gate.get() {
+            gate.request();
+        }
+    }
+}
+
+impl DampingLaw for Tripwire {
+    fn at_temperature(
+        &self,
+        _connector: usize,
+        reference: &PassiveBushingMatrix,
+        _temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        self.trip();
+        Ok(reference.clone())
+    }
+}
+
+impl ShiftLaw for Tripwire {
+    fn factor(&self, _connector: usize, _temperature_k: f64) -> Result<f64, String> {
+        self.trip();
+        Ok(1.0)
+    }
+}
+
+#[test]
+fn cancellation_after_the_entry_poll_is_seen_by_the_owners_poll() {
+    let start = RelaxationState {
+        bodies: moving(),
+        memory: preloaded(),
+    };
+    let mut inputs = HELD.to_vec();
+    inputs.extend([300.0; 4]);
+    let tripwire = || {
+        Rc::new(Tripwire {
+            gate: Cell::new(None),
+        })
+    };
+    let (by_form, by_factor) = (tripwire(), tripwire());
+    let following_forms = network(Gravity::ZERO).temperature_dependent(by_form.clone());
+    let shifted = network(Gravity::ZERO).shifted(by_factor.clone());
+    for (component, law) in [(following_forms, by_form), (shifted, by_factor)] {
+        let component = component.expect("law");
+        let gate: &'static CancelGate = Box::leak(Box::new(CancelGate::new_clock_free()));
+        propose(&component, &start, 2.0e-2, &inputs, gate).expect("step");
+        // Armed, the request arrives when the network asks the law, after
+        // the network's own entry poll and before the owner's first: only
+        // the owner's poll can see it.
+        law.gate.set(Some(gate));
+        assert_eq!(
+            propose(&component, &start, 2.0e-2, &inputs, gate).unwrap_err(),
+            RelaxationNetworkRefusal::Cancelled
+        );
+    }
 }
 
 #[test]

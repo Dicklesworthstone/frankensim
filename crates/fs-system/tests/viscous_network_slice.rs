@@ -14,6 +14,7 @@
 #[path = "viscous_network_slice/checkpoints.rs"]
 mod checkpoints;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -515,6 +516,59 @@ fn the_network_refuses_what_it_cannot_represent() {
     })
     .unwrap_err();
     assert_eq!(refused, ViscousNetworkRefusal::Cancelled);
+}
+
+/// A damping law that keeps every built form and, once armed, requests
+/// cancellation on its gate whenever it is asked for one. Not a material.
+#[derive(Debug)]
+struct Tripwire {
+    gate: Cell<Option<&'static CancelGate>>,
+}
+
+impl DampingLaw for Tripwire {
+    fn at_temperature(
+        &self,
+        _connector: usize,
+        reference: &PassiveBushingMatrix,
+        _temperature_k: f64,
+    ) -> Result<PassiveBushingMatrix, String> {
+        if let Some(gate) = self.gate.get() {
+            gate.request();
+        }
+        Ok(reference.clone())
+    }
+}
+
+#[test]
+fn cancellation_after_the_entry_poll_is_seen_by_the_owners_poll() {
+    let gate: &'static CancelGate = Box::leak(Box::new(CancelGate::new_clock_free()));
+    let (properties, links, start) = fixture();
+    let law = Rc::new(Tripwire {
+        gate: Cell::new(None),
+    });
+    let component = ViscousNetwork::temperature_dependent(
+        properties,
+        links,
+        Gravity::ZERO,
+        controls(),
+        law.clone(),
+    )
+    .expect("network");
+    let mut inputs = vec![0.0; 9];
+    inputs.extend([300.0; 4]);
+    let mut next = start.clone();
+    let mut outputs = [0.0; 13];
+    let mut step = || {
+        with_cx(gate, |cx| {
+            component.propose(&start, 1.0e-3, &inputs, &mut next, &mut outputs, cx)
+        })
+    };
+    assert!(matches!(step(), Ok(Proposal::Step(_))));
+    // Armed, the request arrives when the network asks the law for its
+    // forms, after the network's own entry poll and before the owner's
+    // first: only the owner's poll can see it.
+    law.gate.set(Some(gate));
+    assert_eq!(step().unwrap_err(), ViscousNetworkRefusal::Cancelled);
 }
 
 const FRACTION_A: f64 = 0.6;

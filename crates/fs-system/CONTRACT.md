@@ -2059,7 +2059,10 @@ bodies and two connectors, one with off-centre arms and rotational damping.
 - A propose returns the owner's own states, bit for bit, and the mean
   velocities of its displacements.
 - Refusals: no bodies, a connector to a missing body or to one body twice, a
-  temperature that is not positive, a state of the wrong length, cancellation.
+  temperature that is not positive, a state of the wrong length, cancellation
+  on entry, and cancellation that a damping law requests when the network
+  asks it for a form, after the network's entry poll, which only the
+  owner's poll sees.
 - The damping-heat pairing as a declared graph: connector 0's heat goes 60 %
   to one `HeatCapacity`, 30 % to another and the rest to a named sink,
   connector 1's heat all to the second (a shared receiver). Over 400 steps the

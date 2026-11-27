@@ -274,8 +274,10 @@ solves the bodies and the branches' stated axes as one dense system and
 refuses one that does not fit (at this writing, above 128 coordinates: six
 per body and one per nonzero factor row, so with every axis stated, bodies
 plus branches above 21), at the first step and not at construction; no analytic tangent;
-cancellation raised while the owner is inside a step is passed to it but not
-exercised by a test. Inherited from `RigidBody` and `ViscousNetwork` and not
+cancellation that a damping or shift law requests when the network asks it,
+after the network's entry poll, is refused by the owner's first poll
+(fs-system's `tests/relaxation_network_slice.rs`); one raised later, between
+the owner's own polls inside a step, is not exercised by a test. Inherited from `RigidBody` and `ViscousNetwork` and not
 checked here: the energy tolerance is sized by the kinetic terms, which a
 reviewer's emulation found too small for a very thin body (inertia ratio
 1e6) whose principal frame is rotated against the body frame.
