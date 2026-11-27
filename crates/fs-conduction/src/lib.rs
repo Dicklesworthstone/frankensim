@@ -370,6 +370,12 @@ pub enum ConductionError {
         /// The rendered upstream envelope/codec refusal.
         upstream: String,
     },
+    /// A body's pair-form conduction generation over a step is negative: the
+    /// mesh has a positive off-diagonal stiffness entry. It is not clipped.
+    NegativeEntropyGeneration {
+        /// The signed sum [J/K].
+        generated_j_per_k: f64,
+    },
 }
 
 impl fmt::Display for ConductionError {
@@ -514,6 +520,10 @@ impl fmt::Display for ConductionError {
             ConductionError::Snapshot { upstream } => {
                 write!(f, "solver-state snapshot refused: {upstream}")
             }
+            ConductionError::NegativeEntropyGeneration { generated_j_per_k } => write!(
+                f,
+                "the body's conduction generation over the step is {generated_j_per_k:e} J/K, negative"
+            ),
         }
     }
 }
@@ -550,6 +560,7 @@ impl ConductionError {
             ConductionError::LineSearchFailed { .. } => "conduction-line-search",
             ConductionError::LinearSolveFailed { .. } => "conduction-linear-solve",
             ConductionError::Snapshot { .. } => "conduction-snapshot",
+            ConductionError::NegativeEntropyGeneration { .. } => "conduction-negative-entropy",
         }
     }
 }

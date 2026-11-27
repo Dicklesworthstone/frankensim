@@ -37,8 +37,10 @@
 //! reference mass and conductivity can all come from one material card,
 //! behind the same ports ([`enthalpy`]).
 //!
-//! No claim: the entropy generated inside the body (conduction between nodes
-//! at different temperatures) is reported as zero, a lower bound. Robin,
+//! The entropy generated inside the body is the conduction term alone,
+//! `dt sum_{i<j} -K_ij (T_i - T_j)^2 / (T_i T_j)` over the owner's operator at
+//! the endpoint: a lower bound away from steady state, since backward Euler's
+//! temporal term is not added, and a negative sum refuses the step. Robin,
 //! Dirichlet and contact traces, volumetric sources and temperature-dependent
 //! sheet conduction are refused, not wrapped. Traces that
 //! are not coplanar, or do not cover each other, are refused.
@@ -60,6 +62,7 @@ use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
 use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
+use crate::assemble::assemble_operator_scaled_with_interfaces;
 use crate::interface::InterfaceResistance;
 use crate::interface::nonmatching::{
     NonmatchingOptions, TraceFace, degree_two_weights, trace_overlaps,
@@ -67,6 +70,7 @@ use crate::interface::nonmatching::{
 use crate::transient::backward_euler::{
     BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization,
 };
+use crate::transient::enthalpy::entropy::body_generation_j_k;
 use crate::{ConductionError, ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 
 pub mod enthalpy;
@@ -1141,6 +1145,20 @@ impl Component for ConductionBody<'_> {
             }
         };
         self.port_readings(&step.temperature, outputs);
+        // The operator the owner's energy equation uses at the endpoint.
+        let end = &step.temperature;
+        let system = assemble_operator_scaled_with_interfaces(
+            cx,
+            problem.mesh,
+            problem.boundary,
+            problem.material,
+            problem.source,
+            end,
+            None,
+            None,
+            problem.element_materials,
+        )?;
+        let generated_j_per_k = body_generation_j_k(cx, &system.operator, end, dt_s)?;
         let heat_j = heat_in_j(&self.patches, dt_s, inputs);
         let stored_old_j = self.stored_energy_j(old)?;
         let stored_new_j = self.stored_energy_j(&step.temperature)?;
@@ -1154,7 +1172,7 @@ impl Component for ConductionBody<'_> {
             stored_change_j: step.stored_energy_change_j,
             dissipated_j: 0.0,
             numerical_loss_j: heat_j - step.stored_energy_change_j,
-            entropy_generated_j_per_k: 0.0,
+            entropy_generated_j_per_k: generated_j_per_k,
             energy_tolerance_j: units * (stored_old_j.abs() + stored_new_j.abs() + heat_j.abs()),
             residual: step.relative_residual,
             tolerance: self.config.linear.tolerance,

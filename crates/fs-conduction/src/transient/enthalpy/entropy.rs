@@ -313,6 +313,34 @@ impl EnthalpyBackwardEuler<'_, '_> {
         Ok((solution, entropy))
     }
 
+    /// [`body_generation_j_k`] at the endpoint `specific_h` of a step from
+    /// `old_specific_h`, over the operator the energy equation assembles
+    /// there with its phase conductivity. No caloric entropy is evaluated.
+    #[cfg(feature = "component")]
+    pub(crate) fn endpoint_generation_j_k(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old_specific_h: &[f64],
+        specific_h: &[f64],
+        dt_s: f64,
+    ) -> Result<f64, EnthalpyError> {
+        let context = StepContext {
+            storage: self,
+            cx,
+            problem,
+            interfaces: None,
+            old: old_specific_h,
+            dt: dt_s,
+            pointwise_radiation: None,
+        };
+        let temperature = context.temperatures(specific_h)?;
+        let phase_scales = context.phase_scales(specific_h)?;
+        let system = context.assemble(&temperature, phase_scales.as_ref())?;
+        let generated = body_generation_j_k(cx, &system.operator, &temperature, dt_s)?;
+        Ok(generated)
+    }
+
     /// Measure an arbitrary nonradiative endpoint with the original physical
     /// operator. This performs no solve and applies no acceptance gate: signed
     /// production and the actual local residual remain available to a coupled
@@ -464,6 +492,45 @@ fn pair_generation(entry: f64, ti: f64, tj: f64) -> Result<f64, EnthalpyError> {
     }
     let delta = ti - tj;
     finite((-entry * (delta / ti)) * (delta / tj))
+}
+
+/// A body's conduction generation over a step [J/K]: [`evaluate`]'s pair
+/// form over the off-diagonal entries of `operator` at `temperature`, in its
+/// order and arithmetic, times `dt_s`. A negative sum is refused by name.
+#[cfg(any(test, feature = "component"))]
+pub(crate) fn body_generation_j_k(
+    cx: &Cx<'_>,
+    operator: &fs_sparse::Csr,
+    temperature: &[f64],
+    dt_s: f64,
+) -> Result<f64, crate::ConductionError> {
+    use crate::ConductionError;
+    let sum = || -> Result<f64, EnthalpyError> {
+        let mut conduction = Sum::default();
+        for (vertex, &ti) in temperature.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 {
+                poll(cx, vertex)?;
+            }
+            let (columns, entries) = operator.row(vertex);
+            for (&column, &entry) in columns.iter().zip(entries) {
+                if column != vertex {
+                    conduction.add(pair_generation(0.5 * entry, ti, temperature[column])?)?;
+                }
+            }
+        }
+        finite(dt_s * conduction.total()?)
+    };
+    match sum() {
+        Ok(generated) if generated < 0.0 => Err(ConductionError::NegativeEntropyGeneration {
+            generated_j_per_k: generated,
+        }),
+        Ok(generated) => Ok(generated),
+        Err(EnthalpyError::Conduction(error)) => Err(error),
+        Err(_) => Err(ConductionError::NonFinite {
+            field: "body entropy generation",
+            bits: f64::NAN.to_bits(),
+        }),
+    }
 }
 
 pub(super) fn evaluate(
@@ -681,4 +748,58 @@ pub(super) fn evaluate(
     result.balance_residual_j_k = closure.total()?;
     poll(context.cx, h.len())?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+    use fs_sparse::Coo;
+
+    use super::body_generation_j_k;
+    use crate::ConductionError;
+
+    /// One step of 1 s on the Laplacian with edge weights 1 (nodes 0-1), 1
+    /// (1-2) and -0.4 (0-2): positive semidefinite (eigenvalues 0, 0.2 and
+    /// 3), with one positive off-diagonal entry.
+    fn generation(temperature: [f64; 3]) -> Result<f64, ConductionError> {
+        let mut coo = Coo::new(3, 3);
+        for (i, j, weight) in [(0, 1, 1.0), (1, 2, 1.0), (0, 2, -0.4)] {
+            coo.push(i, j, -weight);
+            coo.push(j, i, -weight);
+            coo.push(i, i, weight);
+            coo.push(j, j, weight);
+        }
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let gate = CancelGate::new();
+            let key = StreamKey {
+                seed: 7,
+                kernel_id: 1109,
+                tile: 0,
+                iteration: 0,
+            };
+            let cx = Cx::new(&gate, arena, key, Budget::INFINITE, ExecMode::Deterministic);
+            body_generation_j_k(&cx, &coo.assemble(), &temperature, 1.0)
+        })
+    }
+
+    #[test]
+    fn a_negative_pair_sum_is_refused_by_name() {
+        // 81 / 10 + 8100 / 1000 - 0.4 * 9801 / 100 = -23.004 J/K.
+        let result = generation([1.0, 10.0, 100.0]);
+        let Err(ConductionError::NegativeEntropyGeneration { generated_j_per_k }) = result else {
+            panic!("{result:?}");
+        };
+        let error = (generated_j_per_k + 23.004).abs();
+        assert!(error <= 1.0e-12 * 23.004, "{generated_j_per_k}");
+    }
+
+    #[test]
+    fn the_same_nodes_near_a_uniform_temperature_generate() {
+        // Near a uniform T the sum is about dT' L dT / T^2 >= 0.
+        let generated = generation([300.0, 301.0, 302.0]).unwrap();
+        let expected = 1.0 / 90_300.0 + 1.0 / 90_902.0 - 1.6 / 90_600.0;
+        let error = (generated - expected).abs();
+        assert!(expected > 0.0 && error <= 1.0e-12 * expected, "{generated}");
+    }
 }

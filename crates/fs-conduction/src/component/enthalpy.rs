@@ -20,8 +20,9 @@
 //! and applies that one matrix and its transpose, so the two products are
 //! exact transposes.
 //!
-//! No claim: the entropy generated inside the body is reported as zero, a
-//! lower bound. The owner's refusals stand: a step whose endpoint leaves the
+//! The entropy generated inside the body is the conduction term alone, as for
+//! a conduction body, over the owner's endpoint operator with its phase
+//! conductivity. The owner's refusals stand: a step whose endpoint leaves the
 //! chart, or whose Newton solve misses its policy, refuses the step. Robin,
 //! Dirichlet and contact rows, volumetric sources and temperature-dependent
 //! sheet conduction are refused, as for a conduction body. Latent storage
@@ -278,6 +279,10 @@ impl Component for EnthalpyBody<'_, '_> {
             .solver
             .advance(cx, problem, None, old, dt_s, self.config)?;
         port_readings(&self.patches, &step.temperature, outputs);
+        let end = &step.specific_enthalpy_j_kg;
+        let generated_j_per_k = self
+            .solver
+            .endpoint_generation_j_k(cx, problem, old, end, dt_s)?;
         let heat_j = heat_in_j(&self.patches, dt_s, inputs);
         let stored_old_j = self.stored_energy_j(old)?;
         let stored_new_j = self.stored_energy_j(&step.specific_enthalpy_j_kg)?;
@@ -298,7 +303,7 @@ impl Component for EnthalpyBody<'_, '_> {
             stored_change_j: step.stored_energy_change_j,
             dissipated_j: 0.0,
             numerical_loss_j: heat_j - step.stored_energy_change_j,
-            entropy_generated_j_per_k: 0.0,
+            entropy_generated_j_per_k: generated_j_per_k,
             energy_tolerance_j: units * (stored_old_j.abs() + stored_new_j.abs() + heat_j.abs()),
             residual: step.newton.residual_norm,
             tolerance: newton

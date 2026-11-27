@@ -45,7 +45,7 @@ use fs_ports::component::{Component, Proposal};
 use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 use fs_solver::NewtonKrylovConfig;
 use fs_system::SystemBuilder;
-use fs_system::elements::{Heater, SourceAccount, Waveform};
+use fs_system::elements::{Conductance, HeatCapacity, Heater, SourceAccount, Waveform};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -565,6 +565,79 @@ fn a_heater_through_the_kernel_steps_an_enthalpy_body_as_the_owner_does() {
             ledger.energy_residual_j()
         );
         assert!(ledger.entropy_generated_j_per_k() > 0.0);
+    });
+}
+
+/// Claims, declared before the first run: the conduction body's steady slab
+/// (10 W in at the left, out through a 0.5 W/K wall into a 1e11 J/K lump,
+/// 500 s steps, steady at a step storing at most 1e-9 of `Q dt`, within 100
+/// steps) as an enthalpy body. Its own step from there generates
+/// `dt Q (1/T_right - 1/T_left)` of its port temperatures within 1e-6: the
+/// card's k(T) makes the discrete field not exactly planar, and a face's
+/// spread enters only at second order. The ledger books it within 1e-8.
+#[test]
+fn a_steady_enthalpy_slab_generates_its_heat_times_the_difference_of_its_end_reciprocals() {
+    const POWER_W: f64 = 10.0;
+    const DT_S: f64 = 500.0;
+    with_cx(|cx| {
+        let parts = parts();
+        let probe = body(cx, parts, &["left", "right"]);
+        let mut builder = SystemBuilder::new();
+        let ends = body(cx, parts, &["left", "right"]);
+        let node = builder
+            .add_with_tangent("body", ends, initial(parts))
+            .unwrap();
+        let heater = Heater::new(Waveform::constant(POWER_W).unwrap()).unwrap();
+        let heater = builder
+            .add_with_tangent("heater", heater, SourceAccount::default())
+            .unwrap();
+        let wall = builder
+            .add_with_tangent("wall", Conductance::new(0.5).unwrap(), ())
+            .unwrap();
+        let lump = builder
+            .add_with_tangent("lump", HeatCapacity::new(1.0e11).unwrap(), 300.0)
+            .unwrap();
+        let heat = builder.port(heater, "heat").unwrap();
+        let a = builder.port(wall, "a").unwrap();
+        let b = builder.port(wall, "b").unwrap();
+        for (one, other) in [
+            (builder.port(node, "left").unwrap(), heat),
+            (builder.port(node, "right").unwrap(), a),
+            (b, builder.port(lump, "heat").unwrap()),
+        ] {
+            builder.bond(one, other).unwrap();
+        }
+        let mut system = builder.seal().unwrap();
+        assert!(system.guess(heat, &[370.0]) && system.guess(a, &[320.0]));
+        assert!(system.guess(b, &[300.0]));
+        let booked =
+            |system: &fs_system::System| system.ledger().nodes[0].entropy_generated_j_per_k.value();
+        let (mut steps, mut stored_j, mut last_j_per_k) = (0, f64::INFINITY, 0.0);
+        while stored_j.abs() > 1.0e-9 * POWER_W * DT_S {
+            assert!(steps < 100, "not steady after {steps} steps: {stored_j} J");
+            let old = system.state::<Vec<f64>>(node).unwrap().clone();
+            let before = booked(&system);
+            system.step(DT_S, cx).unwrap();
+            let field = system.state::<Vec<f64>>(node).unwrap();
+            stored_j = probe.stored_energy_j(field).unwrap() - probe.stored_energy_j(&old).unwrap();
+            (steps, last_j_per_k) = (steps + 1, booked(&system) - before);
+        }
+        assert_eq!(system.ledger().nodes[0].name, "body");
+        let field = system.state::<Vec<f64>>(node).unwrap();
+        let (mut end, mut ends_k) = (Vec::new(), [0.0; 2]);
+        let heat_w = [POWER_W, -POWER_W];
+        let proposal = probe.propose(field, DT_S, &heat_w, &mut end, &mut ends_k, cx);
+        let Ok(Proposal::Step(receipt)) = proposal else {
+            panic!("the body did not step");
+        };
+        let generated = receipt.entropy_generated_j_per_k;
+        let expected = DT_S * POWER_W * (1.0 / ends_k[1] - 1.0 / ends_k[0]);
+        let gap = (generated - expected).abs() / expected;
+        let booked_gap = (last_j_per_k - generated).abs() / expected;
+        eprintln!(
+            "steady after {steps} steps: {generated} J/K a step, dt Q (1/Tc - 1/Th) {expected} J/K, {gap:e} relative; the ledger's last step {booked_gap:e} from it"
+        );
+        assert!(gap <= 1.0e-6 && booked_gap <= 1.0e-8);
     });
 }
 

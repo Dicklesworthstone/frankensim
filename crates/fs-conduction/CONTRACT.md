@@ -6520,8 +6520,19 @@ trace in place of a mean port, another Krylov tolerance, a k(T) body and
 that body under another Newton policy; two systems that differ in the
 body's conductivity alone are different problems (`System::problem_id`).
 
-Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. No test in this crate writes a durable snapshot: fs-cli's
+Entropy: the body reports the conduction term alone,
+`dt sum_{i<j} -K_ij (T_i - T_j)^2 / (T_i T_j)` over the operator the owner
+assembles at the endpoint, the enthalpy owner's pair form. It is exact at
+steady state and a lower bound away from it: backward Euler's temporal term,
+per node `C_i ln(T1/T0) - C_i (T1 - T0) / T1 >= 0`, is not included. A
+negative sum (a positive off-diagonal stiffness entry) refuses the step by
+name and is never clipped. A body admits only insulated regions, so the
+operator holds no consistent Robin face matrix, whose off-diagonal entries
+are positive; a body that admits a Robin face must revisit this refusal.
+The steady slab test holds the term to
+`Q (1/T_cold - 1/T_hot)` of the body's two port temperatures within 1e-9.
+
+Not covered: no test in this crate writes a durable snapshot: fs-cli's
 `tests/system_command/checkpoints.rs` saves and resumes scenes of these
 bodies. Of the solvers that are not plain, the coated one's refusal is
 tested and the material-sourced one's is not, and no test builds two
@@ -6645,8 +6656,13 @@ starts at another specific enthalpy, another port set, another step policy
 and another transpose policy; a body on a solver with a phase multiplier
 writes no words and reads none.
 
-Not covered: the entropy generated inside the body is reported as zero, a
-lower bound. A body on a solver that is not plain has no snapshot; of
+Entropy: the same conduction term over the owner's endpoint operator with
+its phase conductivity, refused when negative; the temporal term left out is
+per node `m_i (s(h1) - s(h0)) - m_i (h1 - h0) / T1 >= 0`. The steady slab
+test holds it to `Q (1/T_cold - 1/T_hot)` within 1e-6: the card's k(T)
+makes the discrete field not exactly planar.
+
+Not covered: a body on a solver that is not plain has no snapshot; of
 those, only the phase multiplier's refusal is tested.
 A latent plateau is the owner's and
 is not tested through ports, and the test card is synthetic. No contact
