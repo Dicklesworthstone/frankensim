@@ -1063,6 +1063,11 @@ pub(crate) fn admit_assembly_source(
                         "heat-partition-effusivity",
                         "initial-slip",
                         "query-at",
+                        "maximum-force",
+                        "maximum-penetration",
+                        "initial-closure",
+                        "approach-speed",
+                        "restitution",
                     ],
                     &scope,
                 )?;
@@ -1144,6 +1149,33 @@ pub(crate) fn admit_assembly_source(
                         state.push((k, q));
                     }
                 }
+                // A Hertz contact's ceilings, gap, initial closure and Hunt-Crossley loss; on
+                // every other kind these are refused by name, but `:gap` is a shear film's own.
+                let kind_sym = as_sym(req(&kw, "kind", &scope)?, "interface.kind")?;
+                let hertz = kind_sym == "hertz-contact";
+                for (flag, key, dims) in [
+                    ("maximum-force", "maximum_force", FORCE),
+                    ("maximum-penetration", "maximum_penetration", LENGTH),
+                    ("gap", "gap", LENGTH),
+                    ("initial-closure", "initial_closure", LENGTH),
+                    ("approach-speed", "approach_speed", VELOCITY),
+                    ("restitution", "restitution", Dims::NONE),
+                ] {
+                    let Some(n) = kw.get(flag) else {
+                        continue;
+                    };
+                    if !hertz && flag != "gap" {
+                        return Err(err(format!("{scope}: :{flag} needs a hertz contact")));
+                    }
+                    if hertz {
+                        let q = if dims == Dims::NONE {
+                            QtyAny::dimensionless(as_f64(n, flag)?)
+                        } else {
+                            as_qty_d(n, dims, flag)?
+                        };
+                        state.push((ParameterKey::new(key, dims), q));
+                    }
+                }
                 let bare = "a temperature source takes no card or state";
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
                     // A heat route is bookkeeping, not a material interface: no card.
@@ -1172,6 +1204,10 @@ pub(crate) fn admit_assembly_source(
                         third_body: None,
                         state,
                     },
+                    "hertz-contact" if kw.contains_key("card") || kw.contains_key("family") => {
+                        return Err(err(format!("{scope}: a Hertz contact takes no card")));
+                    }
+                    "hertz-contact" => DraftInterfaceKind::HertzContact { state },
                     "glue" => DraftInterfaceKind::Glue { law_card: card()? },
                     // Its bushing joins the body `:a`; it reads the cell `:b`.
                     "temperature-source" if kw.len() > 3 => {

@@ -1608,6 +1608,84 @@ fn dry_friction_fsim_effusivity_heat_partition() {
     assert!(msg.contains("cannot set both"), "got: {msg}");
 }
 
+/// A material pack `pack-<chem>` with a density and the elastic pair a Hertz contact reads.
+fn elastic_pack(chem: &str, rho: f64, young: f64, poisson: f64) -> RawCardPack {
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, chem);
+    for (name, value, dims, src) in [
+        ("density", rho, DENSITY, "asm-rho"),
+        ("young_modulus", young, MODULUS, "asm-e"),
+        ("poisson_ratio", poisson, Dims::NONE, "asm-nu"),
+    ] {
+        claims
+            .insert_claim(claim(name, value, dims, obs, src))
+            .unwrap();
+    }
+    pack_from_claims(chem, claims)
+}
+
+#[test]
+fn hertz_contact_fsim_elastic_impact_matches_closed_form() {
+    let (young, nu, rho, r, v0, dt) = (200.0e9_f64, 0.3_f64, 7850.0_f64, 0.01_f64, 0.5_f64, 5.0e-7);
+    let packs = CardPackSet::admit(vec![elastic_pack("hz-steel", rho, young, nu)]).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let src = r#"(assembly "hertz_impact" (version 1) (units "SI") (seed 0x46)
+  (versions (constellation "2026-07") (workspace "test-v1")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) (reference-state assembled)
+  (environment :ambient-temp 293.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 0.00015s :dt 0.0000005s :sample-rate 2000000Hz)
+  (part "ball" :kind rigid-body :geometry (sphere 0.01m) :material "hz-steel" :query-temp 293.15K :physics (mechanics) :fidelity lumped :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (-0.5m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (part "anvil" :kind driven-body :geometry (box 0.1m 0.1m 0.02m) :material "hz-steel" :query-temp 293.15K :physics (mechanics) :fidelity lumped)
+  (interface "hit" :kind hertz-contact :a "ball" :b "anvil" :maximum-force 10000N :maximum-penetration 0.001m)
+  (source "hold" :part "anvil" :port "mechanics" :history (constant 0m/s))
+  (probe "x" :kind field-quantity :target "ball" :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 2000000Hz)
+  (probe "v" :kind field-quantity :target "ball" :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 2000000Hz))"#;
+    let id = SolveRunId::parse_hex(&run_dry_fsim(&ledger, &packs, src).unwrap()).unwrap();
+    let exp = explain_assembly_run(&ledger, id).unwrap();
+    let pj = exp.probe_series_json.as_deref();
+    let (x, v) = (extract_probe_values(pj, "x"), extract_probe_values(pj, "v"));
+    // The junction hands each member port minus its body's velocity, so the closure grows at
+    // v_b - v_a: the ball (end a) above the anvil (end b) strikes it at -v0, and the closure is
+    // minus the ball's position. Hertz impact (Johnson 1985, sec. 11.4): K = 4/3 E* sqrt(R), the
+    // peak closure from m v0^2 / 2 = 2/5 K d^(5/2), the contact time 2 d / v0 times
+    // int_0^1 (1 - s^(5/2))^(-1/2) ds.
+    let m = rho * 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+    let k = 4.0 / 3.0 * young / (2.0 * (1.0 - nu * nu)) * r.sqrt();
+    let d_max = (5.0 * m * v0 * v0 / (4.0 * k)).powf(0.4);
+    let t_c = 2.943_275_184_324_705 * d_max / v0;
+    let peak = -x.iter().copied().fold(f64::MAX, f64::min);
+    let v_end = *v.last().unwrap();
+    let last = v
+        .iter()
+        .rposition(|w| (w - v_end).abs() > 1e-9 * v0)
+        .unwrap();
+    let t_end = f64::from(u32::try_from(last + 1).unwrap()) * dt;
+    assert!(
+        ((peak - d_max) / d_max).abs() <= 1e-3,
+        "peak {peak} m, Hertz {d_max} m"
+    );
+    assert!(((v_end - v0) / v0).abs() <= 1e-6, "rebound {v_end} m/s");
+    assert!(
+        (t_end - t_c).abs() <= 3.0 * dt,
+        "contact {t_end} s, Hertz {t_c} s"
+    );
+    let rcpt = exp.lowering_receipt_json.as_deref().unwrap();
+    assert!(rcpt.contains("effective_modulus") && rcpt.contains("effective_radius"));
+    for (bad, want) in [
+        (
+            src.replace(":kind hertz-contact", ":kind hertz-contact :card \"x\""),
+            "takes no card",
+        ),
+        (
+            src.replace(":kind hertz-contact", ":kind heat-route"),
+            ":maximum-force needs a hertz contact",
+        ),
+    ] {
+        let msg = run_dry_fsim(&ledger, &packs, &bad).unwrap_err();
+        assert!(msg.contains(want), "expected `{want}` in: {msg}");
+    }
+}
+
 #[test]
 fn dry_friction_fsim_reversing_table_belt() {
     let (packs, ledger) = (dry_friction_packs(), Ledger::open(":memory:").unwrap());

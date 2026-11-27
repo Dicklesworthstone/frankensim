@@ -87,6 +87,17 @@ CANCELLED=130}` table):
     opt-in effusivity heat partition between two thermal bodies),
     `initial_slip`, and extra card validity coordinates (each refused by name
     on other interface kinds or on duplicate `:query-at` keys).
+  - `:kind hertz-contact` lowers to fs-system's card-less `HertzContact`
+    (Sphere or Box primitives; both parts' `young_modulus` and
+    `poisson_ratio`; a card is refused). `:maximum-force <force>` and
+    `:maximum-penetration <length>` (the contact's ceilings), `:gap <length>`,
+    `:initial-closure <length>`, and `:restitution <number>` with
+    `:approach-speed <velocity>` (Hunt-Crossley loss) populate the same-named
+    state keys; each is refused by name on other kinds, except `:gap`, which
+    stays the shear film's own. The kernel's common-flow junction hands each
+    member port minus its body's velocity, so along the parts' common axis the
+    closure grows at `v_b - v_a`: the axis runs from end `b` to end `a`, and a
+    ball as `:a` above its anvil as `:b` strikes it moving at negative velocity.
   - `(table (<time> <value>) (<time> <value>) ...)` in a source's `:history`
     parses to `TimeHistory::PiecewiseLinear` (at least two `(time value)` knots
     with SI time and uniform value dimensions, refused by name otherwise).
