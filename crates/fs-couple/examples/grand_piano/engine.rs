@@ -700,10 +700,9 @@ impl Instrument {
                 // (Steinway Technical Reference, Grand Dampers, p. 8, step 1).
                 // Moving felt pads must have actually completed their lift;
                 // a new pedal target is not an instantaneous geometry change.
-                let raised=if let Some(dampers)=&self.felt_dampers {
+                h.latched=if let Some(dampers)=&self.felt_dampers {
                     dampers.is_fully_lifted(ci)
-                } else {self.sustain==1.0};
-                h.latched=h.held||raised;
+                } else {h.held||self.sustain==1.0};
             }
         }
         if !on {for h in &mut self.hammers {h.latched=false;}}

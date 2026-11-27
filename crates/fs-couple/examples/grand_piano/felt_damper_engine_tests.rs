@@ -139,10 +139,16 @@ fn pedal_piano() -> Instrument {
 
 #[test]
 fn sostenuto_observes_completed_felt_pad_lift_without_recapturing_later_travel() {
+    // Both the key lifter and the sustain rail prescribe the same finite travel.
+    for key_lift in [false,true] {check_felt_pad_capture(key_lift);}
+}
+
+fn check_felt_pad_capture(key_lift:bool) {
     let mut p=pedal_piano();
     assert!(!p.felt_dampers().unwrap().is_fully_lifted(0));
     assert!(!p.felt_dampers().unwrap().is_fully_lifted(1));
-    p.set_sustain(1.0).unwrap();p.set_sostenuto(true);
+    if key_lift {p.silent_key_down(69).unwrap();} else {p.set_sustain(1.0).unwrap();}
+    p.set_sostenuto(true);
     assert!(!p.hammers[0].latched,"the full-lift command has not moved the pad yet");
     for _ in 0..240 {p.step().unwrap();}
     let half=p.felt_dampers().unwrap().pad_height_m(0).unwrap();
@@ -154,8 +160,9 @@ fn sostenuto_observes_completed_felt_pad_lift_without_recapturing_later_travel()
     p.set_sostenuto(true);
     assert!(!p.hammers[0].latched,"the existing capture cannot expand during travel");
     p.set_sostenuto(false);p.set_sostenuto(true);
-    assert!(p.hammers[0].latched&&!p.hammers[0].held);
-    p.set_sustain(0.0).unwrap();
+    assert!(p.hammers[0].latched);
+    if key_lift {p.note_off(69).unwrap();} else {p.set_sustain(0.0).unwrap();}
+    assert!(!p.hammers[0].held);
     for _ in 0..64 {p.step().unwrap();}
     assert_eq!(p.felt_dampers().unwrap().pad_height_m(0),Some(0.001));
     p.set_sostenuto(false);
