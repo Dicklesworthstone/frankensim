@@ -148,8 +148,7 @@ For explicit downbearing, the ordinary static solve first establishes the
 equilibrium geometry and tangent shell stiffness. Reduction uses those tangent
 modes and preserves all six nodal translation/rotation components, bridge arms,
 and the same equilibrium surface for acoustic motion. It introduces no extra
-preload, geometry flattening, or second equilibrium solve. The flat-board mass
-and acoustic-refinement controls still refuse crowned input.
+preload, geometry flattening, or second equilibrium solve. Flat-panel mass options remain specific to the flat structural model.
 
 ## Limits that affect the sound
 
@@ -165,7 +164,12 @@ under downbearing*, JASA 123 (2008), DOI 10.1121/1.2836787.
 The pressure observer remains a **projected flat-baffle approximation**. At each
 actual shell quadrature point, signed normal displacement times true area is
 preserved, including in-plane displacement contributions. The equivalent source
-is relocated to z=0 for the existing Rayleigh observer. The structural mesh
+is relocated to z=0 for the existing Rayleigh observer. On a geometric pressure
+render, `--acoustic-refinement-levels 0..3` applies three positive integration
+points to each of `4^level` subtriangles per equilibrium facet, up to 120,000
+points in total. This resolves propagation phase across the facet while retaining
+its signed normal motion, bridge response and modal volume. The same rule
+applies to Ritz-reduced modes. The structural mesh
 remains fully 3-D. This acoustic source relocation is not an exact exterior
 solution; source heights, finite-rim diffraction, both radiating sides, lid,
 room scattering and air backreaction require a separate acoustic model.

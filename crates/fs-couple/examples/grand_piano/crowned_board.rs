@@ -14,7 +14,7 @@
 //! See Mamou-Mani et al., JASA 123 (2008), doi:10.1121/1.2836787 for the
 //! distinction between initial crown and a downbearing/prestress calculation.
 use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample,
-    motion::{MotionSurface, SourceBridgeFrame}, reduction, ritz};
+    acoustic_quadrature, motion::{MotionSurface, SourceBridgeFrame}, reduction, ritz};
 use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_plate::{PlateSection, ShellMesh, ShellModel, ShellSupport};
 use fs_plate::shell::stiffened::{BeamSection, ShellBeam, assemble_stiffened_shell};
@@ -80,6 +80,7 @@ pub struct CrownedBoard {
     mesh:ShellMesh, sections:Vec<PlateSection>, beams:Vec<ShellBeam>, fixed:Vec<usize>,
     sites:Vec<Site>, damping:f64, source:String,
     preload:Option<downbearing::Specification>,
+    acoustic_refinement_levels:usize,
     pub max_height_m:f64,
     pub area_m2:f64,
     pub mass_kg:f64,
@@ -197,7 +198,14 @@ impl CrownedBoard {
         }
         if !mass_kg.is_finite() || mass_kg<=0. {return Err("crowned board mass overflow".into());}
         let max_height_m=mesh.nodes.iter().map(|p|p[2].abs()).fold(0.,f64::max);
-        Ok(Self {mesh,sections,beams,fixed,sites,damping,source,preload,max_height_m,area_m2,mass_kg})
+        Ok(Self {mesh,sections,beams,fixed,sites,damping,source,preload,max_height_m,area_m2,mass_kg,
+            acoustic_refinement_levels:0})
+    }
+    /// Refine the projected equilibrium radiation surface before the modal solve.
+    pub fn with_acoustic_refinement(mut self, levels:usize)->Result<Self,String> {
+        acoustic_quadrature::validate_refinement(self.mesh.tris.len(),levels)?;
+        self.acoustic_refinement_levels=levels;
+        Ok(self)
     }
     pub fn prepare(&self,keys:&[u8],upper_hz:f64)->Result<PreparedBoard,String> {
         self.prepare_inner(keys,upper_hz,false)
@@ -295,19 +303,33 @@ impl CrownedBoard {
             modes.push(BoardMode {frequency_hz:pair.lambda.sqrt()/TAU,damping_ratio,bridge,volume:0.});
             intervals.push((pair.interval.0.sqrt()/TAU,pair.interval.1.sqrt()/TAU));
         }
-        let mut surface=Vec::with_capacity(self.mesh.tris.len()*3);
+        let volume_rule=acoustic_quadrature::triangle_weights(0);
+        let quadrature=acoustic_quadrature::triangle_weights(self.acoustic_refinement_levels);
+        let mut surface=Vec::with_capacity(acoustic_mesh.tris.len()*quadrature.len());
         let mut surface_area=0.;
         for (element,tri) in acoustic_mesh.tris.iter().enumerate() {
             let g=acoustic_mesh.facet(element).map_err(|e|e.to_string())?;
             surface_area+=g.area_m2;
-            let n=g.frame[2];let projected=g.area_m2*n[2]/3.;
-            for weights in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
+            let n=g.frame[2];
+            let area_xy=g.area_m2*n[2];
+            let projected=area_xy/quadrature.len() as f64;
+            let normal_rows:Vec<_>=pairs.iter().map(|pair|
+                tri.map(|node|dot(n,nodal(&model,&pair.phi,node,0)))).collect();
+            let field=|row:&[f64;3], weights:&[f64;3]|->f64 {
+                (0..3).map(|i|weights[i]*row[i]/n[2]).sum()
+            };
+            // Volume is already integrated exactly by the original rule. Keep its
+            // reduction order across levels; only retarded pressure needs more points.
+            for weights in &volume_rule {
+                for (mode,row) in modes.iter_mut().zip(&normal_rows) {
+                    mode.volume+=area_xy/3.*field(row,weights);
+                }
+            }
+            for weights in &quadrature {
                 let position=[(0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][0]).sum(),
                     (0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][1]).sum(),0.];
-                let shape:Vec<f64>=pairs.iter().map(|pair|(0..3).map(|i|
-                    weights[i]*dot(n,nodal(&model,&pair.phi,tri[i],0))/n[2]).sum()).collect();
+                let shape:Vec<f64>=normal_rows.iter().map(|row|field(row,weights)).collect();
                 if shape.iter().any(|x|!x.is_finite()) {return Err("crowned radiation projection overflow".into());}
-                for (mode,&value) in modes.iter_mut().zip(&shape) {mode.volume+=projected*value;}
                 surface.push(SurfaceSample {position_m:position,area_m2:projected,mode_shape:shape});
             }
         }
@@ -318,6 +340,10 @@ impl CrownedBoard {
             Some(MotionSurface::new(acoustic_mesh,shapes)?)
         } else {None};
         let mut provenance=format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium);
+        if self.acoustic_refinement_levels!=0 {
+            write!(provenance,"; projected shell acoustic-only refinement level {} ({} surface samples)",
+                self.acoustic_refinement_levels,surface.len()).unwrap();
+        }
         let (physical_damping,reduction)=if let Some(value)=reduced {
             provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected equilibrium pencil only",
                 value.report.source_modes,modes.len(),value.report.protected_low_modes));

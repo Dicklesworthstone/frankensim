@@ -51,7 +51,7 @@ fn board_override_never_allows_conflicting_export_or_silent_preset_fallback() {
     assert!(prepare_geometric_board(&shell(),&[69],400.,true,false,false,0).is_err());
     assert!(prepare_geometric_board(&shell(),&[69],400.,false,true,false,0).is_err());
     assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,true,0).is_err());
-    assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,false,1).is_err());
+    assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,false,4).is_err());
     assert!(prepare_geometric_board(&shell().replace("pretension,0","pretension,10"),&[69],400.,false,false,false,0).is_err());
 }
 
@@ -91,11 +91,12 @@ fn crowned_geometry_custom_felt_and_spatial_release_share_the_existing_main_audi
 fn reduced_crown_reaches_played_pressure_with_full_material_loss() {
     let o=options(&["--preset","steinway-d","--board-geometry","supplied.fss",
         "--render","piano.wav","--modes","12","--board-band-hz","20000",
-        "--board-reduction","3,1,60,600"]).unwrap();
+        "--board-reduction","3,1,60,600","--acoustic-refinement-levels","2"]).unwrap();
     let text=shell().replace("node,4,0.5,0.5,","node,4,0.43,0.54,")
         +"bridge_arm,69,0.013,-0.027,0.019\n";
     let board=prepare_geometric_board_with_reduction(&text,&[69],o.board_band_hz,
-        false,false,false,0,true,o.board_reduction.as_ref()).unwrap();
+        false,false,false,o.acoustic_refinement_levels,true,o.board_reduction.as_ref()).unwrap();
+    assert_eq!(board.surface.len(),4*3*16);
     assert!(board.reduction.as_ref().unwrap().source_modes>board.modes.len());
     assert_eq!(board.modes.len(),3);
     assert_eq!(board.physical_damping.as_ref().unwrap().len(),9);
@@ -119,4 +120,48 @@ fn reduced_crown_reaches_played_pressure_with_full_material_loss() {
         output
     };
     assert_eq!(run(false),run(true));
+}
+
+#[test]
+fn refined_crown_preserves_the_loaded_shell_motion_and_signed_flux() {
+    let text = shell() + "preload-reference,unloaded\ndownbearing-source,estimated,quadrature test\ndownbearing,69,10\n";
+    let prepare = |level| prepare_geometric_board_motion(
+        &text, &[69], 400., false, false, false, level, true).unwrap();
+    let coarse = prepare(0);
+    let fine = prepare(3);
+    let motion = fine.motion.as_ref().unwrap();
+    assert_eq!(motion.shapes, coarse.motion.as_ref().unwrap().shapes);
+    assert_eq!(motion.mesh.nodes, coarse.motion.as_ref().unwrap().mesh.nodes);
+    assert!(motion.mesh.nodes[4][2] < 0.015);
+    assert_eq!(fine.frequency_intervals_hz, coarse.frequency_intervals_hz);
+    for (new, old) in fine.modes.iter().zip(&coarse.modes) {
+        assert_eq!(new.volume, old.volume);
+        assert_eq!(new.bridge, old.bridge);
+    }
+
+    // Reconstruct the physical flux independently from each projected point's
+    // x,y coordinates and the six-DOF equilibrium shell's nodal translations.
+    let per_facet = 3 * 64;
+    assert_eq!(fine.surface.len(), per_facet * motion.mesh.tris.len());
+    for (element, points) in fine.surface.chunks_exact(per_facet).enumerate() {
+        let facet = motion.mesh.facet(element).unwrap();
+        let normal = facet.frame[2];
+        let tri = motion.mesh.tris[element];
+        let [a,b,c] = tri.map(|node| motion.mesh.nodes[node]);
+        let det = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+        for p in points {
+            let [x,y,z] = p.position_m;
+            assert_eq!(z, 0.);
+            let v = ((x-a[0])*(c[1]-a[1]) - (y-a[1])*(c[0]-a[0])) / det;
+            let w = ((b[0]-a[0])*(y-a[1]) - (b[1]-a[1])*(x-a[0])) / det;
+            let bary = [1.-v-w,v,w];
+            assert!(bary.iter().all(|v|*v>0.));
+            assert!((p.area_m2*per_facet as f64 - det/2.).abs() < 1e-13);
+            for (observed,shape) in p.mode_shape.iter().zip(&motion.shapes) {
+                let physical:f64 = (0..3).map(|i| bary[i] * (0..3)
+                    .map(|d|normal[d]*shape[tri[i]][d]).sum::<f64>()).sum();
+                assert!((observed*normal[2]-physical).abs() < 1e-12*(1.+physical.abs()));
+            }
+        }
+    }
 }

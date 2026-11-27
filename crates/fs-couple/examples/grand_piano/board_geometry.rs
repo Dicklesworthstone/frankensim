@@ -30,7 +30,7 @@ pub mod ritz;
 #[path = "board_reduction.rs"]
 pub(super) mod reduction;
 #[path = "board_acoustic_quadrature.rs"]
-mod acoustic_quadrature;
+pub(super) mod acoustic_quadrature;
 #[path = "board_loss.rs"]
 pub mod loss;
 use acoustic_quadrature::triangle_weights as acoustic_triangle_weights;
@@ -355,9 +355,7 @@ impl BoardGeometry {
     /// Each sample evaluates the original P1 or edge-cubic displacement field,
     /// including the cubic slope coordinates. Crowned boards remain separate.
     pub fn with_acoustic_refinement(mut self, levels: usize) -> Result<Self, String> {
-        if levels > 3 || self.chart.mesh.tris.len() * 3 * 4usize.pow(levels as u32) > 120_000 {
-            return Err("acoustic refinement exceeds level 3 or the 120000-point receiver budget".into());
-        }
+        acoustic_quadrature::validate_refinement(self.chart.mesh.tris.len(), levels)?;
         self.acoustic_refinement_levels = levels;
         Ok(self)
     }

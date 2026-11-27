@@ -73,7 +73,8 @@ coordinates are unchanged. This allows finer integration of propagation phase
 and spatial cancellation without rebuilding the mechanical mesh or replacing
 the cubic field with nodal P1 interpolation. Level 0 preserves the original
 quadrature path; the total 120,000-point receiver limit still applies. Crowned
-shells and diagnostic volume output remain outside this flat-panel control.
+shells use the same subdivision on their projected equilibrium facets (see
+[CROWNED_BOARD.md](CROWNED_BOARD.md)). Acoustic refinement requires pressure output.
 
 An independent spatial integration regression prescribes a quadratic normal
 acceleration on an oblique triangle, observes two off-axis receivers, and checks

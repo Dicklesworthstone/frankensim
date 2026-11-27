@@ -119,11 +119,10 @@ The optional FSB stiffener-mass row accepts lumped, consistent-hermite or
 consistent-eccentric. The last adds the supplied bending rotary and offset
 centroid inertia to Hermite translation; it does not infer torsional polar inertia.
 These opt-in corrections have not passed a perceptual similarity gate.
---acoustic-refinement-levels uniformly subdivides flat radiating triangles for
-Rayleigh integration, evaluating the same P1 or edge-cubic displacement field
-at every new point. It preserves the structural mesh, modes and bridge mechanics.
-Level 0 is unchanged; the 120000-point receiver budget still applies.
-Crowned fields and diagnostic-volume output are excluded.
+--acoustic-refinement-levels subdivides the Rayleigh integration triangles for
+flat P1, edge-cubic and projected crowned boards, including loaded equilibria.
+Every point samples the original displacement field. Levels 0..3 share the
+120000-point receiver budget. This option requires geometric pressure output.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
 published shank geometry reduced to rigid rotation plus one bending coordinate.
@@ -610,7 +609,7 @@ impl Options {
         }
         if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
             && (!geometric || options.render.is_none() || options.diagnostic_volume)) {
-            return Err("--acoustic-refinement-levels requires a flat P1 or edge-cubic geometric pressure render and levels 0..3".into());
+            return Err("--acoustic-refinement-levels requires a geometric pressure render and levels 0..3".into());
         }
         if options.equilibrate_board_mass && !geometric {
             return Err("--equilibrate-board-mass requires a flat geometric board".into());
@@ -907,29 +906,23 @@ fn prepare_geometric_board_with_source_ports(text: &str, keys: &[u8], band_hz: f
     acoustic_refinement_levels: usize, retain_motion: bool,
     reduction: Option<&board_geometry::ritz::RitzOptions>,
     frames: Option<&[board_geometry::motion::SourceBridgeFrame]>) -> Result<board_geometry::PreparedBoard, String> {
-    if let Some(reduction) = reduction {
-        if crowned_board::is_crowned(text) {
-            if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
-                return Err("flat-board mass controls require a flat geometric board".into());
-            }
-            return crowned_board::CrownedBoard::read(text)?
-                .prepare_reduced_with_ports(keys, band_hz, retain_motion, reduction, frames);
-        }
-        return board_geometry::BoardGeometry::read(text)?
-            .with_acoustic_refinement(acoustic_refinement_levels)?
-            .prepare_reduced_with_ports(keys, band_hz, retain_motion, equilibrate_mass,
-                consistent_mass, edge_cubic_mass, reduction, frames);
-    }
     if crowned_board::is_crowned(text) {
-        if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
+        if equilibrate_mass || consistent_mass || edge_cubic_mass {
             return Err("flat-board mass controls require a flat geometric board".into());
         }
-        let geometry = crowned_board::CrownedBoard::read(text)?;
-        if retain_motion { geometry.prepare_with_motion(keys, band_hz) }
+        let geometry = crowned_board::CrownedBoard::read(text)?
+            .with_acoustic_refinement(acoustic_refinement_levels)?;
+        if let Some(reduction) = reduction {
+            geometry.prepare_reduced_with_ports(keys, band_hz, retain_motion, reduction, frames)
+        } else if retain_motion { geometry.prepare_with_motion(keys, band_hz) }
         else { geometry.prepare(keys, band_hz) }
     } else {
         let geometry=board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?;
+        if let Some(reduction) = reduction {
+            return geometry.prepare_reduced_with_ports(keys, band_hz, retain_motion, equilibrate_mass,
+                consistent_mass, edge_cubic_mass, reduction, frames);
+        }
         if retain_motion && edge_cubic_mass { geometry.prepare_with_motion_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if retain_motion && consistent_mass { geometry.prepare_with_motion_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if retain_motion && equilibrate_mass { geometry.prepare_with_motion_mass_equilibrated(keys,band_hz) }

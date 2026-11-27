@@ -1,10 +1,15 @@
-//! Positive equal-area quadrature for the existing flat-board displacement.
-//! Refinement only samples that same P1 or edge-cubic field more densely; it
-//! never changes structural nodes, modal coordinates, bridge maps or forces.
+//! Equal-area integration of flat-panel and projected shell radiation.
+
+pub(crate) fn validate_refinement(facets: usize, levels: usize) -> Result<(), String> {
+    if levels > 3 || facets > 120_000 / (3 * 4usize.pow(levels as u32)) {
+        return Err("acoustic refinement exceeds level 3 or the 120000-point receiver budget".into());
+    }
+    Ok(())
+}
 
 /// Uniform barycentric subdivision. Level zero deliberately returns the
 /// original coordinates directly, preserving its floating-point path.
-pub(super) fn triangle_weights(levels: usize) -> Vec<[f64; 3]> {
+pub(crate) fn triangle_weights(levels: usize) -> Vec<[f64; 3]> {
     let rule = [
         [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
         [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
