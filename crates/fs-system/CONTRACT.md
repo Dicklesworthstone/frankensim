@@ -4550,6 +4550,14 @@ recovery or breakdown, or resolve arcing and ideal-storage switching impulses.
 The caller owns temporal resolution and event schedules; a binary command is
 not a continuous control law for instantaneous feedback inside a nonlinear solve.
 
+`IdealSwitch::in_domain(kind)` is the same law on a mechanical or rotational
+port, where closed (zero effort) is free, a cut or a released clutch, and open
+(zero flow) holds the port still, a latch or a brake. Thermal, fluid, magnetic
+and chemical ports are refused by name. Only these two append an identity
+word, naming the domain; refusal texts keep their electrical words. A test
+frees a held mass on a spring at a scheduled event, step by step on the
+midpoint rule's turn.
+
 Run `cargo run -p fs-system --example electrical_switching` for two RC branches
 whose resistors heat a shared thermal capacity. One diode blocks discharge
 when its supply reverses; a commanded switch interrupts the other branch's

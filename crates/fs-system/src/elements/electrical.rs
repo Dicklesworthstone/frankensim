@@ -1,9 +1,10 @@
-//! Ideal electrical switching relations on the kernel's condensed load line.
+//! Ideal switching relations on the kernel's condensed load line.
 
 use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
+use fs_ports::component::Carrier;
 use fs_ports::component::{Class, Component, LoadLine, PortRole, PortSpec, Proposal, Receipt};
 use fs_ports::{PortKind, StableId};
 
@@ -117,11 +118,13 @@ impl LoadLine for IdealDiode {
 
 /// A lossless ideal switch whose `closed` signal is exactly zero or one.
 ///
-/// Electrical port `p` receives current [A] and returns voltage [V]. When
-/// `closed = 1`, voltage is zero and either current direction is allowed.
-/// When `closed = 0`, current is zero and the connected circuit determines
-/// voltage. Add with [`crate::SystemBuilder::add_on_line`]. Inputs are ordered
-/// `[current, closed]`; the only output is voltage.
+/// Port `p` receives a flow and returns an effort. `closed = 1` sets zero
+/// effort, either flow direction allowed; `closed = 0` sets zero flow, the
+/// connected system determining the effort. Electrically ([`Self::new`])
+/// closed is a short; on a mechanical or rotational port ([`Self::in_domain`])
+/// closed is free (a cut: no force or torque) and open holds the port still
+/// (a latch or a brake). Add with [`crate::SystemBuilder::add_on_line`].
+/// Inputs are ordered `[flow, closed]`; the only output is the effort.
 ///
 /// The command is held over a step. Supply prescribed changes through
 /// [`crate::SystemBuilder::scheduled_boundary`] or a source that announces
@@ -138,13 +141,29 @@ impl IdealSwitch {
     /// Construct an ideal switch with electrical `p` and signal `closed`.
     #[must_use]
     pub fn new() -> Self {
+        Self::on(PortKind::ElectricalVoltageCurrent)
+    }
+
+    /// The same law on a port of the power domain `kind`, read as above.
+    ///
+    /// # Errors
+    /// A thermal, fluid, magnetic or chemical `kind`, whose zero effort is
+    /// not a short or a free joint (zero kelvin, zero absolute pressure).
+    pub fn in_domain(kind: PortKind) -> Result<Self, ElementError> {
+        match kind {
+            PortKind::ElectricalVoltageCurrent
+            | PortKind::MechanicalForceVelocity
+            | PortKind::RotationalTorqueAngularVelocity => Ok(Self::on(kind)),
+            _ => Err(ElementError::Law {
+                reason: format!("an ideal switch is not admitted in the {kind:?} domain"),
+            }),
+        }
+    }
+
+    fn on(kind: PortKind) -> Self {
         Self {
             ports: [
-                port(
-                    "p",
-                    Some(PortKind::ElectricalVoltageCurrent),
-                    PortRole::FlowIn,
-                ),
+                port("p", Some(kind), PortRole::FlowIn),
                 PortSpec::signal_in(
                     StableId::new("closed").expect("static switch signal name"),
                     NonZeroUsize::MIN,
@@ -171,6 +190,15 @@ impl Component for IdealSwitch {
         codec_grammar: "no words",
         codec_version: 1,
     });
+
+    fn identity_words(&self, words: &mut Vec<u64>) {
+        // An electrical switch appends nothing, as before it took a domain.
+        match self.ports[0].carrier() {
+            Carrier::Power(PortKind::MechanicalForceVelocity) => words.push(1),
+            Carrier::Power(PortKind::RotationalTorqueAngularVelocity) => words.push(2),
+            _ => {}
+        }
+    }
 
     fn encode_state(&self, (): &(), _words: &mut Vec<u64>) -> bool {
         true

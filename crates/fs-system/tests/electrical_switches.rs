@@ -11,8 +11,8 @@ use fs_ports::PortKind;
 use fs_ports::component::conformance::{Case, check_component, check_load_line};
 use fs_ports::component::{Component, LoadLine, PortLayout, Proposal, audit_step};
 use fs_system::elements::{
-    Admittance, ElementError, Force, IdealDiode, IdealSwitch, SignalClock, SignalSource,
-    SourceAccount, Storage, Waveform,
+    Admittance, ElementError, Force, IdealDiode, IdealSwitch, Mass, Motion, SignalClock,
+    SignalSource, SourceAccount, Spring, Storage, Waveform,
 };
 use fs_system::{NodeId, RouteTemperature, SolveConfig, System, SystemBuilder, heat_sink};
 
@@ -112,6 +112,7 @@ fn diode_complementarity_and_switch_open_short_laws_close_the_first_law() {
             check_component(&diode, &diode_case, cx).unwrap();
             check_load_line(&diode, &diode_case, &[0.75], cx).unwrap();
         }
+        let latch = IdealSwitch::in_domain(PortKind::MechanicalForceVelocity).unwrap();
         for inputs in [[-3.0, 1.0], [0.0, 1.0], [3.0, 1.0], [0.0, 0.0]] {
             let case = Case {
                 state: &(),
@@ -121,6 +122,8 @@ fn diode_complementarity_and_switch_open_short_laws_close_the_first_law() {
             };
             check_component(&switch, &case, cx).unwrap();
             check_load_line(&switch, &case, &[0.75], cx).unwrap();
+            check_component(&latch, &case, cx).unwrap();
+            check_load_line(&latch, &case, &[0.75], cx).unwrap();
         }
     });
 }
@@ -364,6 +367,73 @@ fn native_codecs_are_stateless_and_the_two_laws_have_distinct_identities() {
     codec(IdealDiode::default());
     codec(IdealSwitch::default());
     assert_ne!(IdealDiode::STATE_CHARTER, IdealSwitch::STATE_CHARTER);
+    // The domain is part of the identity: electrical appends none, as before.
+    let identity = |switch: IdealSwitch| {
+        let mut words = Vec::new();
+        switch.identity_words(&mut words);
+        words
+    };
+    assert!(identity(IdealSwitch::new()).is_empty());
+    let mechanical = IdealSwitch::in_domain(PortKind::MechanicalForceVelocity);
+    let rotational = IdealSwitch::in_domain(PortKind::RotationalTorqueAngularVelocity);
+    let words = [mechanical, rotational].map(|switch| identity(switch.unwrap()));
+    assert_eq!(words, [[1], [2]]);
+    for kind in [
+        PortKind::ThermalTemperatureEntropy,
+        PortKind::FluidPressureFlux,
+        PortKind::MagneticMmfFluxRate,
+        PortKind::ChemicalPotentialAmountFlow,
+    ] {
+        let reason = IdealSwitch::in_domain(kind).unwrap_err().to_string();
+        assert!(reason.contains(&format!("{kind:?} domain")), "{reason}");
+    }
+}
+
+/// A mass held still against a stretched spring by an open mechanical switch
+/// is freed when the command closes at a scheduled event (binary times, so
+/// steps end on it); then the midpoint rule turns `(omega x, v)` by
+/// `phi = 2 atan(omega dt / 2)` a step: `x0 cos(n phi)`, `omega x0 sin(n phi)`.
+#[test]
+fn a_mechanical_switch_holds_a_mass_until_its_command_frees_it() {
+    let (mass_kg, stiffness_n_m, stretch_m) = (0.5, 200.0, 0.01);
+    let (dt_s, held, steps) = (1.0 / 1024.0, 64_u32, 464_u32);
+    let release_s = f64::from(held) * dt_s;
+    let mechanical = PortKind::MechanicalForceVelocity;
+    let rest = Motion {
+        position_m: 0.0,
+        velocity_m_s: 0.0,
+    };
+    let mut b = SystemBuilder::new();
+    let body = Mass::new(mass_kg).unwrap();
+    let mass = b.add_with_tangent("mass", body, rest).unwrap();
+    let spring = Spring::in_domain(mechanical, stiffness_n_m, 0.0).unwrap();
+    let spring = b.add_with_tangent("spring", spring, stretch_m).unwrap();
+    let latch = IdealSwitch::in_domain(mechanical).unwrap();
+    let latch = b.add_on_line("latch", latch, ()).unwrap();
+    let p = |b: &SystemBuilder, node, name| b.port(node, name).unwrap();
+    let members = [p(&b, spring, "a"), p(&b, latch, "p")];
+    b.common_flow(p(&b, mass, "p"), &members).unwrap();
+    let command = move |time: f64, _: f64, out: &mut [f64]| out[0] = f64::from(time >= release_s);
+    b.scheduled_boundary(p(&b, latch, "closed"), Box::new(command), vec![release_s])
+        .unwrap();
+    b.boundary(p(&b, spring, "b"), Box::new(|_, _, out| out[0] = 0.0))
+        .unwrap();
+    let mut system = seal(b);
+    let omega = f64::sqrt(stiffness_n_m / mass_kg);
+    let (phi, speed) = (2.0 * (0.5 * omega * dt_s).atan(), omega * stretch_m);
+    let rounding = |size: f64, k: u32| 16.0 * f64::EPSILON * size * f64::from(k);
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for k in 1..=steps {
+            system.step(dt_s, cx).unwrap();
+            let x = *system.state::<f64>(spring).unwrap();
+            let v = system.state::<Motion>(mass).unwrap().velocity_m_s;
+            let turn = f64::from(k.saturating_sub(held)) * phi;
+            near(x, stretch_m * turn.cos(), rounding(stretch_m, k));
+            near(v, speed * turn.sin(), rounding(speed, k));
+        }
+        let residual_j = system.ledger().energy_residual_j();
+        near(residual_j, 0.0, rounding(mass_kg * speed * speed, steps));
+    });
 }
 
 fn rc_branch<C>(
