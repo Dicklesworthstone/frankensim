@@ -311,8 +311,15 @@ fn impact(chi: f64) -> Impact {
     } else {
         None
     };
+    // The heat port's temperature is inside the contact's loop, so the
+    // kernel needs a positive starting value for it before the first step.
+    let heat = thermal.map(|_| builder.port(contact, "heat").unwrap());
+    let mut system = builder.seal().unwrap();
+    if let Some(heat) = heat {
+        assert!(system.guess(heat, &[TEMPERATURE]));
+    }
     Impact {
-        system: builder.seal().unwrap(),
+        system,
         a,
         b,
         contact,
