@@ -5,8 +5,10 @@
 #![warn(missing_docs)]
 
 pub mod descriptor;
+mod runtime;
 
 pub use descriptor::{
     InputDescriptor, ProbeDescriptor, RuntimeRefusal, SNAPSHOT_DESCRIPTOR_SCHEMA,
     SnapshotDescriptor, dims_to_unit, inputs_to_json,
 };
+pub use runtime::{AssemblyRuntime, CustomProbeFn, InputBinding, ProbeBinding};
