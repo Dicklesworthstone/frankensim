@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 pub mod descriptor;
+pub mod live_source;
 mod runtime;
 
 pub use descriptor::{
@@ -12,4 +13,5 @@ pub use descriptor::{
     SnapshotDescriptor, inputs_to_json,
 };
 pub use fs_fsim::{MAX_PACKS, UNIT_DIMS, dims_to_unit};
+pub use live_source::{LiveInputSpec, LiveSource, RUNTIME_INPUT_FAMILY};
 pub use runtime::{AssemblyRuntime, CustomProbeFn, InputBinding, ProbeBinding};
