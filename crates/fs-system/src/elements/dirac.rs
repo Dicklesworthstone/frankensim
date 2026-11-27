@@ -6,6 +6,7 @@ use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_exec::{Cancelled, Cx};
 use fs_ports::component::{
     Class, Component, ContractViolation, PortRole, PortSpec, PortTangent, Proposal, Receipt,
+    StageResidual,
 };
 use fs_ports::{JunctionLaw, JunctionSchema, PortValueShape};
 
@@ -175,19 +176,17 @@ impl DiracJunction {
     fn apply(
         &self,
         inputs: &[f64],
-        outputs: &mut [f64],
+        mut outputs: Option<&mut [f64]>,
         transpose: bool,
         cx: &Cx<'_>,
     ) -> Result<(), DiracError> {
         self.extent("Dirac operand", inputs.len())?;
-        self.extent("Dirac result", outputs.len())?;
+        if let Some(output) = outputs.as_ref() {
+            self.extent("Dirac result", output.len())?;
+        }
         finite(inputs, "Dirac operand", cx)?;
-        for (row, output) in self
-            .matrix()
-            .chunks_exact(self.ports.len())
-            .zip(outputs.chunks_exact_mut(self.width))
-        {
-            for (coordinate, value_out) in output.iter_mut().enumerate() {
+        for (i, row) in self.matrix().chunks_exact(self.ports.len()).enumerate() {
+            for coordinate in 0..self.width {
                 // One dot is bounded by the schema's endpoint ceiling,
                 // regardless of the vector width.
                 cx.checkpoint()?;
@@ -196,13 +195,59 @@ impl DiracJunction {
                     .zip(inputs.chunks_exact(self.width))
                     .map(|(j, effort)| j * effort[coordinate])
                     .sum();
+                // Acceptance must check the same returned flows even when
+                // it has no output buffer. Zero net power cannot certify
+                // that an individual flow is representable.
                 finite(&[value], "Dirac result", cx)?;
-                // Exact skew admission gives J^T = -J, including singular J.
-                *value_out = if transpose { -value } else { value };
+                if let Some(output) = outputs.as_deref_mut() {
+                    // Exact skew admission gives J^T = -J, including singular J.
+                    output[i * self.width + coordinate] = if transpose { -value } else { value };
+                }
             }
         }
         Ok(())
     }
+
+    fn evaluate(
+        &self,
+        dt_s: f64,
+        inputs: &[f64],
+        outputs: Option<&mut [f64]>,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, DiracError> {
+        cx.checkpoint()?;
+        self.validate(dt_s, inputs, cx)?;
+        self.apply(inputs, outputs, false, cx)?;
+        let mut scale_j = 0.0;
+        for (i, row) in self.matrix().chunks_exact(self.ports.len()).enumerate() {
+            for coordinate in 0..self.width {
+                cx.checkpoint()?;
+                let own_effort = inputs[i * self.width + coordinate];
+                for (j, effort) in row.iter().zip(inputs.chunks_exact(self.width)) {
+                    scale_j += (own_effort * (j * effort[coordinate])).abs() * dt_s;
+                }
+            }
+        }
+        // Each dot has n products; power sums span all n * width
+        // coordinates. Bound rounding by term magnitudes, never by the
+        // cancelling net power. Width one retains the scalar arithmetic.
+        let tolerance_j = roundoff((self.coordinates as f64 + 2.0) * scale_j);
+        finite(&[tolerance_j], "Dirac energy allowance", cx)?;
+        cx.checkpoint()?;
+        Ok(Receipt::lossless(0.0, tolerance_j))
+    }
+}
+
+fn empty_stage(vector: &'static str, actual: usize) -> Result<(), DiracError> {
+    if actual != 0 {
+        return Err(ContractViolation::VectorLength {
+            vector,
+            expected: 0,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn finite(values: &[f64], quantity: &'static str, cx: &Cx<'_>) -> Result<(), DiracError> {
@@ -273,26 +318,111 @@ impl Component for DiracJunction {
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, DiracError> {
-        cx.checkpoint()?;
-        self.validate(dt_s, inputs, cx)?;
-        self.apply(inputs, outputs, false, cx)?;
-        let mut scale_j = 0.0;
-        for (i, row) in self.matrix().chunks_exact(self.ports.len()).enumerate() {
-            for coordinate in 0..self.width {
-                cx.checkpoint()?;
-                let own_effort = inputs[i * self.width + coordinate];
-                for (j, effort) in row.iter().zip(inputs.chunks_exact(self.width)) {
-                    scale_j += (own_effort * (j * effort[coordinate])).abs() * dt_s;
-                }
-            }
+        self.evaluate(dt_s, inputs, Some(outputs), cx)
+            .map(Proposal::Step)
+    }
+}
+
+// The junction has no internal state unknowns. Its retained port inputs
+// carry the algebraic equations, with their derivatives in PortTangent.
+impl StageResidual for DiracJunction {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), DiracError> {
+        empty_stage("Dirac stage", z.len())?;
+        if !(dt_s.is_finite() && dt_s > 0.0) {
+            return Err(ContractViolation::Step { dt_s }.into());
         }
-        // Each dot has n products; power sums span all n * width
-        // coordinates. Bound rounding by term magnitudes, never by the
-        // cancelling net power. Width one retains the scalar arithmetic.
-        let tolerance_j = roundoff((self.coordinates as f64 + 2.0) * scale_j);
-        finite(&[tolerance_j], "Dirac energy allowance", cx)?;
+        self.extent("Dirac inputs", inputs.len())?;
+        if inputs.iter().any(|value| !value.is_finite()) {
+            return Err(ContractViolation::NonFinite {
+                quantity: "Dirac inputs",
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), DiracError> {
         cx.checkpoint()?;
-        Ok(Proposal::Step(Receipt::lossless(0.0, tolerance_j)))
+        empty_stage("Dirac stage", z.len())?;
+        empty_stage("Dirac residual", r.len())?;
+        self.evaluate(dt_s, inputs, Some(outputs), cx).map(|_| ())
+    }
+
+    fn jvp_z(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), DiracError> {
+        cx.checkpoint()?;
+        empty_stage("Dirac stage", z.len())?;
+        empty_stage("Dirac stage direction", dz.len())?;
+        empty_stage("Dirac residual direction", dr.len())?;
+        self.extent("Dirac output direction", d_outputs.len())?;
+        self.evaluate(dt_s, inputs, None, cx)?;
+        for chunk in d_outputs.chunks_mut(1024) {
+            cx.checkpoint()?;
+            chunk.fill(0.0);
+        }
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), DiracError> {
+        cx.checkpoint()?;
+        empty_stage("Dirac stage", z.len())?;
+        empty_stage("Dirac residual covector", bar_r.len())?;
+        empty_stage("Dirac stage covector", bar_z.len())?;
+        self.extent("Dirac output covector", bar_outputs.len())?;
+        finite(bar_outputs, "Dirac output covector", cx)?;
+        self.evaluate(dt_s, inputs, None, cx).map(|_| ())
+    }
+
+    fn accept(
+        &self,
+        _old: &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        _new: &mut (),
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, DiracError> {
+        cx.checkpoint()?;
+        empty_stage("Dirac stage", z.len())?;
+        self.evaluate(dt_s, inputs, None, cx)
     }
 }
 
@@ -308,7 +438,7 @@ impl PortTangent for DiracJunction {
     ) -> Result<(), DiracError> {
         cx.checkpoint()?;
         self.validate(dt_s, inputs, cx)?;
-        self.apply(d_inputs, d_outputs, false, cx)
+        self.apply(d_inputs, Some(d_outputs), false, cx)
     }
 
     fn vjp(
@@ -322,6 +452,6 @@ impl PortTangent for DiracJunction {
     ) -> Result<(), DiracError> {
         cx.checkpoint()?;
         self.validate(dt_s, inputs, cx)?;
-        self.apply(bar_outputs, bar_inputs, true, cx)
+        self.apply(bar_outputs, Some(bar_inputs), true, cx)
     }
 }

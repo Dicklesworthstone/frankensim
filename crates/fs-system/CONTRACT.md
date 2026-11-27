@@ -26,10 +26,10 @@ Regression coverage is in `tests/driver_modes_and_store.rs`.
 
 ## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
 
-Fourteen lumped elements implement `fs_ports::component::StageResidual`:
+Fifteen lumped elements implement `fs_ports::component::StageResidual`:
 
 - Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`, `Storage`.
-- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`, `ControlledSource`, `AffineSignal`, `SignalSource`.
+- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`, `ControlledSource`, `AffineSignal`, `SignalSource`, `DiracJunction`.
 
 The dual laws support common-effort networks with the same source clocks,
 work, heat and entropy accounts as their ordinary proposal path. A publishing
@@ -4401,9 +4401,21 @@ individual work terms across every coordinate before cancellation. Scalar
 evaluation retains its original arithmetic order and problem identity; vector
 shape and coordinates are already bound by the retained schema.
 
+The optional `StageResidual` tier has zero internal unknowns. Registering both
+optional tiers admits the same scalar and vector junction laws to monolithic
+and stationary graphs. Proposals, residual outputs and acceptance share the
+native map and energy allowance. Acceptance uses no output-buffer allocation,
+but still computes and validates each returned flow: zero power cannot hide an
+overflowing flow. Internal-state derivative actions are zero, with the input
+sensitivity supplied by the existing `PortTangent`.
+
 `tests/dirac_junction.rs` covers exact scalar and vector relations, power
-cancellation, tangent duality, and closed storage networks against independent
-midpoint-rotation oracles. It also covers malformed source laws, unsupported
+cancellation, tangent/residual conformance and native/accepted receipt parity.
+Its scalar storage network follows the independent midpoint-rotation oracle
+under both interface and monolithic policies; a full-rank two-port network
+recovers its zero-charge stationary state without changing the preceding
+trajectory. It also covers a returned-flow overflow with zero work terms,
+malformed source laws, unsupported
 shapes, invalid calls and cancellation. The retained schema exposes the common
 coordinate/frame/clock declarations, but runtime `PortSpec` power ports do not
 enforce those labels: attached owners must already use the same coordinates.

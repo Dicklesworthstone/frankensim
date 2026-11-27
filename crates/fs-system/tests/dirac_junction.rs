@@ -1,4 +1,4 @@
-//! Admitted N-way Dirac laws, their tangent, and a closed capacitor network.
+//! G0/G2/G4/G5: admitted Dirac laws, residual tiers, closed storage dynamics and replay.
 
 #![allow(clippy::float_cmp)]
 
@@ -6,13 +6,20 @@ use core::num::NonZeroUsize;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 use fs_ports::{
     CoordinateBinding, JunctionLaw, JunctionSchema, PortKind, PortOrientation, PortSchema,
     PortTimestamp, PortValueShape, PowerPairing, StableId,
 };
-use fs_system::{System, SystemBuilder};
+use fs_system::{
+    AnalysisError, BlockSolveMode, BlockSolverPolicy, MonolithicConfig, NodeId, StateMap,
+    StationaryConfig, System, SystemBuilder,
+};
 use fs_system::elements::{DiracError, DiracJunction, ElementError, Storage};
 
 const KIND: PortKind = PortKind::ElectricalVoltageCurrent;
@@ -111,6 +118,7 @@ fn admitted_relation_and_exact_tangent_preserve_power_and_duality() {
     let junction = DiracJunction::new(schema.clone()).unwrap();
     assert_eq!(junction.schema(), &schema);
     assert_eq!(junction.class(), Class::ExactLinear);
+    assert_eq!(junction.unknowns(), 0);
     for (port, declared) in junction.ports().iter().zip(schema.ports()) {
         assert_eq!(port.id(), declared.id());
     }
@@ -143,6 +151,16 @@ fn admitted_relation_and_exact_tangent_preserve_power_and_duality() {
             assert_eq!(receipt.dissipated_j, 0.0);
             assert_eq!(receipt.stored_change_j, 0.0);
             check_port_tangent(&junction, &case, 1.0e-7, 1.0e-8, cx).unwrap();
+            check_stage_residual(&junction, &case, &[], 1.0e-8, 1.0e-10, cx).unwrap();
+            let mut stage_outputs = [f64::NAN; 3];
+            junction
+                .residual(&(), 0.125, &inputs, &[], &mut [], &mut stage_outputs, cx)
+                .unwrap();
+            assert_eq!(&stage_outputs[..], outputs.as_slice());
+            assert_eq!(
+                junction.accept(&(), 0.125, &inputs, &[], &mut (), cx).unwrap(),
+                receipt
+            );
             let (direction, covector) = ([0.25, -0.5, 1.25], [-2.0, 3.0, 0.5]);
             let (mut push, mut pull) = ([0.0; 3], [0.0; 3]);
             junction
@@ -157,24 +175,17 @@ fn admitted_relation_and_exact_tangent_preserve_power_and_duality() {
     });
 }
 
-/// For equal unit capacitors, q' = -J q rotates about (1,1,1).
-/// Midpoint advances its angle by -2 atan(sqrt(3) g dt / 2) per step.
-/// This independent rotation oracle checks the direction and all three
-/// trajectories as well as charge and energy conservation.
-#[test]
-fn three_capacitors_exchange_energy_along_the_midpoint_rotation() {
-    let (g, dt) = (0.75, 0.04);
-    let initial = [1.0_f64, -0.5, 2.0];
+fn capacitor_graph(schema: JunctionSchema, initial: &[f64]) -> (System, Vec<NodeId>) {
     let mut builder = SystemBuilder::new();
     let junction = builder
-        .add_with_tangent("junction", DiracJunction::new(cycle(g)).unwrap(), ())
+        .add_with_tangent_and_stage_residual("junction", DiracJunction::new(schema).unwrap(), ())
         .unwrap();
     let capacitors: Vec<_> = initial
         .iter()
         .enumerate()
         .map(|(i, &charge)| {
             let node = builder
-                .add_with_tangent(
+                .add_with_tangent_and_stage_residual(
                     &format!("capacitor/{i}"),
                     Storage::in_domain(KIND, 1.0).unwrap(),
                     charge,
@@ -189,7 +200,40 @@ fn three_capacitors_exchange_energy_along_the_midpoint_rotation() {
             node
         })
         .collect();
-    let mut system = builder.seal().unwrap();
+    (builder.seal().unwrap(), capacitors)
+}
+
+/// For equal unit capacitors, q' = -J q rotates about (1,1,1).
+/// Midpoint advances its angle by -2 atan(sqrt(3) g dt / 2) per step.
+/// This independent rotation oracle checks the direction and all three
+/// trajectories as well as charge and energy conservation.
+#[test]
+fn three_capacitors_exchange_energy_along_the_midpoint_rotation() {
+    check_capacitor_rotation(BlockSolverPolicy::InterfaceNewton);
+}
+
+#[test]
+fn monolithic_capacitors_follow_the_independent_midpoint_rotation() {
+    check_capacitor_rotation(BlockSolverPolicy::MonolithicNewtonKrylov(
+        MonolithicConfig::default(),
+    ));
+}
+
+fn check_capacitor_rotation(policy: BlockSolverPolicy) {
+    let (g, dt) = (0.75, 0.04);
+    let initial = [1.0_f64, -0.5, 2.0];
+    let (mut system, capacitors) = capacitor_graph(cycle(g), &initial);
+    let monolithic = matches!(&policy, BlockSolverPolicy::MonolithicNewtonKrylov(_));
+    system.set_solver_policy(policy);
+    if monolithic {
+        assert!(
+            system
+                .execution_plan_for_dt(dt)
+                .blocks
+                .iter()
+                .any(|block| block.solve_mode == BlockSolveMode::MonolithicNewtonKrylov)
+        );
+    }
     let root_three = 3.0_f64.sqrt();
     let mean = initial.iter().sum::<f64>() / 3.0;
     let cross = [
@@ -229,6 +273,82 @@ fn three_capacitors_exchange_energy_along_the_midpoint_rotation() {
     for connection in &system.ledger().connections {
         near(connection.energy_defect_j.value(), 0.0, 2.0e-10);
     }
+}
+
+struct ChargeCoordinates(Vec<NodeId>);
+
+impl StateMap for ChargeCoordinates {
+    fn dim(&self) -> usize {
+        self.0.len()
+    }
+
+    fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
+        for (value, &node) in out.iter_mut().zip(&self.0) {
+            *value = *system
+                .state::<f64>(node)
+                .ok_or(AnalysisError::Invalid { what: "capacitor state" })?;
+        }
+        Ok(())
+    }
+
+    fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
+        for (&node, &value) in self.0.iter().zip(state) {
+            system.set_accepted_state(node, value)?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn stationary_two_port_junction_finds_zero_charge_and_restores_the_trajectory() {
+    // The full-rank skew law has only q = 0 as an equilibrium. This is an
+    // operating-point test, not a claim that conservative dynamics decay.
+    let schema = JunctionSchema::try_new(
+        id("two-port"),
+        ports(2),
+        JunctionLaw::Dirac {
+            rows: 2,
+            incidence: vec![0.0, -1.0, 1.0, 0.0],
+        },
+    )
+    .unwrap();
+    let (mut system, capacitors) = capacitor_graph(schema, &[1.0, -2.0]);
+    system.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(
+        MonolithicConfig::default(),
+    ));
+    let coordinates = ChargeCoordinates(capacitors);
+    with_cx(|cx| {
+        for _ in 0..5 {
+            system.step(0.04, cx).unwrap();
+        }
+        let before = system.checkpoint().unwrap();
+        let before_ledger = system.ledger().clone();
+        let before_charge: Vec<_> = coordinates
+            .0
+            .iter()
+            .map(|&node| system.state::<f64>(node).unwrap().to_bits())
+            .collect();
+        let solution = system
+            .solve_stationary(
+                &coordinates,
+                StationaryConfig {
+                    probe_dt_s: 0.1,
+                    ..StationaryConfig::default()
+                },
+                cx,
+            )
+            .unwrap();
+        for &charge in &solution.state {
+            near(charge, 0.0, 1.0e-8);
+        }
+        assert!(solution.residual_norm <= 1.0e-10);
+        assert_eq!(system.time_s().to_bits(), before.time_s().to_bits());
+        assert_eq!(system.steps(), before.steps());
+        assert_eq!(system.ledger(), &before_ledger);
+        for (&node, expected) in coordinates.0.iter().zip(before_charge) {
+            assert_eq!(system.state::<f64>(node).unwrap().to_bits(), expected);
+        }
+    });
 }
 
 #[test]
@@ -281,6 +401,20 @@ fn reuses_schema_admission_and_refuses_other_laws_and_shapes() {
         zero.propose(&(), 1.0, &[2.0, 3.0, 4.0], &mut (), &mut output, cx)
             .unwrap();
         assert_eq!(output, [0.0; 3]);
+        check_stage_residual(
+            &zero,
+            &Case {
+                state: &(),
+                stale: &(),
+                dt_s: 1.0,
+                inputs: &[2.0, 3.0, 4.0],
+            },
+            &[],
+            1.0e-8,
+            1.0e-10,
+            cx,
+        )
+        .unwrap();
     });
 }
 
@@ -300,10 +434,40 @@ fn invalid_calls_and_cancellation_refuse_without_panicking() {
                     .is_err()
             );
             assert_eq!(output, [91.0; 3]);
+            assert!(
+                junction
+                    .residual(&(), dt, inputs, &[], &mut [], &mut output, cx)
+                    .is_err()
+            );
+            assert!(junction.accept(&(), dt, inputs, &[], &mut (), cx).is_err());
+            assert_eq!(output, [91.0; 3]);
         }
+        assert!(
+            junction
+                .residual(&(), 1.0, &[1.0; 3], &[0.0], &mut [], &mut output, cx)
+                .is_err()
+        );
+        assert!(junction.accept(&(), 1.0, &[1.0; 3], &[0.0], &mut (), cx).is_err());
+        assert_eq!(output, [91.0; 3]);
         cx.cancel_gate().request();
         assert_eq!(
             junction.propose(&(), 1.0, &[1.0; 3], &mut (), &mut output, cx),
+            Err(DiracError::Cancelled)
+        );
+        assert_eq!(
+            junction.residual(&(), 1.0, &[1.0; 3], &[], &mut [], &mut output, cx),
+            Err(DiracError::Cancelled)
+        );
+        assert_eq!(
+            junction.jvp_z(&(), 1.0, &[1.0; 3], &[], &[], &mut [], &mut output, cx),
+            Err(DiracError::Cancelled)
+        );
+        assert_eq!(
+            junction.vjp_z(&(), 1.0, &[1.0; 3], &[], &[], &[1.0; 3], &mut [], cx),
+            Err(DiracError::Cancelled)
+        );
+        assert_eq!(
+            junction.accept(&(), 1.0, &[1.0; 3], &[], &mut (), cx),
             Err(DiracError::Cancelled)
         );
         assert_eq!(output, [91.0; 3]);
@@ -335,6 +499,16 @@ fn vector_relation_keeps_coordinates_separate_and_preserves_power_and_duality() 
         assert_eq!(receipt.stored_change_j, 0.0);
         assert_eq!(receipt.dissipated_j, 0.0);
         check_port_tangent(&junction, &case, 1.0e-7, 1.0e-8, cx).unwrap();
+        check_stage_residual(&junction, &case, &[], 1.0e-8, 1.0e-10, cx).unwrap();
+        let mut stage_outputs = [f64::NAN; 6];
+        junction
+            .residual(&(), 0.125, &inputs, &[], &mut [], &mut stage_outputs, cx)
+            .unwrap();
+        assert_eq!(&stage_outputs[..], outputs.as_slice());
+        assert_eq!(
+            junction.accept(&(), 0.125, &inputs, &[], &mut (), cx).unwrap(),
+            receipt
+        );
 
         let direction = [0.25, 1.5, -0.5, 0.25, 1.25, -2.0];
         let covector = [-2.0, 0.5, 3.0, 1.25, 0.5, -0.75];
@@ -567,6 +741,42 @@ fn vector_shape_and_incidence_remain_bound_to_checkpoint_identity() {
     assert!(state_words.is_empty());
     assert_eq!(vector_two.decode_state(&state_words), Some(()));
     assert_eq!(vector_two.decode_state(&[0]), None);
+}
+
+#[test]
+fn residual_acceptance_checks_flows_even_when_all_power_terms_are_zero() {
+    let junction = DiracJunction::new(
+        JunctionSchema::try_new(
+            id("star"),
+            ports(3),
+            JunctionLaw::Dirac {
+                rows: 3,
+                incidence: vec![0.0, 1.0, 1.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    with_cx(|cx| {
+        // The first flow is MAX + MAX, but its own effort is zero.
+        // Every term of effort_i * J_ij * effort_j is exactly zero.
+        let inputs = [0.0, f64::MAX, f64::MAX];
+        let mut output = [91.0; 3];
+        let error = junction
+            .propose(&(), 1.0, &inputs, &mut (), &mut output, cx)
+            .unwrap_err();
+        assert_eq!(
+            junction
+                .residual(&(), 1.0, &inputs, &[], &mut [], &mut output, cx)
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(
+            junction.accept(&(), 1.0, &inputs, &[], &mut (), cx).unwrap_err(),
+            error
+        );
+        assert_eq!(output, [91.0; 3]);
+    });
 }
 
 #[test]
