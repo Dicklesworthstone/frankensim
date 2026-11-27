@@ -1,0 +1,36 @@
+(assembly "rubber_mount_creep_288k"
+  (version 1) (units "SI") (seed 0xb)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 600s) (mem 256MiB))
+  (capability :cores 1cores :mem 256MiB :wall 600s :ops (assembly.*))
+  (reference-state assembled) (environment earth-lab-air)
+  (time-plan :horizon 0.5s :dt 0.25s :sample-rate 4Hz)
+  (part "fixed_clamp" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped :max-work-units 40000000000
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (part "moving_clamp" :kind rigid-body :geometry (box 0.05m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped :max-work-units 40000000000
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (part "chamber" :kind solid :geometry (box 0.05m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1.0 0.0 0.0 0.0)
+              :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)
+              :temperature 288.15K))
+  (interface "mount" :kind mechanical-contact :a "fixed_clamp" :b "moving_clamp"
+    :card "self-adhesive synthetic rubber" :family "relaxation-bushing"
+    :memory (displacement-0-x 0m displacement-1-x 0m displacement-2-x 0m displacement-3-x 0m
+             displacement-4-x 0m displacement-5-x 0m displacement-6-x 0m displacement-7-x 0m
+             displacement-8-x 0m displacement-9-x 0m displacement-10-x 0m displacement-11-x 0m
+             displacement-eq-x 0m))
+  (interface "mount_heat" :kind heat-route :a "moving_clamp" :b "chamber" :fraction 1.0)
+  (interface "chamber_temp" :kind temperature-source :a "moving_clamp" :b "chamber")
+  (source "hold" :interface "mount" :port "drive_x" :history (constant 0.1N))
+  (probe "moving_v" :kind field-quantity :target "moving_clamp"
+    :quantity "velocity-x" :dims (1 0 -1 0 0 0) :sample-rate 4Hz)
+  (probe "chamber_t" :kind field-quantity :target "chamber"
+    :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 4Hz))

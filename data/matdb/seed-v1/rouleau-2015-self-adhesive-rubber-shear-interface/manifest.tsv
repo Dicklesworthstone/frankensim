@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	rouleau-2015-self-adhesive-rubber-shear-interface
+redistribution	permitted	A small selection of attributed numerical facts (Table 1 and the WLF constants) and original explanatory text only; no source-document, table-layout or prose redistribution license is asserted
+citation	L. Rouleau, R. Pirk, B. Pluymers and W. Desmet, Characterization and Modeling of the Viscoelastic Behavior of a Self-Adhesive Rubber Using Dynamic Mechanical Analysis Tests, J. Aerosp. Technol. Manag. 7(2) 200-208 (2015), doi 10.5028/jatm.v7i2.474, Table 1 (p.206), Eq. 8 (p.202), WLF constants (p.205)
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	primary	interface.tsv	interface-tsv-v1

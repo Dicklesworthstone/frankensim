@@ -1,0 +1,95 @@
+frankensim.matdb-source.v1
+surface_a	self-adhesive synthetic rubber	compound unstated by source; from an automotive TIER supplier	one of two equal samples, 10 mm x 10 mm, nominal thickness 2.2 mm (source p.203), held by a compressive pre-strain of about 10 % at clamping, on the fixed clamp	1	rouleau-2015-sample-fixed-clamp-face
+surface_b	self-adhesive synthetic rubber	compound unstated by source; from an automotive TIER supplier	one of two equal samples, 10 mm x 10 mm, nominal thickness 2.2 mm (source p.203), held by a compressive pre-strain of about 10 % at clamping, on the moving clamp	1	rouleau-2015-sample-moving-clamp-face
+context	relaxation-bushing	-	DMA furnace, -70 to 40 C ramp	small-strain linear dynamic shear, 1 to 200 Hz
+observation	dma-sr-2p2mm-master-20c	the 2.2 mm self-adhesive synthetic rubber sample pair in double shear, two equal 10 mm x 10 mm samples between a fixed and a moving clamp (source Fig. 2, p.203)	DMA Q800 in shear mode, dynamic displacement 10 um, 15 frequencies 1 to 200 Hz, temperature ramp 2 C/min from -70 C to 40 C (source p.203); master curve at Tr = 20 C by the time-temperature superposition principle, valid -30 C to 30 C (source p.204-205); generalized Maxwell fit by the enclosing curve technique (source Table 1, p.206)	Each stiffness is the source's Table 1 modulus times the double-shear factor 2 A / h = 2 (0.010 m)^2 / 0.0022 m = 1/11 m, at the nominal 2.2 mm thickness; the source does not state the thickness under its 10 % clamping pre-strain, which this factor does not include. Branch k of this card is the source's series k + 1; eq is the relaxed modulus G0 = 0.15 MPa. The source prints Eq. 8 as log aT = C1 (T - Tr) / (C2 + T - Tr), without a minus sign; its Fig. 6 shift factors (log aT about +3.6 at -20 C, 0 at 20 C and about -0.7 at 30 C) need log10 aT = -C1 (T - Tr) / (C2 + T - Tr), the form this card's wlf_c1 and wlf_c2 take. The shift band is the source's TTSP range. The source states no uncertainty for any Table 1 value or WLF constant, and no Kelvin dashpot: the card states no damping. Only the shear axis x is measured.
+scalar	g-eq	dma-sr-2p2mm-master-20c	stiffness_eq_x	13636.363636363636	N/m	constant
+uncertainty	g-eq	unstated	-	-	-	-
+validity	g-eq	T	243.15	303.15	K
+scalar	g-1	dma-sr-2p2mm-master-20c	stiffness_0_x	3909.090909090909	N/m	constant
+uncertainty	g-1	unstated	-	-	-	-
+validity	g-1	T	243.15	303.15	K
+scalar	tau-1	dma-sr-2p2mm-master-20c	relaxation_time_0	3.25e-1	s	constant
+uncertainty	tau-1	unstated	-	-	-	-
+validity	tau-1	T	243.15	303.15	K
+scalar	g-2	dma-sr-2p2mm-master-20c	stiffness_1_x	7272.727272727273	N/m	constant
+uncertainty	g-2	unstated	-	-	-	-
+validity	g-2	T	243.15	303.15	K
+scalar	tau-2	dma-sr-2p2mm-master-20c	relaxation_time_1	1.29e-1	s	constant
+uncertainty	tau-2	unstated	-	-	-	-
+validity	tau-2	T	243.15	303.15	K
+scalar	g-3	dma-sr-2p2mm-master-20c	stiffness_2_x	14272.727272727272	N/m	constant
+uncertainty	g-3	unstated	-	-	-	-
+validity	g-3	T	243.15	303.15	K
+scalar	tau-3	dma-sr-2p2mm-master-20c	relaxation_time_2	4.97e-2	s	constant
+uncertainty	tau-3	unstated	-	-	-	-
+validity	tau-3	T	243.15	303.15	K
+scalar	g-4	dma-sr-2p2mm-master-20c	stiffness_3_x	37818.181818181816	N/m	constant
+uncertainty	g-4	unstated	-	-	-	-
+validity	g-4	T	243.15	303.15	K
+scalar	tau-4	dma-sr-2p2mm-master-20c	relaxation_time_3	1.43e-2	s	constant
+uncertainty	tau-4	unstated	-	-	-	-
+validity	tau-4	T	243.15	303.15	K
+scalar	g-5	dma-sr-2p2mm-master-20c	stiffness_4_x	138363.63636363635	N/m	constant
+uncertainty	g-5	unstated	-	-	-	-
+validity	g-5	T	243.15	303.15	K
+scalar	tau-5	dma-sr-2p2mm-master-20c	relaxation_time_4	3.50e-3	s	constant
+uncertainty	tau-5	unstated	-	-	-	-
+validity	tau-5	T	243.15	303.15	K
+scalar	g-6	dma-sr-2p2mm-master-20c	stiffness_5_x	207454.54545454544	N/m	constant
+uncertainty	g-6	unstated	-	-	-	-
+validity	g-6	T	243.15	303.15	K
+scalar	tau-6	dma-sr-2p2mm-master-20c	relaxation_time_5	1.30e-3	s	constant
+uncertainty	tau-6	unstated	-	-	-	-
+validity	tau-6	T	243.15	303.15	K
+scalar	g-7	dma-sr-2p2mm-master-20c	stiffness_6_x	526818.1818181818	N/m	constant
+uncertainty	g-7	unstated	-	-	-	-
+validity	g-7	T	243.15	303.15	K
+scalar	tau-7	dma-sr-2p2mm-master-20c	relaxation_time_6	5.89e-4	s	constant
+uncertainty	tau-7	unstated	-	-	-	-
+validity	tau-7	T	243.15	303.15	K
+scalar	g-8	dma-sr-2p2mm-master-20c	stiffness_7_x	571090.9090909091	N/m	constant
+uncertainty	g-8	unstated	-	-	-	-
+validity	g-8	T	243.15	303.15	K
+scalar	tau-8	dma-sr-2p2mm-master-20c	relaxation_time_7	2.27e-4	s	constant
+uncertainty	tau-8	unstated	-	-	-	-
+validity	tau-8	T	243.15	303.15	K
+scalar	g-9	dma-sr-2p2mm-master-20c	stiffness_8_x	1262727.2727272727	N/m	constant
+uncertainty	g-9	unstated	-	-	-	-
+validity	g-9	T	243.15	303.15	K
+scalar	tau-9	dma-sr-2p2mm-master-20c	relaxation_time_8	8.84e-5	s	constant
+uncertainty	tau-9	unstated	-	-	-	-
+validity	tau-9	T	243.15	303.15	K
+scalar	g-10	dma-sr-2p2mm-master-20c	stiffness_9_x	1424545.4545454546	N/m	constant
+uncertainty	g-10	unstated	-	-	-	-
+validity	g-10	T	243.15	303.15	K
+scalar	tau-10	dma-sr-2p2mm-master-20c	relaxation_time_9	2.53e-5	s	constant
+uncertainty	tau-10	unstated	-	-	-	-
+validity	tau-10	T	243.15	303.15	K
+scalar	g-11	dma-sr-2p2mm-master-20c	stiffness_10_x	1400000.0	N/m	constant
+uncertainty	g-11	unstated	-	-	-	-
+validity	g-11	T	243.15	303.15	K
+scalar	tau-11	dma-sr-2p2mm-master-20c	relaxation_time_10	4.55e-6	s	constant
+uncertainty	tau-11	unstated	-	-	-	-
+validity	tau-11	T	243.15	303.15	K
+scalar	g-12	dma-sr-2p2mm-master-20c	stiffness_11_x	743636.3636363636	N/m	constant
+uncertainty	g-12	unstated	-	-	-	-
+validity	g-12	T	243.15	303.15	K
+scalar	tau-12	dma-sr-2p2mm-master-20c	relaxation_time_11	2.04e-7	s	constant
+uncertainty	tau-12	unstated	-	-	-	-
+validity	tau-12	T	243.15	303.15	K
+scalar	wlf-c1	dma-sr-2p2mm-master-20c	wlf_c1	9.23	1	constant
+uncertainty	wlf-c1	unstated	-	-	-	-
+validity	wlf-c1	T	243.15	303.15	K
+scalar	wlf-c2	dma-sr-2p2mm-master-20c	wlf_c2	141.2	K	constant
+uncertainty	wlf-c2	unstated	-	-	-	-
+validity	wlf-c2	T	243.15	303.15	K
+scalar	shift-tr	dma-sr-2p2mm-master-20c	shift_reference_temperature	293.15	K	constant
+uncertainty	shift-tr	unstated	-	-	-	-
+validity	shift-tr	T	243.15	303.15	K
+scalar	shift-lo	dma-sr-2p2mm-master-20c	shift_lowest_temperature	243.15	K	constant
+uncertainty	shift-lo	unstated	-	-	-	-
+validity	shift-lo	T	243.15	303.15	K
+scalar	shift-hi	dma-sr-2p2mm-master-20c	shift_highest_temperature	303.15	K	constant
+uncertainty	shift-hi	unstated	-	-	-	-
+validity	shift-hi	T	243.15	303.15	K

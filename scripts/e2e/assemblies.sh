@@ -57,9 +57,11 @@ PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
 SRM_PACK="$ASM_DIR/packs/eps-nist-srm1453-2013.fsmcdpk"
 N2_PACK="$ASM_DIR/packs/nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk"
 KATS_PACK="$ASM_DIR/packs/katsivardi-2025-pla-metal-dry-air-interface.fsintpk"
+RUBBER_PACK="$ASM_DIR/packs/rouleau-2015-self-adhesive-rubber-shear.fsintpk"
 FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK"
   "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK"
-  "$ASM_DIR/block_on_belt.fsim" "$KATS_PACK")
+  "$ASM_DIR/block_on_belt.fsim" "$KATS_PACK"
+  "$ASM_DIR/rubber_mount_creep_288k.fsim" "$ASM_DIR/rubber_mount_creep_298k.fsim" "$RUBBER_PACK")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -133,6 +135,10 @@ grep -q -- "-6861.725123519331N" "$GP_COMP" || die "compression copy of gas_pist
 run_case gp_comp "$GP_COMP" --materials "$STEEL_PACK" --materials "$N2_PACK"
 # Dry-friction stick-slip block on belt (Katsivardi et al. 2025 pure PLA / dry metallic plate)
 run_case bob "$ASM_DIR/block_on_belt.fsim" --materials "$STEEL_PACK" --interfaces "$KATS_PACK"
+# Rouleau 2015 rubber mount: creep under a held 0.1 N at two chamber temperatures, two exact 0.25 s steps each
+for t in 288k 298k; do
+  run_case "rubber_$t" "$ASM_DIR/rubber_mount_creep_$t.fsim" --materials "$STEEL_PACK" --materials "$SENS_PACK" --interfaces "$RUBBER_PACK"
+done
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -408,6 +414,54 @@ assert "static-friction-coefficient.held" in bob_rcpt and "kinetic-friction-coef
 assert "default: no thermal side; all heat to ambient" in bob_rcpt
 bv_bob = check_budget(e_bob, "block_pos_cap", roundoff_measured=True)
 
+# 11. Rouleau 2015 self-adhesive rubber mount (seed card: Table 1's 12 Maxwell branches and G0 at Tr = 293.15 K, each
+# k = G / 11 N/m on x only; WLF C1 = 9.23, C2 = 141.2 K) between free steel boxes (m_a = 1.95 kg, m_b = 0.975 kg),
+# drive_x 0.1 N from relaxed rest, all of its heat to the Al chamber cell whose temperature shifts it. The moving box's
+# x velocity at each 0.25 s step end against exp(A dt) of the relative system [v, e_eq, e_1..e_12, 1] in 50-digit
+# decimal arithmetic; three planted mutations (eq dropped, a_T = 1, tau_1 and tau_2 swapped) each miss by >= 100 rb_tol.
+import decimal
+decimal.getcontext().prec = 50; Dd = decimal.Decimal
+rb_G = [150000, 43000, 80000, 157000, 416000, 1522000, 2282000, 5795000, 6282000, 13890000, 15670000, 15400000, 8180000]
+rb_tau = ["3.25e-1", "1.29e-1", "4.97e-2", "1.43e-2", "3.50e-3", "1.30e-3", "5.89e-4", "2.27e-4", "8.84e-5", "2.53e-5", "4.55e-6", "2.04e-7"]
+rb_ma, rb_mb, rb_F, rb_n, rb_tol = Dd(7800) * Dd("0.1") * Dd("0.05")**2, Dd(7800) * Dd("0.05")**3, Dd("0.1"), 15, 1e-9
+rb_dt = Dd("0.25")
+rb_mu = rb_ma * rb_mb / (rb_ma + rb_mb)
+rb_aT = lambda T: Dd(10) ** (Dd("-9.23") * (Dd(repr(T)) - Dd("293.15")) / (Dd("141.2") + Dd(repr(T)) - Dd("293.15")))
+rb_mul = lambda X, Y: [[sum(X[i][m] * Y[m][j] for m in range(rb_n)) for j in range(rb_n)] for i in range(rb_n)]
+def rb_creep(T, mut=""):
+  tau, aT = rb_tau[:], Dd(1) if mut == "aT1" else rb_aT(T)
+  if mut == "swap": tau[0], tau[1] = tau[1], tau[0]
+  k = [Dd(0 if (mut == "no_eq" and i == 0) else g) / 11 for i, g in enumerate(rb_G)]
+  A = [[Dd(0)] * rb_n for _ in range(rb_n)]; A[0][14] = rb_F / rb_mu
+  for i in range(13):
+    A[0][1 + i], A[1 + i][0] = -k[i] / rb_mu, Dd(1)
+    if i: A[1 + i][1 + i] = -1 / (aT * Dd(tau[i - 1]))
+  s = 0
+  while max(sum(abs(x) for x in r) for r in A) * rb_dt / 2**s > Dd("0.5"): s += 1
+  M = [[x * rb_dt / 2**s for x in r] for r in A]; E = [[Dd(int(i == j)) for j in range(rb_n)] for i in range(rb_n)]; t = E
+  for j in range(1, 30):
+    t = [[x / j for x in r] for r in rb_mul(t, M)]; E = [[a + b for a, b in zip(r, q)] for r, q in zip(E, t)]
+  for _ in range(s): E = rb_mul(E, E)
+  z, vs = [Dd(0)] * 14 + [Dd(1)], [0.0]
+  for _ in range(2):
+    z = [sum(E[i][m] * z[m] for m in range(rb_n)) for i in range(rb_n)]; vs.append(float(z[0] * rb_ma / (rb_ma + rb_mb)))
+  # From rest e_eq is the stretch u: drive work F u; the network holds the memory plus the relative kinetic energy
+  return vs, float(rb_F * z[1]), float(sum(ki * zi**2 / 2 for ki, zi in zip(k, z[1:14])) + rb_mu * z[0]**2 / 2)
+rb = {}
+for T in (288.15, 298.0):
+  tag = f"rubber_{int(T)}k"; e = ld(f"{tag}.explain.json"); p = probes(e); wl = e["window_ledger"]; tot = wl["totals"]
+  nd = {x["name"]: x for x in wl["nodes"]}; (vs, W, S), Q, Ca = rb_creep(T), tot["dissipated_j"], 2700.0 * 0.05**3 * 945.584
+  vmax = max(abs(v) for v in vs); rel = lambda xs: max(abs(a - b) for a, b in zip(xs, vs)) / vmax
+  err, plant = rel(p["moving_v"]), min(rel(rb_creep(T, m)[0]) for m in ("no_eq", "aT1", "swap"))
+  led = max(abs(tot["boundary_energy_in_j"] / W - 1), abs(Q / (W - S) - 1), abs(nd["relaxation-network"]["port_energy_in_j"] / S - 1))
+  cell = abs(Ca * (p["chamber_t"][-1] - T) - Q) / (2.0 * math.ulp(T) * Ca)
+  # The cell warms by Q / C over the run, which moves a_T by d(ln a_T)/dT * Q / C of itself
+  drift = math.log(10) * 9.23 * 141.2 / (141.2 + T - 293.15)**2 * Q / Ca
+  assert len(p["moving_v"]) == 3 and err <= rb_tol and plant >= 100 * rb_tol and led <= 1e-8 and cell <= 1.0, (tag, err, plant, led, cell)
+  assert tot["sink_heat_j"] == 0.0 and drift <= rb_tol and wres(e) <= 1e-18, (tag, drift, tot)
+  rb[tag] = {"a_t": float(rb_aT(T)), "vel_rel": err, "smallest_plant_rel": plant, "ledger_rel": led,
+             "cell_heat_over_2ulp_floor": cell, "a_t_drift_rel": drift, "energy_residual_j": wres(e)}
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -438,6 +492,7 @@ receipt = {
     "block_on_belt": {"run": ld("bob.run.json")["run"], "verdict": bv_bob,
       "errors": {"max_period_s": bob_T_err, "work_per_cycle_rel": bob_W_rel, "ambient_heat_rel": bob_amb_rel,
                  "peak_slip_speed_m_s": bob_vslip_pk, "energy_residual_j": wres(e_bob)}},
+    "rubber_mount_creep": {"runs": {t: ld(f"rubber_{t}.run.json")["run"] for t in ("288k", "298k")}, "errors": rb},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx", "bob_ood_n"]},
 }
