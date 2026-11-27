@@ -1026,6 +1026,13 @@ physics owners below fs-couple can be composed without it.
     and the ports' power; the four refused crossings; a closure that stays
     `-g` over twelve steps that leave the span and come back; and one step
     below the threshold.
+    `tests/pawl_catch.rs` (under `slices`): a platform falling on a rail
+    with dry friction is caught by a spring-set pawl, a strut on a lossy
+    stop, on the second of four lossy Hertz tooth plates. At `dt` and
+    `dt / 2` it checks the steps of entry, stop and contact, the fall, the
+    closure `-g` of every gap, the rail's heat and the ledger at the arrest
+    against hand calculations, and the impact's first integral within the
+    change from `dt` to `dt / 2`; its module doc names what it omits.
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and

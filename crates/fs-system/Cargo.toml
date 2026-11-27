@@ -87,6 +87,10 @@ name = "pose_gap"
 required-features = ["slices"]
 
 [[test]]
+name = "pawl_catch"
+required-features = ["slices"]
+
+[[test]]
 name = "modal_structure_slice"
 required-features = ["modal-slices"]
 
