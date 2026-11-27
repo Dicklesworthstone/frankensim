@@ -73,3 +73,33 @@ test('real WASM: the retired v1 format, a diameter-free limit setting yield-frac
     assert.match(refusal(() => createPianoEngine(PianoEngine, 48000,
       { stringMaterials: { ...point, packs: silver, geometry: unflagged } })), /state no wire diameter.*diameter-free/s);
   });
+
+test('real WASM: source-resolved nitrogen drives the material strings and receiver together',
+  { skip }, async () => {
+    const PianoEngine = await engine();
+    const gasPack = (name) => new Uint8Array(readFileSync(at(`../../../examples/system/n2/${name}`)));
+    const gasSources = { phase: 'frozen', waterSpecies: null, components: [{
+      speciesPack: gasPack('species.pack'), nasa9Pack: gasPack('nasa9.pack'),
+      transportPack: gasPack('transport.fsmcdpk'),
+    }] };
+    const stringMaterials = { ...point, packs: steel(), geometry: construction('steel-copper-wound-rt0425') };
+    const options = { gas: 'thermochemical 300 90000 mole 1 N2 1', gasSources, stringMaterials,
+      boardCoordinates: 4 };
+    const piano = createPianoEngine(PianoEngine, 48000, options);
+    try {
+      const info = JSON.parse(piano.info());
+      assert.equal(info.acousticGas.temperatureK, 300);
+      assert.equal(info.acousticGas.pressurePa, 90000);
+      assert.ok(info.acousticGas.densityKgM3 > 1.0 && info.acousticGas.densityKgM3 < 1.02);
+      assert.equal(info.stringGasLoading, 'sampled-cylinder-retained-modes');
+      assert.ok(info.stringMaterials);
+      assert.equal(info.gasSourcePacks.length, 1);
+      for (const name of ['species', 'nasa9', 'transport']) assert.match(info.gasSourcePacks[0][name], /^[0-9a-f]{64}$/);
+      assert.equal(piano.noteOn(60, 2), true);
+      const pcm = piano.render(2400);
+      assert.ok(pcm.every(Number.isFinite) && pcm.some(x => x !== 0));
+      assert.equal(piano.isPoisoned(), false);
+    } finally {
+      piano.free();
+    }
+  });
