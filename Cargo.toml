@@ -69,6 +69,7 @@ members = [
     "crates/fs-ad",
     "crates/fs-eproc",
     "crates/fs-ledger",
+    "crates/fs-fsim",
     "crates/fs-ir",
     "crates/fs-plan",
     "crates/fs-xform",

@@ -1850,6 +1850,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-fsim"
+version = "0.0.1"
+dependencies = [
+ "fs-qty",
+]
+
+[[package]]
 name = "fs-ga"
 version = "0.0.1"
 dependencies = [
@@ -1984,6 +1991,7 @@ dependencies = [
  "fs-casebook",
  "fs-evidence",
  "fs-exec",
+ "fs-fsim",
  "fs-geom",
  "fs-ledger",
  "fs-package",

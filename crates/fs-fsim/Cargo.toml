@@ -1,0 +1,17 @@
+[package]
+name = "fs-fsim"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Wasm32-clean FrankenScript AST, canonical s-expression/JSON syntax, and shared .fsim assembly codec."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-qty = { path = "../fs-qty" }
+
+[lints]
+workspace = true

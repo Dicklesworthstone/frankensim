@@ -22,28 +22,25 @@
 pub mod admission;
 #[cfg(feature = "ladder-planner")]
 pub mod anytime;
-pub mod ast;
 pub mod campaign;
 pub mod catalog;
 pub mod conformance;
 pub mod cross_contract;
 #[cfg(feature = "derived-crosswalk")]
 pub mod derived_crosswalk;
-pub mod json;
 pub mod lower;
 pub mod machine;
 #[cfg(feature = "ladder-planner")]
 pub mod planner;
 pub mod query;
-pub mod sexpr;
 pub mod study;
 
-pub use ast::{CountUnit, CountValue, Node, NodeKind, Span};
+pub use fs_fsim::{
+    CountUnit, CountValue, IrError, IrErrorKind, Node, NodeKind, Span, ast, json, sexpr,
+};
 pub use lower::{LowerStep, Lowered, lower};
 pub use query::{FieldRegistry, Qoi, QoiMeta, Query, QueryAdmission, Target};
 pub use study::Study;
-
-use core::fmt;
 
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -311,101 +308,3 @@ fn first_text_difference_span(input: &str, canonical: &str) -> Span {
         }
     }
 }
-
-/// What went wrong while reading a program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrErrorKind {
-    /// A character that cannot start a form.
-    UnexpectedChar,
-    /// Input ended mid-form.
-    UnexpectedEnd,
-    /// Content after the single top-level form.
-    TrailingInput,
-    /// A `(` without its `)`.
-    UnclosedParen,
-    /// A `"` without its closing `"`.
-    UnclosedString,
-    /// An unknown escape sequence.
-    BadEscape,
-    /// A bare `:`.
-    BadKeyword,
-    /// A malformed numeric literal.
-    BadNumber,
-    /// A malformed `0x…` seed.
-    BadSeed,
-    /// A numeric token that is not an int, float, quantity, or count.
-    BadQuantity,
-    /// Nesting beyond the depth cap.
-    TooDeep,
-    /// Malformed JSON structure.
-    JsonSyntax,
-    /// An unknown atom tag in the JSON mapping.
-    JsonUnknownTag,
-    /// A tagged literal that does not match its tag.
-    JsonTagMismatch,
-    /// A versioned artifact uses unsupported language semantics.
-    UnsupportedVersion,
-    /// Persisted versioned bytes are semantically valid but not canonical.
-    NonCanonical,
-    /// Expected a study form.
-    NotAStudy,
-    /// A recognized clause with the wrong shape.
-    MalformedClause,
-}
-
-impl IrErrorKind {
-    /// Stable machine-readable code.
-    #[must_use]
-    pub fn code(self) -> &'static str {
-        match self {
-            IrErrorKind::UnexpectedChar => "IrUnexpectedChar",
-            IrErrorKind::UnexpectedEnd => "IrUnexpectedEnd",
-            IrErrorKind::TrailingInput => "IrTrailingInput",
-            IrErrorKind::UnclosedParen => "IrUnclosedParen",
-            IrErrorKind::UnclosedString => "IrUnclosedString",
-            IrErrorKind::BadEscape => "IrBadEscape",
-            IrErrorKind::BadKeyword => "IrBadKeyword",
-            IrErrorKind::BadNumber => "IrBadNumber",
-            IrErrorKind::BadSeed => "IrBadSeed",
-            IrErrorKind::BadQuantity => "IrBadQuantity",
-            IrErrorKind::TooDeep => "IrTooDeep",
-            IrErrorKind::JsonSyntax => "IrJsonSyntax",
-            IrErrorKind::JsonUnknownTag => "IrJsonUnknownTag",
-            IrErrorKind::JsonTagMismatch => "IrJsonTagMismatch",
-            IrErrorKind::UnsupportedVersion => "IrUnsupportedVersion",
-            IrErrorKind::NonCanonical => "IrNonCanonical",
-            IrErrorKind::NotAStudy => "IrNotAStudy",
-            IrErrorKind::MalformedClause => "IrMalformedClause",
-        }
-    }
-}
-
-/// A structured parse/recognition failure: span + diagnosis + fix hint
-/// (Decalogue P10 — a refusal that teaches).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IrError {
-    /// The offending byte range in the source.
-    pub span: Span,
-    /// The failure class.
-    pub kind: IrErrorKind,
-    /// What is wrong.
-    pub detail: String,
-    /// How to fix it.
-    pub hint: String,
-}
-
-impl fmt::Display for IrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} at bytes {}..{}: {}; fix: {}",
-            self.kind.code(),
-            self.span.start,
-            self.span.end,
-            self.detail,
-            self.hint
-        )
-    }
-}
-
-impl std::error::Error for IrError {}
