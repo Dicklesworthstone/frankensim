@@ -18,7 +18,10 @@
 //! endpoint, whose public adjoint is a transpose solve: the body forms the
 //! port Jacobian one row for each port entry, by one transpose solve each,
 //! and applies that one matrix and its transpose, so the two products are
-//! exact transposes.
+//! exact transposes. The body also offers the step as the owner's Newton
+//! residual in its end enthalpy (`StageResidual`), for a monolithic solve:
+//! its derivative is the tangent the owner's Newton applies, and `accept`
+//! books the receipt `propose` books.
 //!
 //! The entropy generated inside the body is the conduction term alone, as for
 //! a conduction body, over the owner's endpoint operator with its phase
@@ -41,7 +44,9 @@
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
-use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 
 use super::{
     Patch, PatchPort, admit_boundary, admit_ports, bind_policy, bind_problem, bind_values,
@@ -49,7 +54,7 @@ use super::{
     port_readings, reading_weights, unsheeted,
 };
 use crate::transient::enthalpy::adjoint::EnthalpyAdjointError;
-use crate::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyStepConfig};
+use crate::transient::enthalpy::{EnthalpyBackwardEuler, EnthalpyStepConfig, EnthalpyStepSolution};
 use crate::{ConductionError, ConductionProblem, LinearConfig};
 
 /// The enthalpy owner behind heat ports on named boundary patches.
@@ -279,6 +284,25 @@ impl Component for EnthalpyBody<'_, '_> {
             .solver
             .advance(cx, problem, None, old, dt_s, self.config)?;
         port_readings(&self.patches, &step.temperature, outputs);
+        let receipt = self.step_receipt(cx, problem, old, dt_s, inputs, &step)?;
+        new.clear();
+        new.extend_from_slice(&step.specific_enthalpy_j_kg);
+        Ok(Proposal::Step(receipt))
+    }
+}
+
+impl EnthalpyBody<'_, '_> {
+    /// The receipt of the owner's step from `old` to `step`'s endpoint under
+    /// `inputs`: `propose`'s, and `accept`'s on the monolithic path.
+    fn step_receipt(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        step: &EnthalpyStepSolution,
+    ) -> Result<Receipt, EnthalpyAdjointError> {
         let end = &step.specific_enthalpy_j_kg;
         let generated_j_per_k = self
             .solver
@@ -310,9 +334,126 @@ impl Component for EnthalpyBody<'_, '_> {
                 .absolute_tolerance
                 .max(newton.relative_tolerance * first),
         };
+        Ok(receipt)
+    }
+}
+
+/// The owner's Newton residual `m (h - h_old) + dt (A(T) T - b)` [J] in the
+/// end enthalpy, with `T = T(h)`, and its tangent. `accept` runs the owner's
+/// accounts and joule gate on the kernel's endpoint and books `propose`'s
+/// receipt, with a zero residual: the owner solves nothing there.
+impl StageResidual for EnthalpyBody<'_, '_> {
+    fn unknowns(&self) -> usize {
+        self.masses.len()
+    }
+
+    fn initial_guess(
+        &self,
+        old: &Vec<f64>,
+        _dt_s: f64,
+        _inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), EnthalpyAdjointError> {
+        if old.len() != z.len() || z.len() != self.masses.len() {
+            return Err(super::invalid("a stage guess needs one entry per vertex".into()).into());
+        }
+        z.copy_from_slice(old);
+        Ok(())
+    }
+
+    fn residual(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        self.check_width("inputs", inputs.len())?;
+        self.check_width("outputs", outputs.len())?;
+        let boundary = boundary_for(&self.patches, &self.problem, inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
+        };
+        let endpoint =
+            self.solver
+                .evaluate_endpoint(cx, problem, None, old, z, dt_s, self.config, None)?;
+        if r.len() != endpoint.residual_j.len() {
+            return Err(super::invalid("a residual needs one entry per vertex".into()).into());
+        }
+        r.copy_from_slice(&endpoint.residual_j);
+        port_readings(&self.patches, &endpoint.temperature, outputs);
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        self.check_width("tangent outputs", d_outputs.len())?;
+        // The port loads enter `b` alone: the derivative holds no input.
+        let solver = &self.solver;
+        let slope = solver.stage_jacobian_apply(cx, self.problem, old, z, dt_s, false, dz, dr)?;
+        let d_temperature: Vec<f64> = slope.iter().zip(dz).map(|(s, d)| s * d).collect();
+        port_readings(&self.patches, &d_temperature, d_outputs);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        _inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), EnthalpyAdjointError> {
+        self.check_width("adjoint outputs", bar_outputs.len())?;
+        let solver = &self.solver;
+        let slope =
+            solver.stage_jacobian_apply(cx, self.problem, old, z, dt_s, true, bar_r, bar_z)?;
+        let mut weights = vec![0.0; slope.len()];
+        reading_weights(&self.patches, bar_outputs, &mut weights);
+        for ((bar, s), w) in bar_z.iter_mut().zip(&slope).zip(&weights) {
+            *bar += s * w;
+        }
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &Vec<f64>,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, EnthalpyAdjointError> {
+        self.check_width("inputs", inputs.len())?;
+        let boundary = boundary_for(&self.patches, &self.problem, inputs)?;
+        let problem = ConductionProblem {
+            boundary: &boundary,
+            ..self.problem
+        };
+        let step = self
+            .solver
+            .stage_endpoint(cx, problem, old, z, dt_s, self.config)?;
+        let receipt = self.step_receipt(cx, problem, old, dt_s, inputs, &step)?;
         new.clear();
         new.extend_from_slice(&step.specific_enthalpy_j_kg);
-        Ok(Proposal::Step(receipt))
+        Ok(receipt)
     }
 }
 

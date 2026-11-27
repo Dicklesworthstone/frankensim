@@ -7,6 +7,8 @@
 use fs_exec::Cx;
 use fs_solver::norm2;
 
+#[cfg(feature = "component")]
+use super::EnthalpyStepSolution;
 use super::{
     ASSEMBLY_TILE, DofMap, EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, StepContext,
     energy_balance, finite, poll, radiation::boundary_at_temperature, PointwiseBoundary,
@@ -15,6 +17,8 @@ use crate::{
     AmbientRadiationPatch, ConductionProblem, PointwiseAmbientRadiation,
     PointwiseEnclosureRadiation, RobinFlux, ThermalInterfaces,
 };
+#[cfg(feature = "component")]
+use fs_solver::NewtonReport;
 
 /// Physical balances of an arbitrary candidate, with immutable physical history.
 ///
@@ -391,3 +395,106 @@ impl EnthalpyBackwardEuler<'_, '_> {
     }
 }
 
+/// The step's own Newton tangent and finish at a supplied endpoint, for a body
+/// whose kernel solves the step monolithically (`StageResidual`).
+#[cfg(feature = "component")]
+impl EnthalpyBackwardEuler<'_, '_> {
+    /// Apply the tangent `advance`'s Newton solve applies at `h`, the storage
+    /// derivative plus `dt` times the transport's derivative in `h`, or its
+    /// transpose, to `v`; return `dT/dh` at `h`. A body's endpoint has no
+    /// prescribed row and no radiation, and its Neumann loads leave the
+    /// tangent unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_jacobian_apply(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        h: &[f64],
+        dt_s: f64,
+        transpose: bool,
+        v: &[f64],
+        out: &mut [f64],
+    ) -> Result<Vec<f64>, EnthalpyError> {
+        let n = self.masses.len();
+        let lengths = [old.len(), h.len(), v.len(), out.len()];
+        if !problem.boundary.dirichlet().is_empty() || lengths != [n; 4] {
+            return Err(EnthalpyError::InvalidInput(
+                "a stage tangent needs every vertex free, one entry each",
+            ));
+        }
+        let context = StepContext {
+            storage: self,
+            cx,
+            problem,
+            interfaces: None,
+            old,
+            dt: dt_s,
+            pointwise_radiation: None,
+        };
+        let stage = context.stage(h)?;
+        if transpose {
+            let diagonal = &stage.storage_diagonal;
+            for ((value, &weight), &storage) in out.iter_mut().zip(v).zip(diagonal) {
+                *value = storage * weight;
+            }
+        }
+        for (row, &weight) in v.iter().enumerate() {
+            if row % ASSEMBLY_TILE == 0 {
+                poll(cx, row)?;
+            }
+            let (columns, entries) = stage.tangent.row(row);
+            if transpose {
+                for (&column, &entry) in columns.iter().zip(entries) {
+                    out[column] += dt_s * entry * weight;
+                }
+            } else {
+                let applied: f64 = columns
+                    .iter()
+                    .zip(entries)
+                    .map(|(&column, &entry)| entry * v[column])
+                    .sum();
+                out[row] = stage.storage_diagonal[row] * weight + dt_s * applied;
+            }
+        }
+        Ok(stage.slope)
+    }
+
+    /// The owner's accounts and joule gate of the step from `old` ended at the
+    /// supplied `h`, as `advance` finishes its own Newton endpoint. The owner
+    /// solves nothing here: the report holds no iteration and a zero residual,
+    /// and convergence is the caller's.
+    pub(crate) fn stage_endpoint(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.admit_step(cx, problem, old, dt_s, config)?;
+        if !problem.boundary.dirichlet().is_empty() || h.len() != old.len() {
+            return Err(EnthalpyError::InvalidInput(
+                "a stage endpoint needs every vertex free, one entry each",
+            ));
+        }
+        let context = StepContext {
+            storage: self,
+            cx,
+            problem,
+            interfaces: None,
+            old,
+            dt: dt_s,
+            pointwise_radiation: None,
+        };
+        let newton = NewtonReport {
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            history: Vec::new(),
+            diagnosis: None,
+        };
+        context.finish(h.to_vec(), newton, config.energy_tolerance_j)
+    }
+}

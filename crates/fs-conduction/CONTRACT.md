@@ -6622,6 +6622,16 @@ those rows and the VJP their transpose, so the two are transposes of one
 matrix to rounding. Each tangent call costs one primal solve and one
 transpose solve per port entry. The class is `Smooth`.
 
+The body offers the `StageResidual` tier, as a conduction body does. The
+unknowns are the end specific enthalpy, started at the old field; the
+residual is the owner's Newton residual `m (h - h_old) + dt (A(T) T - b)` [J]
+from the public `evaluate_endpoint`, and the ports read `T(h)`. Its
+derivative is the tangent the owner's Newton applies, the outputs' `dT/dh`
+through the reading weights; the port loads enter `b` alone. `accept` runs
+the owner's `finish`, its accounts and joule gate, on the supplied field and
+books `propose`'s receipt through one function, with a zero residual: the
+owner solves nothing there, and convergence belongs to the kernel's gate.
+
 Construction refuses what a conduction body refuses on its boundary and
 ports: a region that is not a uniform zero-flux Neumann row, sheet
 conduction that depends on temperature, a nonzero volumetric source, an
@@ -6652,6 +6662,15 @@ declared before the first run:
   target, 1e-10 of the first residual, a step's receipt carries that
   target, above 1e-30 J and at least the residual, and a heater through
   the kernel steps the body eight times.
+- The conformance cases and the trace port's uniform-flux cases pass
+  `check_stage_residual` at their step's end: the residual within 1e-8 J,
+  the derivatives within 1e-6 relative.
+- The loop of a 20 J/K lump at 420 K, a 0.5 W/K wall and the body's left
+  end, every node offering its stage residual, takes the monolithic solve
+  under the default policy, with a zero receipt residual. Over 50 steps of
+  2 s it stays within 1e-8 K of interface Newton: the owner's 1e-10 J stop
+  is at most 7e-10 K a step on the lightest vertex. The body's monolithic
+  receipt books its own `propose`'s entropy within 1e-8 relative.
 - Refusals by name: Dirichlet and Robin regions, a volumetric source, an
   unknown, repeated or missing port, and a solver on another mesh. A step is
   refused for a field of the wrong length, a heat that is not a number, and

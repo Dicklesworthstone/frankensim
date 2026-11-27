@@ -13,7 +13,9 @@
 //! flux, a heater through the kernel steps it exactly as the owner steps
 //! itself, and it refuses what it cannot carry. Its state codec reads what
 //! it wrote, and its identity follows the chart, the ports and the step
-//! policies. Run with
+//! policies. Its stage residual passes the kit, and a loop of the body, a
+//! wall and a lump solved monolithically meets the same loop solved by
+//! interface Newton. Run with
 //! `cargo test -p fs-conduction --features component --test enthalpy_component`.
 #![cfg(feature = "component")]
 // Exact float comparisons here assert bitwise agreement with the owner.
@@ -40,12 +42,14 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
 use fs_ports::component::{Component, Proposal};
 use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 use fs_solver::NewtonKrylovConfig;
-use fs_system::SystemBuilder;
 use fs_system::elements::{Conductance, HeatCapacity, Heater, SourceAccount, Waveform};
+use fs_system::{BlockSolveMode, BlockSolverPolicy, SystemBuilder};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -321,7 +325,8 @@ fn patch_mean_k(parts: Parts, h: &[f64], at: f64) -> f64 {
 /// difference quotient of its step within 1e-6 relative, above a floor of
 /// the patch rounding plus 1e-9 K for where Newton stops; and its ports
 /// read the closed-form `T(h)` of the state it returns, area-averaged over
-/// each end, within 1e-9 K.
+/// each end, within 1e-9 K; and its stage residual passes the kit at that
+/// state within 1e-8 J and 1e-6 relative.
 #[test]
 fn an_enthalpy_body_of_a_card_conforms_and_its_tangent_is_the_derivative_of_its_step() {
     with_cx(|cx| {
@@ -371,6 +376,8 @@ fn an_enthalpy_body_of_a_card_conforms_and_its_tangent_is_the_derivative_of_its_
                 .unwrap();
             assert!(matches!(proposal, Proposal::Step(_)));
             assert_eq!(means.as_slice(), outputs.as_slice());
+            check_stage_residual(&body, &case, &new, 1.0e-6, 1.0e-8, cx)
+                .unwrap_or_else(|failure| panic!("stage at {dt_s} s, {heat_w:?} W: {failure}"));
             for (port, at) in [(0, 0.0), (1, LENGTH_M)] {
                 let expected = patch_mean_k(parts, &new, at);
                 eprintln!(
@@ -400,8 +407,9 @@ fn an_enthalpy_body_of_a_card_conforms_and_its_tangent_is_the_derivative_of_its_
 /// uniform flux, `A_f / 3` of each face's share on each of its vertices, a
 /// trace port steps the body as the mean port does, the two end fields'
 /// closed-form temperatures within 1e-9 K; a trace port returns the end
-/// `T(h)` at each of its vertices; under loads that are not a uniform flux
-/// the traced body passes the kit and the tangent check as above.
+/// `T(h)` at each of its vertices, and its stage residual passes the kit at
+/// that end as above; under loads that are not a uniform flux the traced
+/// body passes the kit and the tangent check as above.
 #[test]
 fn a_trace_port_of_an_enthalpy_body_conforms_and_steps_it_as_the_mean_port_under_a_uniform_flux() {
     with_cx(|cx| {
@@ -461,6 +469,14 @@ fn a_trace_port_of_an_enthalpy_body_conforms_and_steps_it_as_the_mean_port_under
                 assert!((reading - t_of(end[vertex])).abs() <= 1.0e-9);
             }
             assert!((readings[9] - means[1]).abs() <= 1.0e-9);
+            let uniform_case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s,
+                inputs: &inputs,
+            };
+            check_stage_residual(&traced, &uniform_case, &end, 1.0e-6, 1.0e-8, cx)
+                .unwrap_or_else(|failure| panic!("stage at {dt_s} s: {failure}"));
             for (point, load) in inputs[..9].iter_mut().enumerate() {
                 *load += 0.3 * left_w * (point as f64 - 4.0) / 9.0;
             }
@@ -565,6 +581,100 @@ fn a_heater_through_the_kernel_steps_an_enthalpy_body_as_the_owner_does() {
             ledger.energy_residual_j()
         );
         assert!(ledger.entropy_generated_j_per_k() > 0.0);
+    });
+}
+
+/// Claims, declared before the first run: with every node offering its
+/// stage residual, the kernel's default policy solves the loop of a 20 J/K
+/// lump at 420 K, a 0.5 W/K wall and the body's left end monolithically,
+/// and the body's receipt there has a zero residual. Over 50 steps of 2 s
+/// the body's closed-form temperatures and the lump stay within 1e-8 K of
+/// the same loop solved by interface Newton: the owner's Newton stops at
+/// 1e-10 J, at most 7e-10 K a step at Cp >= 450 J/kg/K on a vertex of at
+/// least 3.3e-4 kg (asserted), and the body's slowest decay keeps at most 14
+/// such steps. On every step the
+/// body's monolithic receipt books the entropy its own `propose` books at
+/// the converged port heat within 1e-8 relative.
+#[test]
+fn a_monolithic_solve_of_the_lump_loop_meets_interface_newton_and_the_owner_receipt() {
+    const DT_S: f64 = 2.0;
+    with_cx(|cx| {
+        let parts = parts();
+        let probe = body(cx, parts, &["left"]);
+        let lightest_kg = solver(cx, parts)
+            .reference_nodal_masses_kg()
+            .iter()
+            .fold(f64::INFINITY, |m, &v| m.min(v));
+        assert!(lightest_kg >= 3.3e-4, "{lightest_kg} kg");
+        let build = || {
+            let mut builder = SystemBuilder::new();
+            let body = body(cx, parts, &["left"]);
+            let node = builder
+                .add_with_tangent_and_stage_residual("body", body, initial(parts))
+                .unwrap();
+            let capacity = HeatCapacity::new(20.0).unwrap();
+            let lump = builder
+                .add_with_tangent_and_stage_residual("lump", capacity, 420.0)
+                .unwrap();
+            let conductance = Conductance::new(0.5).unwrap();
+            let wall = builder
+                .add_with_tangent_and_stage_residual("wall", conductance, ())
+                .unwrap();
+            let (a, b) = (
+                builder.port(wall, "a").unwrap(),
+                builder.port(wall, "b").unwrap(),
+            );
+            builder
+                .bond(builder.port(lump, "heat").unwrap(), a)
+                .unwrap();
+            let left = builder.port(node, "left").unwrap();
+            builder.bond(b, left).unwrap();
+            let mut system = builder.seal().unwrap();
+            assert!(system.guess(a, &[420.0]) && system.guess(b, &[310.0]));
+            (system, node, lump, left)
+        };
+        let (mut monolithic, node, lump, left) = build();
+        let (mut interface, ..) = build();
+        interface.set_solver_policy(BlockSolverPolicy::InterfaceNewton);
+        assert_eq!(
+            monolithic.block_modes(),
+            [BlockSolveMode::MonolithicNewtonKrylov]
+        );
+        assert_eq!(interface.block_modes(), [BlockSolveMode::InterfaceNewton]);
+        let (mut worst_k, mut worst_entropy) = (0.0_f64, 0.0_f64);
+        for index in 0..50 {
+            let old = monolithic.state::<Vec<f64>>(node).unwrap().clone();
+            monolithic.step(DT_S, cx).unwrap();
+            interface.step(DT_S, cx).unwrap();
+            let lumps = [&monolithic, &interface].map(|system| *system.state::<f64>(lump).unwrap());
+            let fields =
+                [&monolithic, &interface].map(|system| system.state::<Vec<f64>>(node).unwrap());
+            let gap_k = fields[0]
+                .iter()
+                .zip(fields[1])
+                .map(|(a, b)| (t_of(*a) - t_of(*b)).abs())
+                .fold((lumps[0] - lumps[1]).abs(), f64::max);
+            let heat_w = monolithic.last_input(left).to_vec();
+            let (mut new, mut reading) = (Vec::new(), [0.0]);
+            let proposal = probe.propose(&old, DT_S, &heat_w, &mut new, &mut reading, cx);
+            let Ok(Proposal::Step(owner)) = proposal else {
+                panic!("step {index}: {proposal:?}");
+            };
+            let receipt = &monolithic.last_receipts()[node.index()];
+            assert_eq!(receipt.residual, 0.0, "step {index}: {receipt:?}");
+            let booked = receipt.entropy_generated_j_per_k;
+            let owner_j_k = owner.entropy_generated_j_per_k;
+            let entropy = (booked - owner_j_k).abs() / owner_j_k;
+            worst_k = worst_k.max(gap_k);
+            worst_entropy = worst_entropy.max(entropy);
+            assert!(
+                gap_k <= 1.0e-8 && entropy <= 1.0e-8,
+                "step {index}: {gap_k} K; {booked} against {owner_j_k} J/K"
+            );
+        }
+        eprintln!(
+            "monolithic against interface Newton over 50 steps: largest gap {worst_k:e} K, entropy {worst_entropy:e} relative"
+        );
     });
 }
 
