@@ -1,76 +1,310 @@
 //! Option B core tests for `fs-runtime` loading real `.fsim` assemblies:
-//! 0-ULP CLI parity, solve-mode parity (with & without constant sources),
-//! live `set_input` work booking, `render_f32` halt/silence, and probe target guards.
+//! full 10-example `.fsim` sweep against the shared `fs-cli` lowering registry,
+//! live `set_input` work booking, `seed_override`, `render_f32` halt/silence,
+//! inline probe target guards, and `from_system` per-step latch checks.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fsim::{PackCatalog, admit_assembly_source};
 use fs_runtime::AssemblyRuntime;
-use fs_system::LoweringRegistry;
+use fs_scenario::assembly::draft::{PhysicsDomain, ProbeDecl, ProbeKind};
 use fs_system::elements::Motion;
+use fs_system::lowering::Observed;
+use fs_system::{LoweredSystem, LoweringRegistry};
 
 const FORCED_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/forced_oscillator.fsim");
+const TWO_MASS_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/two_mass_chain.fsim");
+const CONDUCTION_FSIM: &[u8] =
+    include_bytes!("../../../examples/assemblies/two_body_conduction.fsim");
+const SRM_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/srm1453_slab.fsim");
+const BELT_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/block_on_belt.fsim");
+const GAS_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/gas_piston.fsim");
+const FILM_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/shear_film_pair.fsim");
+const RUB288_FSIM: &[u8] =
+    include_bytes!("../../../examples/assemblies/rubber_mount_creep_288k.fsim");
+const RUB298_FSIM: &[u8] =
+    include_bytes!("../../../examples/assemblies/rubber_mount_creep_298k.fsim");
+const SLIDER_FSIM: &[u8] = include_bytes!("../../../examples/assemblies/thermo_mech_slider.fsim");
+
 const STEEL_PACK: &[u8] = include_bytes!(
     "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
 );
-const CONDUCTION_FSIM: &[u8] =
-    include_bytes!("../../../examples/assemblies/two_body_conduction.fsim");
 const AL_PACK: &[u8] =
     include_bytes!("../../../examples/assemblies/packs/aluminum-pure-thermal-nbs-c447.fsmcdpk");
+const ATKINS_PACK: &[u8] =
+    include_bytes!("../../../examples/system/atkins1964/al6061t6-lathe-0p30um-vacuum.fsintpk");
+const SENS_PACK: &[u8] = include_bytes!(
+    "../../../examples/assemblies/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
+);
+const PG50_PACK: &[u8] =
+    include_bytes!("../../../examples/assemblies/packs/dowfrost-pg50-40-60c.fsmcdpk");
+const SRM_PACK: &[u8] =
+    include_bytes!("../../../examples/assemblies/packs/eps-nist-srm1453-2013.fsmcdpk");
+const N2_PACK: &[u8] =
+    include_bytes!("../../../examples/assemblies/packs/nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk");
+const KATS_PACK: &[u8] = include_bytes!(
+    "../../../examples/assemblies/packs/katsivardi-2025-pla-metal-dry-air-interface.fsintpk"
+);
+const RUBBER_PACK: &[u8] = include_bytes!(
+    "../../../examples/assemblies/packs/rouleau-2015-self-adhesive-rubber-shear.fsintpk"
+);
 
-fn assert_cli_parity(fsim: &[u8], packs: &[&[u8]], rt: &mut AssemblyRuntime, steps: usize) {
+const INLINE_THERMAL_FSIM: &str = r#"(assembly "inline_thermal"
+  (version 1) (units "SI") (seed 0x11)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 293.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 1.0s :dt 0.05s :sample-rate 20Hz)
+  (part "hot" :kind solid :geometry (box 0.06m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped)
+  (source "heater" :part "hot" :port "thermal" :history (constant 500W))
+  (probe "hot_temp" :kind thermocouple :target "hot" :sample-rate 20Hz)
+)"#;
+
+fn cli_registry() -> LoweringRegistry {
+    let mut reg = LoweringRegistry::with_kernel_defaults();
+    fs_system::lowering::owners::register_owner_defaults(&mut reg);
+    reg
+}
+
+fn direct_probe_value(
+    lowered: &LoweredSystem,
+    draft: &fs_scenario::assembly::draft::DraftAssembly,
+    decl: &ProbeDecl,
+) -> f64 {
+    let (eid, qty) = match &decl.kind {
+        ProbeKind::Thermocouple { location, .. } => (*location, "temperature"),
+        ProbeKind::FieldQuantity {
+            target, quantity, ..
+        } => (*target, quantity.name.as_str()),
+        other => panic!("unexpected probe kind {other:?}"),
+    };
+    let obs = lowered.observers.get(&eid).and_then(|f| f(&lowered.system));
+    let nodes = lowered
+        .entity_nodes
+        .get(&eid)
+        .map_or(&[][..], Vec::as_slice);
+    let is_th = draft
+        .input()
+        .parts
+        .iter()
+        .any(|p| p.entity == eid && p.physics.contains(&PhysicsDomain::Thermal));
+    match qty {
+        "position" | "displacement" => nodes
+            .iter()
+            .find_map(|&n| lowered.system.state::<Motion>(n).map(|m| m.position_m))
+            .unwrap(),
+        "velocity" => nodes
+            .iter()
+            .find_map(|&n| lowered.system.state::<Motion>(n).map(|m| m.velocity_m_s))
+            .unwrap(),
+        "temperature" => match obs {
+            Some(Observed::Cell(t)) => t,
+            _ if is_th => nodes
+                .iter()
+                .find_map(|&n| lowered.system.state::<f64>(n).copied())
+                .unwrap(),
+            _ => panic!("no temperature for {}", decl.name),
+        },
+        "heat_rate" => match obs {
+            Some(Observed::HeatRate(q)) => q,
+            _ => panic!("no heat_rate for {}", decl.name),
+        },
+        other => {
+            let Some(Observed::Body {
+                velocity_m_s: v,
+                angular_velocity_rad_s: w,
+            }) = obs
+            else {
+                panic!("no body observer for {other}");
+            };
+            let vals = [v[0], v[1], v[2], w[0], w[1], w[2]];
+            let idx = [
+                "velocity-x",
+                "velocity-y",
+                "velocity-z",
+                "angular-velocity-x",
+                "angular-velocity-y",
+                "angular-velocity-z",
+            ]
+            .iter()
+            .position(|k| *k == other)
+            .unwrap();
+            vals[idx]
+        }
+    }
+}
+
+fn assert_registry_parity(
+    tag: &str,
+    fsim: &[u8],
+    packs: &[&[u8]],
+    seed_override: Option<u64>,
+    dt: f64,
+    steps: usize,
+    expected_inputs: &[&str],
+) -> AssemblyRuntime {
+    let mut rt = AssemblyRuntime::load(fsim, packs, seed_override).unwrap_or_else(|e| {
+        panic!("{tag}: load failed: {e:?}");
+    });
+    let names: Vec<&str> = rt.inputs().iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, expected_inputs, "{tag} live inputs");
     let admitted =
         admit_assembly_source(fsim, &PackCatalog::from_raw_bytes(packs).unwrap()).unwrap();
-    let mut cli = LoweringRegistry::with_kernel_defaults()
+    let mut direct = cli_registry()
         .lower(&admitted.draft, &admitted.card_store)
         .unwrap();
-    assert_eq!(rt.block_modes(), cli.system.block_modes());
-    let mass = cli.entity_nodes[&admitted.draft.input().parts[0].entity][0];
-    let (pos_off, vel_off) = (
-        rt.probes().probe("mass_pos").unwrap().offset,
-        rt.probes().probe("mass_vel").unwrap().offset,
-    );
+    assert_eq!(rt.block_modes(), direct.system.block_modes(), "{tag} modes");
     let (pool, gate) = (
         ArenaPool::new(ArenaConfig::default()),
         CancelGate::new_clock_free(),
     );
     let key = StreamKey {
-        seed: admitted.seed,
+        seed: seed_override.unwrap_or(admitted.seed),
         kernel_id: 119,
         tile: 0,
         iteration: 0,
     };
     let mut buf = vec![0.0; rt.snapshot_len()];
+    let decls = &admitted.draft.input().probes;
     for k in 0..steps {
-        rt.step(1.0e-3).unwrap();
+        rt.step(dt).unwrap();
         pool.scope(|a| {
             let cx = Cx::new(&gate, a, key, Budget::INFINITE, ExecMode::Deterministic);
-            cli.system.step(1.0e-3, &cx).unwrap();
+            direct.system.step(dt, &cx).unwrap();
         });
         rt.read_probes(&mut buf).unwrap();
-        let m = cli.system.state::<Motion>(mass).unwrap();
-        assert_eq!(buf[pos_off].to_bits(), m.position_m.to_bits(), "pos {k}");
-        assert_eq!(buf[vel_off].to_bits(), m.velocity_m_s.to_bits(), "vel {k}");
+        for (pi, decl) in decls.iter().enumerate() {
+            let off = rt.probes().probes[pi].offset;
+            let got = buf[off];
+            let exp = direct_probe_value(&direct, &admitted.draft, decl);
+            assert_eq!(
+                got.to_bits(),
+                exp.to_bits(),
+                "{tag} probe {} step {k}",
+                decl.name
+            );
+        }
     }
     assert_eq!(
         rt.ledger().energy_residual_j().to_bits(),
-        cli.system.ledger().energy_residual_j().to_bits()
+        direct.system.ledger().energy_residual_j().to_bits(),
+        "{tag} ledger residual"
+    );
+    rt
+}
+
+#[test]
+fn all_ten_example_assemblies_match_cli_registry_or_refuse_explicitly() {
+    type SweepCase<'a> = (&'a str, &'a [u8], &'a [&'a [u8]], f64, usize, &'a [&'a str]);
+    let cases: &[SweepCase<'_>] = &[
+        (
+            "forced_oscillator",
+            FORCED_FSIM,
+            &[STEEL_PACK],
+            1.0e-3,
+            20,
+            &["load"],
+        ),
+        (
+            "two_mass_chain",
+            TWO_MASS_FSIM,
+            &[STEEL_PACK],
+            1.0e-3,
+            20,
+            &["load"],
+        ),
+        (
+            "gas_piston",
+            GAS_FSIM,
+            &[STEEL_PACK, N2_PACK],
+            5.0e-4,
+            15,
+            &["ambient_pressure"],
+        ),
+        (
+            "two_body_conduction",
+            CONDUCTION_FSIM,
+            &[AL_PACK, ATKINS_PACK],
+            0.05,
+            15,
+            &[],
+        ),
+        ("srm1453_slab", SRM_FSIM, &[SRM_PACK], 0.01, 10, &[]),
+        (
+            "block_on_belt",
+            BELT_FSIM,
+            &[STEEL_PACK, KATS_PACK],
+            1.0e-3,
+            20,
+            &[],
+        ),
+        (
+            "shear_film_pair",
+            FILM_FSIM,
+            &[SENS_PACK, PG50_PACK],
+            0.01,
+            15,
+            &[],
+        ),
+        (
+            "rubber_mount_creep_288k",
+            RUB288_FSIM,
+            &[STEEL_PACK, SENS_PACK, RUBBER_PACK],
+            0.25,
+            2,
+            &[],
+        ),
+        (
+            "rubber_mount_creep_298k",
+            RUB298_FSIM,
+            &[STEEL_PACK, SENS_PACK, RUBBER_PACK],
+            0.25,
+            2,
+            &[],
+        ),
+    ];
+    for &(tag, fsim, packs, dt, steps, ins) in cases {
+        assert_registry_parity(tag, fsim, packs, None, dt, steps, ins);
+    }
+    // 10th example: lag-filtered thermocouple refuses explicitly; without lag it matches 0-ULP.
+    assert_eq!(
+        AssemblyRuntime::load(SLIDER_FSIM, &[STEEL_PACK], None)
+            .err()
+            .unwrap()
+            .code,
+        "probe-unsupported"
+    );
+    let no_lag = std::str::from_utf8(SLIDER_FSIM)
+        .unwrap()
+        .replace(" :time-constant 0.005s", "");
+    assert_registry_parity(
+        "thermo_mech_slider_no_lag",
+        no_lag.as_bytes(),
+        &[STEEL_PACK],
+        None,
+        1.0e-3,
+        15,
+        &[],
     );
 }
 
 #[test]
-fn forced_oscillator_matches_cli_and_modes_and_books_live_work() {
-    let mut rt = AssemblyRuntime::load(FORCED_FSIM, &[STEEL_PACK], None).unwrap();
-    assert!(rt.probes_json().contains("\"name\":\"mass_pos\""));
-    assert_eq!(
-        (
-            rt.inputs().len(),
-            rt.inputs()[0].name.as_str(),
-            rt.inputs()[0].unit.as_str()
-        ),
-        (1, "load", "N")
+fn forced_oscillator_live_work_seed_override_and_no_source_parity() {
+    let mut rt = assert_registry_parity(
+        "forced_oscillator",
+        FORCED_FSIM,
+        &[STEEL_PACK],
+        None,
+        1.0e-3,
+        50,
+        &["load"],
     );
-    assert_cli_parity(FORCED_FSIM, &[STEEL_PACK], &mut rt, 50);
+    assert!(rt.probes_json().contains("\"name\":\"mass_pos\""));
+    assert_eq!(rt.inputs()[0].unit, "N");
 
     let drive_work = |r: &AssemblyRuntime| {
         let a = r
@@ -81,7 +315,6 @@ fn forced_oscillator_matches_cli_and_modes_and_books_live_work() {
             .unwrap();
         (a.port_energy_in_j.value(), a.stored_change_j.value())
     };
-    // Step-by-step live input change: ledger closes on BOTH step 1 and step 2 (latched per step).
     let (p0, s0) = drive_work(&rt);
     rt.step(1.0e-3).unwrap();
     assert!(rt.ledger().energy_residual_j().abs() < 1.0e-12);
@@ -96,6 +329,17 @@ fn forced_oscillator_matches_cli_and_modes_and_books_live_work() {
     assert!(rt.ledger().energy_residual_j().abs() < 1.0e-12);
     assert!(rt.ledger_json().contains("frankensim.window_ledger.v1"));
 
+    // Seed override re-admits cleanly and matches direct stepping under the overridden seed.
+    assert_registry_parity(
+        "forced_seed_override",
+        FORCED_FSIM,
+        &[STEEL_PACK],
+        Some(0x9999),
+        1.0e-3,
+        10,
+        &["load"],
+    );
+
     // Graph with no constant source keeps identical solve modes & zero live inputs.
     let no_src: String = std::str::from_utf8(FORCED_FSIM)
         .unwrap()
@@ -103,9 +347,15 @@ fn forced_oscillator_matches_cli_and_modes_and_books_live_work() {
         .filter(|l| !l.contains("(source \"load\""))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut free_rt = AssemblyRuntime::load(no_src.as_bytes(), &[STEEL_PACK], None).unwrap();
-    assert!(free_rt.inputs().is_empty());
-    assert_cli_parity(no_src.as_bytes(), &[STEEL_PACK], &mut free_rt, 10);
+    assert_registry_parity(
+        "forced_no_source",
+        no_src.as_bytes(),
+        &[STEEL_PACK],
+        None,
+        1.0e-3,
+        10,
+        &[],
+    );
 }
 
 #[test]
@@ -130,26 +380,9 @@ fn render_f32_parity_halt_and_probe_target_guards() {
     assert_eq!(rendered.take_refusal().unwrap().code, "invalid-dt");
     assert!(rendered.take_refusal().is_none());
 
-    // Thermal-only part refuses `position` (never leaks K as m); 1D part refuses `velocity-x`.
-    let (mut kept, mut skip) = (Vec::new(), 0usize);
-    for l in std::str::from_utf8(CONDUCTION_FSIM).unwrap().lines() {
-        if l.contains("(part \"cold\"") {
-            skip = 3;
-        }
-        if skip > 0 {
-            skip -= 1;
-            continue;
-        }
-        if !["atkins_joint", "6061-T6", ":area", "cold_temp", "hot_limit"]
-            .iter()
-            .any(|k| l.contains(k))
-        {
-            kept.push(l);
-        }
-    }
-    let base_th = kept.join("\n");
-    assert!(AssemblyRuntime::load(base_th.as_bytes(), &[AL_PACK], None).is_ok());
-    let bad_th = base_th.replace(
+    // Inline thermal fixture: thermal-only part refuses `position`; 1D part refuses `velocity-x`.
+    assert!(AssemblyRuntime::load(INLINE_THERMAL_FSIM.as_bytes(), &[AL_PACK], None).is_ok());
+    let bad_th = INLINE_THERMAL_FSIM.replace(
         "(probe \"hot_temp\" :kind thermocouple :target \"hot\" :sample-rate 20Hz)",
         "(probe \"p\" :kind field-quantity :target \"hot\" :quantity \"position\" :dims (1 0 0 0 0 0) :sample-rate 20Hz)",
     );
@@ -185,7 +418,7 @@ fn from_system_latches_inputs_per_step_and_rejects_bad_bindings() {
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     );
     let sys = || {
-        LoweringRegistry::with_kernel_defaults()
+        cli_registry()
             .lower(&admitted.draft, &admitted.card_store)
             .unwrap()
             .system
@@ -207,7 +440,6 @@ fn from_system_latches_inputs_per_step_and_rejects_bad_bindings() {
         good_in.default_value.to_bits()
     );
     latched_rt.set_input(0, 42.0).unwrap();
-    // Staged only in pending cell until step() latches it.
     assert_eq!(
         cell.load(std::sync::atomic::Ordering::Relaxed),
         good_in.default_value.to_bits()

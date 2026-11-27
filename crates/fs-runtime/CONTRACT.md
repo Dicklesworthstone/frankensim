@@ -23,7 +23,7 @@
 Every invalid binding, admission/lowering failure, unlowered/ambiguous/unsupported probe, step refusal, or buffer mismatch returns `RuntimeRefusal { code, stage, message }` with canonical JSON encoding; nothing is silently clamped or ignored.
 
 ## Determinism class
-`ExecMode::Deterministic` with explicit caller `seed` and fixed `StreamKey`; identical inputs and step sizes produce bit-identical native probe outputs matching direct `LoweringRegistry::with_kernel_defaults()` stepping (`tests/runtime_core.rs`).
+`ExecMode::Deterministic` with explicit caller `seed` and fixed `StreamKey`; identical inputs and step sizes produce bit-identical native probe outputs matching direct `LoweringRegistry::with_kernel_defaults()` + `register_owner_defaults()` stepping across all lowered `examples/assemblies/*.fsim` assemblies (`tests/runtime_core.rs`).
 
 ## Cancellation behavior
 Each runtime owns a private `CancelGate::new_clock_free()` passed into `Cx` on every `System::step`; no `fs-runtime` API requests cancellation, so every step ends in completion or a refusal.
@@ -40,7 +40,7 @@ None. `fs-system` is built with `features = ["slices"]`; all dependencies are pu
 - `live_source::tests`: power-port role/dimension guard, `LiveSource` vs static `Force` bit-for-bit & `BlockSolveMode::MonolithicNewtonKrylov` parity (including no-source graph mode check), and first-law work booking.
 - `probes::tests::refuses_non_mechanical_and_spiral_scalar_and_multi_motion`: guards against non-mechanical/rotational scalar fallback and multi-`Motion` ambiguity (`probe-ambiguous`).
 - `tests/no_alloc.rs`: atomic `GlobalAlloc` proof of 0 heap allocations on a 1 kg `Mass` + `ControlledSource` system after warm-up, `from_system` default-cell initialization check, and `render_f32` `f32`-overflow silence halt.
-- `tests/runtime_core.rs`: 0-ULP CLI parity and `block_modes()` parity on `forced_oscillator.fsim` (with untouched `LiveSource` and with no constant source), per-step latched `set_input_by_name` two-step ledger closure and work booking, `render_f32` parity and halt/silence, thermal/3D probe target guards, and `from_system` binding guards.
+- `tests/runtime_core.rs`: full 10-example `examples/assemblies/*.fsim` 0-ULP and `block_modes()` parity sweep against the shared `fs-cli` registry (9 lowered + `thermo_mech_slider` `probe-unsupported` + lag-stripped parity), `seed_override` parity, per-step latched `set_input_by_name` two-step ledger closure and work booking, `render_f32` parity and halt/silence, inline thermal/3D probe guards, and `from_system` binding guards.
 - Cross-target `wasm32-unknown-unknown` vs native `0-ULP` IEEE-754 parity on `forced_oscillator.fsim`: `crates/fs-runtime-wasm/tests/runtime.test.mjs`.
 
 ## No-claim boundaries
