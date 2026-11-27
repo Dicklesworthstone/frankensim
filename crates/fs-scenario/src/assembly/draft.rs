@@ -1145,7 +1145,8 @@ fn check_hertz_state(
     state: &[(ParameterKey, QtyAny)],
     scope: &str,
 ) -> Result<(), DraftAssemblyError> {
-    let (mut has_f, mut has_p, mut has_e, mut has_v) = (false, false, false, false);
+    let (mut has_f, mut has_p, mut has_e, mut has_v, mut has_sx, mut has_sy) =
+        (false, false, false, false, false, false);
     for (k, q) in state {
         let f = format!("{scope}.state.{}", k.name);
         match k.name.as_str() {
@@ -1158,6 +1159,14 @@ fn check_hertz_state(
                 has_p = true;
             }
             "gap" | "initial_closure" => check_qty(*q, LENGTH, &f, false, false)?,
+            "station_x" => {
+                check_qty(*q, LENGTH, &f, false, false)?;
+                has_sx = true;
+            }
+            "station_y" => {
+                check_qty(*q, LENGTH, &f, false, false)?;
+                has_sy = true;
+            }
             "restitution" => {
                 check_qty(*q, Dims::NONE, &f, true, false)?;
                 if q.value > 1.0 {
@@ -1187,6 +1196,12 @@ fn check_hertz_state(
         return Err(DraftAssemblyError::new(
             scope,
             "restitution and approach_speed pair required",
+        ));
+    }
+    if has_sx != has_sy {
+        return Err(DraftAssemblyError::new(
+            scope,
+            "station_x and station_y pair required",
         ));
     }
     Ok(())

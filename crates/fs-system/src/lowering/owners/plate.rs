@@ -1,4 +1,4 @@
-//! Modal circular plate owner (`PartLoweringKey(Shell, {Mechanics}, Modal)`, `.11.9.2` / `.11.9.3`).
+//! Modal circular plate owner (`PartLoweringKey(Shell, {Mechanics}, Modal)`, `.11.9.2`..`.11.9.4`).
 //! Lowers `Shell` + `TensionedDisk` + `FidelityRung::Modal` onto `ModalStructure` via
 //! `fs_modal::slice_window`. Damping is film viscoelastic bending loss only:
 //! `zeta_k = 0.5 * eta(f_k) * (phi_k^T K_bend phi_k) / lambda_k` on the zero-prestress DKT
@@ -18,7 +18,7 @@ use fs_ports::{PortKind, StableId};
 use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QtyAny, QuantitySpec};
 use fs_scenario::assembly::draft::{
-    DraftAssemblyInput, DraftGeometrySource, DraftInterfaceKind, DraftPartKind, FidelityRung,
+    DraftGeometrySource, DraftInterfaceDecl, DraftInterfaceKind, DraftPartKind, FidelityRung,
     PhysicsDomain, SourceTarget,
 };
 use fs_scenario::entity::EntityId;
@@ -46,6 +46,8 @@ const DISK_BUDGET: ProfileBudget = ProfileBudget {
 };
 
 type Disk<'a> = (TensionedDisk, Vec<ModePair>, &'a MaterialCard, Hash, f64);
+type Strike = (EntityId, [f64; 2]);
+type Ports<'a> = (&'a [EntityId], &'a [Strike], bool);
 
 /// Register `PartLoweringKey(Shell, {Mechanics}, Modal)`.
 pub(crate) fn register(registry: &mut LoweringRegistry) {
@@ -57,18 +59,36 @@ pub(crate) fn register(registry: &mut LoweringRegistry) {
     registry.register_part(k, lower_modal_plate);
 }
 
+fn is_part_face_power_port(
+    ctx: &PartLoweringContext<'_>,
+    idx: usize,
+    iface: &DraftInterfaceDecl,
+) -> bool {
+    let DraftInterfaceKind::PowerPort { schema } = &iface.kind else {
+        return false;
+    };
+    let inp = ctx.draft.input();
+    (owning_part(inp, iface.feature_a) == Some(idx)
+        || owning_part(inp, iface.feature_b) == Some(idx))
+        && ctx
+            .cards
+            .power_port_schema(schema)
+            .is_some_and(|c| c.description == "face")
+}
+
 /// Distinct surface features of `part` touched by a `PistonFace` interface or a
-/// surface-targeted `mechanics` source, in draft order.
-fn face_surfaces(
-    inp: &DraftAssemblyInput,
-    part: EntityId,
+/// surface-targeted `mechanics` source, in draft order, plus `HertzContact` strikes
+/// and whether `(part, "face")` is targeted.
+fn collect_ports(
+    ctx: &PartLoweringContext<'_>,
     it: &Scoped,
-) -> Result<Vec<EntityId>, LoweringError> {
+) -> Result<(Vec<EntityId>, Vec<Strike>, bool), LoweringError> {
+    let (inp, part) = (ctx.draft.input(), ctx.part.entity);
     let Some(idx) = inp.parts.iter().position(|p| p.entity == part) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new(), false));
     };
     let owns = |e| owning_part(inp, e) == Some(idx);
-    let mut out = Vec::new();
+    let (mut out, mut strikes, mut part_face) = (Vec::new(), Vec::new(), false);
     let mut push = |e: EntityId| {
         if !out.contains(&e) {
             out.push(e);
@@ -90,33 +110,74 @@ fn face_surfaces(
         }
     }
     for src in &inp.sources {
-        if let SourceTarget::Port { entity, port } = &src.target
-            && port == "mechanics"
-            && *entity != part
-            && owns(*entity)
-        {
-            push(*entity);
+        if let SourceTarget::Port { entity, port } = &src.target {
+            if *entity == part && port == "face" {
+                part_face = true;
+            } else if port == "mechanics" && *entity != part && owns(*entity) {
+                push(*entity);
+            }
         }
     }
-    Ok(out)
+    part_face |= inp
+        .interfaces
+        .iter()
+        .any(|i| is_part_face_power_port(ctx, idx, i));
+    for iface in &inp.interfaces {
+        let DraftInterfaceKind::HertzContact { state } = &iface.kind else {
+            continue;
+        };
+        let xy = |n| {
+            state
+                .iter()
+                .find(|(k, _)| k.name == n)
+                .map_or(0.0, |(_, q)| q.value)
+        };
+        for feat in [iface.feature_a, iface.feature_b] {
+            if !owns(feat) {
+                continue;
+            }
+            if feat == part {
+                return Err(
+                    it.invalid("hertz-contact on modal shell must target a surface feature")
+                );
+            }
+            if out.contains(&feat) {
+                return Err(
+                    it.invalid("surface feature cannot combine piston-face and hertz-contact")
+                );
+            }
+            if strikes.iter().any(|(f, _)| *f == feat) {
+                return Err(it.invalid(
+                    "surface feature cannot be shared by two hertz-contact interfaces; use a second feature",
+                ));
+            }
+            strikes.push((feat, [xy("station_x"), xy("station_y")]));
+        }
+    }
+    Ok((out, strikes, part_face))
 }
 
 fn has_center_mech_connection(
-    inp: &DraftAssemblyInput,
-    part: EntityId,
+    ctx: &PartLoweringContext<'_>,
     faces: &[EntityId],
+    strikes: &[Strike],
 ) -> bool {
+    let (inp, part) = (ctx.draft.input(), ctx.part.entity);
     let Some(idx) = inp.parts.iter().position(|p| p.entity == part) else {
         return false;
     };
-    let owns_non_face = |e| owning_part(inp, e) == Some(idx) && !faces.contains(&e);
+    let owns_non_face = |e| {
+        owning_part(inp, e) == Some(idx)
+            && !faces.contains(&e)
+            && !strikes.iter().any(|(f, _)| *f == e)
+    };
     inp.sources.iter().any(|s| {
         matches!(&s.target, SourceTarget::Port { entity, port } if *entity == part && port == "mechanics")
     }) || inp.joints.iter().any(|j| j.parent == part || j.child == part)
-        || inp
-            .interfaces
-            .iter()
-            .any(|i| owns_non_face(i.feature_a) || owns_non_face(i.feature_b))
+        || inp.interfaces.iter().any(|i| {
+            !is_part_face_power_port(ctx, idx, i)
+                && (owns_non_face(i.feature_a) || owns_non_face(i.feature_b))
+        })
 }
 
 fn select_non_splitting_modes(
@@ -327,7 +388,7 @@ fn build_disk<'a>(
 fn build_attachments(
     film: &TensionedDisk,
     modes: &[ModePair],
-    faces: &[EntityId],
+    (faces, strikes, part_face): Ports<'_>,
     ctx: &PartLoweringContext<'_>,
     it: &mut Scoped,
 ) -> Result<Vec<ModalAttachment>, LoweringError> {
@@ -338,18 +399,22 @@ fn build_attachments(
         .position(|&(x, y)| x == 0.0 && y == 0.0)
         .and_then(|i| film.model.dof_map[3 * i])
         .ok_or_else(|| it.invalid("no free center DOF"))?;
-    let id = StableId::new("mechanics").map_err(|e| it.invalid(format!("port id: {e:?}")))?;
-    let weights = modes.iter().map(|m| m.phi[ctr]).collect();
-    let mut atts = Vec::with_capacity(1 + faces.len());
-    atts.push(ModalAttachment {
-        id,
-        kind: PortKind::MechanicalForceVelocity,
-        width: NonZeroUsize::MIN,
-        weights,
-    });
-    if !faces.is_empty() {
-        let disk_area = PI * film.spec.radius_m * film.spec.radius_m;
+    let disk_area = PI * film.spec.radius_m * film.spec.radius_m;
+    if part_face || !faces.is_empty() {
         it.derive(ctx.part, "disk_area", disk_area, AREA_DIMS, "pi*r^2");
+    }
+    let mk = |name: &str, weights| -> Result<ModalAttachment, LoweringError> {
+        let id = StableId::new(name).map_err(|e| it.invalid(format!("port id: {e:?}")))?;
+        Ok(ModalAttachment {
+            id,
+            kind: PortKind::MechanicalForceVelocity,
+            width: NonZeroUsize::MIN,
+            weights,
+        })
+    };
+    let mut atts = Vec::with_capacity(1 + usize::from(part_face) + faces.len() + strikes.len());
+    atts.push(mk("mechanics", modes.iter().map(|m| m.phi[ctr]).collect())?);
+    if part_face || !faces.is_empty() {
         let face_w: Vec<f64> = modes
             .iter()
             .map(|m| {
@@ -361,16 +426,25 @@ fn build_attachments(
                     .ok_or_else(|| it.invalid("non-finite modal_area"))
             })
             .collect::<Result<_, _>>()?;
-        for idx in 0..faces.len() {
-            let fid = StableId::new(format!("face_{idx}"))
-                .map_err(|e| it.invalid(format!("face port id: {e:?}")))?;
-            atts.push(ModalAttachment {
-                id: fid,
-                kind: PortKind::MechanicalForceVelocity,
-                width: NonZeroUsize::MIN,
-                weights: face_w.clone(),
-            });
+        if part_face {
+            atts.push(mk("face", face_w.clone())?);
         }
+        for idx in 0..faces.len() {
+            atts.push(mk(&format!("face_{idx}"), face_w.clone())?);
+        }
+    }
+    for (idx, &(_, [x, y])) in strikes.iter().enumerate() {
+        let sw: Vec<f64> = modes
+            .iter()
+            .map(|m| {
+                film.sample_mode_at(&m.phi, x, y)
+                    .map_err(|e| it.invalid(format!("strike station ({x}, {y}) refused: {e}")))
+            })
+            .collect::<Result<_, _>>()?;
+        if sw.iter().all(|w| w.abs() <= 1.0e-12) {
+            return Err(it.invalid("strike station has zero modal participation (fixed rim)"));
+        }
+        atts.push(mk(&format!("strike_{idx}"), sw)?);
     }
     Ok(atts)
 }
@@ -407,8 +481,8 @@ fn lower_modal_plate(
         rec(format!("modal_damping_ratio[{k}]"), zeta, z_note);
         pairs.push((omega, zeta));
     }
-    let faces = face_surfaces(ctx.draft.input(), ctx.part.entity, &it)?;
-    let atts = build_attachments(&film, &modes, &faces, ctx, &mut it)?;
+    let (faces, strikes, part_face) = collect_ports(ctx, &it)?;
+    let atts = build_attachments(&film, &modes, (&faces, &strikes, part_face), ctx, &mut it)?;
     let bdg = ModalAcousticTimeBudget::audible_reference();
     let st = ModalStructure::from_modes(rate, &pairs, bdg, atts)
         .map_err(|e| it.invalid(format!("ModalStructure refused: {e:?}")))?;
@@ -416,11 +490,18 @@ fn lower_modal_plate(
     let node = graph.add_with_tangent(&ctx.part.name, Some(ctx.part.entity), st, rest)?;
     let (mech, heat) = (graph.port(node, "mechanics")?, graph.port(node, "heat")?);
     graph.expose_port(ctx.part.entity, "mechanics", mech);
+    if part_face {
+        graph.expose_port(ctx.part.entity, "face", graph.port(node, "face")?);
+    }
     for (idx, &feat) in faces.iter().enumerate() {
         let fp = graph.port(node, &format!("face_{idx}"))?;
         graph.expose_port(feat, "mechanics", fp);
     }
-    if !has_center_mech_connection(ctx.draft.input(), ctx.part.entity, &faces) {
+    for (idx, &(feat, _)) in strikes.iter().enumerate() {
+        let sp = graph.port(node, &format!("strike_{idx}"))?;
+        graph.expose_port(feat, "mechanics", sp);
+    }
+    if !has_center_mech_connection(ctx, &faces, &strikes) {
         graph.bind_zero_boundary(mech);
     }
     let t_amb = ctx.ambient_temperature_k();
@@ -458,5 +539,9 @@ mod tests {
         let a0 = film.modal_area(&ms[0].phi).unwrap();
         let a1 = film.modal_area(&ms[1].phi).unwrap();
         assert!(a0.abs() > 0.1 && a1.abs() < 1.0e-12);
+        let c0 = film.sample_mode_at(&ms[0].phi, 0.0, 0.0).unwrap();
+        let c1 = film.sample_mode_at(&ms[1].phi, 0.0, 0.0).unwrap();
+        assert!(c0.abs() > 1.0 && c1.abs() < 1.0e-12);
+        assert!(film.sample_mode_at(&ms[0].phi, 0.2, 0.0).is_err());
     }
 }

@@ -2,7 +2,8 @@
 
 use fs_dcontact::component::{ContactInterface, ContactSolve, ContactState};
 use fs_dcontact::{Obstacle, hunt_crossley_loss_from_restitution};
-use fs_qty::Dims;
+use fs_qty::{Dims, QtyAny};
+use fs_scenario::assembly::ParameterKey;
 use fs_scenario::assembly::draft::{
     DraftGeometrySource, DraftInterfaceKind, DraftPartDecl, PrimitiveShape,
 };
@@ -35,9 +36,55 @@ fn inv_radius(geom: &DraftGeometrySource, scope: &str) -> Result<f64, LoweringEr
         {
             Ok(1.0 / radius.value)
         }
-        DraftGeometrySource::Primitive(PrimitiveShape::Box { .. }) => Ok(0.0),
-        _ => Err(inv(scope, "HertzContact requires Sphere or Box primitive")),
+        DraftGeometrySource::Primitive(PrimitiveShape::Box { .. })
+        | DraftGeometrySource::TensionedDisk(_) => Ok(0.0),
+        _ => Err(inv(
+            scope,
+            "HertzContact requires Sphere, Box, or TensionedDisk",
+        )),
     }
+}
+
+fn check_strike_station(
+    state: &[(ParameterKey, QtyAny)],
+    parts: (&DraftPartDecl, &DraftPartDecl),
+    rec: &mut ProvenanceRecorder,
+    scope: &str,
+) -> Result<(), LoweringError> {
+    let get = |n| {
+        state
+            .iter()
+            .find(|(k, _)| k.name == n)
+            .map(|(_, q)| q.value)
+    };
+    let dec = get("station_x").zip(get("station_y"));
+    let rad = |g: &DraftGeometrySource| match g {
+        DraftGeometrySource::TensionedDisk(d) => (Some(d.radius.value), None),
+        DraftGeometrySource::Primitive(PrimitiveShape::Sphere { radius }) => {
+            (None, Some(radius.value))
+        }
+        _ => (None, None),
+    };
+    let ((da, sa), (db, sb)) = (rad(&parts.0.geometry), rad(&parts.1.geometry));
+    let Some((r_disk, r_stick)) = da.zip(sb).or_else(|| db.zip(sa)) else {
+        return dec.map_or(Ok(()), |_| {
+            Err(inv(scope, "station_x/station_y requires TensionedDisk"))
+        });
+    };
+    let (x, y, sx, sy) = dec.map_or(
+        (0.0, 0.0, "not declared: 0", "not declared: 0"),
+        |(x, y)| (x, y, "state.station_x", "state.station_y"),
+    );
+    let r_s = x.hypot(y);
+    if !r_s.is_finite() || r_s + r_stick > r_disk {
+        return Err(inv(
+            scope,
+            format!("strike station overhangs rim: {r_s:.6}+{r_stick:.6}>{r_disk:.6}"),
+        ));
+    }
+    rec.record_declared_field("station_x", x, LENGTH_DIMS, scope, sx);
+    rec.record_declared_field("station_y", y, LENGTH_DIMS, scope, sy);
+    Ok(())
 }
 
 fn elastic_pair(
@@ -171,6 +218,10 @@ fn lower_hertz_contact(
     if !(ir_star.is_finite() && ir_star > 0.0) {
         return Err(inv(&scope, "HertzContact refuses flat-on-flat geometry"));
     }
+    let DraftInterfaceKind::HertzContact { state } = &ctx.interface.kind else {
+        return Err(inv(&scope, "expected HertzContact interface"));
+    };
+    check_strike_station(state, (pa, pb), &mut rec, &scope)?;
     let r_star = 1.0 / ir_star;
     let curved = if ir_a > 0.0 { pa } else { pb };
     rec.record_geometry_derived(

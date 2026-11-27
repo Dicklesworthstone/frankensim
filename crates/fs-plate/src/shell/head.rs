@@ -120,4 +120,59 @@ impl TensionedDisk {
         if !integral.is_finite() {return Err(PlateError::BadSection{what:"disk modal area overflow"});}
         Ok(integral)
     }
+
+    /// Locate `(x_m, y_m)` in the meshed disk by exact P1 barycentric coordinates (no snapping).
+    /// # Errors
+    /// Non-finite inputs, non-positive facets, or a point outside the mesh polygon.
+    pub fn locate_barycentric(
+        &self,
+        x_m: f64,
+        y_m: f64,
+    ) -> Result<([usize; 3], [f64; 3]), PlateError> {
+        let bad = |what| PlateError::BadSection { what };
+        if !(x_m.is_finite() && y_m.is_finite()) {
+            return Err(bad("disk sample station must be finite metres"));
+        }
+        let ns = &self.mesh.nodes;
+        for &tri in &self.mesh.tris {
+            let ((ax, ay), (bx, by), (cx, cy)) = (ns[tri[0]], ns[tri[1]], ns[tri[2]]);
+            let det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+            if !(det.is_finite() && det > 0.0) {
+                return Err(bad("disk mesh requires finite positively oriented facets"));
+            }
+            let b = ((x_m - ax) * (cy - ay) - (y_m - ay) * (cx - ax)) / det;
+            let c = ((bx - ax) * (y_m - ay) - (by - ay) * (x_m - ax)) / det;
+            let a = 1.0 - b - c;
+            if [a, b, c]
+                .iter()
+                .all(|v| v.is_finite() && *v >= -32.0 * f64::EPSILON)
+            {
+                let bary = [a.max(0.0), b.max(0.0), c.max(0.0)];
+                let sum: f64 = bary.iter().sum();
+                if !(sum.is_finite() && sum > 0.0) {
+                    return Err(bad("disk barycentric normalization failed"));
+                }
+                return Ok((tri, bary.map(|v| v / sum)));
+            }
+        }
+        Err(bad("strike station lies outside the film mesh"))
+    }
+
+    /// Evaluate a reduced mode vector at `(x_m, y_m)` via P1 barycentric interpolation.
+    /// # Errors
+    /// Mode mismatch, outside-mesh point, or non-finite result.
+    pub fn sample_mode_at(&self, mode: &[f64], x_m: f64, y_m: f64) -> Result<f64, PlateError> {
+        let bad = |what| PlateError::BadSection { what };
+        if mode.len() != self.model.free || mode.iter().any(|v| !v.is_finite()) {
+            return Err(bad("disk mode does not match its finite pencil"));
+        }
+        let (tri, bary) = self.locate_barycentric(x_m, y_m)?;
+        let dm = &self.model.dof_map;
+        let val: f64 = (0..3)
+            .map(|j| bary[j] * dm[3 * tri[j]].map_or(0.0, |i| mode[i]))
+            .sum();
+        val.is_finite()
+            .then_some(val)
+            .ok_or_else(|| bad("disk mode interpolation overflow"))
+    }
 }

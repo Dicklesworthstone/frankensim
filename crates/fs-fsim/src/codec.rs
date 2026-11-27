@@ -1424,6 +1424,8 @@ pub fn admit_assembly_source(
                         "initial-closure",
                         "approach-speed",
                         "restitution",
+                        "station-x",
+                        "station-y",
                     ],
                     &scope,
                 )?;
@@ -1516,6 +1518,8 @@ pub fn admit_assembly_source(
                     ("initial-closure", "initial_closure", LENGTH),
                     ("approach-speed", "approach_speed", VELOCITY),
                     ("restitution", "restitution", Dims::NONE),
+                    ("station-x", "station_x", LENGTH),
+                    ("station-y", "station_y", LENGTH),
                 ] {
                     let Some(n) = kw.get(flag) else {
                         continue;
@@ -2394,6 +2398,59 @@ mod tests {
                 "got `{}` expected `{needle}`",
                 err.what
             );
+        }
+    }
+
+    #[test]
+    fn hertz_contact_station_admits_roundtrips_and_refuses() {
+        let s: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let packs = PackCatalog::from_raw_bytes(&[s]).unwrap();
+        let m =
+            ":material \"steel-music-wire-ligo-p1400229\" :query-temp 293.15K :physics (mechanics)";
+        let run = |k: &str, ex: &str| {
+            let src = format!(
+                "(assembly \"s\" (version 1) (units \"SI\") (seed 0x1) \
+                 (versions (constellation \"2026-07\") (workspace \"t\")) \
+                 (budget (wall 60s) (mem 64MiB)) \
+                 (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) \
+                 (reference-state assembled) (environment earth-lab-air) \
+                 (time-plan :horizon 0.01s :dt 0.0001s :sample-rate 10000Hz) \
+                 (part \"st\" :kind rigid-body :geometry (sphere 0.005m) {m} :fidelity lumped) \
+                 (part \"hd\" :kind shell :geometry {VALID_TENSIONED_DISK} {m} :fidelity (modal 3)) \
+                 (interface \"hit\" :kind {k} :a \"st\" :b \"hd\" {ex}))"
+            );
+            admit_assembly_source(src.as_bytes(), &packs)
+        };
+        let f = ":maximum-force 10000N :maximum-penetration 0.01m";
+        let st = format!("{f} :station-x 0.06m :station-y -0.02m");
+        let ok = run("hertz-contact", &st).unwrap();
+        let txt = std::str::from_utf8(&ok.canonical_source).unwrap();
+        let ast = crate::sexpr::parse(txt).unwrap();
+        let js = crate::json::print_checked(&ast).unwrap();
+        for b in [ok.canonical_source.as_slice(), js.as_bytes()] {
+            let a = admit_assembly_source(b, &packs).unwrap();
+            let DraftInterfaceKind::HertzContact { state } = &a.draft.input().interfaces[0].kind
+            else {
+                panic!()
+            };
+            let v = |k| state.iter().find(|(p, _)| p.name == k).unwrap().1;
+            assert_eq!(v("station_x"), QtyAny::new(0.06, LENGTH));
+            assert_eq!(v("station_y"), QtyAny::new(-0.02, LENGTH));
+        }
+        for (k, ex, w) in [
+            ("hertz-contact", ":station-x 0.06m", "pair required"),
+            ("hertz-contact", ":station-y 0.02m", "pair required"),
+            ("hertz-contact", ":station-x 1N :station-y 0m", "wrong SI"),
+            ("piston-face", ":station-x 0.06m", "needs a hertz contact"),
+        ] {
+            let arg = if k == "piston-face" {
+                ex.into()
+            } else {
+                format!("{f} {ex}")
+            };
+            assert!(run(k, &arg).err().unwrap().what.contains(w));
         }
     }
 }
