@@ -387,6 +387,12 @@ that generated heat is neither lost nor duplicated.
   Its tests do not compare it with fs-couple's modal impact owner; that
   comparison belongs to the drum's kernel graph.
 
+- `ContactInterface::publishing_reaction` appends a scalar `SignalOut` port
+  `reaction_n` carrying `trial.reaction >= 0` [N], the exact settled reaction
+  used in the contact's discrete momentum update over `dt_s`. Contacts built
+  without it retain their original ports and `identity_words` bit for bit;
+  calling `publishing_reaction` twice refuses.
+
 ## Shared unilateral power-potential remainder
 
 `power_potential_midpoint_remainder` exposes the same cancellation-stable

@@ -159,6 +159,8 @@ pub struct ContactInterface {
     ports: Vec<PortSpec>,
     /// Per end (`a`, `b`): the port of its end input, if it reads one.
     ends: [Option<usize>; 2],
+    /// Port index of the optional `reaction_n` signal output, if published.
+    reaction_port: Option<usize>,
 }
 
 fn port_error(_: impl core::fmt::Debug) -> DContactError {
@@ -236,7 +238,30 @@ impl ContactInterface {
             solve,
             ports,
             ends: [None; 2],
+            reaction_port: None,
         })
+    }
+
+    /// Publish the settled step reaction [N] on a scalar signal output
+    /// `reaction_n`.
+    ///
+    /// The published value is `trial.reaction >= 0`, the exact force that the
+    /// contact's own discrete momentum update applies to ends `a` (`+R`) and
+    /// `b` (`-R`) over `dt_s`. Contacts built without this option keep their
+    /// original ports and identity words bit for bit.
+    ///
+    /// # Errors
+    /// [`DContactError::Parameter`] if `reaction_n` is already published.
+    pub fn publishing_reaction(mut self) -> Result<Self, DContactError> {
+        if self.reaction_port.is_some() {
+            return Err(DContactError::Parameter {
+                what: "contact interface reaction output: publish once",
+            });
+        }
+        let id = StableId::new("reaction_n").map_err(port_error)?;
+        self.reaction_port = Some(self.ports.len());
+        self.ports.push(PortSpec::signal_out(id, NonZeroUsize::MIN));
+        Ok(self)
     }
 
     /// The interface reading, at each end marked in `ends` (`a`, `b`), the
@@ -453,13 +478,16 @@ impl Component for ContactInterface {
 
     /// The obstacle's own identity ([`Obstacle::identity_words`]), then
     /// every budget of the solve, then, per end, zero or one more than the
-    /// port of its end input. The ports are in a system's own description.
+    /// port of its end input, followed by one more than the `reaction_n` port
+    /// index only when [`Self::publishing_reaction`] is enabled. The ports are
+    /// in a system's own description.
     fn identity_words(&self, words: &mut Vec<u64>) {
         let Self {
             law,
             solve,
             ports: _,
             ends,
+            reaction_port,
         } = self;
         let ContactSolve {
             max_iterations,
@@ -480,6 +508,9 @@ impl Component for ContactInterface {
             .map(f64::to_bits),
         );
         words.extend(ends.map(|at| at.map_or(0, |port| port as u64 + 1)));
+        if let Some(port) = reaction_port {
+            words.push(*port as u64 + 1);
+        }
     }
 }
 
@@ -510,13 +541,14 @@ impl LoadLine for ContactInterface {
             });
         };
         let lossy = self.law.internal_loss() > 0.0;
+        let publishes = self.reaction_port.is_some();
         if auxiliary.len() != self.told() + usize::from(lossy) || end_rows.len() != 2 * self.told()
         {
             return Err(DContactError::Shape {
                 what: "contact interface end inputs or their rows",
             });
         }
-        if outputs.len() != 2 + usize::from(lossy) {
+        if outputs.len() != 2 + usize::from(lossy) + usize::from(publishes) {
             return Err(DContactError::Shape {
                 what: "contact interface outputs",
             });
@@ -624,6 +656,9 @@ impl LoadLine for ContactInterface {
         outputs[1] = -trial.reaction;
         if lossy {
             outputs[2] = -trial.dissipated_power;
+        }
+        if publishes {
+            outputs[2 + usize::from(lossy)] = trial.reaction;
         }
         Ok(Proposal::Step(Receipt {
             stored_change_j,

@@ -9,14 +9,16 @@ use fs_blake3::{ContentHash, hash_bytes};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb as m;
+use fs_ports::component::conformance::{Case, check_component, check_load_line};
+use fs_ports::component::{Component, LoadLine};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft as d;
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::{
     EntityCatalog, EntityDeclaration, EntityId, Environment, FrameId, InterfacePair, Scenario,
 };
-use fs_system::elements::{Motion, Slip, SourceAccount};
-use fs_system::{CardStore, LoweredSystem, LoweringError, LoweringRegistry};
+use fs_system::elements::{Mass, Motion, Slider, SliderEnd, Slip, SourceAccount};
+use fs_system::{CardStore, LoweredSystem, LoweringError, LoweringRegistry, System, SystemBuilder};
 
 const L: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const T_DIM: Dims = Dims([0, 0, 1, 0, 0, 0]);
@@ -668,4 +670,93 @@ fn dry_friction_refusals_cover_validity_order_third_body_partition_and_slip() {
     let arcpt = amb.receipt.canonical_json();
     assert!(arcpt.contains("default: no thermal side; all heat to ambient"));
     assert!(!arcpt.contains("declared: ambient sink"));
+}
+
+#[test]
+fn slider_identity_conformance_and_liftoff() {
+    let id = |s: &Slider| {
+        let mut w = Vec::new();
+        s.identity_words(&mut w);
+        w
+    };
+    let fixed = Slider::new(10.0, 0.5, 0.3).unwrap();
+    assert_eq!(id(&fixed), [5.0_f64.to_bits(), 3.0_f64.to_bits(), 0, 0]);
+    let sig = Slider::loaded_by_signal(0.5, 0.3).unwrap();
+    assert!(Slider::loaded_by_signal(0.2, 0.3).is_err());
+    let alt = Slider::loaded_by_signal(0.5, 0.25).unwrap();
+    assert!(id(&fixed) != id(&sig) && id(&sig) != id(&alt));
+    let told = sig.clone().told(SliderEnd::A);
+    let names: Vec<_> = told.ports().iter().map(|p| p.id().as_str()).collect();
+    assert_eq!(names, ["a", "b", "heat", "normal_n", "span_a"]);
+    with_cx(|cx| {
+        let (old, stale, line) = (Slip::sliding(-1.0), Slip::stuck(), [0.05, 0.0, 0.0, 0.0]);
+        for n in [10.0, 0.0] {
+            let inp = [-1.0, 0.0, 300.0, n];
+            let case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s: 1.0e-3,
+                inputs: &inp,
+            };
+            check_component(&sig, &case, cx).unwrap();
+            check_load_line(&sig, &case, &line, cx).unwrap();
+        }
+        let run = |s: &Slider, inp: &[f64]| {
+            let (mut st, mut out) = (stale, [1.0; 3]);
+            s.propose_on_line(&old, 1.0e-3, inp, &line, &mut st, &mut out, cx)
+                .map(|r| (st, out, r))
+        };
+        let res_fix = run(&fixed, &[-1.0, 0.0, 300.0]).unwrap();
+        let res_sig = run(&sig, &[-1.0, 0.0, 300.0, 10.0]).unwrap();
+        assert_eq!(res_fix, res_sig);
+        let (s0, o0, _) = run(&sig, &[-1.0, 0.0, 300.0, 0.0]).unwrap();
+        assert!(o0.iter().all(|&v| v == 0.0) && !s0.is_stuck());
+        for bad in [-1.0e-12, f64::NAN, f64::INFINITY] {
+            assert!(run(&sig, &[-1.0, 0.0, 300.0, bad]).is_err());
+        }
+        let build = |use_sig: bool| {
+            let mut b = SystemBuilder::new();
+            let (m0, mass) = (
+                Motion {
+                    position_m: 0.0,
+                    velocity_m_s: 2.0,
+                },
+                Mass::new(1.0).unwrap(),
+            );
+            let m = b.add_with_tangent("m", mass, m0).unwrap();
+            let sc = if use_sig {
+                Slider::loaded_by_signal(0.4, 0.3)
+            } else {
+                Slider::new(10.0, 0.4, 0.3)
+            };
+            let sl = b
+                .add_on_line("s", sc.unwrap(), Slip::sliding(-2.0))
+                .unwrap();
+            let p = |b: &SystemBuilder, n, k| b.port(n, k).unwrap();
+            b.bond(p(&b, sl, "a"), p(&b, m, "p")).unwrap();
+            b.boundary(p(&b, sl, "b"), Box::new(|_, _, v| v[0] = 0.0))
+                .unwrap();
+            b.boundary(p(&b, sl, "heat"), Box::new(|_, _, v| v[0] = 300.0))
+                .unwrap();
+            if use_sig {
+                let f = Box::new(|t, _, v: &mut [f64]| v[0] = if t < 0.05 { 10.0 } else { 0.0 });
+                b.scheduled_boundary(p(&b, sl, "normal_n"), f, vec![0.05])
+                    .unwrap();
+            }
+            (b.seal().unwrap(), m)
+        };
+        let ((mut ss, ms), (mut sc, mc)) = (build(true), build(false));
+        let diss = |s: &System| s.ledger().nodes[1].dissipated_j.value();
+        let vel = |s: &System, m| s.state::<Motion>(m).unwrap().velocity_m_s;
+        for _ in 0..50 {
+            ss.step(1.0e-3, cx).unwrap();
+            sc.step(1.0e-3, cx).unwrap();
+            assert!((vel(&ss, ms) - vel(&sc, mc)).abs() <= 1.0e-13);
+        }
+        let (v0, q0) = (vel(&ss, ms), diss(&ss));
+        for _ in 0..50 {
+            ss.step(1.0e-3, cx).unwrap();
+            assert!((vel(&ss, ms) - v0).abs() <= 1.0e-14 && diss(&ss).to_bits() == q0.to_bits());
+        }
+    });
 }

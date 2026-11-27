@@ -197,6 +197,12 @@ use fs_ports::{PortKind, StableId};
 
 use super::{ElementError, heat, inputs_finite, port, positive, roundoff, temperature};
 
+#[derive(Debug, Clone, Copy)]
+enum NormalLoad {
+    Constant(f64, f64),
+    Signal(f64, f64),
+}
+
 /// A dry-friction slider between ports `a` and `b`, with the loss leaving
 /// through port `heat`.
 ///
@@ -207,10 +213,7 @@ use super::{ElementError, heat, inputs_finite, port, positive, roundoff, tempera
 /// `SystemBuilder::add_on_line`.
 #[derive(Debug, Clone)]
 pub struct Slider {
-    /// Largest force held at zero slip [N].
-    hold_n: f64,
-    /// Force while sliding [N].
-    slide_n: f64,
+    normal: NormalLoad,
     ports: Vec<PortSpec>,
     /// Per end that is told its span, where the span starts among the
     /// inputs.
@@ -318,6 +321,37 @@ pub enum SliderRow {
 }
 
 impl Slider {
+    fn base(normal: NormalLoad, extra: Option<PortSpec>) -> Self {
+        let kind = Some(PortKind::MechanicalForceVelocity);
+        let mut ports = vec![
+            port("a", kind, PortRole::FlowIn),
+            port("b", kind, PortRole::FlowIn),
+            heat("heat", PortRole::EffortIn),
+        ];
+        if let Some(p) = extra {
+            ports.push(p);
+        }
+        Self {
+            normal,
+            ports,
+            spans: [None; 2],
+        }
+    }
+
+    fn check_mu(s: f64, k: f64) -> Result<(f64, f64), ElementError> {
+        let (holds, slides) = (
+            positive("static_coefficient", s)?,
+            positive("kinetic_coefficient", k)?,
+        );
+        if slides > holds {
+            return Err(ElementError::Parameter {
+                name: "kinetic_coefficient",
+                value: k,
+            });
+        }
+        Ok((holds, slides))
+    }
+
     /// A slider pressed with `normal_n` [N], holding up to
     /// `static_coefficient * normal_n` at rest and resisting with
     /// `kinetic_coefficient * normal_n` while it slides.
@@ -331,25 +365,30 @@ impl Slider {
         kinetic_coefficient: f64,
     ) -> Result<Self, ElementError> {
         let normal_n = positive("normal_n", normal_n)?;
-        let holds = positive("static_coefficient", static_coefficient)?;
-        let slides = positive("kinetic_coefficient", kinetic_coefficient)?;
-        if slides > holds {
-            return Err(ElementError::Parameter {
-                name: "kinetic_coefficient",
-                value: kinetic_coefficient,
-            });
-        }
-        let kind = Some(PortKind::MechanicalForceVelocity);
-        Ok(Self {
-            hold_n: positive("static friction force", holds * normal_n)?,
-            slide_n: positive("kinetic friction force", slides * normal_n)?,
-            ports: vec![
-                port("a", kind, PortRole::FlowIn),
-                port("b", kind, PortRole::FlowIn),
-                heat("heat", PortRole::EffortIn),
-            ],
-            spans: [None; 2],
-        })
+        let (holds, slides) = Self::check_mu(static_coefficient, kinetic_coefficient)?;
+        let h = positive("static friction force", holds * normal_n)?;
+        let s = positive("kinetic friction force", slides * normal_n)?;
+        Ok(Self::base(NormalLoad::Constant(h, s), None))
+    }
+
+    /// A slider whose nonnegative normal load [N] arrives on `normal_n`
+    /// (`0` separates with zero friction; negative/nonfinite refuses).
+    ///
+    /// # Errors
+    /// Non-positive/nonfinite coefficients, or `kinetic_coefficient > static_coefficient`.
+    pub fn loaded_by_signal(
+        static_coefficient: f64,
+        kinetic_coefficient: f64,
+    ) -> Result<Self, ElementError> {
+        let (holds, slides) = Self::check_mu(static_coefficient, kinetic_coefficient)?;
+        let id = StableId::new("normal_n").map_err(|_| ElementError::Parameter {
+            name: "normal_n",
+            value: 0.0,
+        })?;
+        Ok(Self::base(
+            NormalLoad::Signal(holds, slides),
+            Some(PortSpec::signal_in(id, NonZeroUsize::MIN)),
+        ))
     }
 
     /// The same slider with a signal input `span_a` or `span_b` of width
@@ -367,8 +406,7 @@ impl Slider {
             SliderEnd::B => (1, "span_b"),
         };
         if self.spans[index].is_none() {
-            // After `a`, `b`, `heat` and the span that is there already.
-            let at = 3 + 2 * self.spans.iter().flatten().count();
+            let at: usize = self.ports.iter().map(PortSpec::input_width).sum();
             let id = StableId::new(name).expect("element port names are valid stable ids");
             self.ports
                 .push(PortSpec::signal_in(id, NonZeroUsize::MIN.saturating_add(1)));
@@ -382,6 +420,10 @@ impl Slider {
     /// compliance of the slip to the force, `stuck` whether the last step
     /// ended stuck (a zero `start` is stuck whatever it says).
     ///
+    /// For a slider built with [`Self::loaded_by_signal`], pass the step's
+    /// normal load through `propose_on_line` (this helper evaluates at zero
+    /// normal load when no constant load is stored).
+    ///
     /// A `c` that is not positive is no compliance: both sides are given,
     /// or what the slider is joined to is rigid to within rounding, which
     /// can leave a hair below zero. The slip is then what it is, and the
@@ -394,7 +436,23 @@ impl Slider {
     /// last place where the test on `released` passed.
     #[must_use]
     pub fn on_line(&self, start: f64, released: f64, c: f64, stuck: bool) -> (f64, f64, SliderRow) {
-        let (hold, slide) = (self.hold_n, self.slide_n);
+        let lim = match self.normal {
+            NormalLoad::Constant(h, s) => (h, s),
+            NormalLoad::Signal(..) => (0.0, 0.0),
+        };
+        Self::on_line_limits(lim, start, released, c, stuck)
+    }
+
+    fn on_line_limits(
+        (hold, slide): (f64, f64),
+        start: f64,
+        released: f64,
+        c: f64,
+        stuck: bool,
+    ) -> (f64, f64, SliderRow) {
+        if hold == 0.0 {
+            return (0.0, released, SliderRow::Released);
+        }
         if !(c > 0.0) {
             let (force, row) = if released == 0.0 {
                 (0.0, SliderRow::Held)
@@ -539,7 +597,10 @@ impl Component for Slider {
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
-        words.extend([self.hold_n.to_bits(), self.slide_n.to_bits()]);
+        match self.normal {
+            NormalLoad::Constant(h, s) => words.extend([h.to_bits(), s.to_bits()]),
+            NormalLoad::Signal(h, s) => words.extend([u64::MAX, h.to_bits(), s.to_bits(), 3]),
+        }
         words.extend(self.spans.map(|at| at.map_or(0, |index| index as u64 + 1)));
     }
 
@@ -569,6 +630,25 @@ impl Component for Slider {
 }
 
 impl Slider {
+    fn limits(&self, inputs: &[f64]) -> Result<(f64, f64), ElementError> {
+        let NormalLoad::Signal(mu_s, mu_k) = self.normal else {
+            let NormalLoad::Constant(h, s) = self.normal else {
+                unreachable!()
+            };
+            return Ok((h, s));
+        };
+        let n = inputs.get(3).copied().unwrap_or(f64::NAN);
+        let (hold, slide) = (mu_s * n, mu_k * n);
+        if n.is_finite() && n >= 0.0 && hold.is_finite() && slide.is_finite() {
+            Ok((hold, slide))
+        } else {
+            Err(ElementError::Parameter {
+                name: "normal_n",
+                value: n,
+            })
+        }
+    }
+
     fn valid_slip(&self, state: &Slip) -> bool {
         state.ended_m_s.is_finite()
             && (0..2).all(|end| {
@@ -648,7 +728,8 @@ impl LoadLine for Slider {
             [Some(a), Some(b)] => 2.0 * released - (a - b),
             _ => old.ended_m_s + moved[0] - moved[1],
         };
-        let (force, mean, row) = self.on_line(start, released, c, old.stuck);
+        let lim = self.limits(inputs)?;
+        let (force, mean, row) = Self::on_line_limits(lim, start, released, c, old.stuck);
         // An end that answers follows the midpoint relation, and what a
         // given end does besides is in the start slip, so the slip ends
         // at twice its mean less that start.

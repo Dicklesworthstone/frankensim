@@ -5,12 +5,12 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_dcontact::component::{ContactInterface, ContactSolve, ContactState};
-use fs_dcontact::{DContactError, Obstacle};
+use fs_dcontact::{DContactError, Obstacle, hunt_crossley_loss_from_restitution};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::component::conformance::{Case, Observed, check_component, check_load_line};
 use fs_ports::component::{Class, Component, LoadLine, Proposal};
-use fs_system::elements::{Mass, Motion};
-use fs_system::{NodeId, System, SystemBuilder};
+use fs_system::elements::{HeatCapacity, Mass, Motion, Slider, Slip};
+use fs_system::{NodeId, RouteTemperature, System, SystemBuilder};
 
 #[path = "component/dissipation.rs"]
 mod dissipation;
@@ -720,4 +720,181 @@ fn the_interface_identity_follows_its_obstacle_its_budgets_and_its_ends() {
     ];
     identities.extend(changes.map(|change| named(wall(), change, [false; 2])));
     all_differ(&identities);
+}
+
+#[test]
+fn drum_contact_identity_unchanged_and_reaction_signal_conformance() {
+    let obs = law(HERTZ_K, 1.5, 0.0);
+    let (mut want, mut got, mut pub_id) = (Vec::new(), Vec::new(), Vec::new());
+    obs.identity_words(&mut want);
+    want.push(100);
+    for v in [1.0e6_f64, 0.01, 1.0e-9, 1.0e-12] {
+        want.push(v.to_bits());
+    }
+    want.extend([0, 0]);
+    let plain = ContactInterface::new(obs.clone(), solve()).unwrap();
+    plain.identity_words(&mut got);
+    assert_eq!(got, want);
+    let pub_el = plain.publishing_reaction().unwrap();
+    assert!(pub_el.clone().publishing_reaction().is_err());
+    pub_el.identity_words(&mut pub_id);
+    assert_ne!(got, pub_id);
+    let lossy = obs.with_internal_loss(0.25).unwrap();
+    let pub_lo = ContactInterface::new(lossy, solve()).unwrap();
+    let pub_lo = pub_lo.publishing_reaction().unwrap();
+    with_cx(|cx| {
+        let (old, stale) = (ContactState::at(1.0e-4), ContactState::at(-1.0));
+        let line = [5.0e-4, 0.0, 0.0, 0.0];
+        let pairs = [
+            (&pub_el, &[0.5, 0.0][..], 3),
+            (&pub_lo, &[0.5, 0.0, 300.0][..], 4),
+        ];
+        for (iface, inputs, n) in pairs {
+            let case = Case {
+                state: &old,
+                stale: &stale,
+                dt_s: 1.0e-6,
+                inputs,
+            };
+            let (_, out) = stepped(check_component(iface, &case, cx).unwrap());
+            check_load_line(iface, &case, &line, cx).unwrap();
+            assert_eq!((out.len(), out[n - 1].to_bits()), (n, out[0].to_bits()));
+        }
+    });
+}
+
+/// One body (`MASS_KG`) split into two orthogonal 1-DOF translational DOFs
+/// (`mn` normal, `mt` tangential, no rotation), joined by `reaction_n -> normal_n`.
+fn build_coupled_hertz_slider(chi: f64, mu_k: f64, init_vt: f64) -> (System, [NodeId; 5]) {
+    let mut b = SystemBuilder::new();
+    let m = || Mass::new(MASS_KG).unwrap();
+    let m0 = |position_m, velocity_m_s| Motion {
+        position_m,
+        velocity_m_s,
+    };
+    let mn = b
+        .add_with_tangent("mn", m(), m0(APPROACH_M, -SPEED_M_S))
+        .unwrap();
+    let mt = b.add_with_tangent("mt", m(), m0(0.0, init_vt)).unwrap();
+    let obs = law(HERTZ_K, 1.5, 0.0).with_internal_loss(chi).unwrap();
+    let ci = ContactInterface::new(obs, solve()).unwrap();
+    let ci = ci.publishing_reaction().unwrap();
+    let wall = b
+        .add_on_line("wall", ci, ContactState::at(-APPROACH_M))
+        .unwrap();
+    let sl_c = Slider::loaded_by_signal(0.4, mu_k).unwrap();
+    let sl = b
+        .add_on_line("slider", sl_c, Slip::sliding(-init_vt))
+        .unwrap();
+    let hc = |c| HeatCapacity::new(c).unwrap();
+    let ta = b.add_with_tangent("ta", hc(20.0), 300.0).unwrap();
+    let tb = b.add_with_tangent("tb", hc(30.0), 300.0).unwrap();
+    let p = |b: &SystemBuilder, n, k| b.port(n, k).unwrap();
+    let z = || Box::new(|_: f64, _: f64, v: &mut [f64]| v[0] = 0.0);
+    b.bond(p(&b, wall, "a"), p(&b, mn, "p")).unwrap();
+    b.boundary(p(&b, wall, "b"), z()).unwrap();
+    b.bond(p(&b, sl, "a"), p(&b, mt, "p")).unwrap();
+    b.boundary(p(&b, sl, "b"), z()).unwrap();
+    let (rn, nn) = (p(&b, wall, "reaction_n"), p(&b, sl, "normal_n"));
+    b.signal(rn, nn).unwrap();
+    let sinks = [(p(&b, ta, "heat"), 0.35), (p(&b, tb, "heat"), 0.65)];
+    let eq = RouteTemperature::SinkEquivalent;
+    b.heat_route(p(&b, sl, "heat"), &sinks, None, eq).unwrap();
+    if chi > 0.0 {
+        b.heat_route(p(&b, wall, "heat"), &sinks, None, eq).unwrap();
+    }
+    let mut sys = b.seal().unwrap();
+    let sh = sys.port(sl, "heat").unwrap();
+    sys.guess(sh, &[300.0]);
+    if chi > 0.0 {
+        let wh = sys.port(wall, "heat").unwrap();
+        sys.guess(wh, &[300.0]);
+    }
+    (sys, [mn, mt, wall, ta, tb])
+}
+
+fn run_coupled_hertz_slider(chi: f64, dt_s: f64, cx: &Cx<'_>) -> [f64; 9] {
+    let (mu_k, init_vt) = (0.3, 2.0);
+    let (mut sys, [mn, mt, wall, ta, tb]) = build_coupled_hertz_slider(chi, mu_k, init_vt);
+    let (mut entry_s, mut exit_s, mut peak_m, mut t) = (None, None, 0.0_f64, 0.0_f64);
+    let mut bx = sys.state::<ContactState>(wall).unwrap().closure_m;
+    let diss = |s: &System, i: usize| s.ledger().nodes[i].dissipated_j.value();
+    let stored = |s: &System, i: usize| s.ledger().nodes[i].stored_change_j.value();
+    let vel = |s: &System, n| s.state::<Motion>(n).unwrap().velocity_m_s;
+    let check = |s: &mut System| {
+        let (vn0, vt0, qf0) = (vel(s, mn), vel(s, mt), diss(s, 3));
+        s.step(dt_s, cx).unwrap();
+        let (vn1, vt1) = (vel(s, mn), vel(s, mt));
+        let err = (MASS_KG * (vt1 - vt0) + mu_k * MASS_KG * (vn1 - vn0)).abs();
+        assert!(err <= 1.0e-12 * MASS_KG * SPEED_M_S, "dp err={err:e}");
+        if s.state::<ContactState>(wall).unwrap().reaction_n.to_bits() == 0.0_f64.to_bits() {
+            assert_eq!(diss(s, 3).to_bits(), qf0.to_bits());
+            assert!((vt1 - vt0).abs() <= 1.0e-14);
+        }
+    };
+    for _ in 0..500_000 {
+        check(&mut sys);
+        let ax = sys.state::<ContactState>(wall).unwrap().closure_m;
+        let cross = t + dt_s * (0.0 - bx) / (ax - bx);
+        if bx <= 0.0 && ax > 0.0 && entry_s.is_none() {
+            entry_s = Some(cross);
+        }
+        if bx > 0.0 && ax <= 0.0 && entry_s.is_some() {
+            exit_s = Some(cross);
+            break;
+        }
+        peak_m = peak_m.max(ax);
+        bx = ax;
+        t += dt_s;
+    }
+    for _ in 0..10 {
+        check(&mut sys);
+    }
+    let (du_a, du_b) = (stored(&sys, 4), stored(&sys, 5));
+    assert!((20.0 * (sys.state::<f64>(ta).unwrap() - 300.0) - du_a).abs() <= 1.0e-9);
+    assert!((30.0 * (sys.state::<f64>(tb).unwrap() - 300.0) - du_b).abs() <= 1.0e-9);
+    let dur = exit_s.unwrap() - entry_s.unwrap();
+    let res = sys.ledger().energy_residual_j();
+    [
+        dur,
+        peak_m,
+        vel(&sys, mn),
+        vel(&sys, mt) - init_vt,
+        diss(&sys, 3),
+        diss(&sys, 2),
+        du_a,
+        du_b,
+        res,
+    ]
+}
+
+#[test]
+fn hertz_bounce_drives_slider_identity_separation_and_restitution() {
+    let peak = (2.5 * MASS_KG * SPEED_M_S * SPEED_M_S / (2.0 * HERTZ_K)).powf(0.4);
+    let dur = 2.943_275_2 * peak / SPEED_M_S;
+    with_cx(|cx| {
+        let c = run_coupled_hertz_slider(0.0, 2.0e-6, cx);
+        let f = run_coupled_hertz_slider(0.0, 5.0e-7, cx);
+        assert!((f[1] - peak).abs() < (c[1] - peak).abs());
+        assert!((f[1] - peak).abs() <= 1.0e-4 * peak);
+        assert!((f[0] - dur).abs() <= 2.0e-3 * dur);
+        assert!((f[3] + 2.0 * 0.3 * SPEED_M_S).abs() <= 1.0e-10);
+        assert_eq!(f[5].to_bits(), 0.0_f64.to_bits());
+        assert!((f[6] / f[4] - 0.35).abs() <= 1.0e-12);
+        assert!((f[7] / f[4] - 0.65).abs() <= 1.0e-12);
+        assert!(f[8].abs() <= 1.0e-12);
+
+        let e = 0.7;
+        let chi = hunt_crossley_loss_from_restitution(e, SPEED_M_S).unwrap();
+        let hc_c = run_coupled_hertz_slider(chi, 2.0e-6, cx);
+        let hc_f = run_coupled_hertz_slider(chi, 5.0e-7, cx);
+        let (vn, dvt) = (e * SPEED_M_S, -0.3 * (1.0 + e) * SPEED_M_S);
+        assert!((hc_f[2] - vn).abs() < (hc_c[2] - vn).abs());
+        assert!((hc_f[2] - vn).abs() <= 1.0e-3 * vn);
+        assert!((hc_f[3] - dvt).abs() < (hc_c[3] - dvt).abs());
+        assert!((hc_f[3] - dvt).abs() <= 1.0e-3 * dvt.abs());
+        assert!(hc_f[5] > 0.0 && hc_f[4] > 0.0);
+        assert!((hc_f[6] + hc_f[7] - hc_f[4] - hc_f[5]).abs() <= 1.0e-12);
+        assert!(hc_f[8].abs() <= 1.0e-12);
+    });
 }
