@@ -42,12 +42,12 @@ use fs_scenario::assembly::draft::{
     DraftPartKind, FidelityRung, GearMeshDecl, JointDecl, JointKind, PhysicsDomain, PrimitiveShape,
     SourceDecl, SourceTarget, SpiralSpringGenerator, StepPolicy, ThirdBodyDecl, TimeHistory,
 };
-use fs_scenario::assembly::{GeometrySource, MaterialRef};
+use fs_scenario::assembly::{GeometrySource, MaterialRef, ParameterKey};
 use fs_scenario::entity::{Entity, EntityCatalog, EntityId, EntityKind};
 
 use crate::elements::{
     Conductance, Damper, ElementError, FlowSource, Force, HeatCapacity, Heater, Mass, Motion,
-    SourceAccount, Spring, Storage, Waveform,
+    Slider, SliderEnd, Slip, SourceAccount, Spring, Storage, Waveform,
 };
 use crate::{
     AdmissionError, CausalizationAudit, ExecutionPlan, HeatSink, NodeId, PortRef, RouteTemperature,
@@ -99,7 +99,9 @@ const TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const FREQUENCY_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const FORCE_DIMS: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const VELOCITY_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
+const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 
 // ============================================================================
 // Registry Keys
@@ -3945,6 +3947,10 @@ pub fn register_kernel_defaults(registry: &mut LoweringRegistry) {
         lower_kelvin_voigt_interface,
     );
     registry.register_interface(
+        InterfaceLoweringKey::new(InterfaceKindTag::MechanicalContact, "dry-friction"),
+        lower_dry_friction_interface,
+    );
+    registry.register_interface(
         InterfaceLoweringKey::new(InterfaceKindTag::Glue, "elastic-glue"),
         lower_elastic_glue_interface,
     );
@@ -5061,6 +5067,355 @@ fn lower_kelvin_voigt_interface(
     let (property_receipts, parameter_sources) = recorder.finish();
     Ok(LoweredInterfaceOutput {
         created_nodes: vec![s_name, d_name],
+        property_receipts,
+        parameter_sources,
+    })
+}
+
+fn owning_part_decl(
+    input: &fs_scenario::assembly::draft::DraftAssemblyInput,
+    entity: EntityId,
+) -> Option<&DraftPartDecl> {
+    let mut cur = Some(entity);
+    for _ in 0..=input.catalog.entities().len() {
+        let id = cur?;
+        if let Some(p) = input.parts.iter().find(|p| p.entity == id) {
+            return Some(p);
+        }
+        cur = input.catalog.get(id).and_then(Entity::parent);
+    }
+    None
+}
+
+fn route_friction_heat(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    rec: &mut ProvenanceRecorder,
+    heat: PortRef,
+    beta: Option<f64>,
+    scope: &str,
+) -> Result<(), LoweringError> {
+    let (cat, root, t_amb) = (
+        &ctx.draft.input().catalog,
+        ctx.draft.input().root,
+        ctx.ambient_temperature_k(),
+    );
+    let therm = |e| {
+        (!graph.is_ground_feature(cat, e, root))
+            .then(|| graph.resolve_entity_port(cat, e, "thermal"))
+            .flatten()
+    };
+    let (ta, tb) = (
+        therm(ctx.interface.feature_a),
+        therm(ctx.interface.feature_b),
+    );
+    let inv = |d: &str| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d.to_owned(),
+    };
+    let prec =
+        |r: &mut ProvenanceRecorder, k, v, d| r.record_declared_field(k, v, Dims::NONE, scope, d);
+    let mut amb = |r: &mut ProvenanceRecorder, sinks, temp| -> Result<(), LoweringError> {
+        let (k, d) = ("ambient_sink_temperature_k", TEMPERATURE_DIMS);
+        r.record_declared_field(k, t_amb, d, "environment", "ambient_temperature");
+        graph.add_heat_route(heat, sinks, Some(ambient_heat_sink(scope, t_amb)?), temp);
+        Ok(())
+    };
+    match (ta, tb, beta) {
+        (Some(_), Some(_), None) => Err(inv(
+            "dry-friction between two thermal bodies requires explicit heat_partition_a in [0, 1]",
+        )),
+        (None, None, Some(_)) => Err(inv(
+            "heat_partition_a given, but neither side has thermal physics",
+        )),
+        (Some(pa), Some(pb), Some(b)) => {
+            prec(rec, "heat_partition_a", b, "declared: side_a thermal");
+            prec(rec, "heat_partition_b", 1.0 - b, "declared: side_b thermal");
+            if b >= 1.0 {
+                graph.attach_common_effort(pa, heat, 1.0);
+            } else if b <= 0.0 {
+                graph.attach_common_effort(pb, heat, 1.0);
+            } else {
+                graph.add_heat_route(
+                    heat,
+                    vec![(pa, b), (pb, 1.0 - b)],
+                    None,
+                    RouteTemperature::SinkEquivalent,
+                );
+            }
+            Ok(())
+        }
+        (Some(p), None, None) | (None, Some(p), None) => {
+            let (k, d) = if ta.is_some() {
+                ("heat_partition_a", "declared: single thermal side_a")
+            } else {
+                ("heat_partition_b", "declared: single thermal side_b")
+            };
+            prec(rec, k, 1.0, d);
+            graph.attach_common_effort(p, heat, 1.0);
+            Ok(())
+        }
+        (Some(p), None, Some(b)) | (None, Some(p), Some(b)) => {
+            let (share, k) = if ta.is_some() {
+                (b, "heat_partition_a")
+            } else {
+                (1.0 - b, "heat_partition_b")
+            };
+            prec(rec, k, share, "declared: thermal side");
+            prec(
+                rec,
+                "heat_partition_ambient",
+                1.0 - share,
+                "declared: ambient sink",
+            );
+            if share >= 1.0 {
+                graph.attach_common_effort(p, heat, 1.0);
+                Ok(())
+            } else if share <= 0.0 {
+                amb(rec, Vec::new(), RouteTemperature::Fixed(t_amb))
+            } else {
+                amb(rec, vec![(p, share)], RouteTemperature::SinkEquivalent)
+            }
+        }
+        (None, None, None) => {
+            prec(rec, "heat_partition_ambient", 1.0, "declared: ambient sink");
+            amb(rec, Vec::new(), RouteTemperature::Fixed(t_amb))
+        }
+    }
+}
+
+fn dry_friction_query_mu(
+    ctx: &InterfaceLoweringContext<'_>,
+    entry: &InterfaceCardEntry,
+    state: &[(ParameterKey, QtyAny)],
+    (normal_n, v_rel0, t_init): (f64, f64, f64),
+    (scope, rec): (&str, &mut ProvenanceRecorder),
+) -> Result<(f64, f64), LoweringError> {
+    let inv = |d: String| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: d,
+    };
+    let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
+    let v_query = match find("sliding_speed") {
+        Some(q) if q.dims == VELOCITY_DIMS && q.value.is_finite() && q.value >= 0.0 => q.value,
+        Some(_) => {
+            return Err(inv(
+                "sliding_speed must be a finite non-negative velocity [m/s]".into(),
+            ));
+        }
+        None => v_rel0.abs(),
+    };
+    let mut q_state: Vec<_> = state
+        .iter()
+        .filter(|(k, _)| !matches!(k.name.as_str(), "heat_partition_a" | "initial_slip"))
+        .cloned()
+        .collect();
+    let (s_prop, k_prop) = (
+        "static-friction-coefficient",
+        "kinetic-friction-coefficient",
+    );
+    let claims = entry.card.claims();
+    let has_ax = |ax: &str| {
+        claims
+            .claims_for(s_prop)
+            .iter()
+            .chain(claims.claims_for(k_prop).iter())
+            .any(|(_, c)| c.validity.bound(ax).is_some())
+    };
+    let p_amb = ctx.ambient_pressure_pa();
+    for (ax, d, v, always) in [
+        ("sliding_speed", VELOCITY_DIMS, v_query, true),
+        ("temperature", TEMPERATURE_DIMS, t_init, false),
+        ("ambient_pressure", PRESSURE_DIMS, p_amb, false),
+    ] {
+        if find(ax).is_none() && (always || has_ax(ax)) {
+            q_state.push((ParameterKey::new(ax, d), QtyAny::new(v, d)));
+        }
+    }
+    let held = "held: mu does not follow the interface's live state (one-way)";
+    for (k, v, d, f) in [
+        ("normal_force", normal_n, FORCE_DIMS, "state.normal_force"),
+        (
+            "initial_relative_velocity_m_s",
+            v_rel0,
+            VELOCITY_DIMS,
+            "initial_end_velocities",
+        ),
+        ("query_temperature_k", t_init, TEMPERATURE_DIMS, held),
+        ("query_sliding_speed_m_s", v_query, VELOCITY_DIMS, held),
+    ] {
+        rec.record_declared_field(k, v, d, scope, f);
+    }
+    let mut env = ctx.query_env();
+    env.ambient_temp_k = t_init;
+    let qm = |r: &mut ProvenanceRecorder, p, lbl| {
+        r.query_interface_property(scope, entry, &q_state, p, lbl, env)
+    };
+    let (mu_s, _) = qm(rec, s_prop, "static-friction-coefficient.held")?;
+    let (mu_k, _) = qm(rec, k_prop, "kinetic-friction-coefficient.held")?;
+    if mu_s.dims != Dims::NONE
+        || mu_k.dims != Dims::NONE
+        || !(mu_k.value > 0.0 && mu_s.value.is_finite() && mu_s.value >= mu_k.value)
+    {
+        return Err(inv(format!(
+            "dry-friction requires 0 < {k_prop} ({}) <= {s_prop} ({})",
+            mu_k.value, mu_s.value
+        )));
+    }
+    Ok((mu_s.value, mu_k.value))
+}
+
+fn dry_friction_end_state(
+    ctx: &InterfaceLoweringContext<'_>,
+    state: &[(ParameterKey, QtyAny)],
+    scope: &str,
+) -> Result<(f64, f64, Slip), LoweringError> {
+    let input = ctx.draft.input();
+    let (fa, fb) = (ctx.interface.feature_a, ctx.interface.feature_b);
+    let part_t = |feat| {
+        owning_part_decl(input, feat)
+            .filter(|p| p.physics.contains(&PhysicsDomain::Thermal))
+            .map(|p| {
+                p.initial
+                    .as_ref()
+                    .and_then(|i| i.temperature)
+                    .map_or(ctx.ambient_temperature_k(), |t| t.value)
+            })
+    };
+    let t_init = match (part_t(fa), part_t(fb)) {
+        (Some(a), Some(b)) => f64::midpoint(a, b),
+        (Some(t), None) | (None, Some(t)) => t,
+        (None, None) => ctx.ambient_temperature_k(),
+    };
+    let part_v0 = |feat| {
+        let Some(p) = owning_part_decl(input, feat) else {
+            return 0.0;
+        };
+        if p.kind == DraftPartKind::DrivenBody {
+            input.sources.iter()
+                .find(|s| matches!(&s.target, SourceTarget::Port { entity, port } if *entity == p.entity && port == "mechanics"))
+                .map_or(0.0, |s| evaluate_time_history(&s.history, 0.0))
+        } else {
+            p.initial
+                .as_ref()
+                .map_or(0.0, |i| i.linear_velocity[0].value)
+        }
+    };
+    let (va0, vb0) = (part_v0(fa), part_v0(fb));
+    let v_rel0 = va0 - vb0;
+    if let Some((_, q)) = state.iter().find(|(k, _)| k.name == "initial_slip") {
+        let inv = |d: String| LoweringError::Invalid {
+            item: scope.to_owned(),
+            detail: d,
+        };
+        if q.dims != VELOCITY_DIMS || !q.value.is_finite() {
+            return Err(inv("initial_slip must be a finite velocity [m/s]".into()));
+        }
+        if (q.value - v_rel0).abs() > 1.0e-12 {
+            return Err(inv(format!(
+                "initial_slip ({}) contradicts initial end velocities ({va0} - {vb0})",
+                q.value
+            )));
+        }
+    }
+    let slip = if v_rel0.abs() <= 1.0e-15 {
+        Slip::stuck()
+    } else {
+        Slip::sliding(-v_rel0)
+    };
+    Ok((t_init, v_rel0, slip))
+}
+
+fn lower_dry_friction_interface(
+    ctx: &InterfaceLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+) -> Result<LoweredInterfaceOutput, LoweringError> {
+    let scope = format!("interface:{}", ctx.interface.name);
+    let inv = |d: &str| LoweringError::Invalid {
+        item: scope.clone(),
+        detail: d.to_owned(),
+    };
+    let ResolvedInterfaceCard::System(entry) = ctx.card else {
+        return Err(inv("dry-friction requires an InterfaceSystemCard"));
+    };
+    let DraftInterfaceKind::MechanicalContact {
+        third_body, state, ..
+    } = &ctx.interface.kind
+    else {
+        return Err(inv("dry-friction requires a mechanical-contact interface"));
+    };
+    if third_body.is_some() {
+        return Err(inv("dry-friction refuses a third-body lubricant film"));
+    }
+    let find = |n: &str| state.iter().find(|(k, _)| k.name == n).map(|(_, q)| *q);
+    let normal_n = find("normal_force")
+        .filter(|q| q.dims == FORCE_DIMS && q.value.is_finite() && q.value > 0.0)
+        .map(|q| q.value)
+        .ok_or_else(|| inv("dry-friction requires positive normal_force [N]"))?;
+    let beta = match find("heat_partition_a") {
+        Some(q)
+            if q.dims == Dims::NONE && q.value.is_finite() && (0.0..=1.0).contains(&q.value) =>
+        {
+            Some(q.value)
+        }
+        Some(_) => return Err(inv("heat_partition_a must be dimensionless in [0, 1]")),
+        None => None,
+    };
+    let (t_init, v_rel0, slip) = dry_friction_end_state(ctx, state, &scope)?;
+    let mut rec = ProvenanceRecorder::default();
+    let (mu_s, mu_k) = dry_friction_query_mu(
+        ctx,
+        entry,
+        state,
+        (normal_n, v_rel0, t_init),
+        (&scope, &mut rec),
+    )?;
+    let mut slider =
+        Slider::new(normal_n, mu_s, mu_k).map_err(|source| LoweringError::Element {
+            item: scope.clone(),
+            source,
+        })?;
+    let input = ctx.draft.input();
+    let (cat, root, fa, fb) = (
+        &input.catalog,
+        input.root,
+        ctx.interface.feature_a,
+        ctx.interface.feature_b,
+    );
+    let ends = [
+        (
+            fa,
+            "a",
+            SliderEnd::A,
+            "span_a",
+            graph.resolve_entity_port(cat, fa, "span"),
+        ),
+        (
+            fb,
+            "b",
+            SliderEnd::B,
+            "span_b",
+            graph.resolve_entity_port(cat, fb, "span"),
+        ),
+    ];
+    for (_, _, end, _, sp) in ends {
+        if sp.is_some() {
+            slider = slider.told(end);
+        }
+    }
+    let node_name = format!("interface.{}", ctx.interface.name);
+    let node = graph.add_on_line(&node_name, Some(ctx.interface.entity), slider, slip)?;
+    for (feat, mport, _, sport, sp) in ends {
+        attach_mech_endpoint(graph, cat, feat, root, graph.port(node, mport)?, &scope)?;
+        if let Some(src) = sp {
+            graph.connect_signal(src, graph.port(node, sport)?)?;
+        }
+    }
+    let heat = graph.port(node, "heat")?;
+    route_friction_heat(ctx, graph, &mut rec, heat, beta, &scope)?;
+    let (property_receipts, parameter_sources) = rec.finish();
+    Ok(LoweredInterfaceOutput {
+        created_nodes: vec![node_name],
         property_receipts,
         parameter_sources,
     })

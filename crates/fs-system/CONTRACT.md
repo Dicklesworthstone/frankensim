@@ -179,7 +179,18 @@ to `FlowSource::publishing`, exposing `mechanics` and `span` and consuming that
 source receipt (wrong dimensions or duplicate sources refuse). `LoweringGraph` exposes `add_on_line` and `connect_signal` for non-smooth
 `LoadLine` components; `is_ground_feature` returns true only for `root`, marked
 ground entities (and their descendants), and surfaces parented directly to
-`root`, never for surfaces owned by an unmarked part. fs-cli lowers every
+`root`, never for surfaces owned by an unmarked part. The kernel default
+registers the `"dry-friction"` `MechanicalContact` family: it refuses
+third-body films, requires positive `normal_force`, queries both
+`static-friction-coefficient` and `kinetic-friction-coefficient`
+(`0 < mu_k <= mu_s`) once at `(T_init, N, |v|)` marking both one-way held in
+the receipt (refusing kinetic-only cards or out-of-validity queries by name),
+wires `Slider` on the non-smooth `LoadLine` tier with automatic
+`span_a`/`span_b` signal coupling for moving `DrivenBody` ends and consistent
+initial slip (breakaway and re-catch resolve on step boundaries, so stick-slip
+period error is below `dt` by design), and routes friction heat via explicit
+`heat_partition_a` (required when both ends are thermal; 100% to a sole thermal
+end when omitted; remainder to ambient sink). fs-cli lowers every
 assembly through the kernel defaults plus these groups.
 
 fs-couple's `rigid_damping_heat` target keeps the hand-built graph as the
