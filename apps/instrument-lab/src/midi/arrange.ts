@@ -277,8 +277,11 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   // MIDI controllers are per channel, whichever track sends them; a note plays at its written
   // velocity times the channel's volume (CC7) and expression (CC11) when it starts. A file that
   // sends neither plays as written.
-  const cc = new Map<number, { tick: number; order: number; c: number; v: number }[]>();
-  const releasesByChannel = new Map<number, { tick: number; order: number }[]>();
+  type SourcePosition = { tick: number; order: number };
+  type LevelChange = SourcePosition & { value: number };
+  const volume = new Map<number, LevelChange[]>();
+  const expression = new Map<number, LevelChange[]>();
+  const releasesByChannel = new Map<number, SourcePosition[]>();
   const pedalByChannel = new Map<number, { t: number; value: number }[]>();
   const switchedPedals: { t: number; channel: number; controller: 66 | 67; on: boolean }[] = [];
   for (const track of midi.tracks) for (const c of track.controls) {
@@ -288,10 +291,11 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     const reset = controller === 121;
     const soundOff = controller === 120;
     if (controller === 7 || controller === 11 || reset) {
-      const list = cc.get(channel) ?? [];
       // Reset All Controllers restores expression to full and leaves channel volume alone.
-      list.push({ tick: c.tick, order, c: reset ? 11 : controller, v: reset ? 127 : value });
-      cc.set(channel, list);
+      const levels = controller === 7 ? volume : expression;
+      const list = levels.get(channel) ?? [];
+      list.push({ tick: c.tick, order, value: reset ? 127 : value });
+      levels.set(channel, list);
       if (!reset) continue;
     }
     if (channel !== 9) {
@@ -313,20 +317,29 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     }
     if (controller !== 0 && controller !== 32 && controller < 120) report.ignoredControllers++;
   }
-  const bySource = (a: { tick: number; order: number }, b: { tick: number; order: number }) =>
-    a.tick - b.tick || a.order - b.order;
+  const bySource = (a: SourcePosition, b: SourcePosition) => a.tick - b.tick || a.order - b.order;
   for (const list of releasesByChannel.values()) list.sort(bySource);
-  for (const list of cc.values()) list.sort(bySource);
-  const levelAt = (note: PairedNote): number => {
-    const list = cc.get(note.channel);
-    if (!list) return 1;
-    let vol = 127, expr = 127;
-    for (const e of list) {
-      if (e.tick > note.onTick || (e.tick === note.onTick && e.order > (note.onOrder ?? Infinity))) break;
-      if (e.c === 7) vol = e.v; else expr = e.v;
+  for (const list of volume.values()) list.sort(bySource);
+  for (const list of expression.values()) list.sort(bySource);
+
+  // Controls can be written in another track. Search in merged source order,
+  // including the relative order of a controller and an attack at the same tick.
+  function firstAfter(events: readonly SourcePosition[], note: PairedNote): number {
+    const at = { tick: note.onTick, order: note.onOrder ?? Infinity };
+    let lo = 0, hi = events.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (bySource(events[mid]!, at) <= 0) lo = mid + 1; else hi = mid;
     }
-    return (vol / 127) * (expr / 127);
-  };
+    return lo;
+  }
+  function valueAt(timeline: Map<number, LevelChange[]>, note: PairedNote): number {
+    const events = timeline.get(note.channel);
+    if (!events) return 127;
+    return events[firstAfter(events, note) - 1]?.value ?? 127;
+  }
+  const levelAt = (note: PairedNote): number =>
+    (valueAt(volume, note) / 127) * (valueAt(expression, note) / 127);
   report.pitchBends = midi.counters.pitchBends;
 
   // ---------------------------------------------------------------- parts
@@ -357,13 +370,8 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
           notes: notes.map((n) => {
             const t = sec(n.onTick);
             // A release after an attack can end it at that same tick.
-            const onset = { tick: n.onTick, order: n.onOrder ?? Infinity };
-            let lo = 0, hi = releases.length;
-            while (lo < hi) {
-              const mid = (lo + hi) >>> 1;
-              if (bySource(releases[mid]!, onset) <= 0) lo = mid + 1; else hi = mid;
-            }
-            const releaseAt = lo < releases.length ? sec(releases[lo]!.tick) : undefined;
+            const release = releases[firstAfter(releases, n)];
+            const releaseAt = release && sec(release.tick);
             return { t, off: Math.min(sec(n.offTick), releaseAt ?? Infinity), releaseAt,
               key: n.key, vel: n.onVelocity, level: levelAt(n) };
           }) });
