@@ -931,8 +931,13 @@ physics owners below fs-couple can be composed without it.
     claim: `M` and `G` are constants, exact for a body whose configuration
     does not change over the window it is used for; it is not a rigid body
     that rotates, and it keeps no positions. `tests/multiport_inertia.rs`
-    checks that one row and one port with `G = [1]` give the `Mass` step,
-    receipt and stored energy to the bit.
+    checks conformance, tangents and exact linearity over a sweep of shapes,
+    the step, flows and receipt against sums by hand, that one row and one
+    port with `G = [1]` give the `Mass` step, receipt and stored energy to the
+    bit, the refusals, and a coupled `M = [[2, 1], [1, 2]]` on two anchored
+    springs through the kernel, whose velocities follow the modal closed
+    form of the midpoint rule (each mode turned by `2 atan(omega dt / 2)`
+    per step) within `8 steps` roundoff units, with its energy kept.
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and
