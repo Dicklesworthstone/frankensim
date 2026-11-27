@@ -97,10 +97,21 @@ constructors:
   to one `RelaxationNetwork` instead, and a network that mixes the families
   is refused, naming both sets. Such a card holds the damping and, for each
   branch `k`, a diagonal stiffness `stiffness_<k>_x` .. `_rz` (factor
-  `L = sqrt(K)`) and `relaxation_time_<k>`. The memory has no default: the
-  interface's state declares each branch's elastic displacement
-  `displacement_<k>_x` .. `_rz`, held as `a = L x` (an assembly file spells
-  them `:memory`, fs-cli's CONTRACT). The card may state a
+  `L = sqrt(K)`) and `relaxation_time_<k>`. It may also hold an equilibrium
+  spring, `k = eq`: `stiffness_eq_x` .. `_rz` and no time (fs-mbd's lossless
+  `Equilibrium` branch; `relaxation_time_eq` is refused by name). The memory
+  has no default: the interface's state declares each branch's elastic
+  displacement `displacement_<k>_x` .. `_rz`, held as `a = L x` (an assembly
+  file spells them `:memory`, fs-cli's CONTRACT). An axis states every
+  branch's stiffness or none, and some axis states one; `damping_<axis>` is
+  stated or not on its own. What the card leaves unstated is 0 for that
+  bushing, receipted "not stated by the card: 0 for this bushing", and an
+  unstated axis declares no displacement. A partly stated axis, a card with
+  no stiffness and a displacement on an unstated axis are refused by name.
+  In fs-couple's `rigid_damping_heat`, the memory pair with an equilibrium
+  spring beside its branch steps with its graph bit for bit and resumes from
+  a checkpoint as the plain run, and stating only its x axis steps as the
+  explicit zeros do, bit for bit. The card may state a
   temperature shift `a_T` (fs-material's): `shift_reference_temperature`,
   `shift_lowest_temperature`, `shift_highest_temperature` and one model,
   `activation_energy` (J/mol) or `wlf_c1` and `wlf_c2`. Its Kelvin viscosity

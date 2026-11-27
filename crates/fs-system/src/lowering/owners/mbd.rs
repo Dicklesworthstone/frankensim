@@ -21,9 +21,15 @@
 //! A relaxation bushing has a viscous bushing's damping and, for each branch
 //! `k = 0, 1, ...` while its card has `relaxation_time_<k>` (s), a diagonal
 //! stiffness `stiffness_<k>_x` .. `stiffness_<k>_rz` (N/m, N m/rad), whose
-//! factor `L` is its square root. A branch's memory has no default: the
-//! interface's state declares its elastic displacement `displacement_<k>_x`
-//! .. `displacement_<k>_rz` (m, rad), held as `a = L x`. A relaxation network
+//! factor `L` is its square root, and, when the card states one, the
+//! equilibrium spring `k = eq`: `stiffness_eq_x` .. `stiffness_eq_rz`, with
+//! no time (fs-mbd's lossless `Equilibrium` branch). A branch's memory has
+//! no default: the interface's state declares its elastic displacement
+//! `displacement_<k>_x` .. `displacement_<k>_rz` (m, rad), held as
+//! `a = L x`. An axis states every branch's stiffness or none, and some axis
+//! states them; a relaxation card's `damping_<axis>` is stated or not on its
+//! own. What the card does not state is 0 for this bushing, receipted so,
+//! and an unstated axis declares no displacement. A relaxation network
 //! prepares at most `max_work_units` dense multiply-adds per step.
 //!
 //! A relaxation bushing's card may state fs-material's temperature shift
@@ -234,6 +240,10 @@ pub(crate) fn lower(
             let card = family_entry(ctx.cards, iface, family);
             let card = card.ok_or_else(|| it.invalid(format!("not a {family} interface")))?;
             for (axis, (name, dims)) in DAMPING.into_iter().enumerate() {
+                // A relaxation card's unstated axis has no dashpot.
+                if memory && unstated(&mut it, card.0, name, dims) {
+                    continue;
+                }
                 let (value, receipt) = it.interface_receipt(ctx, card, name, dims)?;
                 coefficients[axis][axis] = value;
                 curves.extend(curve(&it, card.0, (axis, name), &receipt)?);
@@ -521,42 +531,101 @@ fn with_memory(ctx: &GroupLoweringContext<'_>) -> Result<bool, LoweringError> {
 }
 
 /// A relaxation bushing's branches, their memory and its shift, from its card
-/// and its interface's state (see the module's notes).
+/// and its interface's state (see the module's notes): the Maxwell branches
+/// `0, 1, ...`, then the equilibrium spring. On an unstated axis a branch's
+/// stiffness and displacement are 0, and a declared displacement is refused.
 fn branches(
     ctx: &GroupLoweringContext<'_>,
     it: &mut Scoped,
     (card, state): (&InterfaceCardEntry, State<'_>),
 ) -> Result<Bank, LoweringError> {
+    let claims = |name: &str| !card.card.claims_for(name).is_empty();
+    if claims("relaxation_time_eq") {
+        return Err(it.invalid("`relaxation_time_eq`: the equilibrium spring does not relax"));
+    }
+    let mut labels = Vec::new();
+    while claims(&format!("relaxation_time_{}", labels.len())) {
+        labels.push(labels.len().to_string());
+    }
+    let maxwell = labels.len();
+    let eq = BRANCH.map(|(axis, ..)| claims(&format!("stiffness_eq_{axis}")));
+    labels.extend(eq.contains(&true).then(|| "eq".to_owned()));
+    let stated = stated_axes(it, card, &labels)?;
     let (mut branches, mut memory) = (Vec::new(), Vec::new());
-    loop {
-        let k = branches.len();
-        let time = format!("relaxation_time_{k}");
-        if card.card.claims_for(&time).is_empty() {
-            return Ok((branches, memory, shift(ctx, it, (card, state))?));
+    for (n, k) in labels.iter().enumerate() {
+        let (time, mut tau) = (format!("relaxation_time_{k}"), None);
+        if n < maxwell {
+            fixed(it, card, &time)?;
+            tau = Some(it.interface(ctx, (card, state), &time, TIME_DIMS)?);
         }
-        fixed(it, card, &time)?;
-        let tau = it.interface(ctx, (card, state), &time, TIME_DIMS)?;
         let (mut rows, mut x) = ([[0.0; 6]; 6], [0.0; 6]);
         for (axis, (suffix, stiffness, length)) in BRANCH.into_iter().enumerate() {
             let name = format!("stiffness_{k}_{suffix}");
+            let key = format!("displacement_{k}_{suffix}");
+            let declared = state.iter().find(|(p, _)| p.name == key);
+            if !stated[axis] {
+                unstated(it, card, &name, stiffness);
+                let why = format!("`{key}` is on an axis the card does not state");
+                if declared.is_some() {
+                    return Err(it.invalid(why));
+                }
+                continue;
+            }
             fixed(it, card, &name)?;
             rows[axis][axis] = it.interface(ctx, (card, state), &name, stiffness)?.sqrt();
-            let key = format!("displacement_{k}_{suffix}");
-            let declared = state
-                .iter()
-                .find(|(p, q)| p.name == key && q.dims == length);
+            let declared = declared.filter(|(_, q)| q.dims == length);
             let no_default =
                 || it.invalid(format!("a branch's memory has no default: declare `{key}`"));
             let &(_, q) = declared.ok_or_else(no_default)?;
             it.declare(&format!("state.{key}"), q);
             x[axis] = q.value;
         }
-        let branch = SpatialRelaxationBranch::from_gram_rows(rows, tau);
+        let branch = match tau {
+            Some(tau) => SpatialRelaxationBranch::from_gram_rows(rows, tau),
+            None => SpatialRelaxationBranch::from_equilibrium_gram_rows(rows),
+        };
         let branch = branch.map_err(|err| it.invalid(format!("branch {k}: {err:?}")))?;
         let a = branch.elastic_memory(x);
         memory.push(a.map_err(|err| it.invalid(format!("branch {k} memory: {err:?}")))?);
         branches.push(branch);
     }
+    Ok((branches, memory, shift(ctx, it, (card, state))?))
+}
+
+/// The axes a relaxation card states: each states the stiffness of every
+/// branch in `labels` or of none (refused naming the first missing), and some
+/// axis states them.
+fn stated_axes(
+    it: &Scoped,
+    card: &InterfaceCardEntry,
+    labels: &[String],
+) -> Result<[bool; 6], LoweringError> {
+    let mut stated = [false; 6];
+    for (axis, (suffix, ..)) in BRANCH.into_iter().enumerate() {
+        let keys = labels.iter().map(|k| format!("stiffness_{k}_{suffix}"));
+        let (with, without): (Vec<_>, Vec<_>) =
+            keys.partition(|key| !card.card.claims_for(key).is_empty());
+        if let (false, Some(key)) = (with.is_empty(), without.first()) {
+            let why = format!("an axis states every branch's stiffness or none: declare `{key}`");
+            return Err(it.invalid(why));
+        }
+        stated[axis] = !with.is_empty();
+    }
+    if !stated.contains(&true) {
+        return Err(it.invalid("a relaxation bushing states a branch's stiffness on some axis"));
+    }
+    Ok(stated)
+}
+
+/// Whether a relaxation card leaves `name` unstated, 0 for this bushing,
+/// receipted so.
+fn unstated(it: &mut Scoped, card: &InterfaceCardEntry, name: &str, dims: Dims) -> bool {
+    let none = card.card.claims_for(name).is_empty();
+    if none {
+        let why = "not stated by the card: 0 for this bushing";
+        it.r.record_declared_field(name, 0.0, dims, &it.item, why);
+    }
+    none
 }
 
 /// Refuses branch key `name` as a curve: a branch follows temperature by a

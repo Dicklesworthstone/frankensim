@@ -267,7 +267,8 @@ fn parse_query_pairs(
 }
 
 /// A relaxation bushing's branch memory, `:memory (displacement-<k>-<axis> value ...)`: each
-/// pair is the state key `displacement_<k>_<axis>`, in m on x, y and z and in rad on rx, ry and rz.
+/// pair is the state key `displacement_<k>_<axis>`, in m on x, y and z and in rad on rx, ry and rz,
+/// `<k>` a branch's number or `eq`, the equilibrium spring.
 fn parse_memory(n: &Node, scope: &str) -> Result<Vec<(ParameterKey, QtyAny)>, SolveRefusal> {
     let pairs = as_list(n, "memory")?;
     if !pairs.len().is_multiple_of(2) {
@@ -278,7 +279,7 @@ fn parse_memory(n: &Node, scope: &str) -> Result<Vec<(ParameterKey, QtyAny)>, So
         let key = as_sym(&pair[0], "memory key")?;
         let rest = key.strip_prefix("displacement-");
         let split = rest.and_then(|rest| rest.split_once('-'));
-        let branch = |k: &str| k.parse::<usize>().is_ok_and(|n| n.to_string() == k);
+        let branch = |k: &str| k == "eq" || k.parse::<usize>().is_ok_and(|n| n.to_string() == k);
         let dims = match split {
             Some((k, "x" | "y" | "z")) if branch(k) => LENGTH,
             Some((k, "rx" | "ry" | "rz")) if branch(k) => Dims::NONE,
@@ -1581,7 +1582,8 @@ mod tests {
         let pad = "(part \"pad\" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m) \
                    :physics (mechanics) :fidelity lumped)";
         let memory = "displacement-0-x 0.4m displacement-0-y 0m displacement-0-z 0m \
-                      displacement-0-rx 0rad displacement-0-ry 0rad displacement-1-rz 0.1rad";
+                      displacement-0-rx 0rad displacement-0-ry 0rad displacement-1-rz 0.1rad \
+                      displacement-eq-x 0.2m";
         let mount = format!(
             "(interface \"mount\" :kind mechanical-contact :a \"rotor\" :b \"pad\" \
              :card \"{}\" :family \"relaxation-bushing\" :memory ({memory}))",
@@ -1602,6 +1604,7 @@ mod tests {
             key("displacement_0_rx", 0.0, Dims::NONE),
             key("displacement_0_ry", 0.0, Dims::NONE),
             key("displacement_1_rz", 0.1, Dims::NONE),
+            key("displacement_eq_x", 0.2, LENGTH),
         ];
         let third_body = None;
         let contact = DraftInterfaceKind::MechanicalContact {
@@ -1648,6 +1651,7 @@ mod tests {
         for row in [
             "displacement-0-w 0m | no :memory key `displacement-0-w`",
             "displacement-01-x 0m | no :memory key `displacement-01-x`",
+            "displacement-Eq-x 0m | no :memory key `displacement-Eq-x`",
             "displacement-0-x 0.1s | displacement-0-x has wrong SI dimensions",
             "displacement-0-x 0m displacement-0-x 0m | repeats `displacement-0-x`",
             "displacement-0-x 0m | :memory needs a mechanical contact",

@@ -10,7 +10,8 @@
 //! on cell 0's published temperature. With bushing0 holding 0.7 N or -0.7 N
 //! on x (a constant source on its `drive_x`), against `memory_graph` with
 //! that held force. With bushing0's damping on `module_curve(0.4)` instead,
-//! against `memory_graph` with the test's `CurveLaw` on that claim.
+//! against `memory_graph` with the test's `CurveLaw` on that claim. With an
+//! equilibrium spring beside the branch, against `memory_graph` with that spring.
 
 use super::*;
 use crate::graph::lowering::{
@@ -31,7 +32,7 @@ use fs_system::lowering::Observed;
 use fs_system::lowering::owners::{
     RELAXATION_BUSHING_FAMILY, VISCOUS_BUSHING_FAMILY, register_owners,
 };
-use fs_system::{CardStore, Ledger, LoweringRegistry};
+use fs_system::{CardStore, Ledger, LoweringRegistry, ParameterSource};
 
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
@@ -183,19 +184,19 @@ fn the_lowered_memory_draft_steps_with_the_memory_graph_bit_for_bit() {
     // displacement is the fixture's 0.6 sqrt(J), each to the bit.
     assert_eq!(1.69_f64.sqrt().to_bits(), 1.3_f64.to_bits());
     assert_eq!((1.3 * DISPLACEMENT_M).to_bits(), 0.6_f64.to_bits());
-    steps_with_the_memory_graph(None, None);
+    steps_with_the_memory_graph(None, None, false);
 }
 
 #[test]
 fn a_shifted_memory_draft_follows_its_cell_as_the_shifted_memory_graph_bit_for_bit() {
-    steps_with_the_memory_graph(Some(&Follows::Shift(arrhenius(300.0, 360.0))), None);
+    steps_with_the_memory_graph(Some(&Follows::Shift(arrhenius(300.0, 360.0))), None, false);
 }
 
 #[test]
 fn a_memory_draft_on_a_damping_curve_steps_with_the_memory_graph_on_its_law_bit_for_bit() {
     let law = Follows::Damping(CurveLaw::new([module_curve(0.4)]));
     for held in [None, Some(0.7)] {
-        steps_with_the_memory_graph(Some(&law), held);
+        steps_with_the_memory_graph(Some(&law), held, false);
     }
 }
 
@@ -203,18 +204,30 @@ fn a_memory_draft_on_a_damping_curve_steps_with_the_memory_graph_on_its_law_bit_
 fn a_held_memory_draft_steps_with_the_driven_memory_graph_bit_for_bit() {
     // The oracle's held forces (`HELD`), then 0.7 N with the shift.
     for force in [0.7, -0.7] {
-        steps_with_the_memory_graph(None, Some(force));
+        steps_with_the_memory_graph(None, Some(force), false);
     }
-    steps_with_the_memory_graph(Some(&Follows::Shift(arrhenius(300.0, 360.0))), Some(0.7));
+    let shift = Follows::Shift(arrhenius(300.0, 360.0));
+    steps_with_the_memory_graph(Some(&shift), Some(0.7), false);
+}
+
+#[test]
+fn an_equilibrium_spring_beside_the_branch_steps_with_the_memory_graph_bit_for_bit() {
+    // The factor 0.5 times the 0.4 m stretch is the oracle's 0.2 sqrt(J).
+    assert_eq!((0.25_f64.sqrt() * 0.4).to_bits(), 0.2_f64.to_bits());
+    steps_with_the_memory_graph(None, None, true);
+    // Held and shifted, as a measured mount is.
+    let shift = Follows::Shift(arrhenius(300.0, 360.0));
+    steps_with_the_memory_graph(Some(&shift), Some(0.7), true);
 }
 
 /// The memory pair following cell 0 as its temperature source by `follows`:
 /// a shift's keys on its card, or bushing0's damping on `module_curve(0.4)`,
-/// the claim the law must read.
-fn following(follows: Option<&Follows>) -> (DraftAssembly, CardStore) {
-    let pair = |keys: &[_]| memory_pair(displacement(DISPLACEMENT_M), keys, 1);
+/// the claim the law must read; with `eq`, `memory(true)`'s spring.
+fn following(follows: Option<&Follows>, eq: bool) -> (DraftAssembly, CardStore) {
+    let (state, spring) = memory(eq);
+    let pair = |keys: &[_]| memory_pair(state.clone(), &[&spring[..], keys].concat(), 1);
     match follows {
-        None => memory_pair(displacement(DISPLACEMENT_M), &[], 0),
+        None => memory_pair(state.clone(), &spring, 0),
         Some(Follows::Shift(shift)) => pair(&shift_keys(shift)),
         Some(Follows::Damping(_)) => curved(pair(&[]), 0, module_curve(0.4)),
     }
@@ -231,14 +244,15 @@ impl Follows {
     }
 }
 
-/// `following(follows)` with bushing0 holding `held` [N] on x, against
-/// `memory_graph` following by `follows`, cell 0 published and that force.
-fn steps_with_the_memory_graph(follows: Option<&Follows>, held: Option<f64>) {
-    let pair = following(follows);
+/// `following(follows, eq)` with bushing0 holding `held` [N] on x, against
+/// `memory_graph` following by `follows`, cell 0 published, that force and
+/// with `eq` its spring.
+fn steps_with_the_memory_graph(follows: Option<&Follows>, held: Option<f64>, eq: bool) {
+    let pair = following(follows, eq);
     let force = held.map(|f| ("drive_x", TimeHistory::Constant(QtyAny::new(f, FORCE))));
     let (draft, cards) = holding(pair, force.as_slice());
     // The oracle takes the bodies' mass properties from the receipts, as 1b's.
-    let mut fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, held.unwrap_or(0.0));
+    let mut fixture = oracle_pair(held, eq);
     let mass: [MassProperties; 2] = lowered_mass(&lower(&draft, &cards));
     fixture.bodies.properties[..2].copy_from_slice(&mass);
     let laws: &'static [Caloric; 2] = Box::leak(Box::new(laws()));
@@ -341,6 +355,40 @@ fn steps_with_the_memory_graph(follows: Option<&Follows>, held: Option<f64>) {
         let want = [v.x, v.y, v.z].map(f64::to_bits);
         assert_eq!(velocity_m_s.map(f64::to_bits), want, "{case}");
     }
+}
+
+/// The branch's memory and, with `eq`, an equilibrium spring beside it: its
+/// keys, 0.25 N/m on x (factor 0.5) and 0 on the other axes, and its memory,
+/// stretched 0.4 m on x.
+fn memory(eq: bool) -> (State, Vec<(&'static str, f64, Dims)>) {
+    let mut state = displacement(DISPLACEMENT_M);
+    if !eq {
+        return (state, Vec::new());
+    }
+    let to_eq = |(key, q): (ParameterKey, _)| {
+        let name = key.name.replace("_0_", "_eq_");
+        (ParameterKey::new(name, key.dims), q)
+    };
+    state.extend(displacement(0.4).into_iter().map(to_eq));
+    let mut spring = vec![("stiffness_eq_x", 0.25, STIFFNESS)];
+    spring.extend(["stiffness_eq_y", "stiffness_eq_z"].map(|name| (name, 0.0, STIFFNESS)));
+    let twisting = ["stiffness_eq_rx", "stiffness_eq_ry", "stiffness_eq_rz"];
+    spring.extend(twisting.map(|name| (name, 0.0, TORSIONAL_STIFFNESS)));
+    (state, spring)
+}
+
+/// `memory_graph`'s pair holding `held` [N] on x and, with `eq`, `memory(true)`'s
+/// spring beside its branch: factor 0.5 on x, memory 0.2 sqrt(J).
+fn oracle_pair(held: Option<f64>, eq: bool) -> MemoryPair {
+    let mut pair = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, held.unwrap_or(0.0));
+    if eq {
+        let mut rows = [[0.0; 6]; 6];
+        rows[0][0] = 0.5;
+        let spring = SpatialRelaxationBranch::from_equilibrium_gram_rows(rows).unwrap();
+        pair.branches[0].push(spring);
+        pair.memory[0].push([0.2, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+    pair
 }
 
 /// The oracle's timeline and cells under `scheme`. The implicit one is a twin
@@ -561,6 +609,67 @@ fn a_damping_curve_off_t_on_a_branch_beside_a_shift_or_a_fixed_bushing_refuses()
 }
 
 #[test]
+fn unstated_axes_step_as_explicit_zeros_and_a_partly_stated_card_refuses() {
+    // bushing0 on a card of `values` alone, declaring `state`.
+    let on = |values: &[_], state: State| {
+        let (draft, mut cards) = memory_pair(displacement(DISPLACEMENT_M), &[], 0);
+        let mut input = draft.input().clone();
+        let family = (RELAXATION_BUSHING_FAMILY, values);
+        on_card((&mut input, &mut cards), 0, family, state);
+        (admit(input), cards)
+    };
+    // Only x stated: the damping, the branch and its memory.
+    let x = relaxation_values()[..3].to_vec();
+    let only_x = on(&x, displacement(DISPLACEMENT_M)[..1].to_vec());
+    let zeros = memory_pair(displacement(DISPLACEMENT_M), &[], 0);
+    let mut pairs = [only_x, zeros].map(|(draft, cards)| lower(&draft, &cards));
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        while pairs[1].system.time_s() < 0.3 {
+            let seen = pairs.each_mut().map(|lowered| {
+                let system = &mut lowered.system;
+                let dt = system.step(0.3 - system.time_s(), cx).unwrap().dt_s;
+                let node = lowered.node_map["relaxation-network"];
+                (dt.to_bits(), system.state::<RelaxationState>(node).cloned())
+            });
+            assert_eq!(seen[0], seen[1], "at {} s", pairs[1].system.time_s());
+        }
+    });
+    let sources = &pairs[0].receipt.interfaces[0].parameter_sources;
+    let unstated = "not stated by the card: 0 for this bushing";
+    for name in ["damping_y", "damping_rz", "stiffness_0_z", "stiffness_0_ry"] {
+        let receipt = sources.iter().find(|p| p.parameter == name).unwrap();
+        let ParameterSource::DeclaredAssemblyField { field, .. } = &receipt.source else {
+            panic!("{name}: {receipt:?}");
+        };
+        assert_eq!(field, unstated, "{name}");
+        assert_eq!(receipt.value.to_bits(), 0.0_f64.to_bits(), "{name}");
+    }
+    let (state, spring) = memory(true);
+    let mut no_x = state.clone();
+    no_x.retain(|(key, _)| key.name != "displacement_eq_x");
+    let timed = [&spring[..], &[("relaxation_time_eq", 0.1, TIME)]].concat();
+    let pairs = [
+        memory_pair(state.clone(), &timed, 0),
+        memory_pair(no_x, &spring, 0),
+        memory_pair(state, &spring[..5], 0),
+        on(&x[..1], Vec::new()),
+        on(&x, displacement(DISPLACEMENT_M)),
+    ];
+    let named = [
+        "`relaxation_time_eq`",
+        "declare `displacement_eq_x`",
+        "declare `stiffness_eq_rz`",
+        "a branch's stiffness on some axis",
+        "`displacement_0_y` is on an axis",
+    ];
+    for (pair, named) in pairs.into_iter().zip(named) {
+        let why = refusal(pair);
+        assert!(why.contains("bushing0") && why.contains(named), "{why}");
+    }
+}
+
+#[test]
 fn a_cell_past_its_damping_curves_last_knot_refuses_the_step_by_name() {
     // The knots end at 300.01 K, which cell 0 passes in the run.
     let knots = vec![(300.0, 0.4), (300.01, 0.4)];
@@ -582,7 +691,15 @@ fn a_cell_past_its_damping_curves_last_knot_refuses_the_step_by_name() {
 
 #[test]
 fn a_following_network_resumes_from_a_checkpoint_as_the_plain_run() {
-    let pair = memory_pair(displacement(DISPLACEMENT_M), &[], 1);
+    // As it is, then with an equilibrium spring beside the branch.
+    for eq in [false, true] {
+        let (state, spring) = memory(eq);
+        resumes_as_the_plain_run(memory_pair(state, &spring, 1));
+    }
+}
+
+/// `pair` on a damping curve, from a checkpoint two steps in, as the plain run.
+fn resumes_as_the_plain_run(pair: (DraftAssembly, CardStore)) {
     let (draft, cards) = curved(pair, 0, module_curve(0.4));
     let mut lowered = lower(&draft, &cards);
     let nodes = ["relaxation-network", "thermal-timeline"].map(|name| lowered.node_map[name]);
