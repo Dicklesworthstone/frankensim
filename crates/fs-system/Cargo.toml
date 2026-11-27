@@ -75,6 +75,10 @@ name = "modal_plate_slice"
 required-features = ["plate-slices"]
 
 [[test]]
+name = "modal_cavity_slice"
+required-features = ["plate-slices", "phs"]
+
+[[test]]
 name = "painleve_rod"
 required-features = ["slices"]
 
