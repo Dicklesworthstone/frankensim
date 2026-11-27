@@ -76,8 +76,10 @@ const span = (m: number) => {
   const r = Math.round(m);
   return r >= 60 ? `${Math.floor(r / 60)} h${r % 60 ? ` ${String(r % 60).padStart(2, "0")}` : ""}` : `${r} min`;
 };
-/** Minutes to the boil, whole minutes up: the water is at the boil by then. */
-const upTo = (m: number) => span(Math.ceil(m - 1e-6));
+/** Minutes to the boil, in whole minutes up (the water is at the boil by then), a few seconds over a minute counted
+ *  as that minute. */
+const upMin = (m: number) => Math.ceil(m - 0.1);
+const upTo = (m: number) => span(upMin(m));
 /** A temperature as every readout shows it: whole degrees, tenths (down) near the boil. */
 const degC = (c: number) => (c >= 95 ? (Math.floor(c * 10 + 1e-6) / 10).toFixed(1) : String(Math.floor(c + 1e-6)));
 const smooth = (x: number) => {
@@ -332,7 +334,7 @@ export function mountBoilLab(root: HTMLElement): void {
         lines.push(`levels off at ${degC(r.c[r.c.length - 1]!)} °C`, `${burners} × ${span(MAX_MIN)}`);
       } else {
         if (t.v) t.v.textContent = upTo(r.boilMin);
-        lines.push(`light it by ${clock(NEEDED - Math.ceil(r.boilMin - 1e-6))}`, `${burners} × ${upTo(r.boilMin)}`);
+        lines.push(`light it by ${clock(NEEDED - upMin(r.boilMin))}`, `${burners} × ${upTo(r.boilMin)}`);
       }
       const steamed = r.steamL * r.setup.pots;
       lines.push(steamed >= 0.05 ? `${steamed.toFixed(1)} L to steam` : "under 0.1 L to steam");
@@ -352,12 +354,12 @@ export function mountBoilLab(root: HTMLElement): void {
     }
     const kept = Math.max(0, oo.steamL - ol.steamL);
     if (oo.boilMin !== null && ol.boilMin !== null) {
-      const saves = Math.ceil(oo.boilMin - 1e-6) - Math.ceil(ol.boilMin - 1e-6);
+      const saves = upMin(oo.boilMin) - upMin(ol.boilMin);
       parts.push(`On the big pot the lid saves ${saves >= 1 ? span(saves) : "under a minute"} and ${kept.toFixed(1)} L of water: near the boil, most of the heat an open pot loses goes off as steam.`);
     } else if (oo.boilMin === null) {
       parts.push(`With no lid the big pot does not boil in ${span(MAX_MIN)}: it levels off at ${degC(oo.c[oo.c.length - 1]!)} °C, a simmer, with the steam off its open top carrying away most of the burner's heat and ${oo.steamL.toFixed(1)} L of the water.`);
     }
-    if (tl.boilMin !== null) parts.push(`For the macaroni at ${clock(NEEDED)}, light the two pots with lids by ${clock(NEEDED - Math.ceil(tl.boilMin - 1e-6))}${ol.boilMin !== null ? `, or the big pot with its lid by ${clock(NEEDED - Math.ceil(ol.boilMin - 1e-6))}` : ""}.`);
+    if (tl.boilMin !== null) parts.push(`For the macaroni at ${clock(NEEDED)}, light the two pots with lids by ${clock(NEEDED - upMin(tl.boilMin))}${ol.boilMin !== null ? `, or the big pot with its lid by ${clock(NEEDED - upMin(ol.boilMin))}` : ""}.`);
     statusEl.textContent = parts.join(" ");
     statusEl.dataset.state = oo.boilMin === null ? "warn" : "ok";
   }
