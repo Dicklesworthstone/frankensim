@@ -1,0 +1,32 @@
+(assembly "block_on_belt"
+  (version 1) (units "SI") (seed 0x43)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 293.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 3.6s :dt 0.001s :sample-rate 1000Hz)
+  (part "block" :kind rigid-body :geometry (box 0.05m 0.05m 0.02564102564102564m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
+              :linear-velocity (0.0025m/s 0m/s 0m/s)
+              :angular-velocity (0rad/s 0rad/s 0rad/s)))
+  (part "belt" :kind driven-body :geometry (box 0.1m 0.05m 0.025m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (joint "spring" :kind prismatic :parent root :child "block"
+    :axis (1 0 0) :stiffness 1000N/m)
+  (interface "pad" :kind mechanical-contact :a "block" :b "belt"
+    :card "pure-PLA-FDM-circular-pattern" :family "dry-friction"
+    :normal-force 5N :initial-slip 0m/s
+    :query-at (sliding_speed 0.0025m/s))
+  (source "belt_drive" :part "belt" :port "mechanics"
+    :history (constant 0.0025m/s))
+  (probe "block_pos" :kind field-quantity :target "block"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)
+  (probe "block_vel" :kind field-quantity :target "block"
+    :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 1000Hz)
+  (requirement "block_pos_cap" :probe "block_pos"
+    :stat max :relation at-most :limit 0.005m)
+)

@@ -56,8 +56,10 @@ SENS_PACK="$ASM_DIR/packs/aluminum-pure-nbs-c447-sensible-heat.fsmcdpk"
 PG50_PACK="$ASM_DIR/packs/dowfrost-pg50-40-60c.fsmcdpk"
 SRM_PACK="$ASM_DIR/packs/eps-nist-srm1453-2013.fsmcdpk"
 N2_PACK="$ASM_DIR/packs/nitrogen-n2-mcbride2002-lemmon2004.fsmcdpk"
+KATS_PACK="$ASM_DIR/packs/katsivardi-2025-pla-metal-dry-air-interface.fsintpk"
 FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK"
-  "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK")
+  "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK"
+  "$ASM_DIR/block_on_belt.fsim" "$KATS_PACK")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -129,6 +131,8 @@ GP_COMP="$ARTIFACT_DIR/gas_piston_comp.fsim"
 sed 's/-6361.725123519331N/-6861.725123519331N/' "$ASM_DIR/gas_piston.fsim" > "$GP_COMP"
 grep -q -- "-6861.725123519331N" "$GP_COMP" || die "compression copy of gas_piston.fsim missing shifted load"
 run_case gp_comp "$GP_COMP" --materials "$STEEL_PACK" --materials "$N2_PACK"
+# Dry-friction stick-slip block on belt (Katsivardi et al. 2025 pure PLA / dry metallic plate)
+run_case bob "$ASM_DIR/block_on_belt.fsim" --materials "$STEEL_PACK" --interfaces "$KATS_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -166,6 +170,9 @@ run_case srm1453_fail "$SRM_FAIL" --materials "$SRM_PACK" --analysis stationary
 SRM_IND="$ARTIFACT_DIR/srm1453_ind.fsim"
 sed 's/3.35W/3.20W/' "$ASM_DIR/srm1453_slab.fsim" > "$SRM_IND"
 run_case srm1453_ind "$SRM_IND" --materials "$SRM_PACK" --analysis stationary
+BOB_OOD="$ARTIFACT_DIR/block_on_belt_ood_n.fsim"
+sed 's/:normal-force 5N/:normal-force 6N/' "$ASM_DIR/block_on_belt.fsim" > "$BOB_OOD"
+expect_refusal bob_ood_n 4 "outside the validity" --json run "$BOB_OOD" "$ARTIFACT_DIR/ledgers/ref7.db" --materials "$STEEL_PACK" --interfaces "$KATS_PACK"
 
 # Independent closed-form Python oracles + summary receipt emission
 python3 - "$ARTIFACT_DIR" "$SOURCE_IDENTITY" "$RUNNER_SHA256" "$JSONL" "$RECEIPT" \
@@ -378,6 +385,29 @@ gp_comp_v = max(abs(a - b[1]) for a, b in zip(pgpc["piston_vel"], gp_rk))
 gp_comp_t = max(abs(a - b[3]) for a, b in zip(pgpc["gas_temp"], gp_rk))
 assert len(pgpc["gas_temp"]) == 41 and gp_comp_x <= 5e-6 and gp_comp_v <= 1e-4 and gp_comp_t <= 2e-3 and wres(e_gpc) <= 1e-9, (gp_comp_x, gp_comp_v, gp_comp_t, wres(e_gpc))
 
+# 10. Dry-friction stick-slip block on belt (Katsivardi et al. 2025 Table 3: mu_s=0.371, mu_k=0.195 at N=5 N, v=0.0025 m/s; 500 g steel sled m=0.5 kg, k=1000 N/m, ambient heat)
+e_bob = ld("bob.explain.json"); pbob = probes(e_bob)
+bob_m, bob_k, bob_N, bob_v, bob_mus, bob_muk, bob_dt = 0.5, 1000.0, 5.0, 0.0025, 0.371, 0.195, 0.001
+bob_w = math.sqrt(bob_k / bob_m); bob_xs, bob_xk = bob_mus * bob_N / bob_k, bob_muk * bob_N / bob_k; bob_d = bob_xs - bob_xk
+bob_T_ex = 2.0 * bob_d / bob_v + 2.0 * (math.pi - math.atan(bob_w * bob_d / bob_v)) / bob_w
+bob_W_ex = bob_muk * bob_N * bob_v * bob_T_ex; bob_vslip_ex = bob_v + math.hypot(bob_v, bob_d * bob_w)
+bpos, bvel = pbob["block_pos"], pbob["block_vel"]
+bob_cr = [(i - 1 + (bob_xk - bpos[i - 1]) / (bpos[i] - bpos[i - 1])) * bob_dt
+          for i in range(1, len(bpos)) if abs(bvel[i] - bob_v) < 1e-6 and bpos[i - 1] < bob_xk <= bpos[i]]
+bob_periods = [bob_cr[j + 1] - bob_cr[j] for j in range(len(bob_cr) - 1)]
+bob_T_err = max(abs(t - bob_T_ex) for t in bob_periods)
+bob_tot = e_bob["window_ledger"]["totals"]; bob_diss = bob_tot["dissipated_j"]
+bob_W_cyc = bob_diss / len(bob_periods); bob_W_rel = abs(bob_W_cyc - bob_W_ex) / bob_W_ex
+bob_amb_rel = abs(bob_tot["sink_heat_j"] - bob_diss) / bob_diss
+bob_vslip_pk = max(abs(bob_v - v) for v in bvel)
+bob_rcpt = json.dumps(e_bob["lowering_receipt"])
+print(f"block_on_belt: cycles={len(bob_periods)} T_exact={bob_T_ex:.9f}s max_period_err={bob_T_err:.3e}s (<dt={bob_dt}s) W_cyc={bob_W_cyc*1e3:.6f}mJ W_rel={bob_W_rel:.3e} peak_slip={bob_vslip_pk*1e3:.3f}mm/s (exact {bob_vslip_ex*1e3:.3f}mm/s, {bob_vslip_pk/bob_v:.2f}xV)")
+assert len(bob_periods) == 4 and bob_T_err < bob_dt and bob_W_rel <= bob_dt / bob_T_ex + 1e-9, (len(bob_periods), bob_T_err, bob_W_rel)
+assert bob_amb_rel <= 1e-12 and wres(e_bob) <= 1e-12 and abs(bob_vslip_pk - bob_vslip_ex) / bob_vslip_ex <= 1e-2, (bob_amb_rel, wres(e_bob), bob_vslip_pk, bob_vslip_ex)
+assert "static-friction-coefficient.held" in bob_rcpt and "kinetic-friction-coefficient.held" in bob_rcpt
+assert "default: no thermal side; all heat to ambient" in bob_rcpt
+bv_bob = check_budget(e_bob, "block_pos_cap", roundoff_measured=True)
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -405,8 +435,11 @@ receipt = {
       "mode_verdicts": {"modal": bv_gpm, "transient": bv_gpt, "comp": bv_gpc},
       "errors": {"ruchardt_freq_rel": gp_fad_rel, "adiabatic_zeta": gp_z_ad, "equilibrium_v_m_s": gp_eq_v, "equilibrium_t_k": gp_eq_t,
                  "comp_pos_m": gp_comp_x, "comp_vel_m_s": gp_comp_v, "comp_temp_k": gp_comp_t, "comp_energy_residual_j": wres(e_gpc)}},
+    "block_on_belt": {"run": ld("bob.run.json")["run"], "verdict": bv_bob,
+      "errors": {"max_period_s": bob_T_err, "work_per_cycle_rel": bob_W_rel, "ambient_heat_rel": bob_amb_rel,
+                 "peak_slip_speed_m_s": bob_vslip_pk, "energy_residual_j": wres(e_bob)}},
   },
-  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx"]},
+  "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx", "bob_ood_n"]},
 }
 pathlib.Path(rcpt_p).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 with open(jsonl_p, "a") as w:

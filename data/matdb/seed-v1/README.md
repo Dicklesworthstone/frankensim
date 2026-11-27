@@ -3098,6 +3098,19 @@ conversions explicitly; the source does not name the roughness metric, repeat
 count, dispersion, humidity, oxide state, wear rate, or transferable friction
 law, and no such claim is inferred.
 
+`katsivardi-2025-pla-metal-dry-air-interface/` is an ordered CC BY 4.0 dry
+sliding-sled interface card from Katsivardi et al. (*Materials* 18(12), 2730,
+2025, DOI `10.3390/ma18122730`, `PMC12194527`), Section 2.5.1, Section 3.4.1,
+and Table 3 (circle geometric pattern, not Table 2): FDM-printed `30 x 30 mm^2`
+pure-PLA sled against a flat dry metallic plate under ASTM D1894 conditions
+(`5 N` stated for the `500 g` dead weight, `150 mm/min = 0.0025 m/s`, `n = 3`
+replicates). It records `static-friction-coefficient = 0.371` (first breakaway
+peak from rest) and `kinetic-friction-coefficient = 0.195` with `Unstated`
+uncertainty because the source prints `+/- 0.006` and `+/- 0.003` without
+defining SD, SE, or coverage factor; counterface metallic-plate grade/finish
+and Section 2.5.1 test temperature/humidity are unstated (Section 2.5.2's
+ball-on-disk conditions are not carried over).
+
 `nasa-52100-gxl320a-vacuum-interface/` is a separate ordered four-ball system
 card from NASA/TM-1999-209064. It binds one rotating and three stationary
 grade-25, 9.5-mm AISI 52100 balls to the reported cleaning sequence, named
@@ -3527,6 +3540,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/nasa-52100-dry-air-interface/manifest.tsv \
   --out /path/to/nasa-52100-dry-air-interface.fsintpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/katsivardi-2025-pla-metal-dry-air-interface/manifest.tsv \
+  --out /path/to/katsivardi-2025-pla-metal-dry-air-interface.fsintpk
 
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/nasa-52100-gxl320a-vacuum-interface/manifest.tsv \
