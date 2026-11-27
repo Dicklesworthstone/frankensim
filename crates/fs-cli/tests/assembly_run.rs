@@ -1404,3 +1404,175 @@ fn gas_piston_fsim_adiabatic_finite_g_and_transient_oracles() {
     let err = try_run(&bad, AssemblyAnalysisMode::Modal).unwrap_err();
     assert!(err.contains("piston face takes no card"));
 }
+
+fn dry_friction_pack(tag: &str, chem: &str, mu_s: Option<f64>, mu_k: f64) -> RawCardPack {
+    let mut claims = ClaimSet::new();
+    let obs = reg_obs(&mut claims, tag);
+    let val = ValidityDomain::unconstrained()
+        .with("temperature", 250.0, 500.0)
+        .with("normal_force", 1.0, 50.0)
+        .with("sliding_speed", 0.0, 5.0);
+    let add = |cs: &mut ClaimSet, name: &str, v: f64| {
+        let mut c = claim(name, v, Dims::NONE, obs, name);
+        c.validity = val.clone();
+        cs.insert_claim(c).unwrap();
+    };
+    if let Some(s) = mu_s {
+        add(&mut claims, "static-friction-coefficient", s);
+    }
+    add(&mut claims, "kinetic-friction-coefficient", mu_k);
+    interface_pack(tag, [chem, chem], "dry-air", claims)
+}
+
+fn extract_probe_values(json: Option<&str>, key: &str) -> Vec<f64> {
+    let after = json
+        .unwrap()
+        .split(&format!("\"name\":\"{key}\""))
+        .nth(1)
+        .unwrap();
+    let arr = after.split("\"values\":[").nth(1).unwrap();
+    arr.split(']')
+        .next()
+        .unwrap()
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect()
+}
+
+fn dry_friction_packs() -> CardPackSet {
+    CardPackSet::admit(vec![
+        material_pack("unit-mat", 1.0, 100.0, 200.0e9),
+        dry_friction_pack("dry-good", "S355-ground", Some(0.5), 0.3),
+        dry_friction_pack("dry-kin-only", "AISI-52100", None, 0.3),
+    ])
+    .unwrap()
+}
+
+fn run_dry_fsim(ledger: &Ledger, packs: &CardPackSet, src: &str) -> Result<String, String> {
+    let p = AssemblyCancelPlan::default();
+    let (o, _) = run_assembly(
+        ledger,
+        src.as_bytes(),
+        packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        p,
+    )
+    .map_err(|e| e.what)?;
+    assert_eq!(o.status, SolveRunStatus::Completed);
+    Ok(o.run)
+}
+
+#[test]
+fn dry_friction_fsim_stick_slip_and_refusals() {
+    let (packs, ledger) = (dry_friction_packs(), Ledger::open(":memory:").unwrap());
+    let stick_slip = r#"(assembly "dry_stick_slip" (version 1) (units "SI") (seed 0x43)
+  (versions (constellation "2026-07") (workspace "test-v1")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 101325Pa)
+  (time-plan :horizon 3.5s :dt 0.002s :sample-rate 500Hz)
+  (part "block" :kind rigid-body :geometry (box 1m 1m 1m) :material "unit-mat" :query-temp 300K :physics (mechanics thermal) :fidelity lumped :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (0.1m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s) :temperature 300K))
+  (part "belt" :kind driven-body :geometry (box 1m 1m 1m) :material "unit-mat" :query-temp 300K :physics (mechanics) :fidelity lumped)
+  (joint "spring" :kind prismatic :parent root :child "block" :axis (1 0 0) :stiffness 100N/m)
+  (interface "pad" :kind mechanical-contact :a "block" :b "belt" :card "S355-ground" :family "dry-friction" :normal-force 10N :heat-partition-a 0.6 :initial-slip 0m/s :query-at (sliding_speed 0.1m/s))
+  (source "belt_v" :part "belt" :port "mechanics" :history (constant 0.1m/s))
+  (probe "block_pos" :kind field-quantity :target "block" :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 500Hz)
+  (probe "block_vel" :kind field-quantity :target "block" :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 500Hz)
+  (probe "block_temp" :kind field-quantity :target "block" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 500Hz)
+  (requirement "temp_cap" :probe "block_temp" :stat max :relation at-most :limit 305K))"#;
+    let id = SolveRunId::parse_hex(&run_dry_fsim(&ledger, &packs, stick_slip).unwrap()).unwrap();
+    let exp = explain_assembly_run(&ledger, id).unwrap();
+    let pj = exp.probe_series_json.as_deref();
+    let (pos, vel, tmp) = (
+        extract_probe_values(pj, "block_pos"),
+        extract_probe_values(pj, "block_vel"),
+        extract_probe_values(pj, "block_temp"),
+    );
+    let (dt, x_k) = (2.0e-3_f64, 0.03_f64);
+    let mut crosses = Vec::new();
+    for i in 1..pos.len() {
+        if (vel[i] - 0.1).abs() < 1e-6 && pos[i - 1] < x_k && pos[i] >= x_k {
+            let f = (x_k - pos[i - 1]) / (pos[i] - pos[i - 1]);
+            crosses.push((f64::from(u32::try_from(i - 1).unwrap()) + f) * dt);
+        }
+    }
+    let delta: f64 = 0.02;
+    let exact_t = 2.0 * delta / 0.1 + 2.0 * (std::f64::consts::PI - (delta * 100.0).atan()) / 10.0;
+    let meas_t = (crosses[crosses.len() - 1] - crosses[1])
+        / f64::from(u32::try_from(crosses.len() - 2).unwrap());
+    assert!(crosses.len() >= 4 && (meas_t - exact_t).abs() < dt && *tmp.last().unwrap() > 300.005);
+    let rcpt = exp.lowering_receipt_json.as_deref().unwrap();
+    assert!(
+        rcpt.contains("static-friction-coefficient.held")
+            && rcpt.contains("kinetic-friction-coefficient.held")
+            && rcpt.contains("heat_partition_a")
+            && rcpt.contains("heat_partition_ambient")
+            && exp.qoi_budget_json.as_deref().unwrap().contains("temp_cap")
+    );
+    let wj = exp.window_ledger_json.as_deref().unwrap();
+    let res: f64 = wj
+        .split("\"energy_residual_j\":")
+        .nth(1)
+        .unwrap()
+        .split([',', '}'])
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(res.abs() <= 1e-12, "res={res}");
+    for (bad, want) in [
+        (
+            stick_slip.replace(":kind mechanical-contact", ":kind thermal-contact"),
+            "needs a mechanical contact",
+        ),
+        (
+            stick_slip.replace(
+                ":query-at (sliding_speed 0.1m/s)",
+                ":query-at (normal_force 20N)",
+            ),
+            "repeats `normal_force`",
+        ),
+        (
+            stick_slip.replace(":initial-slip 0m/s", ":initial-slip 1m/s"),
+            "initial_slip",
+        ),
+        (
+            stick_slip.replace("S355-ground", "AISI-52100"),
+            "static-friction-coefficient",
+        ),
+    ] {
+        let msg = run_dry_fsim(&ledger, &packs, &bad).unwrap_err();
+        assert!(msg.contains(want), "expected `{want}` in: {msg}");
+    }
+}
+
+#[test]
+fn dry_friction_fsim_reversing_table_belt() {
+    let (packs, ledger) = (dry_friction_packs(), Ledger::open(":memory:").unwrap());
+    let rev = r#"(assembly "dry_reversing" (version 1) (units "SI") (seed 0x44)
+  (versions (constellation "2026-07") (workspace "test-v1")) (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) (reference-state assembled)
+  (environment :ambient-temp 300K :ambient-pressure 101325Pa)
+  (time-plan :horizon 0.8s :dt 0.002s :sample-rate 500Hz)
+  (part "block" :kind rigid-body :geometry (box 1m 1m 1m) :material "unit-mat" :query-temp 300K :physics (mechanics thermal) :fidelity lumped :initial (:position (0m 0m 0m) :orientation (1 0 0 0) :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s) :temperature 300K))
+  (part "belt" :kind driven-body :geometry (box 1m 1m 1m) :material "unit-mat" :query-temp 300K :physics (mechanics) :fidelity lumped)
+  (interface "pad" :kind mechanical-contact :a "block" :b "belt" :card "S355-ground" :family "dry-friction" :normal-force 10N)
+  (source "belt_v" :part "belt" :port "mechanics" :history (table (0s 0m/s) (0.2s 0.6m/s) (0.4s -0.6m/s) (0.8s -0.6m/s)))
+  (probe "block_vel" :kind field-quantity :target "block" :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 500Hz)
+  (probe "block_temp" :kind field-quantity :target "block" :quantity "temperature" :dims (0 0 0 1 0 0) :sample-rate 500Hz))"#;
+    let id = SolveRunId::parse_hex(&run_dry_fsim(&ledger, &packs, rev).unwrap()).unwrap();
+    let rexp = explain_assembly_run(&ledger, id).unwrap();
+    let pj = rexp.probe_series_json.as_deref();
+    let (rvel, rtmp) = (
+        extract_probe_values(pj, "block_vel"),
+        extract_probe_values(pj, "block_temp"),
+    );
+    assert!((rvel[100] - 0.6).abs() <= 1e-12 && (rtmp[100] - 300.0).abs() <= 1e-12);
+    assert!((rvel.last().unwrap() + 0.6).abs() <= 1e-12 && *rtmp.last().unwrap() > 300.003);
+    let bad = rev.replace(
+        "(table (0s 0m/s) (0.2s 0.6m/s) (0.4s -0.6m/s) (0.8s -0.6m/s))",
+        "(table (0s 0m/s))",
+    );
+    let msg = run_dry_fsim(&ledger, &packs, &bad).unwrap_err();
+    assert!(msg.contains("at least two"), "got: {msg}");
+}

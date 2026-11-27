@@ -80,6 +80,14 @@ CANCELLED=130}` table):
     declares the state key `displacement_<k>_<axis>`, `<k>` a branch's number
     or `eq` (the equilibrium spring) and `<axis>` one of `x`, `y`, `z` (m) or
     `rx`, `ry`, `rz` (rad), each key once.
+  - `:normal-force <force>`, `:heat-partition-a <fraction>`,
+    `:initial-slip <velocity>`, and `:query-at (<axis> <value> ...)` on a
+    `mechanical-contact` populate `normal_force`, `heat_partition_a`,
+    `initial_slip`, and extra card validity coordinates (each refused by name
+    on other interface kinds or on duplicate `:query-at` keys).
+  - `(table (<time> <value>) (<time> <value>) ...)` in a source's `:history`
+    parses to `TimeHistory::PiecewiseLinear` (at least two `(time value)` knots
+    with SI time and uniform value dimensions, refused by name otherwise).
   - `(source "<n>" :interface "<interface>" :port "<port>" :history ...)`
     holds a port of an interface declared earlier in the file, such as a
     relaxation bushing's `drive_x`. A source names one of `:part` and

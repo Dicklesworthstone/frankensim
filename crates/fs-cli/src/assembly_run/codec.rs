@@ -31,6 +31,8 @@ const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const FREQUENCY: Dims = Dims([0, 0, -1, 0, 0, 0]);
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const AREA: Dims = Dims([2, 0, 0, 0, 0, 0]);
+const FORCE: Dims = Dims([1, 1, -2, 0, 0, 0]);
+const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeStat {
@@ -368,6 +370,23 @@ fn parse_history(n: &Node) -> Result<TimeHistory, SolveRefusal> {
                 after: as_qty(req(&kw, "after", "step")?, "after")?,
             })
         }
+        "table" if v.len() >= 3 => {
+            let mut knots = Vec::with_capacity(v.len() - 1);
+            for row in &v[1..] {
+                let pair = as_list(row, "table knot")?;
+                if pair.len() != 2 {
+                    return Err(err("table knot must be (time value)"));
+                }
+                knots.push((
+                    as_qty_d(&pair[0], TIME, "table.time")?,
+                    as_qty(&pair[1], "table.value")?,
+                ));
+            }
+            Ok(TimeHistory::PiecewiseLinear { knots })
+        }
+        "table" => Err(err(
+            "table history requires at least two (time value) knots",
+        )),
         o => Err(err(format!("unsupported history `{o}`"))),
     }
 }
@@ -1039,6 +1058,10 @@ pub(crate) fn admit_assembly_source(
                         "fluid-at",
                         "memory",
                         "sign",
+                        "normal-force",
+                        "heat-partition-a",
+                        "initial-slip",
+                        "query-at",
                     ],
                     &scope,
                 )?;
@@ -1091,21 +1114,33 @@ pub(crate) fn admit_assembly_source(
                     ("area", "area", AREA),
                     ("normal-pressure", "normal_pressure", PRESSURE),
                     ("thickness", "thickness", LENGTH),
+                    ("normal-force", "normal_force", FORCE),
+                    ("initial-slip", "initial_slip", VELOCITY),
                 ] {
                     if let Some(n) = kw.get(flag) {
                         state.push((ParameterKey::new(key, dims), as_qty_d(n, dims, flag)?));
                     }
                 }
-                if let Some(n) = kw.get("fraction") {
-                    let fraction = QtyAny::dimensionless(as_f64(n, "fraction")?);
-                    state.push((ParameterKey::new("fraction", Dims::NONE), fraction));
+                for (flag, key) in [
+                    ("fraction", "fraction"),
+                    ("sign", "sign"),
+                    ("heat-partition-a", "heat_partition_a"),
+                ] {
+                    if let Some(n) = kw.get(flag) {
+                        let val = QtyAny::dimensionless(as_f64(n, flag)?);
+                        state.push((ParameterKey::new(key, Dims::NONE), val));
+                    }
                 }
                 if let Some(n) = kw.get("memory") {
                     state.extend(parse_memory(n, &scope)?);
                 }
-                if let Some(n) = kw.get("sign") {
-                    let sign = QtyAny::dimensionless(as_f64(n, "sign")?);
-                    state.push((ParameterKey::new("sign", Dims::NONE), sign));
+                if let Some(n) = kw.get("query-at") {
+                    for (k, q) in parse_query_pairs(n, &scope, "query-at")? {
+                        if state.iter().any(|(have, _)| have.name == k.name) {
+                            return Err(err(format!("{scope} repeats `{}` in :query-at", k.name)));
+                        }
+                        state.push((k, q));
+                    }
                 }
                 let bare = "a temperature source takes no card or state";
                 let kind = match as_sym(req(&kw, "kind", &scope)?, "interface.kind")? {
@@ -1144,8 +1179,16 @@ pub(crate) fn admit_assembly_source(
                     o => return Err(err(format!("{scope} unsupported kind `{o}`"))),
                 };
                 let contact = matches!(kind, DraftInterfaceKind::MechanicalContact { .. });
-                if kw.contains_key("memory") && !contact {
-                    return Err(err(format!("{scope}: :memory needs a mechanical contact")));
+                for flag in [
+                    "memory",
+                    "normal-force",
+                    "heat-partition-a",
+                    "initial-slip",
+                    "query-at",
+                ] {
+                    if kw.contains_key(flag) && !contact {
+                        return Err(err(format!("{scope}: :{flag} needs a mechanical contact")));
+                    }
                 }
                 interfaces.push(DraftInterfaceDecl {
                     name: iname,
