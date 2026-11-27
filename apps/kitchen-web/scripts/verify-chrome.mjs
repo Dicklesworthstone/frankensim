@@ -166,11 +166,12 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
       "[data-stove-canvas]",
+      "[data-bo-canvas]",
       "[data-oven-canvas]",
       "[data-cold-canvas]",
       "[data-brigade-canvas]",
@@ -557,6 +558,31 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-kit.png");
       }
 
+      if (sid === "boil") {
+        // As set on arrival (30 litres, full flame): the two pots with lids boil in about 25 min, half the big pot's
+        // 50 with its lid, for the same gas; the big pot without one in about 57. On half a flame the big open pot does
+        // not boil in 3 h: it levels off short of 100 °C. Held at 52 min, every pot but the big open one is boiling.
+        const info = () => page.$eval("[data-bo-stage]", (el) => el.boil.info());
+        const minOf = (i, k) => i.runs.find((r) => r.key === k)?.boilMin;
+        const built = await info();
+        console.log(`[verify-chrome] Put the water on: ${JSON.stringify(built.runs.map((r) => [r.key, r.boilMin, r.steamL]))} | ${built.status.slice(0, 90)}`);
+        const [oo, ol, to, tl] = ["one-open", "one-lid", "two-open", "two-lid"].map((k) => minOf(built, k));
+        if (built.litres !== 30 || built.flame !== "full" || !(tl < to && to < ol && ol < oo) || Math.round(tl) !== 25 || Math.round(ol) !== 50 || !/for the same gas/.test(built.status)) throw new Error(`Put the water on: 30 litres at full flame do not boil in the order or minutes expected: ${JSON.stringify(built)}`);
+        await page.click('[data-bo-flame="half"]');
+        await sleep(300);
+        const half = await info();
+        console.log(`[verify-chrome] Put the water on, half a flame: ${JSON.stringify(half.runs.map((r) => [r.key, r.boilMin, r.peak]))}`);
+        if (minOf(half, "one-open") !== null || !(minOf(half, "two-lid") > 0) || !/does not boil in 3 h: it levels off at 9\d\.\d °C/.test(half.status)) throw new Error(`Put the water on: on half a flame the big open pot boils, or the status does not say it levels off: ${JSON.stringify(half)}`);
+        await page.click('[data-bo-flame="full"]');
+        await page.$eval("[data-bo-stage]", (el) => el.boil.hold(52));
+        await sleep(1200);
+        const held = await info();
+        if (held.t !== 52 || !/\d+ °C$/.test(held.tags[0] ?? "") || !held.tags.slice(1).every((t) => /Boiling$/.test(t ?? ""))) throw new Error(`Put the water on: held at 52 min, the labels are not the big open pot heating and the rest boiling: ${JSON.stringify(held.tags)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch2-boil.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch2-boil.png");
+        await page.$eval("[data-bo-stage]", (el) => el.boil.hold(null));
+      }
+
       if (sid === "glasses") {
         // As set on arrival (thighs and risotto, 60 lunches of each, both at once): 1 h 01 together, 1 h 36 one after
         // the other, 35 min saved; the cook at the left combi loading the thighs at 6:04, at the range stirring at 6:20;
@@ -654,13 +680,14 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 20 WebGL canvases (16 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 21 WebGL canvases (17 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
         "[data-stove-canvas]",
+        "[data-bo-canvas]",
         "[data-oven-canvas]",
         "[data-cold-canvas]",
         "[data-brigade-canvas]",
@@ -685,7 +712,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 20 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 21 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);

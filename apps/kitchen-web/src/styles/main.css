@@ -4259,3 +4259,143 @@ button.wk-dish[aria-pressed="true"] {
     font-size: 0.62rem;
   }
 }
+
+/* ============================ Put the water on ============================ */
+.bo-fig {
+  margin-top: 2.4rem;
+}
+.bo-stage {
+  aspect-ratio: 16 / 9;
+}
+.bo-hud {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  max-width: calc(100% - 1.8rem);
+}
+.bo-hud span {
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+.bo-hud em[data-kind="heat"] {
+  color: #fed7aa;
+  background: rgb(249 115 22 / 0.2);
+}
+.bo-hud em[data-kind="boil"] {
+  color: #bae6fd;
+  background: rgb(56 189 248 / 0.2);
+}
+/* The labels over each way's pots. */
+.bo-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  padding: 0.24rem 0.45rem 0.24rem 0.55rem;
+  border-radius: 0.35rem;
+  background: rgb(10 10 12 / 0.8);
+  box-shadow:
+    inset 3px 0 0 var(--c),
+    0 0 0 1px rgb(255 255 255 / 0.12);
+  font: 600 0.66rem/1 var(--mono);
+  letter-spacing: 0.02em;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+  translate: -50% -100%;
+}
+/* The stem down to its pots. */
+.bo-tag::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: var(--stem, 6px);
+  translate: var(--sx, 0px) 0;
+  background: color-mix(in srgb, var(--c) 70%, transparent);
+}
+.bo-tag i {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--soft);
+}
+.bo-tag b {
+  color: var(--c);
+}
+.bo-tag[data-boiled] {
+  background: color-mix(in srgb, var(--c) 30%, rgb(10 10 12 / 0.85));
+}
+.bo-tag[data-boiled] b {
+  color: #fff;
+}
+.bo-tag[hidden] {
+  display: none;
+}
+.bo-tile {
+  align-content: start;
+  box-shadow: inset 0 3px 0 var(--c);
+}
+.bo-tile small {
+  white-space: pre-line;
+  line-height: 1.45;
+}
+.bo-lab .wk-tile b {
+  font-size: 1.12rem;
+  white-space: nowrap;
+}
+.bo-keys {
+  margin: 0;
+}
+.bo-chart-wrap {
+  margin-top: 0.3rem;
+}
+.bo-svg .grid {
+  stroke: rgb(255 255 255 / 0.07);
+}
+.bo-svg .grid.boil {
+  stroke: rgb(255 255 255 / 0.32);
+  stroke-dasharray: 4 3;
+}
+.bo-svg .xa.st {
+  text-anchor: start;
+}
+.bo-svg .xa.en {
+  text-anchor: end;
+}
+.bo-svg .ln {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.bo-svg .ln.faint {
+  stroke-width: 1.4;
+  stroke-opacity: 0.22;
+}
+.bo-svg .bp {
+  fill: var(--c);
+  stroke: #0b0b0c;
+  stroke-width: 1.5;
+}
+.bo-svg text.bpl {
+  fill: var(--c);
+  font-weight: 600;
+}
+.bo-svg .play {
+  stroke: var(--chapter);
+  stroke-width: 1.5;
+}
+@media (max-width: 720px) {
+  .bo-tag i {
+    display: none;
+  }
+}
+@media (max-width: 599px) {
+  .bo-stage {
+    aspect-ratio: 4 / 5;
+  }
+}

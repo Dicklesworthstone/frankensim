@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "build:cf": "node scripts/stage-cf.mjs",
-    "test": "tsc --noEmit && bun test src/sim/physicsKernels.test.ts src/sim/commissaryWeek.test.ts src/sim/commissaryFloor.test.ts src/sim/serviceRush.test.ts src/sim/cateringMorning.test.ts src/sim/crewCrowd.test.ts src/sim/twoKitchens.test.ts src/sim/buyOne.test.ts src/sim/combiTrip.test.ts src/sim/oneCook.test.ts src/three/morningKitchen.test.ts src/three/models/shop.test.ts src/three/models/people.test.ts src/three/models/tuck.test.ts src/three/models/labelInk.test.ts",
+    "test": "tsc --noEmit && bun test src/sim/physicsKernels.test.ts src/sim/commissaryWeek.test.ts src/sim/commissaryFloor.test.ts src/sim/serviceRush.test.ts src/sim/cateringMorning.test.ts src/sim/crewCrowd.test.ts src/sim/twoKitchens.test.ts src/sim/buyOne.test.ts src/sim/combiTrip.test.ts src/sim/oneCook.test.ts src/sim/potBoil.test.ts src/three/morningKitchen.test.ts src/three/models/shop.test.ts src/three/models/people.test.ts src/three/models/tuck.test.ts src/three/models/labelInk.test.ts",
     "verify": "node scripts/verify-chrome.mjs"
   },
   "dependencies": {

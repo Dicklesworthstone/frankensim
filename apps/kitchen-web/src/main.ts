@@ -9,6 +9,7 @@ import { EQUIPMENT_PIECES, mountEquipmentTurntable } from "./three/equipmentTurn
 import { mountHeroKitchen, type HeroController } from "./three/heroKitchen";
 import { OVEN_BOULE_DETAIL, OVEN_PIECES, mountOvenLab } from "./three/ovenLab";
 import { STOVE_PIECES, STOVE_STEAK, mountStoveLab } from "./three/stoveLab";
+import { BOIL_PIECES, mountBoilLab } from "./three/boilLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { prefetchBouleLayers } from "./three/models/boulePrefetch";
 import { prefetchFoodTexels } from "./three/models/foodPrefetch";
@@ -299,6 +300,7 @@ function bootstrap(): void {
   const pendingMounts: Pending[] = [
     { id: "equipment", el: document.getElementById("equipment")!, mount: mountEquipmentTurntable, done: false, pieces: EQUIPMENT_PIECES },
     { id: "stove", el: document.getElementById("stove")!, mount: mountStoveLab, done: false, after: steakReady, pieces: () => steakReady.then(() => STOVE_PIECES) },
+    { id: "boil", el: document.getElementById("boil")!, mount: mountBoilLab, done: false, pieces: BOIL_PIECES },
     { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false, pieces: OVEN_PIECES },
     { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false, pieces: coldPieces() },
     { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false, pieces: BRIGADE_PIECES },

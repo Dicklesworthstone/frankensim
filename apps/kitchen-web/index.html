@@ -550,7 +550,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>02</b><i></i>The stove</p>
               <h2 class="d3" id="stove-title">Sear a steak, then <em class="g">pour in the wine</em>.</h2>
               <p class="kicker">
-                A ribeye sears in a skillet over gas, induction or an electric coil. Change the pan or the fat and the sear changes. Pour in 120 mL of wine and it boils on contact, cools the pan and lifts the browned bits off the bottom.
+                A ribeye sears in a skillet over gas, induction or an electric coil. Change the pan or the fat and the sear changes. Pour in 120 mL of wine and it boils on contact, cools the pan and lifts the browned bits off the bottom. Then put the pasta water on, in one big pot or two smaller ones, and see which boils first.
               </p>
             </div>
             <a class="more" href="#stove-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -626,6 +626,66 @@
               <div>
                 <code class="formula">C_pan · dT_pan/dt = η(source, pan) · P_in − q_steak − ṁ_vap · h_fg − q_loss</code>
                 <p class="model">Model: <code>stepStoveKernel</code>, matching FrankenSim's <code>engine-stove</code> reference to one part in a million. Fitted values: each fat's smoke point and contact factor.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal bo-fig" id="boil">
+            <header class="fig-head">
+              <p class="todo">Put the pasta water on, and see which pot boils first</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage bo-stage" data-bo-stage>
+                <canvas data-bo-canvas tabindex="0" aria-label="Two six-burner ranges side by side with the same water on them four ways. On the left range, a 40-quart stockpot without a lid and one with a lid. On the right range, the water split between two 20-quart pots without lids and two with lids. A cook stands beside the ranges. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud bo-hud" aria-hidden="true"><b data-bo-hud-clock>0:00</b><span data-bo-hud-doing>…</span><em data-bo-hud-note data-kind="heat">Heating</em></div>
+                <span class="bo-tag" data-bo-tag="one-open" style="--c:#f97316" hidden aria-hidden="true"><i>One pot, no lid</i><b>…</b></span>
+                <span class="bo-tag" data-bo-tag="one-lid" style="--c:#facc15" hidden aria-hidden="true"><i>One pot, lid on</i><b>…</b></span>
+                <span class="bo-tag" data-bo-tag="two-open" style="--c:#22d3ee" hidden aria-hidden="true"><i>Two pots, no lids</i><b>…</b></span>
+                <span class="bo-tag" data-bo-tag="two-lid" style="--c:#a5b4fc" hidden aria-hidden="true"><i>Two pots, lids on</i><b>…</b></span>
+              </div>
+              <div class="lab bo-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles bo-tiles">
+                    <div class="wk-tile bo-tile" style="--c:#f97316"><span>One pot, no lid</span><b><i data-bo-tile="one-open">…</i></b><small data-bo-tile-s="one-open">…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#facc15"><span>One pot, lid on</span><b><i data-bo-tile="one-lid">…</i></b><small data-bo-tile-s="one-lid">…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#22d3ee"><span>Two pots, no lids</span><b><i data-bo-tile="two-open">…</i></b><small data-bo-tile-s="two-open">…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#a5b4fc"><span>Two pots, lids on</span><b><i data-bo-tile="two-lid">…</i></b><small data-bo-tile-s="two-lid">…</small></div>
+                  </div>
+                  <div class="bo-chart-wrap">
+                    <p class="rs-map-head"><b>The water's temperature, each way</b><span class="wk-keys bo-keys"><span style="--k:#f97316">One pot, no lid</span><span style="--k:#facc15">One pot, lid on</span><span style="--k:#22d3ee">Two pots, no lids</span><span style="--k:#a5b4fc">Two pots, lids on</span></span></p>
+                    <div class="bo-chart" data-bo-chart role="img" aria-label="Each way's water temperature against the minutes since the burners were lit, from the cold tap to the boil at 100 °C, a dot where each one boils."></div>
+                    <p class="rs-map-note">Each line is one way's water, from the cold tap at 18 °C to the boil at 100 °C, the dashed line. Near the boil the open pots' lines bend over: their steam takes more and more of the heat.</p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">The macaroni goes in at 6:30. Put the water on in one big pot or two smaller ones, with lids or without, and the twin says when each will boil.</p>
+                  <label class="range"><span><b>Water</b><output data-bo-litres-val>30 litres</output></span><input type="range" min="8" max="32" step="1" value="30" data-bo-litres aria-label="Litres of water in all" /></label>
+                  <div class="field">
+                    <p class="micro">Flame</p>
+                    <div class="seg fill bo-flames" role="group" aria-label="The flame under every pot">
+                      <button type="button" data-bo-flame="full" aria-pressed="true">Full</button>
+                      <button type="button" data-bo-flame="three" aria-pressed="false">Three-quarters</button>
+                      <button type="button" data-bo-flame="half" aria-pressed="false">Half</button>
+                    </div>
+                  </div>
+                  <div class="status" data-bo-status data-state="ok">Heating the water…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="boil-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>Each pot's water heats as one: Alan Berick, at the Aprovecho Research Center, measured a pot's water within a fraction of a degree from top to bottom all the way to the boil. A 30 000 BTU/h open burner puts 42% of its heat into the pot, the share the stove above gives gas, at any flame. The water and the steel take that heat in, and the pot gives some back three ways: steam off the open water, radiation from the water or the lid and from the pot's side, and warm air rising off it.</p>
+                <p>Near the boil, steam is most of it. Its rate per square metre of open water is measured: Berick held 5 litres in a 25 cm pot at each temperature from 50 °C to 98 °C and weighed what it lost. At 98 °C a lid stopped 92% of it, and the model takes that for a lid at every temperature. The emissivities are his measurements too. With his burner's power taken from his run under a film of oil, which stops evaporation, the model brings his open pot to the boil in 27 minutes, as he measured. Two pots on two burners take in twice the heat for the same water, so they boil in about half the time for about the same gas.</p>
+              </div>
+              <div>
+                <code class="formula">(m·c_w + C_pot) · dT/dt = η · P_burner − ṁ_steam · h_fg − εσA(T⁴ − T_room⁴) − h·A·(T − T_room)</code>
+                <p class="model">Model: <code>heatUp</code> in <code>potBoil</code>, the water and the pot stepped a second at a time to 100 °C. Measured inputs: Berick's evaporation rates and emissivities. Warm air: Churchill and Chu up the pot's side, a hot plate facing up across its top.</p>
               </div>
                 </div>
               </details>

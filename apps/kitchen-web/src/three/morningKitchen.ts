@@ -32,9 +32,10 @@ export const LINE_Z = -0.62;
 export const OVEN = { id: "NSF-COMBI-10PAN", w: 0.847, d: 0.776, h: 1.79 };
 export const OVEN_X0 = [-2.08, -1.2] as const;
 export const RANGE = { id: "NSF-RANGE-GAS-6B", w: 0.914, d: 0.864, h: 1.473, x0: -0.32 };
-const GRATE_Y = 0.914;
-const BURNER_X = [0.18, 0.457, 0.734] as const;
-const BURNER_Z = [0.22, 0.58] as const;
+/** The range's grate top, and its burners' centres: across from its left side, and behind its front. */
+export const GRATE_Y = 0.914;
+export const BURNER_X = [0.18, 0.457, 0.734] as const;
+export const BURNER_Z = [0.22, 0.58] as const;
 export const TABLE = { id: "NSF-PREPTABLE-96", w: 2.438, d: 0.762, h: 0.914, x0: -1.98 };
 export const TABLE_Z = 0.8;
 const POT = { id: "NSF-STOCKPOT-8QT", w: 0.24, d: 0.3, h: 0.215 };

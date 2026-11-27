@@ -8,7 +8,9 @@
  *
  * Live quantities, `hooks.set(name, value)` (default in brackets):
  *   NSF-STOCKPOT-*            level 0..1 liquid height [0.7]; boil 0..1 [0] (tick rolls the surface, raises bubbles,
- *                             steam above about 0.6). open(frac) lifts and tips the lid (joint "pot_lid_lift").
+ *                             steam above about 0.6); water 0 broth, 1 clear water [0]; steam 0..3, how fast it goes
+ *                             off as steam (1 a hard boil's), or -1 to follow the boil [-1]. open(frac) lifts and tips
+ *                             the lid (joint "pot_lid_lift").
  *   NSF-HOTEL-PAN-*           fill 0..1 food surface height [0.6]; food 0 braised meat in sauce, 1 rice, 2 vegetables,
  *                             3 soup [0]. Each food rides its own joint ("food_0".."food_3").
  *   NSF-TONGS-12IN            open(frac) opens the upper arm up to 30° about the hinge pin (joint "tongs_pinch").
@@ -1340,6 +1342,8 @@ const stockpot: Builder = (s, e) => {
   let level = 0.7;
   let boil = 0;
   let lidOpen = 0;
+  /** Steam set from outside (how fast the water is going off as steam, 1 a hard boil's), or -1 to follow the boil. */
+  let steamSet = -1;
   const m4 = new THREE.Matrix4();
   const q4 = new THREE.Quaternion();
   const v4 = new THREE.Vector3();
@@ -1399,9 +1403,9 @@ const stockpot: Builder = (s, e) => {
     // Fine ripples and bursting cells, scrolling faster the harder it boils.
     stockM.bumpScale = 1.2 * boil;
     stockM.bumpMap!.offset.set(Math.sin(t * 0.8) * 0.05 + t * 0.07 * boil, Math.cos(t * 0.6) * 0.05 - t * 0.05 * boil);
-    // Steam: faint wisps above a hard boil, fainter with the lid on.
-    const st = smooth(0.55, 1, boil) * (level > 0.01 ? 1 : 0) * (0.25 + 0.75 * lidOpen);
-    steamMat.opacity = 0.16 * st;
+    // Steam: faint wisps above a hard boil, fainter with the lid on; or as much as the caller says goes off.
+    const st = (steamSet >= 0 ? steamSet : smooth(0.55, 1, boil) * (0.25 + 0.75 * lidOpen)) * (level > 0.01 ? 1 : 0);
+    steamMat.opacity = Math.min(0.5, 0.16 * st);
     for (const pf of puffs) {
       const ph = (pf.ph + t * 0.12) % 1;
       pf.sp.visible = st > 0.01;
@@ -1420,6 +1424,15 @@ const stockpot: Builder = (s, e) => {
       set: (name, v) => {
         if (name === "level") level = clamp01(v);
         else if (name === "boil") boil = clamp01(v);
+        else if (name === "steam") steamSet = v < 0 ? -1 : Math.min(3, v);
+        else if (name === "water") {
+          // Clear water: no broth colour, thin enough to show the pot's floor through it.
+          const clear = v >= 0.5;
+          stockM.map = clear ? null : f.stock.map;
+          stockM.color.setHex(clear ? 0xd3e4ea : 0xffffff);
+          stockM.opacity = clear ? 0.42 : 0.88;
+          stockM.needsUpdate = true;
+        }
         place(clock);
       },
       open: (fr) => {
@@ -1432,7 +1445,7 @@ const stockpot: Builder = (s, e) => {
         clock = t;
         // Off the boil nothing here moves with time (no ripples, bubbles or steam), and set() has already laid the
         // surface, so a still pot costs nothing a frame.
-        if (boil > 0) place(t);
+        if (boil > 0 || steamSet > 0) place(t);
       },
     };
   };
