@@ -26,10 +26,10 @@ Regression coverage is in `tests/driver_modes_and_store.rs`.
 
 ## StageResidual on default lumped elements (bead `frankensim-rc-1109-root-3gc12.11.7`, Stage 2b)
 
-Eleven lumped elements implement `fs_ports::component::StageResidual`:
+Thirteen lumped elements implement `fs_ports::component::StageResidual`:
 
 - Stateful (`unknowns() == 1`, exact midpoint/discrete-gradient residual matching `propose` to roundoff, with analytic `jvp_z` and exact transpose `vjp_z`): `Mass`, `Spring`, `HeatCapacity`, `Storage`.
-- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`.
+- Zero-unknown (`unknowns() == 0`, residual outputs and `accept` matching `propose`): `Damper`, `Force`, `Conductance`, `Heater`, `Admittance`, `FlowSource`, `Gyrator`, `ControlledSource`, `AffineSignal`.
 
 The dual laws support common-effort networks with the same source clocks,
 work, heat and entropy accounts as their ordinary proposal path. A publishing
@@ -41,7 +41,7 @@ keeps its lossless cross-domain power relation.
 constructors in `lowering.rs` use it. A cavity's integrated volume is its storage
 unknown, so the existing cavity/duct graph can participate in monolithic solves
 and stationary-analysis admission. Other elements such as `GapField`,
-`ControlledSource`, `Slider`, `Restriction` and `GasVolume`
+`Slider`, `Restriction` and `GasVolume`
 still lack this tier. Direct `SystemBuilder::add` and `add_with_tangent` callers
 do not attach `StageResidual`, even when the concrete type implements it.
 
@@ -4280,8 +4280,15 @@ inputs, invalid steps and unrepresentable work/accounts refuse before publishing
 state or outputs. Proposals and both tangent actions poll cancellation before
 work and before publication, allocate nothing, and retain deterministic order.
 
-`tests/controlled_sources.rs` checks Component/tangent conformance in four power
-domains, signed capacitor charging and recovery against independent charge/work
+The optional `StageResidual` tier has zero internal unknowns: the command is
+an algebraic output, and the source work account advances only on acceptance.
+Residual evaluation and acceptance share the native step's work calculation,
+finite-value guards and cancellation checks. Register both optional tiers with
+`SystemBuilder::add_with_tangent_and_stage_residual` to use a commanded source
+in monolithic or stationary composition.
+
+`tests/controlled_sources.rs` checks Component/tangent/residual conformance in four power
+domains, monolithic signed capacitor charging and recovery against independent charge/work
 equations, and an actual Mass driven and braked by a signal feedback component
 against its independent discrete recurrence and the full energy ledger. Invalid
 inputs and cancellation preserve caller state, port and derivative buffers.
@@ -4299,7 +4306,10 @@ and bias extents are exact, and every coefficient is finite. It is
 dissipation, and no per-step allocation. Its native stateless codec binds
 dimensions and every coefficient/bias bit into the problem identity.
 Arithmetic or shape errors and cancellation refuse; the kernel publishes
-none of a failed coupled trial.
+none of a failed coupled trial. Its optional `StageResidual` has zero internal
+unknowns and uses the same map for residual outputs and acceptance validation.
+Registering both optional tiers admits the map's signal equations to monolithic
+algebraic loops and stationary analysis without adding controller state.
 
 `Mass::publishing()` adds accepted, left-end `position` and `velocity`
 signals without changing motion, power outputs or receipts. Their port-input
@@ -4308,8 +4318,9 @@ the inertance's chosen domain: position/velocity, angle/angular velocity,
 or passed charge/current. Repeated publication requests add no duplicate ports.
 
 `tests/affine_signal.rs` checks rectangular maps and transpose actions,
-unchanged Mass stepping, independent PD feedback dynamics and source work,
-rejected/cancelled steps and bitwise checkpoint replay. The existing durable
+unchanged Mass stepping, independent PD feedback dynamics and source work in
+both interface and monolithic solves, stationary recovery of the authored
+setpoint, rejected/cancelled steps and bitwise monolithic checkpoint replay. The existing durable
 snapshot tests reject changed gains, bias or published-port shape. Gains and
 signal units are authored; this map infers no saturation, delay, sample period,
 dynamic controller state or stability. The `feedback_control` example builds

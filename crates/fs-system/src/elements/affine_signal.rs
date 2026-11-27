@@ -5,7 +5,9 @@ use core::num::NonZeroUsize;
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::StableId;
-use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::{
+    Class, Component, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 
 use super::{ElementError, finite, inputs_finite, positive};
 
@@ -124,6 +126,27 @@ impl AffineSignal {
         }
         Ok(())
     }
+
+    fn evaluate(
+        &self,
+        dt_s: f64,
+        inputs: &[f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        self.validate(dt_s, inputs)?;
+        extent(
+            "affine signal output width",
+            outputs.len(),
+            self.output_width,
+        )?;
+        for (row, output) in outputs.iter_mut().enumerate() {
+            *output = self.row(row, inputs, true, cx)?;
+        }
+        cx.checkpoint()?;
+        Ok(())
+    }
 }
 
 fn extent(name: &'static str, actual: usize, expected: usize) -> Result<(), ElementError> {
@@ -184,18 +207,114 @@ impl Component for AffineSignal {
         outputs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
+        self.evaluate(dt_s, inputs, outputs, cx)?;
+        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+    }
+}
+
+// The affine map has no internal state unknown. Its input/output equations
+// still participate in a coupled algebraic loop through the retained inputs.
+impl StageResidual for AffineSignal {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        extent("affine signal stage width", z.len(), 0)?;
+        self.validate(dt_s, inputs)
+    }
+
+    fn residual(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
         cx.checkpoint()?;
-        self.validate(dt_s, inputs)?;
+        extent("affine signal stage width", z.len(), 0)?;
+        extent("affine signal residual width", r.len(), 0)?;
+        self.evaluate(dt_s, inputs, outputs, cx)
+    }
+
+    fn jvp_z(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        extent("affine signal stage width", z.len(), 0)?;
+        extent("affine signal stage direction width", dz.len(), 0)?;
+        extent("affine signal residual direction width", dr.len(), 0)?;
         extent(
-            "affine signal output width",
-            outputs.len(),
+            "affine signal output direction width",
+            d_outputs.len(),
             self.output_width,
         )?;
-        for (row, output) in outputs.iter_mut().enumerate() {
-            *output = self.row(row, inputs, true, cx)?;
-        }
+        self.validate(dt_s, inputs)?;
+        self.check_response(inputs, cx)?;
         cx.checkpoint()?;
-        Ok(Proposal::Step(Receipt::lossless(0.0, 0.0)))
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        extent("affine signal stage width", z.len(), 0)?;
+        extent("affine signal residual covector width", bar_r.len(), 0)?;
+        extent(
+            "affine signal output covector width",
+            bar_outputs.len(),
+            self.output_width,
+        )?;
+        extent("affine signal stage covector width", bar_z.len(), 0)?;
+        self.validate(dt_s, inputs)?;
+        inputs_finite(bar_outputs)?;
+        self.check_response(inputs, cx)?;
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        (): &(),
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        _new: &mut (),
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ElementError> {
+        cx.checkpoint()?;
+        extent("affine signal stage width", z.len(), 0)?;
+        self.validate(dt_s, inputs)?;
+        self.check_response(inputs, cx)?;
+        cx.checkpoint()?;
+        Ok(Receipt::lossless(0.0, 0.0))
     }
 }
 

@@ -9,13 +9,16 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ports::PortKind;
 use fs_ports::component::conformance::{
-    Case, Observed, check_component, check_exact_linear, check_port_tangent,
+    Case, Observed, check_component, check_exact_linear, check_port_tangent, check_stage_residual,
 };
-use fs_ports::component::{Class, Component, PortRole, PortTangent};
+use fs_ports::component::{Class, Component, PortRole, PortTangent, StageResidual};
 use fs_system::elements::{
     AffineSignal, ControlledSource, ElementError, Mass, Motion, SourceAccount,
 };
-use fs_system::{NodeId, System, SystemBuilder};
+use fs_system::{
+    AnalysisError, BlockSolveMode, BlockSolverPolicy, MonolithicConfig, NodeId, StateMap,
+    StationaryConfig, System, SystemBuilder,
+};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -85,6 +88,7 @@ fn rectangular_signal_map_conforms_and_uses_the_full_transpose() {
             assert_eq!(receipt.energy_tolerance_j, 0.0);
             check_port_tangent(&map, &case, 1.0e-6, 1.0e-8, cx).unwrap();
             check_exact_linear(&map, &case, &other, cx).unwrap();
+            check_stage_residual(&map, &case, &[], 1.0e-8, 1.0e-10, cx).unwrap();
         }
         let mut transpose = [f64::NAN; 3];
         map.vjp(&(), 0.125, other.inputs, &[3.0, -2.0], &mut transpose, cx)
@@ -183,17 +187,17 @@ fn target(time: f64) -> f64 {
 fn feedback_graph() -> (System, NodeId, NodeId, NodeId, Rc<Cell<bool>>) {
     let mut builder = SystemBuilder::new();
     let body = builder
-        .add_with_tangent("body", Mass::new(MASS).unwrap().publishing(), INITIAL)
+        .add_with_tangent_and_stage_residual("body", Mass::new(MASS).unwrap().publishing(), INITIAL)
         .unwrap();
     let source = builder
-        .add_with_tangent(
+        .add_with_tangent_and_stage_residual(
             "source",
             ControlledSource::effort(PortKind::MechanicalForceVelocity),
             SourceAccount::default(),
         )
         .unwrap();
     let control = builder
-        .add_with_tangent(
+        .add_with_tangent_and_stage_residual(
             "control",
             AffineSignal::new(3, 1, vec![KP, -KP, -KV], vec![0.0]).unwrap(),
             (),
@@ -235,7 +239,97 @@ fn feedback_graph() -> (System, NodeId, NodeId, NodeId, Rc<Cell<bool>>) {
             }),
         )
         .unwrap();
-    (builder.seal().unwrap(), body, source, control, fail)
+    let mut system = builder.seal().unwrap();
+    system.set_solver_policy(BlockSolverPolicy::InterfaceNewton);
+    (system, body, source, control, fail)
+}
+
+#[test]
+fn monolithic_feedback_matches_interface_solve_and_independent_work() {
+    let (mut interface, body, source, _, _) = feedback_graph();
+    let (mut monolithic, _, _, _, _) = feedback_graph();
+    monolithic.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(
+        MonolithicConfig::default(),
+    ));
+    assert!(
+        monolithic
+            .execution_plan_for_dt(DT)
+            .blocks
+            .iter()
+            .any(|block| { block.solve_mode == BlockSolveMode::MonolithicNewtonKrylov })
+    );
+    let mut expected = INITIAL;
+    let mut supplied_j = 0.0;
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        for _ in 0..120 {
+            // Left-end observed feedback and midpoint physical work, derived
+            // independently of either kernel solve mode.
+            let force = KP * (target(monolithic.time_s()) - expected.position_m)
+                - KV * expected.velocity_m_s;
+            let next_velocity = expected.velocity_m_s + DT * force / MASS;
+            let displacement = DT * 0.5 * (expected.velocity_m_s + next_velocity);
+            expected.position_m += displacement;
+            expected.velocity_m_s = next_velocity;
+            supplied_j += force * displacement;
+            interface.step(DT, cx).unwrap();
+            monolithic.step(DT, cx).unwrap();
+            let actual = monolithic.state::<Motion>(body).unwrap();
+            let reference = interface.state::<Motion>(body).unwrap();
+            near(actual.position_m, expected.position_m, 2.0e-10);
+            near(actual.velocity_m_s, expected.velocity_m_s, 2.0e-10);
+            near(actual.position_m, reference.position_m, 2.0e-10);
+            near(actual.velocity_m_s, reference.velocity_m_s, 2.0e-10);
+            near(
+                monolithic
+                    .state::<SourceAccount>(source)
+                    .unwrap()
+                    .energy_in_j,
+                -supplied_j,
+                2.0e-10,
+            );
+            near(monolithic.ledger().energy_residual_j(), 0.0, 2.0e-10);
+        }
+    });
+}
+
+struct MotionCoordinates(NodeId);
+
+impl StateMap for MotionCoordinates {
+    fn dim(&self) -> usize {
+        2
+    }
+
+    fn read(&self, system: &System, out: &mut [f64]) -> Result<(), AnalysisError> {
+        let state = system
+            .state::<Motion>(self.0)
+            .ok_or(AnalysisError::Invalid { what: "body state" })?;
+        out.copy_from_slice(&[state.position_m, state.velocity_m_s]);
+        Ok(())
+    }
+
+    fn write(&self, system: &mut System, state: &[f64]) -> Result<(), AnalysisError> {
+        system.set_accepted_state(
+            self.0,
+            Motion {
+                position_m: state[0],
+                velocity_m_s: state[1],
+            },
+        )?;
+        Ok(())
+    }
+}
+
+#[test]
+fn controlled_mass_stationary_analysis_recovers_the_authored_setpoint() {
+    let (mut system, body, _, _, _) = feedback_graph();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let solution = system
+            .solve_stationary(&MotionCoordinates(body), StationaryConfig::default(), cx)
+            .unwrap();
+        near(solution.state[0], target(0.0), 1.0e-9);
+        near(solution.state[1], 0.0, 1.0e-9);
+        assert!(solution.residual_norm < 1.0e-10);
+    });
 }
 
 #[test]
@@ -298,6 +392,9 @@ fn authored_position_and_velocity_feedback_matches_independent_dynamics_and_work
 #[test]
 fn rejected_and_cancelled_feedback_steps_replay_from_the_same_checkpoint() {
     let (mut system, body, source, _, fail) = feedback_graph();
+    system.set_solver_policy(BlockSolverPolicy::MonolithicNewtonKrylov(
+        MonolithicConfig::default(),
+    ));
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
         for _ in 0..12 {
@@ -371,7 +468,14 @@ fn invalid_shapes_nonfinite_arithmetic_and_cancelled_calls_refuse() {
                 map.propose(&(), dt, input, &mut (), &mut output, cx)
                     .is_err()
             );
+            assert!(
+                map.residual(&(), dt, input, &[], &mut [], &mut output, cx)
+                    .is_err()
+            );
+            assert!(map.accept(&(), dt, input, &[], &mut (), cx).is_err());
         }
+        assert!(map.initial_guess(&(), 1.0, &[1.0], &mut [0.0]).is_err());
+        assert!(map.accept(&(), 1.0, &[1.0], &[0.0], &mut (), cx).is_err());
         assert!(map.propose(&(), 1.0, &[1.0], &mut (), &mut [], cx).is_err());
         assert!(
             map.jvp(&(), 1.0, &[f64::MAX], &[0.0], &mut [0.0], cx)
@@ -401,6 +505,14 @@ fn invalid_shapes_nonfinite_arithmetic_and_cancelled_calls_refuse() {
         );
         assert_eq!(
             map.vjp(&(), 1.0, &[1.0], &[1.0], &mut output, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            map.residual(&(), 1.0, &[1.0], &[], &mut [], &mut output, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            map.accept(&(), 1.0, &[1.0], &[], &mut (), cx),
             Err(ElementError::Cancelled)
         );
         assert_eq!(output, [91.0]);

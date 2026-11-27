@@ -6,11 +6,15 @@ use core::num::NonZeroUsize;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_ports::component::conformance::{Case, Observed, check_component, check_port_tangent};
-use fs_ports::component::{Class, Component, PortSpec, PortTangent, Proposal, Receipt};
+use fs_ports::component::conformance::{
+    Case, Observed, check_component, check_port_tangent, check_stage_residual,
+};
+use fs_ports::component::{
+    Class, Component, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 use fs_ports::{PortKind, StableId};
-use fs_system::SystemBuilder;
 use fs_system::elements::{ControlledSource, ElementError, Mass, Motion, SourceAccount, Storage};
+use fs_system::{BlockSolveMode, SystemBuilder};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -70,6 +74,7 @@ fn commanded_effort_and_flow_conform_in_each_domain_with_their_full_tangent() {
                         assert_eq!(receipt.stored_change_j, 0.125 * conjugate * command);
                         assert_eq!(receipt.dissipated_j, 0.0);
                         check_port_tangent(&source, &case, 1.0e-7, 1.0e-8, cx).unwrap();
+                        check_stage_residual(&source, &case, &[], 1.0e-8, 1.0e-10, cx).unwrap();
                     });
                 }
             }
@@ -112,6 +117,12 @@ fn reciprocal_effort_and_flow_scales_retain_representable_work() {
                 };
                 assert_eq!(receipt.stored_change_j, expected_work);
                 assert_eq!(audit.port_energy_in_j, expected_work);
+                let mut accepted = stale;
+                let stage_receipt = source
+                    .accept(&state, dt_s, &inputs, &[], &mut accepted, cx)
+                    .unwrap();
+                assert_eq!(stage_receipt, receipt);
+                assert_eq!(accepted.energy_in_j, expected_work);
             });
         }
     }
@@ -123,10 +134,14 @@ fn current_commands_charge_and_recover_capacitor_energy_with_the_source_sign() {
     let kind = PortKind::ElectricalVoltageCurrent;
     let mut builder = SystemBuilder::new();
     let capacitor = builder
-        .add_with_tangent("capacitor", Storage::in_domain(kind, 0.25).unwrap(), 0.5)
+        .add_with_tangent_and_stage_residual(
+            "capacitor",
+            Storage::in_domain(kind, 0.25).unwrap(),
+            0.5,
+        )
         .unwrap();
     let source = builder
-        .add_with_tangent(
+        .add_with_tangent_and_stage_residual(
             "source",
             ControlledSource::flow(kind),
             SourceAccount::default(),
@@ -147,6 +162,13 @@ fn current_commands_charge_and_recover_capacitor_energy_with_the_source_sign() {
         )
         .unwrap();
     let mut system = builder.seal().unwrap();
+    assert!(
+        system
+            .execution_plan_for_dt(0.1)
+            .blocks
+            .iter()
+            .any(|block| { block.solve_mode == BlockSolveMode::MonolithicNewtonKrylov })
+    );
     let (mut charge, mut received) = (0.5, 0.0);
     with_cx(&gate, |cx| {
         for command in [2.0, -3.0] {
@@ -378,7 +400,25 @@ fn source_refusal_and_cancellation_publish_neither_state_nor_ports() {
             );
             assert_eq!(new, stale);
             assert_eq!(out, [91.0]);
+            assert!(
+                source
+                    .residual(&old, dt, inputs, &[], &mut [], &mut out, cx)
+                    .is_err()
+            );
+            assert!(source.accept(&old, dt, inputs, &[], &mut new, cx).is_err());
+            assert_eq!(new, stale);
+            assert_eq!(out, [91.0]);
         }
+        assert!(
+            source
+                .initial_guess(&old, 0.1, &[1.0, 2.0], &mut [0.0])
+                .is_err()
+        );
+        assert!(
+            source
+                .accept(&old, 0.1, &[1.0, 2.0], &[0.0], &mut stale.clone(), cx)
+                .is_err()
+        );
         let mut tangent = [91.0];
         assert!(
             source
@@ -406,6 +446,14 @@ fn source_refusal_and_cancellation_publish_neither_state_nor_ports() {
         );
         assert_eq!(
             source.vjp(&old, 0.1, &[1.0, 2.0], &[3.0], &mut covector, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            source.residual(&old, 0.1, &[1.0, 2.0], &[], &mut [], &mut out, cx),
+            Err(ElementError::Cancelled)
+        );
+        assert_eq!(
+            source.accept(&old, 0.1, &[1.0, 2.0], &[], &mut new, cx),
             Err(ElementError::Cancelled)
         );
         assert_eq!(new, stale);

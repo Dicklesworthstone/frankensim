@@ -4,7 +4,9 @@ use core::num::NonZeroUsize;
 
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
-use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal};
+use fs_ports::component::{
+    Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
+};
 use fs_ports::{PortKind, StableId};
 
 use super::{
@@ -73,6 +75,29 @@ impl ControlledSource {
         finite("controlled source energy [J]", old.energy_in_j)?;
         Ok(())
     }
+
+    fn prepare_step(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+    ) -> Result<(SourceAccount, Receipt), ElementError> {
+        Self::validate(old, dt_s, inputs)?;
+        // Pair effort and flow before multiplying by duration: their physical
+        // scales can be reciprocal even when dt * command is unrepresentable.
+        let work_j = finite(
+            "controlled source work [J]",
+            self.ports[0].energy_in_j(dt_s, &inputs[..1], &inputs[1..]),
+        )?;
+        let (next, receipt) = source_step(old, dt_s, work_j);
+        finite("controlled source energy [J]", next.energy_in_j)?;
+        finite("controlled source clock [s]", next.time_s())?;
+        finite(
+            "controlled source energy allowance [J]",
+            receipt.energy_tolerance_j,
+        )?;
+        Ok((next, receipt))
+    }
 }
 
 fn width(name: &'static str, actual: usize, expected: usize) -> Result<(), ElementError> {
@@ -128,27 +153,120 @@ impl Component for ControlledSource {
         cx: &Cx<'_>,
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
-        Self::validate(old, dt_s, inputs)?;
         width("controlled source output width", outputs.len(), 1)?;
-        let command = inputs[1];
-        // Match the port's power pairing before applying duration. Multiplying
-        // dt by the command first can erase or overflow otherwise representable
-        // work when effort and flow have reciprocal physical scales.
-        let work_j = finite(
-            "controlled source work [J]",
-            self.ports[0].energy_in_j(dt_s, &inputs[..1], &[command]),
-        )?;
-        let (next, receipt) = source_step(old, dt_s, work_j);
-        finite("controlled source energy [J]", next.energy_in_j)?;
-        finite("controlled source clock [s]", next.time_s())?;
-        finite(
-            "controlled source energy allowance [J]",
-            receipt.energy_tolerance_j,
-        )?;
+        let (next, receipt) = self.prepare_step(old, dt_s, inputs)?;
         cx.checkpoint()?;
         *new = next;
-        outputs[0] = command;
+        outputs[0] = inputs[1];
         Ok(Proposal::Step(receipt))
+    }
+}
+
+// The work account is accumulated only when a stage is accepted. It adds no
+// internal solve unknown: the commanded output is algebraic at fixed inputs.
+impl StageResidual for ControlledSource {
+    fn unknowns(&self) -> usize {
+        0
+    }
+
+    fn initial_guess(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), ElementError> {
+        width("controlled source stage width", z.len(), 0)?;
+        Self::validate(old, dt_s, inputs)
+    }
+
+    fn residual(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        r: &mut [f64],
+        outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        width("controlled source stage width", z.len(), 0)?;
+        width("controlled source residual width", r.len(), 0)?;
+        width("controlled source output width", outputs.len(), 1)?;
+        self.prepare_step(old, dt_s, inputs)?;
+        cx.checkpoint()?;
+        outputs[0] = inputs[1];
+        Ok(())
+    }
+
+    fn jvp_z(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        dz: &[f64],
+        dr: &mut [f64],
+        d_outputs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        width("controlled source stage width", z.len(), 0)?;
+        width("controlled source stage direction width", dz.len(), 0)?;
+        width("controlled source residual direction width", dr.len(), 0)?;
+        width(
+            "controlled source output direction width",
+            d_outputs.len(),
+            1,
+        )?;
+        self.prepare_step(old, dt_s, inputs)?;
+        cx.checkpoint()?;
+        d_outputs.fill(0.0);
+        Ok(())
+    }
+
+    fn vjp_z(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        bar_r: &[f64],
+        bar_outputs: &[f64],
+        bar_z: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ElementError> {
+        cx.checkpoint()?;
+        width("controlled source stage width", z.len(), 0)?;
+        width("controlled source residual covector width", bar_r.len(), 0)?;
+        width(
+            "controlled source output covector width",
+            bar_outputs.len(),
+            1,
+        )?;
+        width("controlled source stage covector width", bar_z.len(), 0)?;
+        inputs_finite(bar_outputs)?;
+        self.prepare_step(old, dt_s, inputs)?;
+        cx.checkpoint()?;
+        Ok(())
+    }
+
+    fn accept(
+        &self,
+        old: &SourceAccount,
+        dt_s: f64,
+        inputs: &[f64],
+        z: &[f64],
+        new: &mut SourceAccount,
+        cx: &Cx<'_>,
+    ) -> Result<Receipt, ElementError> {
+        cx.checkpoint()?;
+        width("controlled source stage width", z.len(), 0)?;
+        let (next, receipt) = self.prepare_step(old, dt_s, inputs)?;
+        cx.checkpoint()?;
+        *new = next;
+        Ok(receipt)
     }
 }
 
