@@ -990,7 +990,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>06</b><i></i>The week</p>
               <h2 class="d3" id="week-title">Dead on Tuesday, slammed on Wednesday, <em class="g">one crew</em>.</h2>
               <p class="kicker">
-                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste, or hire a fourth cook and see what that buys. Then find where the blast chiller should stand, and run one lunch hour the same way.
+                A commissary's orders swing from 360 meals on Tuesday to 1,250 on Wednesday, with the same three cooks. Cook the dishes that keep on the slow days, chill them, and watch the overtime, the idle hours and the waste, or hire a fourth cook and see what that buys. Cool tomorrow's chili four ways against the Food Code's clock, then find where the blast chiller should stand, and run one lunch hour the same way.
               </p>
             </div>
             <a class="more" href="#week-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -1059,6 +1059,70 @@
               <div>
                 <code class="formula">work_d = setup + packing + Σ_dish (cooked_d · cook min + from stock_d · reheat min)<br />overtime_d = max(0, work_d − cooks × 8 h)</code>
                 <p class="model">Model: <code>runCommissary</code>. Minutes per meal, keeping times and pan yields are set for a catering commissary.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+
+          <figure class="fig reveal bo-fig cd-fig" id="cool">
+            <header class="fig-head">
+              <p class="todo">Cook the chili a day ahead, and cool it in time</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage bo-stage cd-stage" data-cd-stage>
+                <canvas data-cd-canvas tabindex="0" aria-label="A walk-in cooler and a walk-in freezer side by side, their roofs off and their front walls cut away low. In the cooler, a 40-quart pot of chili on a dunnage rack and two speed racks of hotel pans of chili, 3 inches deep and 2 inches deep. In the freezer, a speed rack of 2-inch pans. Each pot and pan is cut through its middle, the cut coloured by the chili's temperature. A cook stands outside. Drag to look around."></canvas>
+                <div class="wk-hud rs-hud bo-hud cd-hud" aria-hidden="true"><b data-cd-hud-clock>2:00 pm</b><span data-cd-hud-doing>…</span><em data-cd-hud-note data-kind="hot">Cooling</em></div>
+                <span class="bo-tag" data-cd-tag="pot" style="--c:#f472b6" hidden aria-hidden="true"><i>In its pot</i><b>…</b></span>
+                <span class="bo-tag" data-cd-tag="deep" style="--c:#c084fc" hidden aria-hidden="true"><i>3 in deep</i><b>…</b></span>
+                <span class="bo-tag" data-cd-tag="shallow" style="--c:#4ade80" hidden aria-hidden="true"><i>2 in deep</i><b>…</b></span>
+                <span class="bo-tag" data-cd-tag="freezer" style="--c:#e2e8f0" hidden aria-hidden="true"><i>Freezer first</i><b>…</b></span>
+              </div>
+              <div class="lab bo-lab cd-lab">
+                <div class="lab-view">
+                  <div class="cd-cuts-wrap">
+                    <p class="rs-map-head"><b>Each way's chili, cut through the middle, to scale</b></p>
+                    <canvas class="cd-cuts" data-cd-cuts role="img" aria-label="The four ways' chili cut through the middle and drawn side by side at one scale: the pot's deep cylinder, the 3-inch pan and the two 2-inch pans, each coloured by its temperature, with a dot at its middle and a key from 0 °F to 200 °F."></canvas>
+                    <p class="rs-map-note">The heat leaves through the faces. In a 2-inch pan the middle is an inch from the top and the bottom; in a full pot it is half a foot from everything, so the middle stays hot long after the outside has cooled.</p>
+                  </div>
+                  <div class="wk-tiles bo-tiles cd-tiles">
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#f472b6" data-cd-tile-box="pot"><span>Left in its pot</span><b><i data-cd-tile="pot">…</i></b><small data-cd-tile-s="pot">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#c084fc" data-cd-tile-box="deep"><span>3-inch pans</span><b><i data-cd-tile="deep">…</i></b><small data-cd-tile-s="deep">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#4ade80" data-cd-tile-box="shallow"><span>2-inch pans</span><b><i data-cd-tile="shallow">…</i></b><small data-cd-tile-s="shallow">…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#e2e8f0" data-cd-tile-box="freezer"><span>Freezer first</span><b><i data-cd-tile="freezer">…</i></b><small data-cd-tile-s="freezer">…</small></div>
+                  </div>
+                  <div class="bo-chart-wrap">
+                    <p class="rs-map-head"><b>The middle, from 135 °F</b><span class="wk-keys bo-keys"><span style="--k:#f472b6">In its pot</span><span style="--k:#c084fc">3-inch pans</span><span style="--k:#4ade80">2-inch pans</span><span style="--k:#e2e8f0">Freezer first</span></span></p>
+                    <div class="bo-chart" data-cd-chart role="img" aria-label="Each way's middle temperature against the hours since it fell to 135 °F, with the Food Code's limits shaded: above 70 °F after 2 hours, and above 41 °F after 6 hours."></div>
+                    <p class="rs-map-note">The Food Code's clock starts when the middle falls to 135 °F: it must reach 70 °F within 2 hours and 41 °F within 6. A line that enters the shading has spent too long warm. The tiles count the hours from 135 °F to 41 °F.</p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">Tomorrow's chili comes off the stove at 2 pm, at 190 °F. Leave it in the pot, pan it 3 inches or 2 inches deep, or start the 2-inch pans in the freezer, and the twin shows the night in the walk-in.</p>
+                  <label class="range"><span><b>Batch</b><output data-cd-litres-val>30 litres</output></span><input type="range" min="8" max="32" step="1" value="30" data-cd-litres aria-label="Litres of chili" /></label>
+                  <div class="field">
+                    <p class="micro">Cover</p>
+                    <div class="seg fill" role="group" aria-label="Whether the pot and pans are covered">
+                      <button type="button" data-cd-cover="off" aria-pressed="true">Uncovered</button>
+                      <button type="button" data-cd-cover="on" aria-pressed="false">Lid and film</button>
+                    </div>
+                  </div>
+                  <div class="status" data-cd-status data-state="warn">Working out the night…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="cool-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>The chili carries its heat out to its faces by conduction, so the model follows it cell by cell: through a pan's depth, from the floor to the top, and up and across a pot, from the axis to the wall. Its conductivity, density and heat capacity at each temperature come from what it is made of (USDA's chili con carne with beans: 76% water, then carbohydrate, protein, fat, fibre and ash), each part's own by the Choi and Okos equations.</p>
+                <p>At each face the walk-in's air draws heat off by convection, and the box's walls take radiation. Open chili also steams, which takes the heat to evaporate it. Under a film or a lid, the heat crosses the air gap to the cover, and the steam condenses there. The air's pull is the one number fitted: to Roberts and colleagues' four runs in a school's working walk-in cooler and freezer. Fitted the same way to Olds's six runs in an empty walk-in, the model's times to 70 °F and to 41 °F come within a fifth of all ten measured runs, and it agrees with Roberts that only the 2-inch pans in the freezer met both limits.</p>
+              </div>
+              <div>
+                <code class="formula">ρc · ∂T/∂t = ∇ · (k ∇T)<br />q_face = h (T_s − T_air) + εσ (T_s⁴ − T_air⁴) + ṁ_steam · h_fg</code>
+                <p class="model">Model: <code>coolDown</code>, the pans in slices 2 mm deep and the pot in rings and layers, stepped a minute or less at a time. Food properties: Choi and Okos, by temperature. Limits: FDA Food Code 3-501.14, 135 °F to 70 °F within 2 hours and to 41 °F within 6. The pans' rack moves from the freezer to the walk-in once their middle is at 41 °F.</p>
               </div>
                 </div>
               </details>

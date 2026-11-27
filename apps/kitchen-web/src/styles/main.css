@@ -4399,3 +4399,50 @@ button.wk-dish[aria-pressed="true"] {
     aspect-ratio: 4 / 5;
   }
 }
+/* Cooling the chili (chapter 06, second figure). */
+.cd-hud em[data-kind="hot"] {
+  color: #fed7aa;
+  background: rgb(249 115 22 / 0.2);
+}
+.cd-hud em[data-kind="cold"] {
+  color: #bae6fd;
+  background: rgb(56 189 248 / 0.2);
+}
+.cd-cuts-wrap {
+  margin-bottom: 0.9rem;
+}
+.cd-cuts {
+  display: block;
+  width: 100%;
+  height: 210px;
+}
+.cd-tile[data-ok="true"] b {
+  color: #86efac;
+}
+.cd-tile[data-ok="false"] b {
+  color: #fca5a5;
+}
+.cd-svg .late {
+  fill: rgb(239 68 68 / 0.13);
+  stroke: rgb(248 113 113 / 0.5);
+  stroke-width: 1;
+}
+.cd-svg .late-t {
+  fill: #fca5a5;
+  font-size: 10px;
+  font-weight: 600;
+}
+.cd-svg .grid.line {
+  stroke: rgb(255 255 255 / 0.16);
+  stroke-dasharray: 3 3;
+}
+.cd-svg .now {
+  fill: var(--c);
+  stroke: #0b0b0c;
+  stroke-width: 1.6;
+}
+@media (max-width: 599px) {
+  .cd-cuts {
+    height: 170px;
+  }
+}

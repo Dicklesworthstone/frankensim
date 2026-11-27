@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -177,6 +177,7 @@ async function main() {
       "[data-brigade-canvas]",
       "[data-pivot-canvas]",
       "[data-week-canvas]",
+      "[data-cd-canvas]",
       "[data-floor-canvas]",
       "[data-rush-canvas]",
       "[data-gl-canvas]",
@@ -558,6 +559,41 @@ async function main() {
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch7-kit.png");
       }
 
+      if (sid === "cool") {
+        // As set on arrival (30 litres, uncovered): of the four ways only the 2-inch pans started in the freezer meet
+        // both of the Food Code's limits, the slower the deeper, and the pot is still over 41 °F a day after it went
+        // in. Covered, every way is slower. Held at 5 h, the freezer pans stand in the walk-in, their middle at or
+        // under 41 °F, while the pot's is still over 135 °F.
+        const info = () => page.$eval("[data-cd-stage]", (el) => el.cool.info());
+        const ready = (covered) =>
+          page.waitForFunction((c) => {
+            const i = document.querySelector("[data-cd-stage]")?.cool?.info();
+            return !!i && i.ready && i.covered === c;
+          }, { timeout: 30000 }, covered);
+        const by = (i, k) => i.runs.find((r) => r.key === k);
+        const inTime = (r) => r.ok1 && r.ok2;
+        await ready(false);
+        const open = await info();
+        console.log(`[verify-chrome] Cool the chili: ${JSON.stringify(open.runs.map((r) => [r.key, r.stage1, r.total, r.dayF]))} | ${open.status.slice(0, 90)}`);
+        const [pot, deep, shallow, freezer] = ["pot", "deep", "shallow", "freezer"].map((k) => by(open, k));
+        if (open.litres !== 30 || !inTime(freezer) || [pot, deep, shallow].some(inTime) || !(pot.total > deep.total && deep.total > shallow.total && shallow.total > freezer.total) || !(pot.dayF > 41) || !/^Only 2-inch pans started in the freezer/.test(open.status)) throw new Error(`Cool the chili: 30 litres uncovered do not cool in the order or verdicts expected: ${JSON.stringify(open)}`);
+        await page.click('[data-cd-cover="on"]');
+        await ready(true);
+        const film = await info();
+        console.log(`[verify-chrome] Cool the chili, covered: ${JSON.stringify(film.runs.map((r) => [r.key, r.total]))}`);
+        if (["pot", "deep", "shallow", "freezer"].some((k) => !(by(film, k).total > by(open, k).total))) throw new Error(`Cool the chili: covered, a way is not slower: ${JSON.stringify(film.runs)}`);
+        await page.click('[data-cd-cover="off"]');
+        await ready(false);
+        await page.$eval("[data-cd-stage]", (el) => el.cool.hold(300));
+        await sleep(1200);
+        const held = await info();
+        const tagF = (t) => Number(/(-?\d+) °F$/.exec(t ?? "")?.[1] ?? NaN);
+        if (held.t !== 300 || !(tagF(held.tags[3]) <= 41) || !(tagF(held.tags[0]) > 135)) throw new Error(`Cool the chili: held at 5 h, the labels are not the freezer pans cold and the pot hot: ${JSON.stringify(held.tags)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-cool.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-cool.png");
+        await page.$eval("[data-cd-stage]", (el) => el.cool.hold(null));
+      }
+
       if (sid === "boil") {
         // As set on arrival (30 litres, full flame): the two pots with lids boil in about 25 min, half the big pot's
         // 50 with its lid, for the same gas; the big pot without one in about 57. On half a flame the big open pot does
@@ -680,9 +716,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 21 WebGL canvases (17 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 22 WebGL canvases (18 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "floor", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -693,6 +729,7 @@ async function main() {
         "[data-brigade-canvas]",
         "[data-pivot-canvas]",
         "[data-week-canvas]",
+        "[data-cd-canvas]",
         "[data-floor-canvas]",
         "[data-rush-canvas]",
         "[data-gl-canvas]",
@@ -712,7 +749,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 21 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 22 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);

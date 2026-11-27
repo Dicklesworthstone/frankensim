@@ -268,7 +268,7 @@ function studioScene(renderer: THREE.WebGLRenderer, centre: THREE.Vector3, span:
 /* ------------------------------------------------------------------------------------------------------------ */
 
 /** An 18 × 26 in aluminium sheet pan, its beaded rim on y = 0 and its floor 25 mm below. */
-function sheetPan(s: Shop): void {
+export function sheetPan(s: Shop): void {
   const prof: (readonly [number, number])[] = s.fine(2)
     ? [[0.006, -0.025], [0.003, -0.0235], [0.0012, -0.005], [-0.0012, -0.0038], [-0.0026, -0.0018], [-0.0016, 0.0004], [0.0012, 0.0004], [0.0026, -0.002], [0.0036, -0.0236], [0.0066, -0.0246]]
     : [[0.006, -0.025], [0.0012, -0.005], [-0.0026, -0.0018], [0.0012, 0.0004], [0.0036, -0.0236], [0.0066, -0.0246]];

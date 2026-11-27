@@ -8,9 +8,9 @@
  *
  * Live quantities, `hooks.set(name, value)` (default in brackets):
  *   NSF-STOCKPOT-*            level 0..1 liquid height [0.7]; boil 0..1 [0] (tick rolls the surface, raises bubbles,
- *                             steam above about 0.6); water 0 broth, 1 clear water [0]; steam 0..3, how fast it goes
- *                             off as steam (1 a hard boil's), or -1 to follow the boil [-1]. open(frac) lifts and tips
- *                             the lid (joint "pot_lid_lift").
+ *                             steam above about 0.6); water 0 broth, 1 clear water [0]; chili 1 chili con carne [0];
+ *                             steam 0..3, how fast it goes off as steam (1 a hard boil's), or -1 to follow the boil
+ *                             [-1]. open(frac) lifts and tips the lid (joint "pot_lid_lift").
  *   NSF-HOTEL-PAN-*           fill 0..1 food surface height [0.6]; food 0 braised meat in sauce, 1 rice, 2 vegetables,
  *                             3 soup [0]. Each food rides its own joint ("food_0".."food_3").
  *   NSF-TONGS-12IN            open(frac) opens the upper arm up to 30° about the hinge pin (joint "tongs_pinch").
@@ -36,7 +36,7 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { register, type Builder, type Hooks } from "./index";
 import { palette } from "./materials";
 import { bar, cyl, lathe, plate, rbox, torus, ball, turnJoint, Shop, type V3, type Built } from "./shop";
-import { PI, TAU, adiff, clamp, clamp01, fbm, greyTexels, lattice, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, type P2 } from "./texels";
+import { PI, TAU, adiff, apnoise, clamp, clamp01, fbm, greyTexels, lattice, lerp, noise2, normalTexels, paintTexels, rng, smooth, tfbm, type P2 } from "./texels";
 import { KNIFE_BH, KNIFE_BW, KNIFE_EH, KNIFE_EW, LABEL_TW, MEAT_TW, knifeTexelsFor, labelInk, labelPaperFor, panFoodTexelsFor } from "./foodTexels";
 import { Ribeye, STEAK_SIDE_Q, steakOutline, steakTissueFor } from "./steakTissue";
 import * as bt from "./bouleTexels";
@@ -1425,7 +1425,23 @@ const stockpot: Builder = (s, e) => {
         if (name === "level") level = clamp01(v);
         else if (name === "boil") boil = clamp01(v);
         else if (name === "steam") steamSet = v < 0 ? -1 : Math.min(3, v);
-        else if (name === "water") {
+        else if (name === "chili") {
+          // Chili con carne: opaque, its sauce at the same scale as in a pan.
+          const on = v >= 0.5;
+          const mp = on ? (panFoods().chili as THREE.MeshPhysicalMaterial).map!.clone() : f.stock.map;
+          if (on && mp) {
+            mp.repeat.set((2 * Rin) / 0.16, (2 * Rin) / 0.16);
+            mp.needsUpdate = true;
+          }
+          stockM.map = mp;
+          stockM.color.setHex(0xffffff);
+          stockM.opacity = on ? 1 : 0.88;
+          stockM.transparent = !on;
+          stockM.depthWrite = on;
+          stockM.roughness = on ? 0.3 : 0.04;
+          stockM.clearcoat = on ? 0.7 : 1;
+          stockM.needsUpdate = true;
+        } else if (name === "water") {
           // Clear water: no broth colour, thin enough to show the pot's floor through it.
           const clear = v >= 0.5;
           stockM.map = clear ? null : f.stock.map;
@@ -1548,8 +1564,8 @@ const GN: Record<string, P2> = {
   "1/9": [0.176, 0.108],
 };
 export type GNSize = keyof typeof GN;
-/** What a hotel pan holds: braised meat in sauce, rice, vegetables, soup. */
-export type PanFood = 0 | 1 | 2 | 3;
+/** What a hotel pan holds: braised meat in sauce, rice, vegetables, soup, chili con carne with beans. */
+export type PanFood = 0 | 1 | 2 | 3 | 4;
 
 interface PanSection {
   prof: P2[];
@@ -1558,6 +1574,8 @@ interface PanSection {
   rc0: number;
   /** Offset of the inner wall at height y. */
   innerD(y: number): number;
+  /** Offset of the inside at height y, from the floor (tS) round the bottom bend and up the wall. */
+  insideAt(y: number): number;
   tS: number;
 }
 
@@ -1613,6 +1631,22 @@ function panSection(s: Shop, W: number, Dp: number, h: number): PanSection {
     rc0,
     tS,
     innerD: (y: number) => Ib[0] + Math.max(0, y - Ib[1]) * Math.tan(tau),
+    insideAt: (y: number) => (y >= Ib[1] ? Ib[0] + (y - Ib[1]) * Math.tan(tau) : -rb + Math.sqrt(Math.max(0, (rb - tS) ** 2 - (rb - Math.max(tS, y)) ** 2))),
+  };
+}
+
+/**
+ * The inside of a hotel pan as drawn (hotelPan): the half-sizes of its inside at height y over its floor, along its
+ * length and across it; its floor's height; and the food's surface for a fill.
+ */
+export function hotelPanInside(size: GNSize, depthM: number): { halfL: (y: number) => number; halfW: (y: number) => number; floorY: number; foodY: (fill: number) => number } {
+  const [W, Dp] = GN[size] ?? GN["1/1"];
+  const sec = panSection(new Shop(1, "pan_inside"), W, Dp, depthM);
+  return {
+    halfL: (y) => sec.A0 + sec.insideAt(y),
+    halfW: (y) => sec.B0 + sec.insideAt(y),
+    floorY: sec.tS,
+    foodY: (fill) => sec.tS + fill * (depthM - sec.tS - 0.008),
   };
 }
 
@@ -1651,6 +1685,23 @@ function panFoods(): Record<string, THREE.Material> {
     }
   }
   const sauceC = pixelCanvas(256, 256, t.sauce);
+  // Chili con carne, a 16 cm tile that repeats without a seam: brick-red sauce, ground beef through it in darker
+  // crumbs, flecks of chili skin, beads of orange fat where it is glossy.
+  const nCh = apnoise(4401, 6, 6);
+  const nBf = apnoise(4402, 40, 40);
+  const nFt = apnoise(4403, 28, 28);
+  const nFl = apnoise(4404, 90, 90);
+  const chiliC = paint(256, 256, (x, y, o) => {
+    const u = x / 256;
+    const v = y / 256;
+    const b = tfbm(nCh, u * 6, v * 6, 3);
+    const beef = smooth(0.56, 0.66, tfbm(nBf, u * 40, v * 40, 2));
+    const fat = smooth(0.74, 0.82, tfbm(nFt, u * 28, v * 28, 2)) * 0.5;
+    const fleck = smooth(0.86, 0.9, nFl(u * 90, v * 90));
+    o[0] = lerp(lerp(104, 136, b), 74, beef) * (1 - 0.45 * fleck) + fat * 70;
+    o[1] = lerp(lerp(33, 48, b), 40, beef) * (1 - 0.45 * fleck) + fat * 38;
+    o[2] = lerp(lerp(18, 24, b), 27, beef) * (1 - 0.45 * fleck) + fat * 6;
+  });
   const vegC = pixelCanvas(256, 256, t.veg);
   const soupC = pixelCanvas(256, 256, t.soup);
   foodCache = {
@@ -1677,6 +1728,10 @@ function panFoods(): Record<string, THREE.Material> {
     bean: phys({ color: 0x5a8a2e, roughness: 0.32, clearcoat: 0.5 }, "box"),
     soup: phys({ color: 0xffffff, map: canvasTex(soupC, true, true), roughness: 0.06, clearcoat: 1, transparent: true, opacity: 0.94 }, "box", 1 / 0.15),
     herb: std({ color: 0x3e6a22, roughness: 0.6, side: THREE.DoubleSide }, "box"),
+    chili: phys({ color: 0xffffff, map: canvasTex(chiliC, true, true), roughness: 0.3, clearcoat: 0.7, clearcoatRoughness: 0.12, envMapIntensity: 1.2 }, "box", 1 / 0.16),
+    // Kidney beans, cooked: deep maroon skins with a soft sheen; and the beef, in crumbs.
+    kidney: phys({ color: 0x5e1f1a, roughness: 0.34, clearcoat: 0.6, clearcoatRoughness: 0.2 }, "box"),
+    crumb: std({ color: 0x5c3624, roughness: 0.78 }, "box"),
   };
   return foodCache;
 }
@@ -1732,10 +1787,10 @@ function foodBed(s: Shop, kind: PanFood, A: number, B: number, rc: number, inA: 
   const k = s.seg(6, 2);
   const mx = s.seg(24, 4);
   const mz = s.seg(14, 3);
-  const surfMat = kind === 0 ? m.sauce : kind === 1 ? m.rice : kind === 2 ? m.veg : m.soup;
+  const surfMat = kind === 0 ? m.sauce : kind === 1 ? m.rice : kind === 2 ? m.veg : kind === 4 ? m.chili : m.soup;
   const prof: P2[] = [];
   const steps = kind === 1 || kind === 2 ? s.seg(8, 2) : s.seg(4, 2);
-  const liquid = kind === 0 || kind === 3;
+  const liquid = kind === 0 || kind === 3 || kind === 4;
   // A liquid climbs the steel in a meniscus a few millimetres high; its edge runs on into the wall, never short of it.
   const men = liquid && s.fine(2) ? [-0.007, -0.0035, -0.0016, -0.0006, 0] : [];
   const menY = [0, 0.0003, 0.0009, 0.0017, 0.0026];
@@ -1797,6 +1852,21 @@ function foodBed(s: Shop, kind: PanFood, A: number, B: number, rc: number, inA: 
         s.add(m.bean, cyl(s, 0.0035, 0.016, "y", 6), [x, 0.0, z]);
       } else if (q < 0.7) s.add(m.carrot, cyl(s, 0.011, 0.005, "y", 12), [x, 0.007, z], [(r() - 0.5) * 0.9, 0, (r() - 0.5) * 0.9]);
       else s.add(m.bean, cyl(s, 0.0035, 0.05 + r() * 0.03, "x", 6), [x, 0.008, z], [0, r() * PI, (r() - 0.5) * 0.3]);
+    }
+  } else if (kind === 4 && s.fine(1)) {
+    // Chili: kidney beans half-sunk in it, and crumbs of beef at the surface.
+    const area = 4 * inA * inB;
+    const beans = Math.round(area * (s.fine(2) ? 520 : 180));
+    for (let i = 0; i < beans; i++) {
+      const [x, z] = at();
+      const len = 0.0075 + r() * 0.0025;
+      s.add(m.kidney, ball(s, len, s.fine(2) ? 10 : 6), [x, -0.0012, z], [(r() - 0.5) * 0.5, r() * PI, (r() - 0.5) * 0.3], [1, 0.42, 0.55]);
+    }
+    const crumbs = Math.round(area * (s.fine(2) ? 300 : 90));
+    for (let i = 0; i < crumbs; i++) {
+      const [x, z] = at();
+      const w = 0.005 + r() * 0.005;
+      s.add(m.crumb, chunk(s, w, w * 0.6, w * (0.6 + r() * 0.4), 4500 + (i % 6)), [x, -0.0008, z], [(r() - 0.5) * 0.6, r() * PI, (r() - 0.5) * 0.6]);
     }
   } else if (kind === 3 && s.fine(1)) {
     // Soup: carrot coins and herb leaves floating.
