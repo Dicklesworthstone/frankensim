@@ -173,9 +173,11 @@ orientation by axis and value rather than ignoring it. A lumped `DrivenBody`
 without a mechanical source remains a stationary ground anchor; with one
 velocity source (`[1, 0, -1, 0, 0, 0]`) targeting its `mechanics` port it lowers
 to `FlowSource::publishing`, exposing `mechanics` and `span` and consuming that
-source receipt (wrong dimensions or duplicate sources refuse). `LoweringGraph`
-exposes `add_on_line` and `connect_signal` for non-smooth `LoadLine` components.
-fs-cli lowers every assembly through the kernel defaults plus these groups.
+source receipt (wrong dimensions or duplicate sources refuse). `LoweringGraph` exposes `add_on_line` and `connect_signal` for non-smooth
+`LoadLine` components; `is_ground_feature` returns true only for `root`, marked
+ground entities (and their descendants), and surfaces parented directly to
+`root`, never for surfaces owned by an unmarked part. fs-cli lowers every
+assembly through the kernel defaults plus these groups.
 
 fs-couple's `rigid_damping_heat` target keeps the hand-built graph as the
 oracle and lowers the same pairing declared as a draft. The lowered network,

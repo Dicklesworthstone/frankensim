@@ -1865,13 +1865,16 @@ impl LoweringGraph {
             return true;
         }
         let mut cur = catalog.get(entity).and_then(Entity::parent);
+        if cur == Some(root) {
+            return entity.kind() == EntityKind::Surface;
+        }
         for _ in 0..=catalog.entities().len() {
             let Some(id) = cur else { break };
             if self.ground_entities.contains(&id) {
                 return true;
             }
             if id == root {
-                return entity.kind() == EntityKind::Surface;
+                return false;
             }
             cur = catalog.get(id).and_then(Entity::parent);
         }

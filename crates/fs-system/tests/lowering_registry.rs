@@ -978,6 +978,16 @@ fn unseen_multi_domain_device_lowers_with_zero_rust_changes() {
     });
     assert!(lowered.system.ledger().entropy_generated_j_per_k() >= 0.0);
     assert!(lowered.system.ledger().energy_residual_j().abs() <= 1.0e-10);
+    let pos = lowered
+        .system
+        .state::<Motion>(lowered.node_map["carriage.mechanics"])
+        .unwrap()
+        .position_m;
+    let sx = *lowered
+        .system
+        .state::<f64>(lowered.node_map["interface.carriage_stop.spring"])
+        .unwrap();
+    assert!(sx.abs() > 1e-3 && (sx + pos).abs() <= 1e-12, "{sx} {pos}");
     let json = lowered.receipt.canonical_json();
     assert!(json.contains("\"schema\":\"frankensim.lowering_receipt.v1\""));
     assert!(json.contains("\"third_body_thermal_conductivity\""));
@@ -2347,4 +2357,46 @@ fn moving_driven_body_and_load_line_graph_helpers() {
     dup.name = "bv2".into();
     inp.sources.push(dup);
     assert!(err(inp).contains("at most one"));
+}
+
+#[test]
+fn part_surface_is_not_ground_and_non_thermal_contact_refuses() {
+    use {DraftPartKind as K, EntityDeclaration as E, PhysicsDomain as P};
+    let (mut cards, mut cat) = (CardStore::new(), EntityCatalog::new());
+    let steel = cards.insert_material(steel_card());
+    let mut tc = ClaimSet::new();
+    let cl = scalar_claim("thermal_conductance", 5.0, CONDUCTANCE, "tc");
+    tc.insert_claim(cl).unwrap();
+    let card = interface_card(tc, "dry");
+    let tcard = cards.insert_interface("thermal-conductance", card).unwrap();
+    let root = cat.declare(E::assembly("g")).unwrap();
+    let hot = cat.declare(E::part(root, "hot")).unwrap();
+    let cold = cat.declare(E::part(root, "cold")).unwrap();
+    let sh = cat.declare(E::surface(hot, "sh")).unwrap();
+    let sc = cat.declare(E::surface(cold, "sc")).unwrap();
+    let pair = InterfacePair::ordered(sh, sc);
+    let cid = cat.declare(E::interface(root, "lk", pair)).unwrap();
+    let parts = vec![
+        box_part("hot", hot, K::Solid, steel, &[P::Thermal]),
+        box_part("cold", cold, K::RigidBody, steel, &[P::Mechanics]),
+    ];
+    let mut inp = empty_draft("g", root, cat, parts, vec![]);
+    let kind = DraftInterfaceKind::ThermalContact {
+        law_card: tcard,
+        third_body: None,
+        state: vec![],
+    };
+    inp.interfaces.push(DraftInterfaceDecl {
+        name: "lk".into(),
+        entity: cid,
+        feature_a: sh,
+        feature_b: sc,
+        kind,
+    });
+    let draft = DraftAssembly::admit(inp, &base_scenario("g")).unwrap();
+    let err = LoweringRegistry::with_kernel_defaults()
+        .lower(&draft, &cards)
+        .err()
+        .expect("must not ground");
+    assert!(matches!(err, LoweringError::MissingPort { ref port, .. } if port == "thermal"));
 }
