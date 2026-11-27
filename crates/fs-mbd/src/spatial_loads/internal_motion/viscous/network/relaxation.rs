@@ -20,7 +20,7 @@ use crate::spatial_loads::internal_impulse::{
             relaxation::{
                 PreparedRelaxationNetwork, RelaxationNetworkError, RelaxationNetworkLink,
                 RelaxationNetworkMemory, RelaxationNetworkReceipt, branch_count,
-                memory_energy_change_retained, planned_costs,
+                memory_energy_change_retained, planned_costs, stated_coordinates,
             },
         },
     },
@@ -354,13 +354,13 @@ fn step_network(
             .into());
         }
     }
-    let branches = branch_count(links)?;
+    let (branches, stated) = (branch_count(links)?, stated_coordinates(links));
     admit_limit(
         "branches",
         branches as u128,
         controls.limits.maximum_branches as u128,
     )?;
-    let (source_bytes, source_terms) = planned_costs(n, e, branches, half)?;
+    let (source_bytes, source_terms) = planned_costs(n, e, branches, stated, half)?;
     let bytes = source_bytes
         + n as u128
             * (2 * core::mem::size_of::<RigidBodyState>() + core::mem::size_of::<Pose>()) as u128

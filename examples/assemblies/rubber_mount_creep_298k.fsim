@@ -7,12 +7,12 @@
   (time-plan :horizon 0.5s :dt 0.25s :sample-rate 4Hz)
   (part "fixed_clamp" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
     :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
-    :physics (mechanics) :fidelity lumped :max-work-units 40000000000
+    :physics (mechanics) :fidelity lumped :max-work-units 1000000000
     :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
               :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
   (part "moving_clamp" :kind rigid-body :geometry (box 0.05m 0.05m 0.05m)
     :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
-    :physics (mechanics) :fidelity lumped :max-work-units 40000000000
+    :physics (mechanics) :fidelity lumped :max-work-units 1000000000
     :initial (:position (0m 0m 0m) :orientation (1 0 0 0)
               :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 0rad/s)))
   (part "chamber" :kind solid :geometry (box 0.05m 0.05m 0.05m)

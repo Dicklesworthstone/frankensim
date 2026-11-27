@@ -4,6 +4,8 @@
 mod kinetics;
 #[path = "relaxation/equilibrium.rs"]
 mod equilibrium;
+#[path = "relaxation/reduction.rs"]
+mod reduction;
 use super::*;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     driven::{DrivenViscousNetworkLimits, PreparedDrivenViscousNetwork},

@@ -333,6 +333,50 @@ fn g1_preloaded_memory_accelerates_bodies_and_heats_original_finite_cells() {
     assert_eq!(initial.time_s(), 0.0);
 }
 
+/// The pair's branch states x only: its five zero factor rows leave the
+/// owner's dense system. The run stays within 1e-12 (of the largest value of
+/// each quantity) of the full dense evolution's f64 bits, taken before that
+/// change (bead ks7e6).
+#[test]
+fn zero_factor_rows_keep_the_preloaded_pair_within_1e12_of_the_full_dense_run() {
+    let fixture = MemoryPair::new(0.1, 2.0, 0.3, 2.0, 0.0, 0.0);
+    let routes = [BTreeMap::from([(CellId(0), 0.3), (CellId(1), 0.4)])];
+    let calorics = laws();
+    let initial = thermal(&calorics, false, true);
+    let out = advance_memory(
+        fixture.input(&routes),
+        &initial,
+        &(),
+        0.4,
+        memory_controls(),
+        || false,
+    )
+    .unwrap();
+    let states = out.states().iter();
+    let momenta: Vec<f64> = states.map(|s| s.linear_momentum_world().x).collect();
+    let report = out.report();
+    let energy = [report.dissipated_energy_j, report.memory_energy_change_j];
+    let quantities: [(&[f64], &[u64]); 3] = [
+        (&momenta, &[0x3fe8d308e9e57490, 0xbfe8d308e9e57490]),
+        (&out.memory()[0][0], &[0x3fd145206733ec1e, 0, 0, 0, 0, 0]),
+        (&energy, &[0x3ffa9a603ccde43d, 0xbfff6adf83e7af58]),
+    ];
+    let mut close = true;
+    for (actual, bits) in quantities {
+        let golden: Vec<f64> = bits.iter().map(|&b| f64::from_bits(b)).collect();
+        let scale = golden.iter().fold(0.0, |s: f64, g| s.max(g.abs()));
+        close &= actual.len() == bits.len();
+        for (a, g) in actual.iter().zip(&golden) {
+            close &= (a - g).abs() <= 1e-12 * scale;
+        }
+    }
+    let found: Vec<Vec<u64>> = quantities
+        .iter()
+        .map(|(actual, _)| actual.iter().map(|x| x.to_bits()).collect())
+        .collect();
+    assert!(close, "{found:#x?}");
+}
+
 #[test]
 fn g1_driven_memory_continues_with_the_same_original_caloric_and_elastic_history() {
     let fixture = MemoryPair::new(0.4, 1.3, 0.2, 0.6, -2.0, 0.7);

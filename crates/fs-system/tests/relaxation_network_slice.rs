@@ -383,6 +383,64 @@ fn held_wrenches() -> [Wrench; 3] {
     [force(0.3, 0.0, -0.1), force(0.0, 0.0, 0.0), force(-0.2, 0.4, 0.0)]
 }
 
+/// Each quantity within 1e-12 of its largest golden value; all bits on failure.
+fn golden(quantities: &[(&[f64], &[u64])]) {
+    let mut close = true;
+    for &(actual, bits) in quantities {
+        let golden: Vec<f64> = bits.iter().map(|&b| f64::from_bits(b)).collect();
+        let scale = golden.iter().fold(0.0, |s: f64, g| s.max(g.abs()));
+        close &= actual.len() == bits.len();
+        for (a, g) in actual.iter().zip(&golden) {
+            close &= (a - g).abs() <= 1e-12 * scale;
+        }
+    }
+    let found: Vec<Vec<u64>> = quantities
+        .iter()
+        .map(|(actual, _)| actual.iter().map(|x| x.to_bits()).collect())
+        .collect();
+    assert!(close, "{found:#x?}");
+}
+
+/// Zero factor rows (the x-only branch's five, and the unstated axes of the
+/// other branches, one of them preloaded with 0.15) leave the owner's dense
+/// system. The step stays near the full dense evolution's f64 bits, taken
+/// before that change (bead ks7e6).
+#[test]
+fn zero_factor_rows_keep_the_step_within_1e12_of_the_full_dense_one() {
+    let gravity = Gravity::new(Vec3::new(0.0, -1.0, -9.81)).expect("gravity");
+    let start = RelaxationState {
+        bodies: moving(),
+        memory: preloaded(),
+    };
+    let step = owner_step(&start, &held_wrenches(), gravity, 0.1);
+    let momenta: Vec<f64> = step
+        .states_after()
+        .iter()
+        .flat_map(|s| {
+            let (p, h) = (s.linear_momentum_world(), s.angular_momentum_body());
+            [p.x, p.y, p.z, h.x, h.y, h.z]
+        })
+        .collect();
+    let memory = step.memory_after().iter().flatten().flatten();
+    let memory: Vec<f64> = memory.copied().collect();
+    let energy = [step.dissipated_energy_j, step.memory_energy_change_j];
+    #[rustfmt::skip]
+    let (momenta_bits, memory_bits) = ([
+        0x4002a4070ce25a51, 0xbf868a704f376360, 0xbfff6aa61a3a061d, 0x3f44bd0eb51a997a,
+        0x3fd36bffda76ec29, 0xbfc8cda6de0a5362, 0xbff0c529fc0ca97f, 0xbfc1bcf1eb6c2e2c,
+        0xbff2e1265869d562, 0x3fb9389018645a79, 0x3f83e90cd73fff30, 0x3fd9e4c80aab437d,
+        0x3fe0e5bce3483ba2, 0xbff2910f71503469, 0xc0078b40b026e740, 0, 0, 0,
+    ], [
+        0xbf90857a92747989, 0, 0, 0, 0, 0, 0, 0xbf9f8240866ac4bc, 0, 0, 0x3f733238106cedf6,
+        0x3f94c999914c3546, 0xbfd044ebc4816af8, 0, 0, 0, 0, 0,
+    ]);
+    golden(&[
+        (&momenta, &momenta_bits),
+        (&memory, &memory_bits),
+        (&energy, &[0x3fd78e5deb4e2f4e, 0xbfbfd6a40428d0fc]),
+    ]);
+}
+
 #[test]
 fn the_relaxation_network_conforms_and_books_the_owners_work_heat_and_memory() {
     let gate = CancelGate::new_clock_free();

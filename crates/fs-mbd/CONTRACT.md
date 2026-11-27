@@ -270,9 +270,10 @@ first-order feedback); a body torque is held in the body's frame, as for the
 viscous network; a network follows a damping
 law or a shift law, not both, and a shift is one factor per connector (the
 owner's kinetics take one per Kelvin form and one per branch); the owner
-solves bodies and branches as one dense system and
-refuses one that does not fit (at this writing, bodies plus branches above
-21), at the first step and not at construction; no analytic tangent;
+solves the bodies and the branches' stated axes as one dense system and
+refuses one that does not fit (at this writing, above 128 coordinates: six
+per body and one per nonzero factor row, so with every axis stated, bodies
+plus branches above 21), at the first step and not at construction; no analytic tangent;
 cancellation raised while the owner is inside a step is passed to it but not
 exercised by a test. Inherited from `RigidBody` and `ViscousNetwork` and not
 checked here: the energy tolerance is sized by the kinetic terms, which a
@@ -10489,6 +10490,22 @@ proof leaves the original dense evolution unchanged. This exact superposition
 prevents large unobservable histories from contaminating a tiny history through
 independently rounded dense transition columns. Cross storage and loss vanish
 by the original constitutive equations, including under nonzero actuation.
+
+A factor row that is exactly zero (every entry +-0; a row of 1e-300 is
+stated) exerts nothing and observes nothing, so its amplitude obeys
+a' = -a/tau alone and never enters the dense system. It advances by the same
+cached decay coefficient, and its heat a0^2 (1 - exp(-2h/tau))/2 joins its
+connector's, an infinite rate included. The dense system holds six
+coordinates per body and one per stated row, and the planned bytes, terms and
+256-coordinate ceiling count those: 2 bodies with 13 x-only branches plan
+413362646 terms per half step, not 16327580316. With every row stated, the
+matrices and results are bit-identical to before. With zero rows they agree
+with the full dense evolution to rounding, not bit for bit: within 1e-12 of
+each quantity's largest value, against f64 goldens taken before the change
+(`tests/internal_viscous_network/relaxation/reduction.rs`, the fs-system
+relaxation slice and the fs-couple `rigid_damping_heat` relaxation tests).
+State words and identities are unchanged, so a checkpoint saved before
+resumes; its later steps may differ in the last bits.
 
 Accepted fixed-geometry receipts expose complete body and memory endpoints,
 per-link positive heat and signed drive work, memory storage change, native

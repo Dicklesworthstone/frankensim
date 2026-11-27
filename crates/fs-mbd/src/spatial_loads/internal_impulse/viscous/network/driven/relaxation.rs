@@ -8,7 +8,9 @@
 //! y' = B(f - C B^T y - sum L^T a), s = B^T y.
 //! Identity storage, skew body-memory coupling and positive original resistance
 //! enter the existing exact quadratic pHS owner. Every factor row and history,
-//! including uncoupled rows and equal-time branches, survives.
+//! including uncoupled rows and equal-time branches, survives. An exactly zero
+//! row couples to nothing, so its amplitude decays by its branch's exact scalar
+//! law outside the dense system, which holds the bodies and stated rows only.
 //!
 //! This is an explicitly authored corotated rate law on the native wrench
 //! port. An equilibrium channel stores the integral of THIS material rate;
@@ -381,8 +383,11 @@ struct Scratch {
 // An original null-stress initial history is an exact invariant solution,
 // even with nonzero graph drive. Its cross energy with the driven response
 // vanishes because that response lies in range(L). Cache its scalar law once.
+// The same law advances the amplitude of an exactly zero factor row, which
+// couples to nothing and so never enters the dense system.
 struct PreparedMemory {
     rows: [[f64; 6]; 6],
+    stated: [bool; 6],
     evolution: SpatialMemoryEvolution,
     decay: f64,
     heat_fraction: f64,
@@ -496,7 +501,7 @@ impl PreparedRelaxationNetwork {
                 "matching original poses/inertias and finite nonnegative duration required",
             ));
         }
-        let branches = branch_count(links)?;
+        let (branches, stated) = (branch_count(links)?, stated_coordinates(links));
         admit_limit(
             "bodies",
             poses.len() as u128,
@@ -512,7 +517,7 @@ impl PreparedRelaxationNetwork {
             branches as u128,
             limits.maximum_branches as u128,
         )?;
-        let (bytes, terms) = planned_costs(poses.len(), links.len(), branches, duration_s)?;
+        let (bytes, terms) = planned_costs(poses.len(), links.len(), branches, stated, duration_s)?;
         admit_limit(
             "live bytes",
             bytes,
@@ -556,15 +561,20 @@ impl PreparedRelaxationNetwork {
                 let separable = duration_s > 0.0
                     && distance.is_finite()
                     && (distance > 0.0 || evolution == SpatialMemoryEvolution::Equilibrium);
+                // Exact for every positive duration, an infinite distance
+                // included: a zero row's amplitude uses it unconditionally. A
+                // zero duration moves nothing (and 0 x an infinite rate is NaN).
+                let (decay, heat_fraction) = if duration_s > 0.0 {
+                    (det::exp(-distance), -det::expm1(-2.0 * distance))
+                } else {
+                    (1.0, 0.0)
+                };
                 memories.push(PreparedMemory {
                     rows: branch.gram_rows,
+                    stated: branch.gram_rows.map(|row| stated_row(&row)),
                     evolution,
-                    decay: if separable { det::exp(-distance) } else { 1.0 },
-                    heat_fraction: if separable {
-                        -det::expm1(-2.0 * distance)
-                    } else {
-                        0.0
-                    },
+                    decay,
+                    heat_fraction,
                     separable,
                 });
             }
@@ -577,11 +587,7 @@ impl PreparedRelaxationNetwork {
             rows: kelvin_rows,
             resistance: body_resistance,
         } = prepare_geometry(poses, properties, &viscous, &mut cancelled)?;
-        let (body_n, n, m) = (
-            6 * poses.len(),
-            6 * (poses.len() + branches),
-            6 * links.len(),
-        );
+        let (body_n, n, m) = (6 * poses.len(), 6 * poses.len() + stated, 6 * links.len());
         let mut input_map = vec![0.0; n * m];
         input_map[..body_n * m].copy_from_slice(&body_map);
         let flow = if duration_s == 0.0 || links.is_empty() {
@@ -590,7 +596,7 @@ impl PreparedRelaxationNetwork {
             let mut q = vec![0.0; n * n];
             let mut j = vec![0.0; n * n];
             let mut r = vec![0.0; n * n];
-            let mut rows = vec![0.0; (m + 6 * branches) * n];
+            let mut rows = vec![0.0; (m + stated) * n];
             // The first m linear forms observe actual slip. The next m observe
             // the complete passive wrench directly, so a weak integrated memory
             // force is never recovered by subtracting two large endpoints.
@@ -611,8 +617,10 @@ impl PreparedRelaxationNetwork {
                 rows[p * n..p * n + body_n]
                     .copy_from_slice(&kelvin_rows[p * body_n..(p + 1) * body_n]);
             }
+            // Each stated row's coordinate, in original order; zero rows are absent.
             let mut memory = body_n;
             let mut row_offset = m;
+            let mut branch_index = 0;
             for (e, link) in links.iter().enumerate() {
                 poll(&mut cancelled)?;
                 let c = viscous[e].damping.native_coefficients();
@@ -629,14 +637,13 @@ impl PreparedRelaxationNetwork {
                 }
                 for branch in &link.branches {
                     poll(&mut cancelled)?;
-                    let rate = memories[(memory - body_n) / 6]
-                        .evolution
-                        .relaxation_rate_per_s();
+                    let prepared = &memories[branch_index];
+                    let rate = prepared.evolution.relaxation_rate_per_s();
                     let root = det::sqrt(rate);
-                    for a in 0..6 {
-                        let index = memory + a;
+                    for a in (0..6).filter(|&a| prepared.stated[a]) {
+                        let index = memory;
                         r[index * n + index] = rate;
-                        rows[(row_offset + a) * n + index] = root;
+                        rows[row_offset * n + index] = root;
                         for i in 0..body_n {
                             let mut coupling = Dd::ZERO;
                             for c in 0..6 {
@@ -651,9 +658,10 @@ impl PreparedRelaxationNetwork {
                         for c in 0..6 {
                             observations[m + 6 * e + c][index] = branch.gram_rows[a][c];
                         }
+                        memory += 1;
+                        row_offset += 1;
                     }
-                    memory += 6;
-                    row_offset += 6;
+                    branch_index += 1;
                 }
             }
             let generator: Vec<_> = j.iter().zip(&r).map(|(j, r)| j - r).collect();
@@ -692,7 +700,7 @@ impl PreparedRelaxationNetwork {
             let mut row_offset = m;
             for (e, link) in prepared.iter_mut().enumerate() {
                 poll(&mut cancelled)?;
-                let count = branch_counts[e] * 6;
+                let count = stated_coordinates(&links[e..=e]);
                 let mut source_rows = vec![0.0; (6 + count) * n];
                 source_rows[..6 * n].copy_from_slice(&rows[6 * e * n..6 * (e + 1) * n]);
                 source_rows[6 * n..]
@@ -832,23 +840,24 @@ impl PreparedRelaxationNetwork {
             poll(&mut cancelled)?;
             for branch in link {
                 let prepared = &self.memories[branch_index];
-                if prepared.exactly_null(branch) {
-                    self.scratch.initial[offset..offset + 6].fill(0.0);
-                    self.scratch.null_initial[offset - body_n..offset - body_n + 6]
-                        .copy_from_slice(branch);
-                    if prepared.heat_fraction != 0.0 {
-                        for &value in branch {
+                let null = prepared.exactly_null(branch);
+                for (a, &value) in branch.iter().enumerate() {
+                    // A proved null history and a zero row's amplitude decay alone.
+                    if null || !prepared.stated[a] {
+                        self.scratch.null_initial[6 * branch_index + a] = value;
+                        if prepared.heat_fraction != 0.0 {
                             self.scratch.null_heat[e] = self.scratch.null_heat[e]
                                 + Dd::from_f64(value)
                                     * Dd::from_f64(value)
                                     * Dd::from_f64(0.5 * prepared.heat_fraction);
                         }
                     }
-                    finite(self.scratch.null_heat[e].to_f64())?;
-                } else {
-                    self.scratch.initial[offset..offset + 6].copy_from_slice(branch);
+                    if prepared.stated[a] {
+                        self.scratch.initial[offset] = if null { 0.0 } else { value };
+                        offset += 1;
+                    }
                 }
-                offset += 6;
+                finite(self.scratch.null_heat[e].to_f64())?;
                 branch_index += 1;
             }
         }
@@ -963,23 +972,23 @@ impl PreparedRelaxationNetwork {
             &mut cancelled,
         )?;
         let mut memory_after = reserve(memory.len())?;
-        let mut offset = body_n;
+        let (mut endpoint, mut branch_index) = (self.scratch.endpoint[body_n..].iter(), 0);
         for source in memory {
             poll(&mut cancelled)?;
             let mut destination = reserve(source.len())?;
             for _ in source {
-                let mut branch = [0.0; 6];
-                let prepared = &self.memories[(offset - body_n) / 6];
+                let (mut branch, prepared) = ([0.0; 6], &self.memories[branch_index]);
                 for (c, value) in branch.iter_mut().enumerate() {
+                    let dense = prepared.stated[c].then(|| endpoint.next()).flatten();
                     *value = finite(
-                        (Dd::from_f64(self.scratch.endpoint[offset + c])
-                            + Dd::from_f64(self.scratch.null_initial[offset - body_n + c])
+                        (Dd::from_f64(dense.copied().unwrap_or(0.0))
+                            + Dd::from_f64(self.scratch.null_initial[6 * branch_index + c])
                                 * Dd::from_f64(prepared.decay))
                         .to_f64(),
                     )?;
                 }
                 destination.push(branch);
-                offset += 6;
+                branch_index += 1;
             }
             memory_after.push(destination);
         }
@@ -1129,13 +1138,27 @@ pub(in crate::spatial_loads) fn branch_count(
             ))
     })
 }
+/// A factor row with a nonzero entry. An exactly zero row (every entry +-0,
+/// not small) exerts nothing and observes nothing; its amplitude only decays.
+fn stated_row(row: &[f64; 6]) -> bool {
+    row.iter().any(|&x| x != 0.0)
+}
+/// The memory coordinates the dense system holds: one per stated row.
+pub(in crate::spatial_loads) fn stated_coordinates(links: &[RelaxationNetworkLink]) -> usize {
+    let branches = links.iter().flat_map(|link| &link.branches);
+    branches
+        .flat_map(|branch| &branch.gram_rows)
+        .filter(|row| stated_row(row))
+        .count()
+}
 pub(in crate::spatial_loads) fn planned_costs(
     bodies: usize,
     connectors: usize,
     branches: usize,
+    stated: usize,
     duration_s: f64,
 ) -> Result<(u128, u128), RelaxationNetworkError> {
-    let n = 6 * (bodies as u128 + branches as u128);
+    let n = 6 * bodies as u128 + stated as u128;
     let m = 6 * connectors as u128;
     let d = n + m + 1;
     if d > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128
@@ -1150,7 +1173,7 @@ pub(in crate::spatial_loads) fn planned_costs(
     let dense = 8
         * ((80 + 8 * m) * d * d
             + connectors as u128 * (8 * n * n + n * m)
-            + (m + 6 * branches as u128) * n);
+            + (m + stated as u128) * n);
     let native = bodies as u128
         * (core::mem::size_of::<Pose>()
             + core::mem::size_of::<MassProperties>()
