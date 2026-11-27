@@ -37,9 +37,8 @@ None. All dependencies are pure Franken workspace crates; `wasm32-unknown-unknow
 - `live_source::tests`: power-port role/dimension guard, `LiveSource` vs static `Force` bit-for-bit & `BlockSolveMode::MonolithicNewtonKrylov` parity (including no-source graph mode check), and first-law work booking.
 - `tests/no_alloc.rs`: atomic `GlobalAlloc` proof of 0 heap allocations on a 1 kg `Mass` + `ControlledSource` system after warm-up, `from_system` default-cell initialization check, and `render_f32` `f32`-overflow silence halt.
 - `tests/runtime_core.rs`: 0-ULP CLI parity and `block_modes()` parity on `forced_oscillator.fsim` (with untouched `LiveSource` and with no constant source), per-step latched `set_input_by_name` two-step ledger closure and work booking, `render_f32` parity and halt/silence, thermal/3D probe target guards, and `from_system` binding guards.
+- Cross-target `wasm32-unknown-unknown` vs native `0-ULP` IEEE-754 parity on `forced_oscillator.fsim`: `crates/fs-runtime-wasm/tests/runtime.test.mjs`.
 
 ## No-claim boundaries
 `fs-runtime` adds no physical model, integrator, material provenance, or audio post-processing. Scientific claims remain owned by the admitted assembly's cards and `fs-system` components.
 
-## Planned (R3)
-- Cut R3: `fs-runtime-wasm` (`wasm-bindgen` wrapper + cross-target native-vs-`wasm32` parity tests).
