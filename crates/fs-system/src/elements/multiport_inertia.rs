@@ -4,6 +4,10 @@
 //! receives an effort and returns a flow; a constant port map `G` (`n x m`) takes the efforts `e`
 //! to the generalized force `G e` and the velocities to the port flows `G^T v`.
 //!
+//! The units are the caller's. A row of `v` is in the port flow's unit over its entries of `G`:
+//! a row whose entries carry a lever arm (metres) is an angular velocity, and `M` carries the
+//! matching mixed units. So the state declares no dimension (`state_dimensions` is `None`).
+//!
 //! The step is the mass's in matrix form, the implicit midpoint rule under held efforts:
 //! `M (v1 - v0) = dt G e`, solved with the square-root-free Cholesky factor `M = L D L^T`, and each
 //! port returns the step-mean flow `G^T (v0 + v1) / 2`. A port's flow is linear in `v`, so it ends
@@ -20,10 +24,7 @@
 use fs_exec::Cx;
 use fs_exec::solver::snapshot_v2::StateIdentityCharterV2;
 use fs_ports::PortKind;
-use fs_ports::component::{
-    Carrier, Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt,
-};
-use fs_qty::Dims;
+use fs_ports::component::{Class, Component, PortRole, PortSpec, PortTangent, Proposal, Receipt};
 
 use super::{ElementError, inputs_finite, port, roundoff};
 
@@ -44,9 +45,9 @@ pub struct MultiportInertia {
 }
 
 impl MultiportInertia {
-    /// The inertia with the row-major `n x n` mass matrix `mass` (momentum per unit flow in
-    /// `kind`) and the row-major `n x ports` port map `map`. Each port receives an effort and
-    /// returns a flow in `kind`.
+    /// The inertia with the row-major `n x n` mass matrix `mass` and the row-major `n x ports`
+    /// port map `map`, both in the rows' units (see the module docs). Each port receives an
+    /// effort and returns a flow in `kind`.
     ///
     /// # Errors
     /// [`ElementError::Parameter`] when `mass` has not `n x n` entries for some `n >= 1`, `map`
@@ -239,13 +240,6 @@ impl Component for MultiportInertia {
         words.extend([self.n as u64, self.ports.len() as u64]);
         words.extend(self.mass.iter().map(|value| value.to_bits()));
         words.extend(self.map.iter().map(|value| value.to_bits()));
-    }
-
-    fn state_dimensions(&self) -> Option<Dims> {
-        match self.ports[0].carrier() {
-            Carrier::Power(kind) => Some(kind.canonical_flow_dimensions()),
-            _ => None,
-        }
     }
 
     fn ports(&self) -> &[PortSpec] {

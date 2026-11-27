@@ -930,7 +930,10 @@ physics owners below fs-couple can be composed without it.
     not positive and finite). Exact-linear, with analytic JVP and VJP. No
     claim: `M` and `G` are constants, exact for a body whose configuration
     does not change over the window it is used for; it is not a rigid body
-    that rotates, and it keeps no positions. `tests/multiport_inertia.rs`
+    that rotates, and it keeps no positions. It declares no state
+    dimension: a row is in the port flow's unit over its entries of `G`, so
+    a lever arm in `G` makes its row an angular velocity, and `M` carries
+    the matching mixed units. `tests/multiport_inertia.rs`
     checks conformance, tangents and exact linearity over a sweep of shapes,
     the step, flows and receipt against sums by hand, that one row and one
     port with `G = [1]` give the `Mass` step, receipt and stored energy to the
@@ -938,6 +941,20 @@ physics owners below fs-couple can be composed without it.
     springs through the kernel, whose velocities follow the modal closed
     form of the midpoint rule (each mode turned by `2 atan(omega dt / 2)`
     per step) within `8 steps` roundoff units, with its energy kept.
+    `tests/painleve_rod.rs` (under `slices`) is Painleve's rod: rows
+    `(vx, vy, omega)`, `G` held at the starting pose over windows in which
+    the rod turns by under a degree, the end on a Hertz `ContactInterface`
+    and a `Slider`. At mu = 1 the end slides at the closed form of
+    `W = G^T M^-1 G`, each step within its own error (the contact's force
+    tolerance and the kernel's relative tolerance, carried by `M^-1 G`),
+    and sticks in the step the closed form stops it. At mu = 1.5, where no
+    slide is consistent, the normal force grows while the end slides, and
+    the end jams and holds for the rest of the window: the mechanical
+    energy never rises past rounding, the closure stays under the contact's
+    ceiling, and the stuck end does not slip. A stuck end has no size: the
+    runs tell the solve an absolute tolerance of 1e-15 m/s, and under the
+    default solve the stuck end is refused by name (`NotConverged` on
+    `slider.a`).
   - `ConductanceMatrix::new(width_a, width_b, points)` is the linear
     conductance between two heat traces, the many-point `Conductance`: field
     heat ports `a` and `b` receive the temperatures at their points and
