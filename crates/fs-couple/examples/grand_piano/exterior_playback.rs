@@ -372,14 +372,14 @@ impl Controls {
         self.cavity = Some(cavity::Specification::read(text)?);
         Ok(self)
     }
+    pub fn wave_keys(&self) -> Vec<u8> {
+        self.stretching.as_ref().map(|spec| spec.waves.keys().copied().collect()).unwrap_or_default()
+    }
     /// Read the already admitted frames before structural rank selection.
-    /// Absence preserves the original primary-only board preparation; supplied
-    /// frames cover the complete scale in its source order, including silence.
+    /// Supplied frames cover the complete scale in its source order, including silence.
     pub fn source_ports(&self, courses: &[Course])
         -> Result<Option<Vec<super::board_geometry::motion::SourceBridgeFrame>>, String> {
-        let keys = self.stretching.as_ref().map(|spec| spec.waves.keys().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-        self.polarization.as_ref().map(|spec| spec.source_ports_with_axial(courses, &keys)).transpose()
+        self.polarization.as_ref().map(|spec| spec.source_ports_with_axial(courses, &self.wave_keys())).transpose()
     }
     /// Bind waves to the very same bare board basis used by the boundary and
     /// the mechanics. A supplied signed string frame is projected later with

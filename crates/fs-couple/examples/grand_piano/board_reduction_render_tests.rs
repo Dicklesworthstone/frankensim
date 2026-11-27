@@ -73,3 +73,43 @@ fn played_frontend_requires_and_applies_the_full_reduced_material_operator() {
     assert!(actual.accounting.felt_loss_j>0.0 && actual.accounting.modal_loss_j>0.0);
     assert!((actual.accounting.input_work_j-actual.energy_j()-actual.accounting.dissipated_j()).abs()<1e-7);
 }
+
+#[test]
+fn unframed_wave_force_recovers_the_boards_axial_static_compliance() {
+    // One free node has vertical displacement and two independent rocking DOFs.
+    // Only key 69 has a longitudinal string and a contact on the horizontal bridge.
+    let mut text = String::from("frankensim-board-geometry-si-v1\nsource,estimated,three-DOF axial panel\nsupport,clamped\npretension,0\ndamping,0.01\n");
+    for (i, (x, y)) in [(0., 0.5), (0.5, 0.), (1., 0.5), (0.5, 1.), (0.5, 0.5)].iter().enumerate() {
+        text.push_str(&format!("node,{i},{x},{y}\n"));
+    }
+    for (i, t) in [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]].iter().enumerate() {
+        text.push_str(&format!("triangle,{i},{},{},{},0.08,450,1000000,80000,0.3,60000,0\n", t[0], t[1], t[2]));
+    }
+    text.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,0,1\nbridge,70,0,0,1,0\n");
+    text.push_str("stiffener,1000000,80000,0.0001,0.0000000008333333333333333,0.000000001,0.01,450,0,4,2\n");
+
+    let geometry = board_geometry::BoardGeometry::read(&text).unwrap();
+    let attachment = geometry.bridge_attachments(&[69]).unwrap()[0];
+    assert!(geometry.bridge_attachments(&[70]).is_err());
+    let compliance = |board: &board_geometry::PreparedBoard| {
+        let row = attachment.axial_row(board.motion.as_ref().unwrap()).unwrap();
+        board.modes.iter().zip(row).map(|(mode, a)|
+            (a / (std::f64::consts::TAU * mode.frequency_hz)).powi(2)).sum::<f64>()
+    };
+    let keys = [69, 70];
+    let source = geometry.prepare_with_motion(&keys, 1000.).unwrap();
+    let expected = compliance(&source);
+    assert!(expected > 0.);
+    for selection in ["3,0,10,30", "pod,3,0,4,30"] {
+        let reduction = board_geometry::ritz::RitzOptions::parse(selection).unwrap();
+        let prepare = |wave_keys: &[u8]| prepare_geometric_board_with_source_ports(&text,
+            &keys, 1000., false, false, false, 0, true, Some(&reduction), None, wave_keys);
+        let vertical_only = prepare(&[]).unwrap();
+        assert!(compliance(&vertical_only) < 1e-10 * expected);
+        let axial = prepare(&[69]).unwrap();
+        assert!((compliance(&axial) - expected).abs() < 1e-9 * expected, "{selection}");
+        assert!(axial.modes.len() > vertical_only.modes.len());
+        assert!(axial.modes.len() < source.modes.len(), "unused transverse rocking must stay outside the basis");
+        assert!(prepare(&[70]).is_err());
+    }
+}

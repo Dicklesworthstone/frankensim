@@ -898,14 +898,15 @@ fn prepare_geometric_board_with_reduction(text: &str, keys: &[u8], band_hz: f64,
     acoustic_refinement_levels: usize, retain_motion: bool,
     reduction: Option<&board_geometry::ritz::RitzOptions>) -> Result<board_geometry::PreparedBoard, String> {
     prepare_geometric_board_with_source_ports(text, keys, band_hz, equilibrate_mass,
-        consistent_mass, edge_cubic_mass, acoustic_refinement_levels, retain_motion, reduction, None)
+        consistent_mass, edge_cubic_mass, acoustic_refinement_levels, retain_motion, reduction, None, &[])
 }
 #[allow(clippy::too_many_arguments)]
 fn prepare_geometric_board_with_source_ports(text: &str, keys: &[u8], band_hz: f64,
     equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool,
     acoustic_refinement_levels: usize, retain_motion: bool,
     reduction: Option<&board_geometry::ritz::RitzOptions>,
-    frames: Option<&[board_geometry::motion::SourceBridgeFrame]>) -> Result<board_geometry::PreparedBoard, String> {
+    frames: Option<&[board_geometry::motion::SourceBridgeFrame]>,
+    wave_keys: &[u8]) -> Result<board_geometry::PreparedBoard, String> {
     if crowned_board::is_crowned(text) {
         if equilibrate_mass || consistent_mass || edge_cubic_mass {
             return Err("flat-board mass controls require a flat geometric board".into());
@@ -920,6 +921,7 @@ fn prepare_geometric_board_with_source_ports(text: &str, keys: &[u8], band_hz: f
         let geometry=board_geometry::BoardGeometry::read(text)?
             .with_acoustic_refinement(acoustic_refinement_levels)?;
         if let Some(reduction) = reduction {
+            let geometry = if frames.is_none() { geometry.with_axial_reduction_keys(wave_keys)? } else { geometry };
             return geometry.prepare_reduced_with_ports(keys, band_hz, retain_motion, equilibrate_mass,
                 consistent_mass, edge_cubic_mass, reduction, frames);
         }
@@ -1377,7 +1379,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
             options.edge_cubic_board_mass, options.acoustic_refinement_levels,
             polarization.is_some() || cavity.is_some() || want_slopes || want_axial,
-            options.board_reduction.as_ref(), source_ports.as_deref())?;
+            options.board_reduction.as_ref(), source_ports.as_deref(), &axial_keys)?;
         let projected = polarization.as_ref().map(|spec|
             spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
         let cavity = cavity.as_ref().map(|spec| spec.project(&prepared)).transpose()?;

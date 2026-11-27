@@ -81,16 +81,29 @@ pub(super) fn project(
             }
         }).collect::<Vec<f64>>());
     }
-    if let Some(frames)=frames {
+    if frames.is_some() || !geometry.axial_reduction_ports.is_empty() {
         // Only source force projection needs this small geometry carrier;
         // never allocate a runtime MotionSurface for the 512-mode source.
         let shell=ShellMesh::new(mesh.nodes.iter().map(|&(x,y)|[x,y,0.]).collect(),
             mesh.tris.clone()).map_err(|e|e.to_string())?;
-        append_secondary_ports(keys,frames,&shell,edge_cubic_mass,source,&mut ports,
-            |phi,node| {
-                let at=|c:usize|model.dof_map[3*node+c].map_or(0.,|i|phi[i]);
-                [0.,0.,at(0),at(2),-at(1),0.]
-            })?;
+        let nodal = |phi: &[f64], node: usize| {
+            let at = |c: usize| model.dof_map[3 * node + c].map_or(0., |i| phi[i]);
+            [0., 0., at(0), at(2), -at(1), 0.]
+        };
+        if let Some(frames) = frames {
+            append_secondary_ports(keys, frames, &shell, edge_cubic_mass, source, &mut ports, nodal)?;
+        }
+        for attachment in &geometry.axial_reduction_ports {
+            let axial = super::motion::SourceBridgePort {
+                triangle: attachment.triangle, weights: attachment.weights,
+                arm_m: attachment.arm_m, direction: attachment.axis_out,
+            }.prepare(&shell, edge_cubic_mass)?;
+            let row = source.modes.iter().map(|pair| {
+                axial.project_nodal(axial.nodes().map(|node| nodal(&pair.phi, node)))
+                    .map(|(coefficient, _)| coefficient)
+            }).collect::<Result<Vec<_>, String>>()?;
+            ports.push(row);
+        }
     }
     project_modal_with_damping(model.free, damping, source, &ports, options,
         |x, y| model.m.spmv(x, y))

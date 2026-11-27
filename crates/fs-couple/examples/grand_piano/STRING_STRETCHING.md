@@ -234,8 +234,9 @@ Without a supplied frame, both renderers derive rows from a **flat** board's
   `u-string-direction` in `data/instruments/descriptions/piano/unknowns.tsv`.
 - **Downbearing** is absent from a flat plate, so the axis has no vertical
   component: the `sin(alpha) U_n` term is exactly 0.
-- With `--board-reduction` the rotations are those of the reduced basis, built
-  from vertical bridge-force snapshots only.
+- With `--board-reduction`, each selected waves key contributes its own axial
+  contact force to the source snapshots alongside the scale's vertical bridge
+  forces. Playback reads the same contact's rotation from the retained modes.
 
 A crowned board needs an explicit signed string frame. On a flat board, a
 missing or ambiguous string-side bridge segment also requires a supplied

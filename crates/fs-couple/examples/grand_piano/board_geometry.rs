@@ -80,6 +80,8 @@ pub struct BoardGeometry {
     chart: PlateChart,
     stiffeners: Vec<Stiffener>,
     stiffener_mass: StiffenerMass,
+    /// Unframed longitudinal source forces requested for bridge-driven reduction.
+    axial_reduction_ports: Vec<BridgeAttachment>,
     /// Exact analytic rotations of the selected edge-cubic panel field.
     consistent_rotary_mass: bool,
     supports: AssemblyOptions,
@@ -336,6 +338,7 @@ impl BoardGeometry {
         }
         Ok(Self {
             material_loss: material.then_some(losses), panel_laws,
+            axial_reduction_ports: Vec::new(),
             provenance: source.ok_or("missing source authority/attribution")?, chart, stiffeners,
             stiffener_mass: stiffener_mass.unwrap_or_default(),
             consistent_rotary_mass: consistent_rotary_mass.unwrap_or(false),
@@ -346,6 +349,16 @@ impl BoardGeometry {
             bridge_sites: sites, damping_ratio: damping.ok_or("missing explicit damping ratio")?,
             acoustic_refinement_levels: 0,
         })
+    }
+
+    /// Include the selected wave keys' actual axial contact forces in the source-space snapshots.
+    pub fn with_axial_reduction_keys(mut self, wave_keys: &[u8]) -> Result<Self, String> {
+        let mut seen = BTreeSet::new();
+        if wave_keys.iter().any(|key| !seen.insert(*key)) {
+            return Err("duplicate axial reduction key".into());
+        }
+        self.axial_reduction_ports = self.bridge_attachments(wave_keys)?;
+        Ok(self)
     }
 
     /// Uniformly subdivide each flat radiating triangle into 4^levels cells,
@@ -624,7 +637,15 @@ impl BoardGeometry {
             }
         }
         if keys.is_empty() { return Err("empty key set".into()); }
-        if let Some(frames) = source_frames { reduction::validate_frames(keys, frames)?; }
+        if let Some(frames) = source_frames {
+            if !self.axial_reduction_ports.is_empty() {
+                return Err("choose supplied bridge frames or geometric axial reduction ports".into());
+            }
+            reduction::validate_frames(keys, frames)?;
+        }
+        if self.axial_reduction_ports.iter().any(|port| !seen.contains(&port.midi)) {
+            return Err("axial reduction key is absent from the admitted scale".into());
+        }
         let transverse_mass = if edge_cubic_transverse_mass {
             TransverseMass::EdgeCubic
         } else if consistent_transverse_mass {
@@ -844,6 +865,9 @@ impl BoardGeometry {
                 if source_frames.is_some_and(|frames|frames.iter().any(|f|f.axial.is_some())) {
                     provenance.push_str(" and selected longitudinal bridge forces");
                 }
+            } else if !self.axial_reduction_ports.is_empty() {
+                provenance.push_str(&format!("; Ritz targets include geometric axial forces for {} waves keys",
+                    self.axial_reduction_ports.len()));
             }
             if let (Some(ritz::Selection::Pod { count, .. }), Some(first), Some(last)) = (reduction_options.map(|o| o.selection),
                 value.report.sample_hz.first(), value.report.sample_hz.last()) {

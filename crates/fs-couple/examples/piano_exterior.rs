@@ -254,10 +254,10 @@ fn prepare_controlled(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spe
 /// One structural solve owns bridge, string-frame and acoustic motion fields.
 fn prepare_board_motion(board_text:&str,keys:&[u8],band_hz:f64,options:&playback::Options)
     ->Result<board_geometry::PreparedBoard,String> {
-    prepare_board_motion_with_source_ports(board_text,keys,band_hz,options,None)
+    prepare_board_motion_with_source_ports(board_text,keys,band_hz,options,None,&[])
 }
 fn prepare_board_motion_with_source_ports(board_text:&str,keys:&[u8],band_hz:f64,
-    options:&playback::Options,frames:Option<&[board_geometry::motion::SourceBridgeFrame]>)
+    options:&playback::Options,frames:Option<&[board_geometry::motion::SourceBridgeFrame]>,wave_keys:&[u8])
     ->Result<board_geometry::PreparedBoard,String> {
     options.validate()?;
     if crowned_board::is_crowned(board_text) {
@@ -271,6 +271,9 @@ fn prepare_board_motion_with_source_ports(board_text:&str,keys:&[u8],band_hz:f64
     } else {
         let geometry=board_geometry::BoardGeometry::read(board_text)?;
         if let Some(reduction)=&options.board_reduction {
+            let geometry = if frames.is_none() && !options.legacy_axial_ratio {
+                geometry.with_axial_reduction_keys(wave_keys)?
+            } else { geometry };
             return geometry.prepare_reduced_with_ports(keys,band_hz,true,options.equilibrate_board_mass,
                 options.consistent_board_mass,options.edge_cubic_board_mass,reduction,frames);
         }
@@ -294,7 +297,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let source_ports=controls.source_ports(&courses)?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
-        options,source_ports.as_deref())?;
+        options,source_ports.as_deref(),&controls.wave_keys())?;
     let mut controls=controls.in_air(spec.gas.as_ref())?;
     controls.bind_unframed_axial_rows(board_text,&board,options)?;
     let (mut piano,cavity_report)=controls.instrument_with_cavity_report(courses,&board.modes,board.motion.as_ref(),options)?;
@@ -410,7 +413,7 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     let cavity=options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
     let source_ports=polarization.as_ref().map(|frames|frames.source_ports(courses)).transpose()?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
-        options,source_ports.as_deref())?;
+        options,source_ports.as_deref(),&[])?;
     let projected=polarization.as_ref().map(|frames|
         frames.project(courses,&board.modes,board.motion.as_ref())).transpose()?;
     let cavity=cavity.as_ref().map(|cavity|cavity.project(&board)).transpose()?;

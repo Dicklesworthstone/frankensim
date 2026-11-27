@@ -102,7 +102,7 @@ fn supplied_frames_drive_lateral_strings_through_the_same_felt_pedals_and_stereo
         o.board_reduction=Some(board_geometry::ritz::RitzOptions::parse("2,0,10,30").unwrap());
     }
     let board = prepare_geometric_board_with_source_ports(&board_text, &[69], o.board_band_hz,
-        true, !cubic, cubic, 0, true, o.board_reduction.as_ref(), Some(&source_ports))
+        true, !cubic, cubic, 0, true, o.board_reduction.as_ref(), Some(&source_ports), &[])
         .unwrap_or_else(|e|panic!("cubic={cubic}, reduced={reduced}: {e}"));
     if reduced {
         assert!(board.reduction.as_ref().unwrap().source_modes>board.modes.len());
