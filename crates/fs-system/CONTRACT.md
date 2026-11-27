@@ -201,7 +201,21 @@ wires `Slider` on the non-smooth `LoadLine` tier with automatic
 initial slip (breakaway and re-catch resolve on step boundaries, so stick-slip
 period error is below `dt` by design), and routes friction heat via explicit
 `heat_partition_a` (required when both ends are thermal; 100% to a sole thermal
-end when omitted; remainder to ambient sink). fs-cli lowers every
+end when omitted; remainder to ambient sink). Card-less `HertzContact` (under
+`slices`, `owners::contact`) lowers `Sphere`/`Box` primitives and both parts'
+`young_modulus` and `poisson_ratio` cards to `fs_dcontact::ContactInterface`
+with `publishing_reaction()` (refusing missing `poisson_ratio` or flat-on-flat
+geometry), with optional Hunt–Crossley loss when both `restitution` in `(0, 1]`
+and `approach_speed > 0` are declared. Card-less `NormalLoad` connects a
+`HertzContact`'s `reaction_n` signal to a `dry-friction` `Slider::loaded_by_signal`
+`normal_n` input (refusing both `normal_force` and `NormalLoad`, or neither):
+`mu_s`/`mu_k` are queried once at `reference_normal_force` and marked held
+with provenance stating the live contact load can leave the card's
+`normal_force` validity. Multiple `LoadLine` components (such as lossy
+`HertzContact` and `Slider`) compose in one SCC on shared thermal bodies with
+energy closure (`tests/dry_friction_slice.rs` under `slices`,
+`tests/multiple_load_lines.rs`).
+fs-cli lowers every
 assembly through the kernel defaults plus these groups.
 
 fs-couple's `rigid_damping_heat` target keeps the hand-built graph as the

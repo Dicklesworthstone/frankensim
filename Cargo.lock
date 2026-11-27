@@ -3014,6 +3014,7 @@ dependencies = [
  "fs-adjoint",
  "fs-alloc",
  "fs-blake3",
+ "fs-dcontact",
  "fs-evidence",
  "fs-exec",
  "fs-gas",

@@ -13,7 +13,7 @@ layer = "L3"
 [features]
 # Owner slices: tests that compose real physics owners on the kernel. Off by
 # default so that the kernel's own tests build nothing but the kernel.
-slices = ["dep:fs-gas", "dep:fs-material", "dep:fs-mbd", "dep:fs-thermal"]
+slices = ["dep:fs-dcontact", "dep:fs-gas", "dep:fs-material", "dep:fs-mbd", "dep:fs-thermal"]
 # Source-owned nonlinear electrical storage; keeps the default kernel small.
 constitutive = ["dep:fs-phs"]
 # Complete source-owned port-Hamiltonian blocks with a physical heat outlet.
@@ -25,6 +25,7 @@ modal-slices = ["dep:fs-nlmodal"]
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-dcontact = { path = "../fs-dcontact", features = ["component"], optional = true }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-gas = { path = "../fs-gas", features = ["component"], optional = true }

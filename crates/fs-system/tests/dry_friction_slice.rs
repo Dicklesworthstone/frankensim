@@ -14,9 +14,7 @@ use fs_ports::component::{Component, LoadLine};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft as d;
 use fs_scenario::assembly::{MaterialRef, ParameterKey, ReferenceState};
-use fs_scenario::{
-    EntityCatalog, EntityDeclaration, EntityId, Environment, FrameId, InterfacePair, Scenario,
-};
+use fs_scenario::{EntityCatalog, EntityDeclaration, EntityId, FrameId, InterfacePair, Scenario};
 use fs_system::elements::{Mass, Motion, Slider, SliderEnd, Slip, SourceAccount};
 use fs_system::lowering::InterfaceKindTag;
 use fs_system::{CardStore, LoweredSystem, LoweringError, LoweringRegistry, System, SystemBuilder};
@@ -182,6 +180,42 @@ type Built = (
     Vec<d::SourceDecl>,
 );
 
+fn admit_and_lower(
+    (root, catalog): (EntityId, EntityCatalog),
+    parts: Vec<d::DraftPartDecl>,
+    (joints, interfaces, sources): Built,
+    (dt, t_end, t_amb): (f64, f64, f64),
+    cards: &CardStore,
+    reg: &LoweringRegistry,
+) -> Result<LoweredSystem, LoweringError> {
+    let mut env = d::DraftEnvironment::earth_lab_air();
+    env.base.ambient_temperature = QtyAny::new(t_amb, TEMP);
+    let scen = Scenario::new("p", 42, env.base.clone());
+    let inp = d::DraftAssemblyInput {
+        name: "p".into(),
+        root,
+        catalog,
+        reference_state: Some(ReferenceState::Assembled),
+        environment: env,
+        time_plan: d::TimePlan {
+            horizon: QtyAny::new(t_end, T_DIM),
+            step_policy: d::StepPolicy::Fixed {
+                dt: QtyAny::new(dt, T_DIM),
+            },
+            default_sample_rate: QtyAny::new(1.0 / dt, Dims([0, 0, -1, 0, 0, 0])),
+            scheme: d::TimeScheme::Explicit,
+        },
+        parts,
+        joints,
+        gear_meshes: vec![],
+        interfaces,
+        sources,
+        controllers: vec![],
+        probes: vec![],
+    };
+    reg.lower(&d::DraftAssembly::admit(inp, &scen).unwrap(), cards)
+}
+
 fn lower_draft_ifaces(
     (side_a, side_b): (&Side, &Side),
     (dt, t_end): (f64, f64),
@@ -196,34 +230,10 @@ fn lower_draft_ifaces(
     let pb = cat
         .declare(EntityDeclaration::part(root, side_b.0))
         .unwrap();
-    let (joints, interfaces, sources) = build(&mut cat, root, [pa, pb]);
-    let mut env = d::DraftEnvironment::earth_lab_air();
-    env.base.ambient_temperature = QtyAny::new(300.0, TEMP);
-    let inp = d::DraftAssemblyInput {
-        name: "p".into(),
-        root,
-        catalog: cat,
-        reference_state: Some(ReferenceState::Assembled),
-        environment: env,
-        time_plan: d::TimePlan {
-            horizon: QtyAny::new(t_end, T_DIM),
-            step_policy: d::StepPolicy::Fixed {
-                dt: QtyAny::new(dt, T_DIM),
-            },
-            default_sample_rate: QtyAny::new(1.0 / dt, Dims([0, 0, -1, 0, 0, 0])),
-            scheme: d::TimeScheme::Explicit,
-        },
-        parts: vec![make_part(side_a, pa), make_part(side_b, pb)],
-        joints,
-        gear_meshes: vec![],
-        interfaces,
-        sources,
-        controllers: vec![],
-        probes: vec![],
-    };
-    let scen = Scenario::new("p", 42, Environment::earth_lab());
-    LoweringRegistry::with_kernel_defaults()
-        .lower(&d::DraftAssembly::admit(inp, &scen).unwrap(), cards)
+    let items = build(&mut cat, root, [pa, pb]);
+    let parts = vec![make_part(side_a, pa), make_part(side_b, pb)];
+    let reg = LoweringRegistry::with_kernel_defaults();
+    admit_and_lower((root, cat), parts, items, (dt, t_end, 300.0), cards, &reg)
 }
 
 fn lower_pair(
@@ -785,6 +795,26 @@ fn slider_identity_conformance_and_liftoff() {
     });
 }
 
+fn add_iface(
+    cat: &mut EntityCatalog,
+    root: EntityId,
+    name: &str,
+    (fa, fb): (EntityId, EntityId),
+    kind: d::DraftInterfaceKind,
+) -> d::DraftInterfaceDecl {
+    let pair = InterfacePair::ordered(fa, fb);
+    let entity = cat
+        .declare(EntityDeclaration::interface(root, name, pair))
+        .unwrap();
+    d::DraftInterfaceDecl {
+        name: name.into(),
+        entity,
+        feature_a: fa,
+        feature_b: fb,
+        kind,
+    }
+}
+
 #[test]
 fn normal_load_and_hertz_lowering_refusals() {
     let mut cards = CardStore::new();
@@ -806,17 +836,6 @@ fn normal_load_and_hertz_lowering_refusals() {
         state,
     };
     let s = |c: &mut EntityCatalog, p, n| c.declare(EntityDeclaration::surface(p, n)).unwrap();
-    let add = |c: &mut EntityCatalog, r, n: &str, (fa, fb), kind| {
-        let pair = InterfacePair::ordered(fa, fb);
-        let entity = c.declare(EntityDeclaration::interface(r, n, pair)).unwrap();
-        d::DraftInterfaceDecl {
-            name: n.into(),
-            entity,
-            feature_a: fa,
-            feature_b: fb,
-            kind,
-        }
-    };
     let run = |mk: &dyn Fn(&mut EntityCatalog, EntityId, [EntityId; 2]) -> Vec<_>| {
         lower_draft_ifaces((&sa, &sb), (1e-3, 1e-2), &cards, |c, r, ps| {
             (vec![], mk(c, r, ps), vec![])
@@ -826,7 +845,7 @@ fn normal_load_and_hertz_lowering_refusals() {
     };
     let err = run(&|c, r, [pa, pb]| {
         let pair = (s(c, pa, "sa"), s(c, pb, "sb"));
-        vec![add(c, r, "hertz", pair, hk())]
+        vec![add_iface(c, r, "hertz", pair, hk())]
     });
     assert!(matches!(
         err,
@@ -842,10 +861,10 @@ fn normal_load_and_hertz_lowering_refusals() {
         let p2 = (s(c, pa, "a2"), s(c, pb, "b2"));
         let (so, sh, th) = (s(c, pa, "ao"), s(c, pa, "ah"), s(c, pb, "bh"));
         vec![
-            add(c, r, "pad1", p1, mc(vec![n10()])),
-            add(c, r, "pad2", p2, mc(vec![n10()])),
-            add(c, r, "nload", (so, sh), d::DraftInterfaceKind::NormalLoad),
-            add(c, r, "hertz", (sh, th), hk()),
+            add_iface(c, r, "pad1", p1, mc(vec![n10()])),
+            add_iface(c, r, "pad2", p2, mc(vec![n10()])),
+            add_iface(c, r, "nload", (so, sh), d::DraftInterfaceKind::NormalLoad),
+            add_iface(c, r, "hertz", (sh, th), hk()),
         ]
     });
     assert!(
@@ -862,11 +881,11 @@ fn normal_load_and_hertz_lowering_refusals() {
         let err = run(&|c, r, [pa, pb]| {
             let (fa, fb) = (s(c, pa, "sa"), s(c, pb, "sb"));
             let (sh, th) = (s(c, pa, "sh"), s(c, pb, "th"));
-            let mut v = vec![add(c, r, "pad", (fa, fb), mc(p_st.clone()))];
+            let mut v = vec![add_iface(c, r, "pad", (fa, fb), mc(p_st.clone()))];
             if with_nl {
                 let nl = d::DraftInterfaceKind::NormalLoad;
-                v.push(add(c, r, "nload", (fa, sh), nl));
-                v.push(add(c, r, "hertz", (sh, th), hk()));
+                v.push(add_iface(c, r, "nload", (fa, sh), nl));
+                v.push(add_iface(c, r, "hertz", (sh, th), hk()));
             }
             v
         });
@@ -875,5 +894,202 @@ fn normal_load_and_hertz_lowering_refusals() {
                 if item == "interface:pad" && detail.contains(needle)),
             "{err}"
         );
+    }
+}
+
+#[cfg(feature = "slices")]
+mod hertz {
+    use std::collections::BTreeMap;
+
+    use fs_system::lowering::owners::register_owner_defaults;
+
+    use super::*;
+
+    const T0: f64 = 293.15;
+    const R_SPHERE: f64 = 0.05;
+    const F_PRE: f64 = 5.0;
+    const MU_S: f64 = 0.40;
+    const MU_K: f64 = 0.25;
+    const SEED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/matdb/seed-v1/");
+
+    type Kv = (ParameterKey, QtyAny);
+    type MatSpec = (ContentHash, Vec<Kv>);
+
+    fn load_seed_mat(dir: &str) -> (m::MaterialCard, BTreeMap<String, f64>) {
+        let txt = std::fs::read_to_string(format!("{SEED}{dir}/properties.tsv")).unwrap();
+        let (mut rows, mut vals, u) = (Vec::new(), BTreeMap::new(), ValidityDomain::unconstrained);
+        for line in txt.lines().skip(1) {
+            let c: Vec<&str> = line.split('\t').collect();
+            if c[0] == "scalar" {
+                let dim = match c[3] {
+                    "density" => Dims([-3, 1, 0, 0, 0, 0]),
+                    "young_modulus" => Dims([-1, 1, -2, 0, 0, 0]),
+                    "poisson_ratio" => Dims::NONE,
+                    "specific_heat_capacity" => Dims([2, 0, -2, -1, 0, 0]),
+                    "thermal_conductivity" => Dims([1, 1, -3, -1, 0, 0]),
+                    _ => continue,
+                };
+                let sc = if c[5] == "GPa" {
+                    1e9
+                } else if c[5] == "MPa" {
+                    1e6
+                } else {
+                    1.0
+                };
+                rows.push((c[1], c[3], c[4].parse::<f64>().unwrap() * sc, dim));
+            } else if c[0] == "validity" {
+                let (lo, hi) = (c[3].parse().unwrap(), c[4].parse().unwrap());
+                let e = vals.entry(c[1]).or_insert_with(u);
+                *e = e.clone().with(c[2], lo, hi);
+            }
+        }
+        let (mut cs, mut map) = (m::ClaimSet::new(), BTreeMap::new());
+        for (id, prop, val, dim) in rows {
+            cs.insert_claim(claim(prop, val, dim, vals.remove(id).unwrap_or_else(u)))
+                .unwrap();
+            map.insert(prop.to_owned(), val);
+        }
+        let sid = m::MaterialStateId {
+            chemistry: dir.into(),
+            phase: "s".into(),
+            process: "r".into(),
+            revision: 0,
+        };
+        (m::MaterialCard::assemble(sid, cs, Vec::new()).unwrap(), map)
+    }
+
+    fn qp_316() -> Vec<Kv> {
+        vec![
+            kv("T", T0, TEMP),
+            kv("source-pressure-known", 0.0, Dims::NONE),
+        ]
+    }
+
+    fn qp_a36() -> Vec<Kv> {
+        const KEYS: [(&str, f64); 5] = [
+            ("engineering_reference_model", 1.0),
+            ("source_specimens_matched", 0.0),
+            ("source_test_temperature_known", 0.0),
+            ("source_test_method_known", 0.0),
+            ("source_hot_rolled", 1.0),
+        ];
+        KEYS.map(|(k, v)| kv(k, v, Dims::NONE)).into()
+    }
+
+    fn shaped_part(s: &Side, e: EntityId, g: d::PrimitiveShape, qp: Vec<Kv>) -> d::DraftPartDecl {
+        let mut p = make_part(s, e);
+        p.geometry = d::DraftGeometrySource::Primitive(g);
+        p.materials[0].query_point = qp;
+        p
+    }
+
+    fn box_g() -> d::PrimitiveShape {
+        d::PrimitiveShape::Box {
+            lx: QtyAny::new(0.1, L),
+            ly: QtyAny::new(0.1, L),
+            lz: QtyAny::new(0.02, L),
+        }
+    }
+
+    fn lower_two_body(
+        cards: &CardStore,
+        (fcard, a36): (ContentHash, ContentHash),
+        (ga, (ma, qa)): (d::PrimitiveShape, MatSpec),
+        h_st: Vec<Kv>,
+        v0: f64,
+    ) -> Result<LoweredSystem, LoweringError> {
+        let mut cat = EntityCatalog::new();
+        let root = cat.declare(EntityDeclaration::assembly("r")).unwrap();
+        let pa = cat.declare(EntityDeclaration::part(root, "a")).unwrap();
+        let pb = cat.declare(EntityDeclaration::part(root, "b")).unwrap();
+        let mut sf = |p, n| cat.declare(EntityDeclaration::surface(p, n)).unwrap();
+        let (fah, fbh, fap, fbp) = (sf(pa, "ah"), sf(pb, "bh"), sf(pa, "ap"), sf(pb, "bp"));
+        let st = vec![
+            kv("reference_normal_force", F_PRE, F_DIM),
+            kv("heat_partition_a", 0.5, Dims::NONE),
+        ];
+        let mc = d::DraftInterfaceKind::MechanicalContact {
+            law_card: fcard,
+            third_body: None,
+            state: st,
+        };
+        let hk = d::DraftInterfaceKind::HertzContact { state: h_st };
+        let nl = d::DraftInterfaceKind::NormalLoad;
+        let ifaces = vec![
+            add_iface(&mut cat, root, "h", (fah, fbh), hk),
+            add_iface(&mut cat, root, "p", (fap, fbp), mc),
+            add_iface(&mut cat, root, "nl", (fap, fah), nl),
+        ];
+        let rb = d::DraftPartKind::RigidBody;
+        let sa = ("a", rb, ma, true, Some(init_st(v0, Some(T0))));
+        let sb = ("b", rb, a36, true, Some(init_st(0.0, Some(T0))));
+        let parts = vec![
+            shaped_part(&sa, pa, ga, qa),
+            shaped_part(&sb, pb, box_g(), qp_a36()),
+        ];
+        let mut reg = LoweringRegistry::with_kernel_defaults();
+        register_owner_defaults(&mut reg);
+        admit_and_lower(
+            (root, cat),
+            parts,
+            (vec![], ifaces, vec![]),
+            (1e-5, 1e-4, T0),
+            cards,
+            &reg,
+        )
+    }
+
+    #[test]
+    fn hertz_lowering_refusals_and_lossy_shared_thermal_closure() {
+        let mut cards = CardStore::new();
+        let mut ins = |d| cards.insert_material(load_seed_mat(d).0);
+        let s316 = ins("stainless-316-20c-engineering-reference");
+        let a36 = ins("steel-a36-onlinemetals-reference");
+        let wire = ins("steel-music-wire-string-heptonstall-ligo-p1400229");
+        // Synthetic in-test friction card (not Katsivardi).
+        let fcard = cards
+            .insert_interface("dry-friction", friction_card(MU_S, MU_K, 20.0, 1.0))
+            .unwrap();
+        let ok_h = || {
+            vec![
+                kv("maximum_force", 1e6, F_DIM),
+                kv("maximum_penetration", 1e-2, L),
+            ]
+        };
+        let sph = d::PrimitiveShape::Sphere {
+            radius: QtyAny::new(R_SPHERE, L),
+        };
+        let run = |g, m, h, v| lower_two_body(&cards, (fcard, a36), (g, m), h, v);
+        let w_err = run(sph.clone(), (wire, vec![kv("T", T0, TEMP)]), ok_h(), 0.0)
+            .err()
+            .unwrap();
+        assert!(w_err.to_string().contains("poisson_ratio"), "{w_err}");
+        let flat = run(box_g(), (s316, qp_316()), ok_h(), 0.0).err().unwrap();
+        assert!(flat.to_string().contains("flat-on-flat"), "{flat}");
+        let mut lossy = ok_h();
+        lossy.extend([
+            kv("restitution", 0.7, Dims::NONE),
+            kv("approach_speed", 0.2, V_DIM),
+        ]);
+        let mut lo = run(sph, (s316, qp_316()), lossy, -0.2).unwrap();
+        let json = lo.receipt.canonical_json();
+        assert!(
+            json.contains("reference_normal_force")
+                && json.contains("can leave card normal_force validity")
+        );
+        with_cx(|cx| {
+            for _ in 0..10 {
+                lo.system.step(1e-5, cx).unwrap();
+            }
+        });
+        let nodes = &lo.system.ledger().nodes;
+        let by = |name| nodes.iter().find(|n| n.name == name).unwrap();
+        let (qh, qp) = (
+            by("interface.h").dissipated_j.value(),
+            by("interface.p").dissipated_j.value(),
+        );
+        let du = by("a.thermal").stored_change_j.value() + by("b.thermal").stored_change_j.value();
+        assert!(qh > 0.0 && qp > 0.0 && (du - (qh + qp)).abs() <= 1e-12);
+        assert!(lo.system.ledger().energy_residual_j().abs() <= 1e-12);
     }
 }
