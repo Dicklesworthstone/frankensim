@@ -7,13 +7,13 @@
 - `ast::{CountUnit, CountValue, Node, NodeKind, Span}`: span-bearing typed AST over `fs-qty` dimensions.
 - `sexpr` and `json`: deterministic total parsers and canonical checked printers with lossless round-trip isomorphism.
 - `IrError`, `IrErrorKind`: structured syntax and shape refusals carrying byte spans and fix hints.
-- `codec::{AdmittedAssembly, AssemblyAnalysisMode, CodecRefusal, MAX_PACKS, PackCatalog, PackEntry, PackKind, admit_assembly_source}`: single shared `.fsim` parser, Five Explicits admission, and `fs-matdb` card-pack store builder used by both `fs-cli` and `fs-runtime`.
+- `codec::{AdmittedAssembly, AssemblyAnalysisMode, CodecRefusal, MAX_PACK_BYTES, MAX_PACKS, PackCatalog, PackEntry, PackKind, admit_assembly_source}`: single shared `.fsim` parser, Five Explicits admission, and `fs-matdb` card-pack store builder used by both `fs-cli` and `fs-runtime`.
 - `UNIT_DIMS`, `dims_to_unit`: canonical 17-unit SI dimension-to-unit mapping (exact union of `fs-cli` and `fs-runtime` tables) re-exported by both crates.
 
 ## Invariants
 - Pure Rust, zero filesystem, zero `fs-ledger`/SQLite dependencies; compiles natively and for `wasm32-unknown-unknown`.
 - `fs-ir` re-exports `ast`, `json`, `sexpr`, `IrError`, and `IrErrorKind` verbatim from `fs-fsim`.
-- `PackCatalog::from_raw_bytes` enforces `MAX_PACKS` (`128`), deduplicates identical packs by content hash, and refuses conflicting cards or unknown magic bytes.
+- `PackCatalog::from_raw_bytes` matches `fs-cli::cards::CardPackSetBuilder`: enforces `MAX_PACK_BYTES` (`4 MiB`) per pack before decoding, collapses byte-identical repeats before enforcing `MAX_PACKS` (`128`) distinct packs, and returns `cli-solve-card-pack-*` refusal codes.
 
 ## Error model
 Syntax and shape failures return `IrError { span, kind, detail, hint }`; `.fsim` admission and card-pack failures return `CodecRefusal { code, what, fix }`. Depth caps (`sexpr::MAX_DEPTH = 256`) and `MAX_PACKS` (`128`) guard hostile input.

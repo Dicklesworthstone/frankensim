@@ -15,8 +15,8 @@ pub mod sexpr;
 pub use ast::{CountUnit, CountValue, Node, NodeKind, Span};
 pub use codec::{
     AdmittedAssembly, AssemblyAnalysisMode, AssemblyRequirement, BOX_AXES, CodecRefusal,
-    DeclaredEnvelopes, GeomEnvelope, MAX_PACKS, PackCatalog, PackEntry, PackKind, ProbeStat,
-    TargetEnvelope, admit_assembly_source,
+    DeclaredEnvelopes, GeomEnvelope, MAX_PACK_BYTES, MAX_PACKS, PackCatalog, PackEntry, PackKind,
+    ProbeStat, TargetEnvelope, admit_assembly_source,
 };
 
 use core::fmt;
@@ -163,11 +163,18 @@ mod tests {
         assert_eq!(dims_to_unit(Dims([1, 1, -2, 0, 0, 0])), Some("N"));
         assert_eq!(dims_to_unit(Dims([0, 0, -1, 0, 0, 0])), Some("rad/s"));
         assert_eq!(dims_to_unit(Dims([1, 2, 3, 0, 0, 0])), None);
-        assert!(PackCatalog::from_raw_bytes(&[b"BADMAGIC"]).is_err());
+        let bad = PackCatalog::from_raw_bytes(&[b"BADMAGIC"]).unwrap_err();
+        assert_eq!(bad.code, "cli-solve-card-pack-decode");
         let steel: &[u8] = include_bytes!(
             "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
         );
-        let dedup = PackCatalog::from_raw_bytes(&[steel, steel]).unwrap();
+        // Byte-identical repeats beyond MAX_PACKS collapse to 1 distinct pack (matching fs-cli).
+        let repeated = vec![steel; MAX_PACKS + 1];
+        let dedup = PackCatalog::from_raw_bytes(&repeated).unwrap();
         assert_eq!(dedup.materials().len(), 1);
+        // Per-pack 4 MiB size cap fires before decoding.
+        let oversized = vec![0u8; MAX_PACK_BYTES + 1];
+        let big = PackCatalog::from_raw_bytes(&[oversized.as_slice()]).unwrap_err();
+        assert_eq!(big.code, "cli-solve-card-pack-size");
     }
 }

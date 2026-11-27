@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{ContentHash, hash_bytes};
 use fs_evidence::uncertainty::RequirementRelation;
-use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack};
+use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack, PackError};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
     DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
@@ -100,8 +100,13 @@ pub struct PackEntry {
     pub bytes: Vec<u8>,
 }
 
-/// Maximum card packs accepted by [`PackCatalog::from_raw_bytes`].
+/// Maximum distinct card packs admitted by [`PackCatalog::from_raw_bytes`]
+/// (matches `fs-cli::cards::MAX_CARD_PACKS`).
 pub const MAX_PACKS: usize = 128;
+
+/// Maximum byte length of a single card pack accepted by [`PackCatalog::from_raw_bytes`]
+/// (matches `fs-cli::cards::MAX_CARD_PACK_BYTES`, 4 MiB).
+pub const MAX_PACK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Admitted material and interface card packs passed to [`admit_assembly_source`].
 #[derive(Debug, Clone, Default)]
@@ -110,8 +115,35 @@ pub struct PackCatalog {
     interfaces: Vec<PackEntry>,
 }
 
+fn pack_refusal(code: &'static str, what: impl Into<String>, fix: &'static str) -> CodecRefusal {
+    CodecRefusal {
+        code,
+        what: what.into(),
+        fix: fix.to_owned(),
+    }
+}
+
+fn map_pack_err(kind: &str, e: &PackError) -> CodecRefusal {
+    let (code, fix) = match e {
+        PackError::IdentityMismatch { .. } => (
+            "cli-solve-card-pack-identity",
+            "re-export the card pack from its canonical source",
+        ),
+        PackError::ResourceLimit { .. } => (
+            "cli-solve-card-pack-size",
+            "supply a normalized card pack within the 4 MiB ceiling",
+        ),
+        _ => (
+            "cli-solve-card-pack-decode",
+            "supply a valid canonical FSMCDPK\0 or FSINTPK\0 pack",
+        ),
+    };
+    pack_refusal(code, format!("{kind} pack decode failed: {e}"), fix)
+}
+
 fn push_unique(
     out: &mut Vec<(ContentHash, PackEntry)>,
+    total_distinct: usize,
     kind: &str,
     root: ContentHash,
     entry: PackEntry,
@@ -120,10 +152,18 @@ fn push_unique(
         return Ok(());
     }
     if out.iter().any(|(_, e)| e.card == entry.card) {
-        return Err(err(format!(
-            "conflicting {kind} packs for card {}",
-            entry.card.to_hex()
-        )));
+        return Err(pack_refusal(
+            "cli-solve-card-pack-conflict",
+            format!("conflicting {kind} packs for card {}", entry.card.to_hex()),
+            "supply only one pack per material or interface card",
+        ));
+    }
+    if total_distinct >= MAX_PACKS {
+        return Err(pack_refusal(
+            "cli-solve-card-pack-count",
+            format!("distinct card pack count exceeds limit {MAX_PACKS}"),
+            "supply at most 128 distinct card packs",
+        ));
     }
     out.push((root, entry));
     Ok(())
@@ -140,29 +180,41 @@ impl PackCatalog {
     }
 
     /// Decode canonical `FSMCDPK\0` and `FSINTPK\0` byte buffers into a catalog.
+    ///
+    /// Matches `fs-cli::cards::CardPackSetBuilder`: enforces `MAX_PACK_BYTES` (4 MiB)
+    /// per pack before decoding, collapses byte-identical repeats before enforcing
+    /// `MAX_PACKS` (128) distinct packs, and returns `cli-solve-card-pack-*` codes.
     pub fn from_raw_bytes(packs: &[&[u8]]) -> Result<Self, CodecRefusal> {
-        if packs.len() > MAX_PACKS {
-            return Err(err(format!(
-                "too many card packs: {} exceeds limit {MAX_PACKS}",
-                packs.len()
-            )));
-        }
-        let (mut mats, mut ints) = (Vec::new(), Vec::new());
-        for raw in packs {
+        let (mut mats, mut ints, mut seen_bytes) = (Vec::new(), Vec::new(), BTreeSet::new());
+        for &raw in packs {
+            if raw.len() > MAX_PACK_BYTES {
+                return Err(pack_refusal(
+                    "cli-solve-card-pack-size",
+                    format!(
+                        "card pack is {} bytes, above the {MAX_PACK_BYTES}-byte ceiling",
+                        raw.len()
+                    ),
+                    "supply a normalized card pack within the 4 MiB ceiling",
+                ));
+            }
+            if !seen_bytes.insert(hash_bytes(raw)) {
+                continue;
+            }
+            let total = mats.len() + ints.len();
             match raw.get(..8) {
                 Some(b"FSMCDPK\0") => {
                     let dec = NormalizedMaterialCardPack::from_bytes(raw)
-                        .map_err(|e| err(format!("material pack decode failed: {e}")))?;
+                        .map_err(|e| map_pack_err("material", &e))?;
                     let e = PackEntry {
                         card: dec.card().content_hash(),
                         identity: dec.card().id().to_string(),
                         bytes: raw.to_vec(),
                     };
-                    push_unique(&mut mats, "material", dec.content_hash(), e)?;
+                    push_unique(&mut mats, total, "material", dec.content_hash(), e)?;
                 }
                 Some(b"FSINTPK\0") => {
                     let dec = NormalizedInterfacePack::from_bytes(raw)
-                        .map_err(|e| err(format!("interface pack decode failed: {e}")))?;
+                        .map_err(|e| map_pack_err("interface", &e))?;
                     let id = format!(
                         "{} | {} | {}",
                         dec.card().surface_a().material,
@@ -174,11 +226,13 @@ impl PackCatalog {
                         identity: id,
                         bytes: raw.to_vec(),
                     };
-                    push_unique(&mut ints, "interface", dec.content_hash(), e)?;
+                    push_unique(&mut ints, total, "interface", dec.content_hash(), e)?;
                 }
                 _ => {
-                    return Err(err(
+                    return Err(pack_refusal(
+                        "cli-solve-card-pack-decode",
                         "unknown card pack magic (expected FSMCDPK\0 or FSINTPK\0)",
+                        "supply a valid canonical FSMCDPK\0 or FSINTPK\0 pack",
                     ));
                 }
             }

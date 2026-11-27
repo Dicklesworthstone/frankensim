@@ -1389,5 +1389,38 @@ mod tests {
             ("indeterminate", &["parameters".to_string()][..])
         );
         assert!(ind.decision_headroom.is_some_and(|x| x > 0.0));
+        // Pin unified 17-unit fs-fsim table: N and Pa requirements evaluate instead of refusing.
+        assert_eq!(unit_dims("N"), Some(Dims([1, 1, -2, 0, 0, 0])));
+        assert_eq!(unit_dims("Pa"), Some(Dims([-1, 1, -2, 0, 0, 0])));
+        let force_req = AssemblyRequirement {
+            id: "f_max".into(),
+            analysis: None,
+            probe: "load_force".into(),
+            stat: ProbeStat::Max,
+            relation: RequirementRelation::AtMost,
+            limit: QtyAny::new(20.0, Dims([1, 1, -2, 0, 0, 0])),
+        };
+        assert_eq!(
+            assess_one(&force_req, "N", 12.0, bnd(), h)
+                .unwrap()
+                .0
+                .outcome,
+            "pass"
+        );
+        let press_req = AssemblyRequirement {
+            id: "p_max".into(),
+            analysis: None,
+            probe: "gas_press".into(),
+            stat: ProbeStat::Max,
+            relation: RequirementRelation::AtMost,
+            limit: QtyAny::new(2.0e5, Dims([-1, 1, -2, 0, 0, 0])),
+        };
+        assert_eq!(
+            assess_one(&press_req, "Pa", 2.5e5, bnd(), h)
+                .unwrap()
+                .0
+                .outcome,
+            "fail"
+        );
     }
 }
