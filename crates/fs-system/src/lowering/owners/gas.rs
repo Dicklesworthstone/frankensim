@@ -7,7 +7,7 @@
 use core::f64::consts::PI;
 
 use fs_blake3::ContentHash;
-use fs_gas::component::{GasCavity, GasEnergySolve, parcel_from_material_card};
+use fs_gas::component::{ClosedGasParcel, GasCavity, GasEnergySolve, parcel_from_material_card};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QtyAny, QuantitySpec};
@@ -20,8 +20,8 @@ use super::{Scoped, owning_part};
 use crate::lowering::{
     AREA_DIMS, ConstitutiveModelRef, FidelityRungKind, InterfaceKindTag, InterfaceLoweringContext,
     InterfaceLoweringKey, LoweredInterfaceOutput, LoweredPartOutput, LoweringError, LoweringGraph,
-    LoweringRegistry, PISTON_FACE_FAMILY, PartLoweringContext, PartLoweringKey, TEMPERATURE_DIMS,
-    VOLUME_DIMS,
+    LoweringRegistry, Observed, PISTON_FACE_FAMILY, PartLoweringContext, PartLoweringKey,
+    TEMPERATURE_DIMS, VOLUME_DIMS,
 };
 
 const P_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
@@ -129,6 +129,13 @@ fn lower_cavity(
         .and_then(|c| if insulated { c.insulated() } else { Ok(c) })
         .map_err(|e| it.invalid(format!("GasCavity refused: {e}")))?;
     let node = graph.add_with_tangent(&ctx.part.name, Some(ctx.part.entity), cavity, parcel)?;
+    graph.observers.insert(
+        ctx.part.entity,
+        Box::new(move |sys| {
+            sys.state::<ClosedGasParcel>(node)
+                .map(|g| Observed::Cell(g.state().state().temperature))
+        }),
+    );
     graph.expose_port(ctx.part.entity, "pressure", graph.port(node, "p")?);
     if !insulated {
         graph.expose_port(ctx.part.entity, "thermal", graph.port(node, "heat")?);

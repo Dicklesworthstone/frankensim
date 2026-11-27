@@ -10,15 +10,17 @@
 - `SnapshotDescriptor` (`SNAPSHOT_DESCRIPTOR_SCHEMA = "frankensim.runtime.snapshot_descriptor.v1"`), `ProbeDescriptor`, `InputDescriptor`, `RuntimeRefusal`, `inputs_to_json`, `MAX_PACKS`, `UNIT_DIMS`, `dims_to_unit` (re-exported from `fs-fsim`): canonical descriptors, refusals, and JSON encoders.
 
 ## Invariants
+- Lowering uses `LoweringRegistry::with_kernel_defaults()` plus `fs_system::lowering::owners::register_owner_defaults`, matching `fs-cli`.
 - On the success path of `set_input`, `step`, `read_probes`, and `render_f32`, the runtime wrapper adds no heap allocation (refusal paths format diagnostics, and any allocation inside a component belongs to the sealed `System`); `tests/no_alloc.rs` measures 0 heap allocations for a 1 kg `Mass` + `ControlledSource` system after one warm-up step.
-- Every interactive power input (promoted constant power `SourceDecl` on non-driven parts or explicit `LiveInputSpec`) enters the kernel through `LiveSource` (`Component + PortTangent + StageResidual`), preserving `BlockSolveMode::MonolithicNewtonKrylov` parity with static lowering and closing first-law energy conservation in `System::ledger()`.
+- Every interactive power input (promoted constant power `SourceDecl` matching a physical power domain on a non-driven part, or explicit `LiveInputSpec`) enters the kernel through `LiveSource` (`Component + PortTangent + StageResidual`), preserving `BlockSolveMode::MonolithicNewtonKrylov` parity with static lowering and closing first-law energy conservation in `System::ledger()`. Dimensionless `[0; 6]` constant sources stay static.
+- When live inputs are attached in `from_draft`/`from_draft_inputs`, the draft is re-admitted under world-frame `Scenario::new(&name, seed, environment.base)` (matching `fs-fsim::admit_assembly_source`); custom non-world frames refuse at re-admission (`admit-refused`).
 - Per-step input latching: `set_input` / `set_input_by_name` writes only a `pending` `AtomicU64`; `AssemblyRuntime::step` copies `pending -> live` once before entering `System::step`, so a mid-step write cannot skew `residual` vs `accept` energy booking.
-- Probe resolution rejects unlowered quantities (`probe-unlowered`), lag-filtered thermocouples (`probe-unsupported`), thermal-state leakage into `position`, and 3D `velocity-x` probes on 1D parts.
+- Probe resolution rejects unlowered quantities (`probe-unlowered`), lag-filtered thermocouples (`probe-unsupported`), ambiguous parts with multiple `Motion` or scalar `f64` nodes (`probe-ambiguous`), non-translational-mechanical scalar fallback into `position` (blocking thermal, non-mechanical, and rotational `SpiralSpring` leakage), and 3D `velocity-x` probes on 1D parts.
 - On refusal or non-finite/overflowing probe output during `render_f32`, the runtime halts, writes exact `0.0` silence for remaining frames, and returns the refusal once from `take_refusal()`.
 - Canonical JSON encoders escape strings deterministically and emit `null` for non-finite `default_value`.
 
 ## Error model
-Every invalid binding, admission/lowering failure, unlowered probe, step refusal, or buffer mismatch returns `RuntimeRefusal { code, stage, message }` with canonical JSON encoding; nothing is silently clamped or ignored.
+Every invalid binding, admission/lowering failure, unlowered/ambiguous/unsupported probe, step refusal, or buffer mismatch returns `RuntimeRefusal { code, stage, message }` with canonical JSON encoding; nothing is silently clamped or ignored.
 
 ## Determinism class
 `ExecMode::Deterministic` with explicit caller `seed` and fixed `StreamKey`; identical inputs and step sizes produce bit-identical native probe outputs matching direct `LoweringRegistry::with_kernel_defaults()` stepping (`tests/runtime_core.rs`).
@@ -30,15 +32,16 @@ Each runtime owns a private `CancelGate::new_clock_free()` passed into `Cx` on e
 `#![deny(unsafe_code)]` across the crate. Zero `unsafe` blocks in library code (only the test-only `GlobalAlloc` counter in `tests/no_alloc.rs`).
 
 ## Feature flags
-None. All dependencies are pure Franken workspace crates; `wasm32-unknown-unknown` compilation is checked.
+None. `fs-system` is built with `features = ["slices"]`; all dependencies are pure Franken workspace crates and `wasm32-unknown-unknown` compilation is checked.
 
 ## Conformance tests
 - `descriptor::tests::canonical_json_writers_pin_exact_bytes`: byte-pin JSON checks.
+- `draft::tests::dimensionless_constant_source_stays_static`: dimensionless `[0; 6]` constant sources are not promoted to `LiveSource`.
 - `live_source::tests`: power-port role/dimension guard, `LiveSource` vs static `Force` bit-for-bit & `BlockSolveMode::MonolithicNewtonKrylov` parity (including no-source graph mode check), and first-law work booking.
+- `probes::tests::refuses_non_mechanical_and_spiral_scalar_and_multi_motion`: guards against non-mechanical/rotational scalar fallback and multi-`Motion` ambiguity (`probe-ambiguous`).
 - `tests/no_alloc.rs`: atomic `GlobalAlloc` proof of 0 heap allocations on a 1 kg `Mass` + `ControlledSource` system after warm-up, `from_system` default-cell initialization check, and `render_f32` `f32`-overflow silence halt.
 - `tests/runtime_core.rs`: 0-ULP CLI parity and `block_modes()` parity on `forced_oscillator.fsim` (with untouched `LiveSource` and with no constant source), per-step latched `set_input_by_name` two-step ledger closure and work booking, `render_f32` parity and halt/silence, thermal/3D probe target guards, and `from_system` binding guards.
 - Cross-target `wasm32-unknown-unknown` vs native `0-ULP` IEEE-754 parity on `forced_oscillator.fsim`: `crates/fs-runtime-wasm/tests/runtime.test.mjs`.
 
 ## No-claim boundaries
 `fs-runtime` adds no physical model, integrator, material provenance, or audio post-processing. Scientific claims remain owned by the admitted assembly's cards and `fs-system` components.
-

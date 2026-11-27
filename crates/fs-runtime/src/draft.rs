@@ -24,6 +24,14 @@ use crate::live_source::{
 use crate::probes::{from_lowered, load_err};
 use crate::runtime::AssemblyRuntime;
 
+/// Shared registry matching `fs-cli`: kernel defaults plus owner groups
+/// (`mbd`, `thermal`, `gas`, `contact`, `loss-routes`).
+fn lowering_registry() -> LoweringRegistry {
+    let mut reg = LoweringRegistry::with_kernel_defaults();
+    fs_system::lowering::owners::register_owner_defaults(&mut reg);
+    reg
+}
+
 impl AssemblyRuntime {
     /// Parse and admit a `.fsim` source with canonical `fs-matdb` card packs
     /// (`FSMCDPK\0` / `FSINTPK\0`), then lower into a runtime.
@@ -38,8 +46,16 @@ impl AssemblyRuntime {
         Self::from_draft(&adm.draft, &adm.card_store, seed)
     }
 
-    /// Lower an admitted [`DraftAssembly`], promoting constant power/signal
-    /// `SourceDecl` entries on non-driven parts into live interactive inputs.
+    /// Lower an admitted [`DraftAssembly`] through the shared kernel + owner
+    /// registry, promoting constant power `SourceDecl` entries (matching a
+    /// physical power domain; dimensionless `[0; 6]` constants stay static) on
+    /// non-driven parts into live interactive inputs.
+    ///
+    /// When live inputs are promoted, the draft is re-admitted under the
+    /// world-frame `Scenario::new(&name, seed, environment.base)` (matching
+    /// `fs-fsim::admit_assembly_source`); `DraftAssembly::admit` uses
+    /// `Scenario` only for non-world frame lookup and `scenario_ir_hash`, so
+    /// custom non-world frames refuse at re-admission (`admit-refused`).
     pub fn from_draft(
         draft: &DraftAssembly,
         cards: &CardStore,
@@ -48,15 +64,17 @@ impl AssemblyRuntime {
         Self::from_draft_inputs(draft, cards, &[], seed)
     }
 
-    /// Lower an admitted [`DraftAssembly`], promoting constant power/signal
-    /// `SourceDecl` entries on non-driven parts alongside explicit `live_inputs`.
+    /// Lower an admitted [`DraftAssembly`] through the shared kernel + owner
+    /// registry, promoting constant power `SourceDecl` entries on non-driven
+    /// parts alongside explicit `live_inputs`. See [`Self::from_draft`] for
+    /// world-frame re-admission semantics.
     pub fn from_draft_inputs(
         draft: &DraftAssembly,
         cards: &CardStore,
         live_inputs: &[LiveInputSpec],
         seed: u64,
     ) -> Result<Self, RuntimeRefusal> {
-        let mut reg = LoweringRegistry::with_kernel_defaults();
+        let mut reg = lowering_registry();
         let (draft, cards, descs, cells) =
             attach_live_inputs(draft, cards, live_inputs, &mut reg, seed)?;
         let lowered = reg
@@ -69,9 +87,7 @@ impl AssemblyRuntime {
 fn infer_port_kind(dims: Dims) -> Option<PortKind> {
     use PortKind as P;
     match dims.0 {
-        [1, 1, -2, 0, 0, 0] | [1, 0, -1, 0, 0, 0] | [0, 0, 0, 0, 0, 0] => {
-            Some(P::MechanicalForceVelocity)
-        }
+        [1, 1, -2, 0, 0, 0] | [1, 0, -1, 0, 0, 0] => Some(P::MechanicalForceVelocity),
         [2, 1, -2, 0, 0, 0] | [0, 0, -1, 0, 0, 0] => Some(P::RotationalTorqueAngularVelocity),
         [2, 1, -3, 0, -1, 0] | [0, 0, 0, 0, 1, 0] => Some(P::ElectricalVoltageCurrent),
         [-1, 1, -2, 0, 0, 0] | [3, 0, -1, 0, 0, 0] => Some(P::FluidPressureFlux),
@@ -210,4 +226,27 @@ fn attach_live_inputs(
         DraftAssembly::admit(input, &scen).map_err(|e| load_err("admit-refused", e.to_string()))?;
     register_runtime_inputs(reg, Arc::new(by_name));
     Ok((adm, cards_out, descs, cells))
+}
+
+#[cfg(test)]
+mod tests {
+    use fs_qty::QtyAny;
+
+    use super::*;
+
+    #[test]
+    fn dimensionless_constant_source_stays_static() {
+        assert_eq!(infer_port_kind(Dims::NONE), None);
+        let fsim = include_bytes!("../../../examples/assemblies/forced_oscillator.fsim");
+        let pack = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let cat = PackCatalog::from_raw_bytes(&[pack]).unwrap();
+        let adm = admit_assembly_source(fsim, &cat).unwrap();
+        let mut inp = adm.draft.input().clone();
+        inp.sources[0].history = TimeHistory::Constant(QtyAny::dimensionless(1.0));
+        let specs = collect_live_specs(&mut inp, &[]);
+        assert!(specs.is_empty());
+        assert_eq!(inp.sources.len(), 1);
+    }
 }

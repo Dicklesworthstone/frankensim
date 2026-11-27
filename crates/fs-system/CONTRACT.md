@@ -5025,4 +5025,5 @@ Under `slices`, `fs-system` depends optionally on `fs-gas` (`component`) to lowe
 (`{Fluid}` insulated or `{Fluid, Thermal}`) to `GasCavity` and `DraftInterfaceKind::PistonFace`
 interfaces to `common_flow_ratios`. `fs-gas` retains a `[dev-dependencies]` edge on `fs-system`
 (L3 dev-only cycle; non-dev deps acyclic). No hidden ambient force is attached; exterior pressure
-is declared explicitly as a `SourceDecl`.
+is declared explicitly as a `SourceDecl`. `lower_cavity` registers an `Observed::Cell`
+observer reading the parcel's temperature [K].

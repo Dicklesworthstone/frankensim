@@ -7,7 +7,9 @@ use std::sync::atomic::AtomicU64;
 use fs_fsim::dims_to_unit;
 use fs_qty::Dims;
 use fs_scenario::EntityId;
-use fs_scenario::assembly::draft::{DraftAssembly, PhysicsDomain, ProbeDecl, ProbeKind};
+use fs_scenario::assembly::draft::{
+    DraftAssembly, DraftGeometrySource, PhysicsDomain, ProbeDecl, ProbeKind,
+};
 use fs_system::elements::Motion;
 use fs_system::lowering::{Observed, Observer};
 use fs_system::{LoweredSystem, NodeId, System};
@@ -95,6 +97,47 @@ impl ProbeCtx<'_> {
             .any(|p| p.entity == eid && p.physics.contains(&PhysicsDomain::Thermal))
     }
 
+    fn is_translational_mechanical(&self, eid: EntityId) -> bool {
+        self.draft.input().parts.iter().any(|p| {
+            p.entity == eid
+                && p.physics.contains(&PhysicsDomain::Mechanics)
+                && !p.physics.contains(&PhysicsDomain::Thermal)
+                && !matches!(p.geometry, DraftGeometrySource::SpiralSpring(_))
+        })
+    }
+
+    fn unique_motion(&self, eid: EntityId, decl: &str) -> Result<Option<NodeId>, RuntimeRefusal> {
+        let mut found = None;
+        for &n in self.nodes.get(&eid).map_or(&[][..], Vec::as_slice) {
+            if self.sys.state::<Motion>(n).is_some() {
+                if found.is_some() {
+                    return Err(load_err(
+                        "probe-ambiguous",
+                        format!("`{decl}` multiple Motion nodes"),
+                    ));
+                }
+                found = Some(n);
+            }
+        }
+        Ok(found)
+    }
+
+    fn unique_scalar(&self, eid: EntityId, decl: &str) -> Result<Option<NodeId>, RuntimeRefusal> {
+        let mut found = None;
+        for &n in self.nodes.get(&eid).map_or(&[][..], Vec::as_slice) {
+            if self.sys.state::<f64>(n).is_some() {
+                if found.is_some() {
+                    return Err(load_err(
+                        "probe-ambiguous",
+                        format!("`{decl}` multiple scalar nodes"),
+                    ));
+                }
+                found = Some(n);
+            }
+        }
+        Ok(found)
+    }
+
     fn scalar(
         &self,
         index: usize,
@@ -142,7 +185,7 @@ impl ProbeCtx<'_> {
                 ..
             } => {
                 let t = self
-                    .find_temp(*location)
+                    .find_temp(*location, &decl.name)?
                     .ok_or_else(|| miss(format!("`{}`", decl.name)))?;
                 let m = ("thermocouple", *location, "temperature", Dims(TMP_D));
                 Ok((self.scalar(idx, off, &decl.name, m), t))
@@ -152,7 +195,7 @@ impl ProbeCtx<'_> {
             } => {
                 let qn = quantity.name.as_str();
                 let t = self
-                    .resolve_field(*target, qn, quantity.dims.0)
+                    .resolve_field(*target, &decl.name, qn, quantity.dims.0)?
                     .ok_or_else(|| miss(format!("`{}` `{qn}`", decl.name)))?;
                 let m = ("field-quantity", *target, qn, quantity.dims);
                 Ok((self.scalar(idx, off, &decl.name, m), t))
@@ -164,54 +207,172 @@ impl ProbeCtx<'_> {
         }
     }
 
-    fn resolve_field(&self, eid: EntityId, name: &str, d: [i8; 6]) -> Option<ProbeTarget> {
-        let nodes = self.nodes.get(&eid).map_or(&[][..], Vec::as_slice);
+    fn resolve_field(
+        &self,
+        eid: EntityId,
+        decl: &str,
+        name: &str,
+        d: [i8; 6],
+    ) -> Result<Option<ProbeTarget>, RuntimeRefusal> {
         let obs = |pred: fn(&Observed) -> bool| {
             self.obs_idx
                 .get(&eid)
                 .copied()
                 .filter(|&i| (self.obs[i])(self.sys).as_ref().is_some_and(pred))
         };
-        let motion = || {
-            nodes
-                .iter()
-                .find(|&&n| self.sys.state::<Motion>(n).is_some())
-                .copied()
-        };
         match (name, d) {
             ("position" | "displacement", LEN_D) => {
-                motion().map(ProbeTarget::MotionPos).or_else(|| {
-                    (!self.is_thermal(eid))
-                        .then(|| nodes.iter().find(|&&n| self.sys.state::<f64>(n).is_some()))
-                        .flatten()
-                        .map(|&n| ProbeTarget::ScalarState(n))
-                })
+                if let Some(n) = self.unique_motion(eid, decl)? {
+                    Ok(Some(ProbeTarget::MotionPos(n)))
+                } else if self.is_translational_mechanical(eid) {
+                    Ok(self.unique_scalar(eid, decl)?.map(ProbeTarget::ScalarState))
+                } else {
+                    Ok(None)
+                }
             }
-            ("velocity", VEL_D) => motion().map(ProbeTarget::MotionVel),
-            ("temperature", TMP_D) => self.find_temp(eid),
+            ("velocity", VEL_D) => Ok(self.unique_motion(eid, decl)?.map(ProbeTarget::MotionVel)),
+            ("temperature", TMP_D) => self.find_temp(eid, decl),
             ("heat_rate", PWR_D) => {
-                obs(|o| matches!(o, Observed::HeatRate(_))).map(ProbeTarget::ObserverHeatRate)
+                Ok(obs(|o| matches!(o, Observed::HeatRate(_))).map(ProbeTarget::ObserverHeatRate))
             }
-            (other, d) => {
-                let c = motion_axis(other, d)?;
-                obs(|o| matches!(o, Observed::Body { .. })).map(|i| ProbeTarget::ObserverBody(i, c))
-            }
+            (other, d) => Ok(motion_axis(other, d)
+                .and_then(|c| obs(|o| matches!(o, Observed::Body { .. })).map(|i| (i, c)))
+                .map(|(i, c)| ProbeTarget::ObserverBody(i, c))),
         }
     }
 
-    fn find_temp(&self, eid: EntityId) -> Option<ProbeTarget> {
+    fn find_temp(&self, eid: EntityId, decl: &str) -> Result<Option<ProbeTarget>, RuntimeRefusal> {
         if let Some(&i) = self.obs_idx.get(&eid)
             && matches!((self.obs[i])(self.sys), Some(Observed::Cell(_)))
         {
-            return Some(ProbeTarget::ObserverCell(i));
+            return Ok(Some(ProbeTarget::ObserverCell(i)));
         }
-        let nodes = self
-            .is_thermal(eid)
-            .then(|| self.nodes.get(&eid))
-            .flatten()?;
-        nodes
-            .iter()
-            .find(|&&n| self.sys.state::<f64>(n).is_some())
-            .map(|&n| ProbeTarget::ScalarState(n))
+        if !self.is_thermal(eid) {
+            return Ok(None);
+        }
+        Ok(self.unique_scalar(eid, decl)?.map(ProbeTarget::ScalarState))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use fs_fsim::{PackCatalog, admit_assembly_source};
+    use fs_ports::PortKind;
+    use fs_qty::QtyAny;
+    use fs_scenario::Scenario;
+    use fs_scenario::assembly::draft::SpiralSpringGenerator;
+    use fs_system::SystemBuilder;
+    use fs_system::elements::{Mass, Storage};
+
+    use super::*;
+
+    fn base_draft() -> (DraftAssembly, EntityId) {
+        let fsim = include_bytes!("../../../examples/assemblies/forced_oscillator.fsim");
+        let pack = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let adm =
+            admit_assembly_source(fsim, &PackCatalog::from_raw_bytes(&[pack]).unwrap()).unwrap();
+        let eid = adm.draft.input().parts[0].entity;
+        (adm.draft, eid)
+    }
+
+    #[test]
+    fn refuses_non_mechanical_and_spiral_scalar_and_multi_motion() {
+        let (draft, eid) = base_draft();
+        let (mut b, m0) = (
+            SystemBuilder::new(),
+            Motion {
+                position_m: 0.0,
+                velocity_m_s: 0.0,
+            },
+        );
+        let s_node = b
+            .add(
+                "s",
+                Storage::in_domain(PortKind::ElectricalVoltageCurrent, 1.0).unwrap(),
+                1.0,
+            )
+            .unwrap();
+        let m1 = b.add("m1", Mass::new(1.0).unwrap(), m0).unwrap();
+        let m2 = b.add("m2", Mass::new(1.0).unwrap(), m0).unwrap();
+        for n in [s_node, m1, m2] {
+            let p = b.port(n, "p").unwrap();
+            b.boundary(p, Box::new(|_, _, o| o[0] = 0.0)).unwrap();
+        }
+        let sys = b.seal().unwrap();
+        let empty = BTreeMap::new();
+
+        // 1. Multi-Motion part refuses `position` and `velocity` as `probe-ambiguous`.
+        let multi = BTreeMap::from([(eid, vec![m1, m2])]);
+        let ctx_m = ProbeCtx {
+            draft: &draft,
+            sys: &sys,
+            nodes: &multi,
+            obs: &[],
+            obs_idx: &empty,
+        };
+        assert_eq!(
+            ctx_m
+                .resolve_field(eid, "p", "position", LEN_D)
+                .err()
+                .unwrap()
+                .code,
+            "probe-ambiguous"
+        );
+        assert_eq!(
+            ctx_m
+                .resolve_field(eid, "v", "velocity", VEL_D)
+                .err()
+                .unwrap()
+                .code,
+            "probe-ambiguous"
+        );
+
+        // 2. Non-mechanical, non-thermal part with scalar f64 refuses `position`.
+        let mut inp_el = draft.input().clone();
+        inp_el.parts[0].physics = BTreeSet::from([PhysicsDomain::Electromagnetics]);
+        let scen = Scenario::new(&inp_el.name, 1, inp_el.environment.base.clone());
+        let d_el = DraftAssembly::admit(inp_el, &scen).unwrap();
+        let single = BTreeMap::from([(eid, vec![s_node])]);
+        let ctx_el = ProbeCtx {
+            draft: &d_el,
+            sys: &sys,
+            nodes: &single,
+            obs: &[],
+            obs_idx: &empty,
+        };
+        assert!(
+            ctx_el
+                .resolve_field(eid, "p", "position", LEN_D)
+                .unwrap()
+                .is_none()
+        );
+
+        // 3. Rotational SpiralSpring part with scalar f64 refuses `position`.
+        let mut inp_sp = draft.input().clone();
+        inp_sp.parts[0].geometry = DraftGeometrySource::SpiralSpring(SpiralSpringGenerator {
+            inner_radius: QtyAny::new(0.01, Dims(LEN_D)),
+            outer_radius: QtyAny::new(0.05, Dims(LEN_D)),
+            turns: 4.0,
+            blade_thickness: QtyAny::new(0.001, Dims(LEN_D)),
+            blade_height: QtyAny::new(0.005, Dims(LEN_D)),
+        });
+        let d_sp = DraftAssembly::admit(inp_sp, &scen).unwrap();
+        let ctx_sp = ProbeCtx {
+            draft: &d_sp,
+            sys: &sys,
+            nodes: &single,
+            obs: &[],
+            obs_idx: &empty,
+        };
+        assert!(
+            ctx_sp
+                .resolve_field(eid, "p", "position", LEN_D)
+                .unwrap()
+                .is_none()
+        );
     }
 }
