@@ -11,8 +11,9 @@
  * heat runs up its wall into them. Nothing is fitted: the chili's properties are Choi and Okos's, the air layers'
  * the textbook correlations, the shell's its materials'. US patent 7,134,552 reports that a carrier of this kind
  * holds food heated to 185 °F above 141 °F "for at least about six hours" and "as much as fifteen hours". Here a lone
- * pan in a primed carrier holds its middle above 141 °F for about six; six pans together hold longer than fifteen,
- * since the middle ones only lose heat sideways, through 15 cm of chili (sim/holdHot.test.ts).
+ * pan in a primed carrier holds its middle above 141 °F for about six; six pans together hold their coolest middle
+ * above it for about twenty, since the middle pans only lose heat sideways, through 15 cm of chili, and no air leaks
+ * past the door's gasket here (sim/holdHot.test.ts).
  */
 import { CHILI, EPS_STEEL, across, fToC, foodProps } from "./coolDown";
 
@@ -101,8 +102,8 @@ export interface HoldRun {
   water: Float32Array;
   /** Each pan's cut through its middle, `grid` per pan (across from the middle out, bottom up), to SLICE_MIN. */
   slice: Float32Array;
-  /** Minutes after packing when the edge falls below 135 °F, and when the pans' middles (on average) fall
-   *  below 141 °F; null if not within the run. */
+  /** Minutes after packing when the edge falls below 135 °F, and when the coolest pan's middle falls below 141 °F;
+   *  null if not within the run (0 if packed under the line). */
   hotMin: number | null;
   mid141: number | null;
   /** Energy (J): stored at packing and at the end, and what left the carrier in between. */
@@ -250,9 +251,11 @@ export function holdRun(way: HoldWay, startC: number, o: HoldOpts = {}): HoldRun
   let lost = 0;
   /** One implicit step of the wall, `q` (W) into its inner skin from the cavity. */
   function wallStep(q: number): void {
+    // The outer skin's loss to the room, at the step's start: the same in the solve and in what is counted lost.
+    const gOut = outerH(wT[NW - 1]!) * A_OUT;
     for (let i = 0; i < NW; i++) {
       const gl = i > 0 ? wG[i - 1]! : 0;
-      const gr = i < NW - 1 ? wG[i]! : outerH(wT[NW - 1]!) * A_OUT;
+      const gr = i < NW - 1 ? wG[i]! : gOut;
       triA[i] = -gl;
       triC[i] = i < NW - 1 ? -gr : 0;
       triB[i] = wC[i]! / dt + gl + gr;
@@ -265,7 +268,7 @@ export function holdRun(way: HoldWay, startC: number, o: HoldOpts = {}): HoldRun
     }
     wT[NW - 1] = triD[NW - 1]! / triB[NW - 1]!;
     for (let i = NW - 2; i >= 0; i--) wT[i] = (triD[i]! - triC[i]! * wT[i + 1]!) / triB[i]!;
-    lost += outerH(wT[NW - 1]!) * A_OUT * (wT[NW - 1]! - ROOM_C) * dt;
+    lost += gOut * (wT[NW - 1]! - ROOM_C) * dt;
   }
 
   const n = samplesTo(maxMin);
@@ -376,10 +379,12 @@ export function holdRun(way: HoldWay, startC: number, o: HoldOpts = {}): HoldRun
       record(k0++, m);
       const kk = k0 - 1;
       const cold = coldest[kk]!;
-      let mid = 0;
-      for (let p = 0; p < P; p++) mid += centre[p]![kk]! / P;
-      if (hotMin === null && cold < HOT_LINE_C) hotMin = m - (SAMPLE_MIN * (HOT_LINE_C - cold)) / (prevCold - cold);
-      if (mid141 === null && mid < fToC(141)) mid141 = m - (SAMPLE_MIN * (fToC(141) - mid)) / (prevMid - mid);
+      let mid = Infinity;
+      for (let p = 0; p < P; p++) mid = Math.min(mid, centre[p]![kk]!);
+      // Where the line was crossed between this sample and the last; at packing, if packed under it.
+      const cross = (line: number, prev: number, now: number) => (m === 0 || !(prev > now) ? m : m - (SAMPLE_MIN * (line - now)) / (prev - now));
+      if (hotMin === null && cold < HOT_LINE_C) hotMin = cross(HOT_LINE_C, prevCold, cold);
+      if (mid141 === null && mid < fToC(141)) mid141 = cross(fToC(141), prevMid, mid);
       prevCold = cold;
       prevMid = mid;
       const done = m >= minMin && hotMin !== null && (!o.to141 || mid141 !== null);

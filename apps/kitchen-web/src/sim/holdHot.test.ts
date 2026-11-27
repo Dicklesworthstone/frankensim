@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { cToF, fToC } from "./coolDown";
-import { HOLD_WAYS, PRIME_MIN, ROOM_C, SAMPLE_MIN, SLICE_MIN, WALL_NODES, holdAll, holdRun, sampleOf, samplesTo, type HoldKey, type HoldRun } from "./holdHot";
+import { HOLD_WAYS, ROOM_C, SAMPLE_MIN, SLICE_MIN, WALL_NODES, holdAll, holdRun, sampleOf, samplesTo, type HoldKey, type HoldRun } from "./holdHot";
 
 const way = (k: HoldKey) => HOLD_WAYS.find((w) => w.key === k)!;
 const hot = new Map<number, HoldRun[]>();
@@ -22,7 +22,17 @@ describe("chili kept hot in a carrier", () => {
 
   test("chili at the room's warmth in a carrier at the room's warmth stays as it is", () => {
     const r = holdRun(way("fullCold"), ROOM_C, { minMin: 60, maxMin: 60 });
-    for (let k = samplesTo(0) - 1; k < samplesTo(60); k++) expect(Math.abs(r.coldest[k]! - ROOM_C)).toBeLessThan(1e-5);
+    const [nx, ny] = r.grid;
+    const per = r.way.pans * nx * ny;
+    for (let k = samplesTo(0) - 1; k < samplesTo(60); k++) {
+      expect(Math.abs(r.coldest[k]! - ROOM_C)).toBeLessThan(1e-5);
+      for (const c of r.centre) expect(Math.abs(c[k]! - ROOM_C)).toBeLessThan(1e-5);
+      for (let i = 0; i < WALL_NODES; i++) expect(Math.abs(r.wall[k * WALL_NODES + i]! - ROOM_C)).toBeLessThan(1e-5);
+      for (let i = 0; i < per; i++) expect(Math.abs(r.slice[k * per + i]! - ROOM_C)).toBeLessThan(1e-5);
+    }
+    // Packed under both lines: under them from the start.
+    expect(r.hotMin).toBe(0);
+    expect(r.mid141).toBe(0);
   });
 
   test("a finer grid and a shorter step give the same hours", () => {
@@ -49,14 +59,14 @@ describe("chili kept hot in a carrier", () => {
     expect(gain("fullPrimed", "fullCold")).toBeLessThan(1.15);
   });
 
-  test("against the carrier patent: a lone primed pan holds about six hours above 141 °F, six pans longer than fifteen", () => {
+  test("against a carrier patent's six to fifteen hours above 141 °F: a lone primed pan's middle holds about six, six pans' coolest middle longer than fifteen", () => {
     const rs = runsAt(185);
     expect(of(rs, "onePrimed").mid141! / 60).toBeGreaterThan(5);
     expect(of(rs, "onePrimed").mid141! / 60).toBeLessThan(7.5);
     expect(of(rs, "fullPrimed").mid141! / 60).toBeGreaterThan(15);
   });
 
-  test("priming warms the shell; a cold carrier stands at the room's warmth; the edge is always cooler than the middle", () => {
+  test("priming warms the shell; a cold carrier stands at the room's warmth; the coolest pan's corner is cooler than every pan's middle", () => {
     const rs = runsAt(185);
     const k0 = samplesTo(0) - 1;
     for (const r of rs) {
@@ -75,13 +85,19 @@ describe("chili kept hot in a carrier", () => {
     }
   });
 
-  test("a page's run covers the stage's hours, the cut faces filled to the end of them", () => {
-    const r = holdRun(way("oneCold"), fToC(165));
-    expect(r.endMin).toBeGreaterThanOrEqual(SLICE_MIN);
-    const [nx, ny] = r.grid;
-    const per = r.way.pans * nx * ny;
-    for (let k = samplesTo(0) - 1; k < samplesTo(SLICE_MIN); k++) expect(Number.isNaN(r.slice[k * per]!)).toBe(false);
-    expect(Number.isNaN(r.slice[(samplesTo(0) - 2) * per]!)).toBe(true);
-    expect(PRIME_MIN).toBe(30);
+  test("a page's run covers the stage's hours, every pan's cut face filled from packing to the end of them", () => {
+    for (const k of ["oneCold", "fullCold"] as const) {
+      const r = holdRun(way(k), fToC(165));
+      expect(r.endMin).toBeGreaterThanOrEqual(SLICE_MIN);
+      const [nx, ny] = r.grid;
+      const per = r.way.pans * nx * ny;
+      for (let s = 0; s < samplesTo(SLICE_MIN); s++)
+        for (let i = 0; i < per; i++) expect(Number.isNaN(r.slice[s * per + i]!)).toBe(s < samplesTo(0) - 1);
+      // The labels, the chart and the walls are read to the stage's end as well.
+      for (let s = samplesTo(0) - 1; s < samplesTo(SLICE_MIN); s++) {
+        expect(Number.isNaN(r.coldest[s]!)).toBe(false);
+        expect(Number.isNaN(r.wall[(s + 1) * WALL_NODES - 1]!)).toBe(false);
+      }
+    }
   });
 });

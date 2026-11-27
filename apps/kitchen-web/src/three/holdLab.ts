@@ -70,14 +70,17 @@ const DONE_MIN = 6 * 60;
 const DONE_MAX = 10 * 60 + 30;
 /** The chart's clock: from the earliest priming to the stage's end. */
 const CHART_T0 = DONE_MIN - PRIME_MIN;
-/** The loop: the priming, the hours (seconds an hour), a hold on the end (seconds). */
-const PRIME_S = 2.6;
+/** The loop: the priming, the swap (the water out, the chili in, slowed to be seen), the hours (seconds an hour), a
+ *  hold on the end (seconds). */
+const PRIME_S = 2.4;
+const SWAP_S = 1.8;
 const HOUR_S = 3.6;
 const END_S = 4;
 /** The pans slide in over the first minutes after packing (and the water out over the last of priming). */
 const SLIDE_MIN = 4;
 
-const degF = (c: number) => `${Math.round(cToF(c))} °F`;
+/** A temperature as shown: rounded, but never up to 135 °F from under it, where the verdicts are drawn. */
+const degF = (c: number) => `${c < HOT_LINE_C ? Math.min(134, Math.round(cToF(c))) : Math.round(cToF(c))} °F`;
 const clockOf = (m: number) => {
   const a = ((Math.round(m) % 1440) + 1440) % 1440;
   const h = Math.floor(a / 60);
@@ -339,7 +342,7 @@ export function mountHoldLab(root: HTMLElement): void {
     return { key: w.key, model, x, y, pans, water, ring: { mat: ringMat, tex: ringTex } };
   });
 
-  // The cook, behind the carriers, an eye on them.
+  // The cook, beside the carriers, an eye on them.
   const cook = makeStaff("p50", 2, { seed: 31, apron: 0x2b3a55, sleeves: "cuffed" });
   const COOK = stacked ? { x: 0.84, z: -0.42 } : { x: 1.42, z: -0.36 };
   cook.place(COOK.x, COOK.z, Math.atan2(-0.6 - COOK.x, 0.3 - COOK.z));
@@ -462,7 +465,7 @@ export function mountHoldLab(root: HTMLElement): void {
   const okAt = (r: HoldRun) => atLunch(r) >= HOT_LINE_C;
 
   function longestDoings(): string[] {
-    return ["Priming two carriers with near-boiling water", "Shut in the carriers until the van", "1 pan, primed: its corner under 135 °F"];
+    return ["Priming two carriers with near-boiling water", "Shut in the carriers until the van", "1 pan, primed: its corner under 135 °F", "Lunch: 1 pan, primed needs reheating"];
   }
 
   /* The runs: off the main thread, kept by packing temperature. */
@@ -472,7 +475,8 @@ export function mountHoldLab(root: HTMLElement): void {
     worker = new Worker(new URL("../sim/holdRuns.worker.ts", import.meta.url), { type: "module" });
     worker.onmessage = (e: MessageEvent<HoldDone>) => {
       cache.set(e.data.startF, e.data.runs);
-      if (e.data.startF === startF) take(e.data.runs, e.data.startF);
+      // A second answer for what is already shown (asked again while the first was on its way) changes nothing.
+      if (e.data.startF === startF && runsF !== startF) take(e.data.runs, e.data.startF);
     };
     worker.onerror = () => {
       worker = null;
@@ -529,7 +533,8 @@ export function mountHoldLab(root: HTMLElement): void {
       const ok = okAt(r);
       t.el?.setAttribute("data-ok", String(ok));
       if (t.v) t.v.textContent = degF(atLunch(r));
-      const lines = ["at lunch, coolest pan", `middle ${degF(sampleOf(r.centre[0]!, LUNCH - done))}`];
+      const mid = Math.min(...r.centre.map((c) => sampleOf(c, LUNCH - done)));
+      const lines = ["corner, at lunch", `middle ${degF(mid)}`];
       lines.push(ok ? (r.hotMin === null ? "Hot all day" : `Hot for ${span(r.hotMin)}`) : `Too cool at ${clockOf(done + r.hotMin!)}`);
       if (t.s) t.s.textContent = lines.join("\n");
     }
@@ -543,7 +548,8 @@ export function mountHoldLab(root: HTMLElement): void {
   };
   const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
   function renderStatus(): void {
-    if (!statusEl || !runs) return;
+    // While another packing temperature is worked out, its "Working out" stays up.
+    if (!statusEl || !runs || runsF !== startF) return;
     const ok = runs.filter(okAt);
     const late = runs.filter((r) => !okAt(r));
     const list = (rs: HoldRun[]) => {
@@ -556,7 +562,7 @@ export function mountHoldLab(root: HTMLElement): void {
       return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
     };
     const parts: string[] = [];
-    const when = `Done at ${clockOf(done)} and packed at ${runsF} °F`;
+    const when = `With the chili done at ${clockOf(done)} and packed at ${runsF} °F`;
     if (!late.length) parts.push(`${when}, all four carriers hold the chili at 135 °F or more until lunch.`);
     else if (!ok.length) parts.push(`${when}, no carrier holds all its chili at 135 °F or more until lunch.`);
     else parts.push(`${when}, ${list(ok)} ${ok.length === 1 ? "holds" : "hold"} the chili at 135 °F or more until lunch.`);
@@ -565,10 +571,10 @@ export function mountHoldLab(root: HTMLElement): void {
     const fc = runOf("fullCold")!;
     const op = runOf("onePrimed")!;
     const oc = runOf("oneCold")!;
-    parts.push(`Six pans keep each other warm: the middle ones lose heat only sideways, through half a foot of chili, so a full carrier holds 135 °F for ${span(Math.min(fp.hotMin!, fc.hotMin!))} or more.`);
+    parts.push(`Six pans keep each other warm: the middle ones lose heat only sideways, through half a foot of chili, so a full carrier keeps every pan at 135 °F or more for ${Math.floor(Math.min(fp.hotMin!, fc.hotMin!) / 60)} hours or longer.`);
     const drop = (r: HoldRun) => Math.round(cToF(r.startC) - cToF(sampleOf(r.coldest, 60)));
     parts.push(`A lone pan has a whole carrier's walls to warm. In a cold carrier it is ${drop(oc)} °F cooler an inch in from its corner after the first hour; in a primed one, ${drop(op)} °F.`);
-    if (runsF === 165) parts.push("Packed at 165 °F, the reheating minimum, it has 20 °F less to lose before 135 °F than at 185 °F.");
+    if (runsF === 165) parts.push("Packed at 165 °F, the reheating minimum, the chili has 20 °F less to lose before 135 °F than at 185 °F.");
     statusEl.textContent = parts.join(" ");
     statusEl.dataset.state = late.length ? "warn" : "ok";
   }
@@ -625,6 +631,8 @@ export function mountHoldLab(root: HTMLElement): void {
     svg += `</svg>`;
     chartEl.innerHTML = svg;
     lives = runs.map((r) => ({ key: r.way.key, clip: chartEl.querySelector<SVGRectElement>(`[data-hd-clip="${r.way.key}"]`), dot: chartEl.querySelector<SVGCircleElement>(`[data-hd-dot="${r.way.key}"]`) }));
+    // Drawn to the minute on show now: the loop that keeps it there does not run while the stage is out of view.
+    showChart(playMin);
   }
   function showChart(m: number): void {
     if (!runs || !chartX || !chartY) return;
@@ -712,13 +720,16 @@ export function mountHoldLab(root: HTMLElement): void {
     if (!runs) return "Working out the morning…";
     const clock = done + m;
     if (m < 0) return "Priming two carriers with near-boiling water";
-    if (m < 20) return `Packed at ${runsF} °F, the doors shut`;
+    if (m < SLIDE_MIN || (m < 20 && clock < VAN[0])) return `Packed at ${runsF} °F, the doors shut`;
     if (clock >= VAN[0] && clock < VAN[1]) return "In the van, 10:30 to 11:15";
+    if (clock >= LUNCH && clock < LUNCH + 30) {
+      const cool = runs.filter((r) => !okAt(r));
+      return !cool.length ? "Lunch: served from the carriers" : cool.length === 1 ? `Lunch: ${cool[0]!.way.short} needs reheating` : `Lunch: ${cool.length} carriers need reheating`;
+    }
     // The latest carrier to fall under 135 °F within the last hour.
     let best = { t: -Infinity, s: "" };
     for (const r of runs) if (r.hotMin !== null && r.hotMin <= m && m - r.hotMin < 60 && r.hotMin > best.t) best = { t: r.hotMin, s: `${r.way.short}: its corner under 135 °F` };
     if (best.s) return best.s;
-    if (clock >= LUNCH && clock < LUNCH + 30) return "Lunch: served from the carriers";
     return clock < VAN[0] ? "Shut in the carriers until the van" : clock < LUNCH ? "At the lunch, waiting to be served" : "Served";
   }
   function showHud(m: number): void {
@@ -832,11 +843,13 @@ export function mountHoldLab(root: HTMLElement): void {
   });
   let last = performance.now();
   const fitClip = clipFitter(camera, scene, 0.05);
-  /** The loop's minute after packing: the priming, then the hours to 1 pm, then a hold. */
-  const loopS = () => PRIME_S + ((DAY_END - done) / 60) * HOUR_S + END_S;
+  /** The loop's minute after packing: the priming, the swap, then the hours to 1 pm, then a hold. */
+  const loopS = () => PRIME_S + SWAP_S + ((DAY_END - done - SLIDE_MIN) / 60) * HOUR_S + END_S;
   function minuteAt(s: number): number {
-    if (s < PRIME_S) return -PRIME_MIN + (s / PRIME_S) * PRIME_MIN;
-    return Math.min(DAY_END - done, ((s - PRIME_S) / HOUR_S) * 60);
+    if (s < PRIME_S) return -PRIME_MIN + (s / PRIME_S) * (PRIME_MIN - SLIDE_MIN);
+    const w = s - PRIME_S;
+    if (w < SWAP_S) return -SLIDE_MIN + (w / SWAP_S) * 2 * SLIDE_MIN;
+    return Math.min(DAY_END - done, SLIDE_MIN + ((w - SWAP_S) / HOUR_S) * 60);
   }
   function animate(now: number): void {
     requestAnimationFrame(animate);
