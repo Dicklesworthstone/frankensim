@@ -643,7 +643,8 @@ async function main() {
         // Flush with the hood's edge and the gap open, the broilers need 5,100 cfm: at the code's 4,000 smoke rolls out
         // under the edge. Pushed 12 inches back with the gap sealed they need 2,800: all of it caught, and none out in
         // the kitchen once what was already out has cleared. At 4,000 cfm four of the six setups are caught, at 2,700
-        // none. No puff the hood caught is ever drawn as escaping.
+        // none. No puff the hood caught is ever drawn as escaping. The cook has stepped in after the broilers and is
+        // working again, 0.4 m in front of them, the tongs' tips coming down onto the steak and not into it.
         const info = () => page.$eval("[data-hc-stage]", (el) => el.hood.info());
         await page.$eval("[data-hc-stage]", (el) => {
           el.hood.hold(true);
@@ -659,7 +660,22 @@ async function main() {
         await sleep(6000);
         const sealed = await info();
         console.log(`[verify-chrome] Keep the hood, 12 in back and sealed: need ${sealed.need}, caught ${sealed.caught}, front ${sealed.frontIn} in, seal ${sealed.sealK}, ${JSON.stringify(sealed.smoke)}`);
-        if (sealed.at !== 2 || !sealed.sealed || sealed.touring || sealed.need !== 2800 || !sealed.caught || sealed.frontIn !== 12 || sealed.sealK !== 1 || sealed.smoke.escaping !== 0 || sealed.smoke.stray !== 0 || !(sealed.smoke.live > 200) || !/all caught/.test(sealed.tags[1] ?? "") || !/sealed/.test(sealed.tags[0] ?? "")) throw new Error(`Keep the hood: 12 inches back and sealed at 4,000 cfm, the smoke is not all caught: ${JSON.stringify(sealed)}`);
+        if (sealed.at !== 2 || !sealed.sealed || sealed.touring || sealed.need !== 2800 || !sealed.caught || sealed.frontIn !== 12 || sealed.sealK !== 1 || sealed.stepping || sealed.cookWork !== 1 || Math.abs(sealed.cookGap - 0.4) > 0.01 || sealed.smoke.escaping !== 0 || sealed.smoke.stray !== 0 || !(sealed.smoke.live > 200) || !/all caught/.test(sealed.tags[1] ?? "") || !/sealed/.test(sealed.tags[0] ?? "")) throw new Error(`Keep the hood: 12 inches back and sealed at 4,000 cfm, the smoke is not all caught: ${JSON.stringify(sealed)}`);
+        const tongsLow = await page.$eval(
+          "[data-hc-stage]",
+          (el) =>
+            new Promise((res) => {
+              const t0 = performance.now();
+              let lo = Infinity;
+              const tick = () => {
+                lo = Math.min(lo, el.hood.info().tongsOver);
+                if (performance.now() - t0 < 2600) requestAnimationFrame(tick);
+                else res(lo);
+              };
+              requestAnimationFrame(tick);
+            }),
+        );
+        if (!(tongsLow > -0.004 && tongsLow < 0.02)) throw new Error(`Keep the hood: over a placing the tongs' tips come down to ${tongsLow} m from the steak's top face, into it or short of it`);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch6-hood.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch6-hood.png");
         await page.$eval("[data-hc-stage]", (el) => el.hood.set({ fan: 2700 }));

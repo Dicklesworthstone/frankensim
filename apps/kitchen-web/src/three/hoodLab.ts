@@ -16,7 +16,7 @@ import { CODE_CFM, COLD_OUT_F, EDGE_IN, SETS, SETUPS, catches, caughtCount, need
 import { bindCanvasResize, clipFitter, createScrollSafeOrbit, createStudioRenderer, observeInView, shaderGate } from "./kit";
 import { buildFixture, type Piece } from "./models/all";
 import { palette } from "./models/materials";
-import { makeStaff } from "./models/people";
+import { Routine, blendPose, copyPose, makeStaff, newPose, standPose } from "./models/people";
 import { Shop, rbox } from "./models/shop";
 import { studioEnvironment, studioLights } from "./models/stage";
 import { STOVE_STEAK } from "./stoveLab";
@@ -46,6 +46,12 @@ const GRATE_Y = GRATE_YF + GRATE_RISE / 2;
 const GRATE_Z0 = -0.072;
 const GRATE_Z1 = -0.698;
 const COOK_Y = STAND.h + GRATE_Y;
+/** Two steaks on each broiler, from its middle and its front (m), and their turn: one on the grates' front half, where
+ *  the cook works it, one further back. */
+const STEAKS = [
+  { dx: -0.2, dz: -0.42, yaw: 0.25 },
+  { dx: 0.17, dz: -0.26, yaw: -0.4 },
+] as const;
 /** The broilers' middles along the hood, and how far their line runs each way. */
 const XS = [-BROILER.w, 0, BROILER.w] as const;
 const LINE_HALF = 1.5 * BROILER.w;
@@ -228,9 +234,9 @@ export function mountHoodLab(root: HTMLElement): void {
   lights.hemi.intensity = 0.5;
   const p = palette();
   {
-    const floor = tilePlane(16, 6);
+    const floor = tilePlane(16, 8);
     floor.rotation.x = -Math.PI / 2;
-    floor.position.set(0, 0, 2.6);
+    floor.position.set(0, 0, 3.6);
     scene.add(floor);
     // The wall: charcoal glazed tile from the floor to the hood's top, painted above.
     const top = EDGE_Y + HOOD.h;
@@ -281,17 +287,14 @@ export function mountHoodLab(root: HTMLElement): void {
     st.position.set(x - STAND.w / 2, 0, -0.012);
     st.scale.y = STAND.h / TABLE_Y;
     g.add(st);
-    for (const [dx, dz, yaw] of [
-      [-0.2, -0.33, 0.25],
-      [0.17, -0.42, -0.4],
-    ] as const) {
+    for (const { dx, dz, yaw } of STEAKS) {
       const s = i === 0 && dx < 0 ? steak.group : steak.group.clone();
       const holder = new THREE.Group();
       s.position.set(-STEAK.w / 2, 0, STEAK.d / 2);
       holder.add(s);
       // On the sloped grates, which fall toward the trough at the front, settled a millimetre into the bars.
       const L = GRATE_Z0 - GRATE_Z1;
-      holder.position.set(x + dx + i * 0.01, STAND.h + GRATE_YF + ((GRATE_Z0 - dz) / L) * GRATE_RISE - 0.001, dz);
+      holder.position.set(x + dx, STAND.h + GRATE_YF + ((GRATE_Z0 - dz) / L) * GRATE_RISE - 0.001, dz);
       holder.rotation.set(Math.atan2(GRATE_RISE, L), yaw, 0);
       g.add(holder);
     }
@@ -325,6 +328,29 @@ export function mountHoodLab(root: HTMLElement): void {
     tongs.add(m.group);
   }
   const grateAt = new THREE.Vector3();
+  const cookPose = newPose();
+  const standAux = newPose();
+  /** The cook works `COOK_BACK` in front of the broilers' fronts (m) and is never nearer than `COOK_MIN`. When they
+   *  move, the cook lowers the tongs (`workK` eases to 0 over `EASE` seconds), takes a few short steps (`step`, a
+   *  routine: back from the broilers at once, towards them only once they have stopped; broilers coming forward wait
+   *  until the cook is on the way back) and takes up the work again where they stopped. */
+  const COOK_BACK = 0.4;
+  const COOK_MIN = 0.3;
+  const EASE = 0.5;
+  let cookZ = frontOf(TOUR[0]!.at) + COOK_BACK;
+  let workK = 1;
+  /** The standing pose's clock while the tongs are down, held still so it meets the routine's own at both ends. */
+  let standT = 0;
+  let step: { r: Routine; t0: number; to: number } | null = null;
+
+  /** The top face of the steak the cook works (m above the floor), and how far the tongs' tips reach below the
+   *  point the work aims at, at the lowest of each placing (the pose aims a spoon's bowl, 17 cm from the fist; the
+   *  tongs reach about 21 cm). */
+  const WORKED_TOP = STAND.h + GRATE_YF + ((GRATE_Z0 - STEAKS[1].dz) / (GRATE_Z0 - GRATE_Z1)) * GRATE_RISE - 0.001 + STEAK.h;
+  const TIPS_BELOW = 0.026;
+  /** How far the tongs' lowest point is above that face (m; into the steak, negative). */
+  const tongsBox = new THREE.Box3();
+  const tongsOver = () => +(tongsBox.setFromObject(tongs).min.y - WORKED_TOP).toFixed(3);
 
   /* The smoke as soft points and the air it draws in as faint streaks, updated each frame. */
   const NS = phone ? 950 : 1500;
@@ -570,8 +596,8 @@ export function mountHoodLab(root: HTMLElement): void {
     const ok = catches(fan, setup);
     parts.push(
       ok
-        ? `With the broilers ${SAID_AT[setup.at]} and the gap behind them ${setup.sealed ? "sealed" : "open"}, a fan pulling ${cfm(fan)} catches all their smoke: the lab measured ${cfm(need)}.`
-        : `With the broilers ${SAID_AT[setup.at]} and the gap behind them ${setup.sealed ? "sealed" : "open"}, smoke escapes the hood: the fan pulls ${cfm(fan)}, and the lab measured ${cfm(need)} to catch it all.`,
+        ? `With the broilers ${SAID_AT[setup.at]} and the gap behind them ${setup.sealed ? "sealed" : "open"}, a fan pulling ${cfm(fan)} catches all their smoke: the least that caught it all in the lab was ${cfm(need)}.`
+        : `With the broilers ${SAID_AT[setup.at]} and the gap behind them ${setup.sealed ? "sealed" : "open"}, smoke escapes the hood: the fan pulls ${cfm(fan)}, and in the lab it took ${cfm(need)} to catch it all.`,
     );
     // Where the broilers must stand for this fan, open and sealed.
     const firstAt = (sealed: boolean) => SETUPS.find((s) => s.sealed === sealed && catches(fan, s))?.at ?? null;
@@ -696,7 +722,7 @@ export function mountHoodLab(root: HTMLElement): void {
     if (!el) return;
     tagAt.copy(at).project(camera);
     const on = tagAt.z < 1 && Math.abs(tagAt.x) < 0.96 && Math.abs(tagAt.y) < 0.96;
-    el.hidden = !on;
+    if (el.hidden === on) el.hidden = !on;
     if (!on) return;
     const sig = text.join("|") + warn;
     if (el.dataset.last !== sig || !tagSize.has(el)) {
@@ -714,7 +740,11 @@ export function mountHoodLab(root: HTMLElement): void {
     const px = ((tagAt.x + 1) / 2) * W;
     const py = ((1 - tagAt.y) / 2) * H;
     const x = Math.min(W - sz.w / 2 - 4, Math.max(sz.w / 2 + 4, px));
-    el.style.transform = `translate(${x.toFixed(1)}px, ${(py - STEM).toFixed(1)}px)`;
+    const tf = `translate(${x.toFixed(1)}px, ${(py - STEM).toFixed(1)}px)`;
+    if (el.dataset.tf !== tf) {
+      el.dataset.tf = tf;
+      el.style.transform = tf;
+    }
     const sx = `${Math.round(px - x)}px`;
     if (el.dataset.sx !== sx) {
       el.dataset.sx = sx;
@@ -760,10 +790,15 @@ export function mountHoodLab(root: HTMLElement): void {
     sDie[i] = -1;
     const k = i * 3;
     // Most smoke comes off the steaks; the rest off the bars where the fat burns.
-    const onSteak = rnd() < 0.55;
-    smoke.pos[k] = x0 + (onSteak ? (rnd() < 0.5 ? -0.2 : 0.17) + (rnd() - 0.5) * 0.16 : (rnd() - 0.5) * 0.8);
+    if (rnd() < 0.55) {
+      const st = STEAKS[rnd() < 0.5 ? 0 : 1]!;
+      smoke.pos[k] = x0 + st.dx + (rnd() - 0.5) * 0.15;
+      smoke.pos[k + 2] = frontZ + st.dz + (rnd() - 0.5) * 0.1;
+    } else {
+      smoke.pos[k] = x0 + (rnd() - 0.5) * 0.8;
+      smoke.pos[k + 2] = frontZ + GRATE_Z0 + (GRATE_Z1 - GRATE_Z0) * rnd();
+    }
     smoke.pos[k + 1] = COOK_Y + 0.02 + rnd() * 0.04;
-    smoke.pos[k + 2] = frontZ + (onSteak ? -0.33 - rnd() * 0.1 : GRATE_Z0 + (GRATE_Z1 - GRATE_Z0) * rnd());
   }
   function emitAir(i: number): void {
     aAge[i] = 0;
@@ -966,10 +1001,28 @@ export function mountHoodLab(root: HTMLElement): void {
     seal.scale.z = Math.max(0.001, back - 0.002);
     seal.position.set(0, SEAL_Y + drop, back / 2);
     lip.position.set(0, SEAL_Y + drop - 0.025, back - 0.0008);
-    // The cook a step in front of the middle broiler, reaching to the steaks.
-    cook.place(COOK_X, frontZ + 0.44, Math.PI);
-    grateAt.set(0.1 + 0.08 * Math.sin(t * 0.9), COOK_Y + 0.02, frontZ - 0.35);
+    // The cook a step in front of the middle broiler, working its front steak with the tongs (their tips down to its
+    // top face), the free hand down by the side, away from the grates; stepping, the routine's own pose.
+    if (step) {
+      step.r.apply(t - step.t0);
+      return;
+    }
+    cook.place(COOK_X, cookZ, Math.PI);
+    const front = STEAKS[1];
+    grateAt.set(front.dx + 0.015 * Math.sin(t * 0.9), WORKED_TOP + TIPS_BELOW + 0.002, frontZ + front.dz);
     cook.work("plate", t, { at: grateAt, surfaceY: COOK_Y });
+    const pose = copyPose(cookPose, cook.current);
+    const free = pose.arms[0];
+    free.ik = 0;
+    free.flex = 0.3;
+    free.abd = 0.12;
+    free.elbow = 0.45;
+    free.twist = 0.1;
+    free.shape = "relax";
+    free.close = 1;
+    // Eased to standing before the steps and from it after them.
+    if (workK < 1) blendPose(pose, standPose(cook, standT, standAux), pose, smooth(workK));
+    cook.pose(pose);
   }
 
   renderAll();
@@ -981,7 +1034,11 @@ export function mountHoodLab(root: HTMLElement): void {
     tagSize.clear();
     frame();
   }).observe(stageEl);
-  void document.fonts?.ready.then(() => frame());
+  // The tags were measured in the fallback face until the page's fonts are in.
+  void document.fonts?.ready.then(() => {
+    tagSize.clear();
+    frame();
+  });
   if (chartEl) {
     let lastW = chartEl.clientWidth;
     new ResizeObserver(() => {
@@ -1031,7 +1088,25 @@ export function mountHoodLab(root: HTMLElement): void {
     const moving = Math.abs(dz) > 1e-4;
     const sGo = moving ? 0 : setup.sealed ? 1 : 0;
     sealK += Math.sign(sGo - sealK) * Math.min(Math.abs(sGo - sealK), dt * 1.4);
-    if (moving && sealK <= 0) frontZ += Math.sign(dz) * Math.min(Math.abs(dz), dt * 0.3);
+    // The cook makes way (see COOK_BACK).
+    const cookTo = zTo + COOK_BACK;
+    if (step && t - step.t0 >= step.r.duration) {
+      cookZ = step.to;
+      standT = step.r.duration;
+      step = null;
+    }
+    const away = Math.abs(cookTo - cookZ) > 0.005;
+    const wGo = step || away ? 0 : 1;
+    workK += Math.sign(wGo - workK) * Math.min(Math.abs(wGo - workK), dt / EASE);
+    if (workK >= 1) standT = 0;
+    if (!step && away && workK <= 0 && (cookTo > cookZ || !moving)) {
+      step = { r: new Routine(cook, { x: COOK_X, z: cookZ, yaw: Math.PI }, [{ kind: "shuffle", to: [COOK_X, cookTo] }], false), t0: t, to: cookTo };
+    }
+    if (moving && sealK <= 0 && (dz < 0 || (step ? step.to : cookZ) >= cookTo - 0.005)) {
+      const z = frontZ + Math.sign(dz) * Math.min(Math.abs(dz), dt * 0.3);
+      frontZ = dz < 0 ? z : Math.max(frontZ, Math.min(z, cook.placement.z - COOK_MIN));
+    }
+    sizeScale();
     placeLine(t);
     stepAir(dt, t);
     stepSmoke(dt, t);
@@ -1071,6 +1146,10 @@ export function mountHoodLab(root: HTMLElement): void {
           caughtCount: caughtCount(fan),
           frontIn: +((HOOD.d - frontZ) / IN).toFixed(2),
           sealK: +sealK.toFixed(2),
+          cookGap: +(cook.placement.z - frontZ).toFixed(3),
+          cookWork: +workK.toFixed(2),
+          stepping: !!step,
+          tongsOver: tongsOver(),
           smoke: { live, escaping, stray },
           tags: [tagGap, tagLip].map((el) => (el && !el.hidden ? el.textContent : null)),
           hud: hudEl?.textContent ?? "",
@@ -1090,6 +1169,10 @@ export function mountHoodLab(root: HTMLElement): void {
       settle() {
         frontZ = frontOf(setup.at);
         sealK = setup.sealed ? 1 : 0;
+        cookZ = frontZ + COOK_BACK;
+        step = null;
+        workK = 1;
+        standT = 0;
       },
       /** Hold the tour where it is (true), or let it run. */
       hold(on: boolean) {
