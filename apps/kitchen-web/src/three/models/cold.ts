@@ -1291,6 +1291,8 @@ export interface ShelfOpts {
   stock?: Shop[] | null;
   /** How full the shelves are, 0..1. */
   fill?: number;
+  /** Cases among the stock (default true); without, tubs and cans only. */
+  cartons?: boolean;
   /** Fewer-sided wires and collars, for the many units in a walk-in. */
   lite?: boolean;
   seed?: number;
@@ -1381,14 +1383,14 @@ export function wireShelving(s: Shop, L: number, D: number, H: number, o: ShelfO
       s.add(wireMatMaterial(), g, [L / 2, y - wr, -D / 2]);
     }
   }
-  if (o.stock?.length && s.detail > 0) shelfStock(o.stock, L, D, tiers, o.fill ?? 0.7, o.seed ?? 7);
+  if (o.stock?.length && s.detail > 0) shelfStock(o.stock, L, D, tiers, o.fill ?? 0.7, o.seed ?? 7, o.cartons ?? true);
 }
 
 /**
  * Dry and cold stock on a shelving unit: kraft cases with printed panels, white tubs with coloured lids, #10 cans,
  * a lidded steam-table pan or two, placed across each shelf to `fill`.
  */
-function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: number, seed: number): void {
+function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: number, seed: number, cartons: boolean): void {
   const p = palette();
   const gm = goodsMaterial();
   const r = rng(seed);
@@ -1413,7 +1415,7 @@ function shelfStock(shops: Shop[], L: number, D: number, tiers: number[], fill: 
     let x = 0.045;
     while (x < L - 0.08) {
       s = shops[item++ % shops.length]!;
-      const kind = r();
+      const kind = cartons ? r() : 0.45 + r() * 0.55;
       if (r() > fill) {
         x += 0.12;
         continue;
@@ -2599,8 +2601,8 @@ function walkIn(k: WalkInSpec): Builder {
     }
     let z0 = zi - 0.06;
     lens.forEach((L, i) => {
-      s.at([T + 0.012 + Ds, floorY, z0], [0, Math.PI / 2, 0], () => wireShelving(s, L, Ds, 1.88, { grooves: false, lite: true, stock: [s], fill: w > 2.7 ? 0.4 : 0.55, seed: 101 + i }));
-      wallR.at([w - T - 0.012 - Ds, floorY, z0 - L], [0, -Math.PI / 2, 0], () => wireShelving(wallR, L, Ds, 1.88, { grooves: false, lite: true, stock: [wallR], fill: w > 2.7 ? 0.35 : 0.5, seed: 201 + i }));
+      s.at([T + 0.012 + Ds, floorY, z0], [0, Math.PI / 2, 0], () => wireShelving(s, L, Ds, 1.88, { grooves: false, lite: true, stock: [s], fill: w > 2.7 ? 0.4 : 0.55, seed: 101 + i, cartons: !k.back }));
+      wallR.at([w - T - 0.012 - Ds, floorY, z0 - L], [0, -Math.PI / 2, 0], () => wireShelving(wallR, L, Ds, 1.88, { grooves: false, lite: true, stock: [wallR], fill: w > 2.7 ? 0.35 : 0.5, seed: 201 + i, cartons: !k.back }));
       z0 -= L + 0.01;
     });
 

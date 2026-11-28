@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COLUMNS, FREEZER_PLACES, ITEM, LEVELS, ITEMS, MENU, SHELVES, THIS_WEEK, WALKIN_PLACES, casesOf, layoutWeek, manyWeeks, runWeeks, thisWeekCounts, type Policy, type Spot, type Trucks } from "./walkInWeek";
+import { COLUMNS, FLOOR_LEVELS, FLOOR_ROWS, FREEZER_PLACES, ITEM, LEVELS, ITEMS, MENU, SHELVES, THIS_WEEK, WALKIN_PLACES, casesOf, layoutWeek, manyWeeks, manyWeeksRun, runWeeks, thisWeekCounts, type Policy, type Spot, type Trucks } from "./walkInWeek";
 
 const POLICIES: Policy[] = [];
 // Every setting the figure offers.
@@ -8,11 +8,11 @@ const isSpot = (e: unknown): e is Spot => typeof e === "object" && e !== null;
 
 describe("a week of meat and fish through the walk-in", () => {
   test("the chart's keeping times, the day it comes in counted as day 1, and the Food Code's cooking temperatures", () => {
-    expect(ITEMS.map((i) => [i.key, i.freshDays, i.thawedDays])).toEqual([
-      ["salmon", 3, 2],
-      ["ribs", 5, 5],
-      ["beef", 2, 2],
-      ["thighs", 2, 2],
+    expect(ITEMS.map((i) => [i.key, i.freshDays, i.thawedDays, i.thawDays])).toEqual([
+      ["salmon", 3, 2, 1],
+      ["ribs", 5, 5, 2],
+      ["beef", 2, 2, 2],
+      ["thighs", 2, 2, 1],
     ]);
     // Top to bottom on the shelves: the hottest cooked lowest.
     for (let i = 1; i < ITEMS.length; i++) expect(ITEMS[i]!.cookF).toBeGreaterThanOrEqual(ITEMS[i - 1]!.cookF);
@@ -57,20 +57,44 @@ describe("a week of meat and fish through the walk-in", () => {
     }
   });
 
-  test("frozen, the thaw goes by the plan a day ahead: with no cushion a count over the plan comes up short", () => {
+  test("frozen, the thaw goes by the plan its thawing time ahead: with no cushion a count over the plan comes up short", () => {
     const none = runWeeks({ trucks: 3, frozen: true, cushion: 0 }, thisWeekCounts());
     const some = runWeeks({ trucks: 3, frozen: true, cushion: 0.1 }, thisWeekCounts());
     expect(none.shortLunches).toBeGreaterThan(0);
     expect(some.shortLunches).toBe(0);
     expect(some.thrownLb).toBeGreaterThan(none.thrownLb);
-    for (const ev of some.events) if (ev.kind === "thaw") expect(ev.hour % 24).toBe(8);
+    const lots = new Map(some.events.flatMap((e) => e.stock).map((l) => [l.id, l]));
+    let pulls = 0;
+    for (const ev of some.events)
+      if (ev.kind === "thaw") {
+        expect(ev.hour % 24).toBe(8);
+        for (const x of ev.lots) {
+          const l = lots.get(x.id)!;
+          const it = ITEM[l.item];
+          // Pulled its thawing time before its lunch, good to the end of its thawed days from then.
+          expect(l.readyDay - l.inDay).toBe(it.thawDays);
+          expect(l.lastDay).toBe(l.readyDay + it.thawedDays - 1);
+          expect(MENU.find((m) => m.day === l.readyDay % 7)?.item).toBe(l.item);
+          pulls++;
+        }
+      }
+    expect(pulls).toBe(MENU.length);
   });
 
-  test("frozen on two trucks fills the freezer's shelves; on five they stay half empty", () => {
+  test("the many weeks a slice at a time come to the same as all at once", () => {
+    const p: Policy = { trucks: 2, frozen: true, cushion: 0.15 };
+    const run = manyWeeksRun(p, 60);
+    let steps = 0;
+    while (!run.step(7)) steps++;
+    expect(steps).toBe(8);
+    expect(run.result()).toEqual(manyWeeks(p, 60));
+  });
+
+  test("frozen on two trucks fills the freezer's shelves; on five a delivery waits only for the morning's pull", () => {
     const two = manyWeeks({ trucks: 2, frozen: true, cushion: 0.1 }, 100);
     const five = manyWeeks({ trucks: 5, frozen: true, cushion: 0.1 }, 100);
     expect(two.freezerPeak.mid).toBeGreaterThan(0.85 * FREEZER_PLACES);
-    expect(five.freezerPeak.p90).toBeLessThan(0.6 * FREEZER_PLACES);
+    expect(five.freezerPeak.p90).toBeLessThan(two.freezerPeak.mid);
     expect(five.anyFloor.freezer).toBe(0);
   });
 
@@ -88,11 +112,13 @@ describe("a week of meat and fish through the walk-in", () => {
     }
   });
 
-  test("every case has a place: chicken never above beef or fish, the floor only once the shelves are full", () => {
+  test("every case has a place: chicken never above beef or fish, fish over beef, the floor only once the shelves are crowded", () => {
     const weeks: number[][] = [thisWeekCounts()];
     // And a spread of weeks either side of the plan.
     for (const f of [0.8, 0.9, 1.1, 1.2]) weeks.push(thisWeekCounts().map((c, d) => (d >= 7 && d < 14 ? Math.round(c * f) : c)));
-    for (const p of POLICIES)
+    for (const p of POLICIES) {
+      // The week the figure plays keeps to the floor places drawn.
+      for (const st of layoutWeek(runWeeks(p, thisWeekCounts())).events) for (const c of st.after) if (c.at.floor) expect(c.at.col).toBeLessThan(FLOOR_ROWS[c.at.box]);
       for (const counts of weeks) {
         const w = runWeeks(p, counts);
         const L = layoutWeek(w);
@@ -106,9 +132,11 @@ describe("a week of meat and fish through the walk-in", () => {
           const key = (box: string, floor: boolean, tier: number, col: number, level: number) => [box, floor, tier, col, level].join("|");
           const keys = st.after.map((c) => key(c.at.box, c.at.floor, c.at.tier, c.at.col, c.at.level));
           expect(new Set(keys).size).toBe(keys.length);
-          // A case on top stands on one of its own lot.
-          for (const c of st.after)
-            if (c.at.level === 1) expect(st.after.find((x) => key(x.at.box, x.at.floor, x.at.tier, x.at.col, x.at.level) === key(c.at.box, c.at.floor, c.at.tier, c.at.col, 0))?.lot).toBe(c.lot);
+          // A case on top stands on one of its own lot, in stacks no higher than the shelves' and the floor's.
+          for (const c of st.after) {
+            expect(c.at.level).toBeLessThan(c.at.floor ? FLOOR_LEVELS[c.at.box] : LEVELS);
+            if (c.at.level > 0) expect(st.after.find((x) => key(x.at.box, x.at.floor, x.at.tier, x.at.col, x.at.level) === key(c.at.box, c.at.floor, c.at.tier, c.at.col, c.at.level - 1))?.lot).toBe(c.lot);
+          }
           // A case put on the floor found the shelves nearly full.
           for (const m of st.moves)
             if (isSpot(m.to) && m.to.floor) {
@@ -118,16 +146,19 @@ describe("a week of meat and fish through the walk-in", () => {
           for (const box of ["walkin", "freezer"] as const) {
             const here = st.after.filter((c) => c.at.box === box);
             const shelved = here.filter((c) => !c.at.floor);
-            for (const a of shelved) for (const b of shelved) if (a.at.col === b.at.col && a.at.tier > b.at.tier) expect(ITEM[a.item].cookF).toBeLessThanOrEqual(ITEM[b.item].cookF);
+            // Top to bottom in the items' order: salmon, short ribs, ground beef, chicken.
+            const rank = (k: string) => ITEMS.findIndex((i) => i.key === k);
+            for (const a of shelved) for (const b of shelved) if (a.at.col === b.at.col && a.at.tier > b.at.tier) expect(rank(a.item)).toBeLessThanOrEqual(rank(b.item));
             // Each case in the box its lot is in.
             for (const c of here) expect(st.ev.stock.find((l) => l.id === c.lot)!.where).toBe(box);
           }
           // Each move's ends: trucks from the dock, prep and the check to the kitchen, a thaw from the freezer to the walk-in.
           for (const m of st.moves) {
-            // A case moved down a shelf in its column, to make room.
+            // A case moved a shelf down or up in its column, to make room.
             if (isSpot(m.from) && isSpot(m.to) && m.from.box === m.to.box) {
               expect(st.ev.kind === "truck" || st.ev.kind === "thaw").toBe(true);
-              expect([m.to.col, m.to.tier, m.to.floor]).toEqual([m.from.col, m.from.tier - 1, false]);
+              expect([m.to.col, m.to.floor, m.from.floor]).toEqual([m.from.col, false, false]);
+              expect(Math.abs(m.to.tier - m.from.tier)).toBe(1);
               continue;
             }
             if (st.ev.kind === "truck") expect(m.from).toBe("dock");
@@ -136,5 +167,6 @@ describe("a week of meat and fish through the walk-in", () => {
           }
         }
       }
+    }
   });
 });

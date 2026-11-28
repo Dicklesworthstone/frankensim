@@ -644,7 +644,9 @@ async function main() {
         // As set on arrival (3 fresh trucks, 10% over the plan): no lunch short and 158 lb thrown out. On 2 trucks
         // Wednesday's 741 lunches of chicken thighs come up short: Monday's are past their day by Tuesday night and
         // Thursday's truck is too late. Frozen on 2 trucks at 25% over, cases end up on the floor. Over a truck's job
-        // the cook is out carrying a case, and the walk-in's door is open for it.
+        // the cook is out carrying a case, and the walk-in's door is open for it; once it is done, every door is shut
+        // and the boxes' tags are up. Frozen, Tuesday's 8 am thaw is for two lunches: the short ribs, two days to
+        // thaw, for Thursday, and the chicken thighs, one, for Wednesday.
         const info = () => page.$eval("[data-wo-stage]", (el) => el.walkin.info());
         const at = async (h) => {
           await page.$eval("[data-wo-stage]", (el, h) => {
@@ -659,6 +661,8 @@ async function main() {
         if (base.policy.trucks !== 3 || base.policy.frozen || base.week.shortLunches !== 0 || base.week.thrownLb !== 158) throw new Error(`A week through the walk-in: as set on arrival the week is not as expected: ${JSON.stringify(base)}`);
         const truck = await at(6.004);
         if (truck.job?.kind !== "truck" || !truck.cook || truck.doors.walkin !== 1 || truck.doors.freezer !== 0) throw new Error(`A week through the walk-in: during Monday's truck the cook is not out or the doors are wrong: ${JSON.stringify(truck)}`);
+        const done = await at(6.2);
+        if (done.job || done.doors.walkin !== 0 || done.doors.freezer !== 0 || !/^Walk-in/.test(done.tags[0] ?? "") || !/^Freezer/.test(done.tags[1] ?? "")) throw new Error(`A week through the walk-in: after Monday's truck a door is open or the boxes' tags are down: ${JSON.stringify(done)}`);
         await page.click('[data-wo-trucks="2"]');
         await sleep(300);
         const two = await at(57.2);
@@ -670,6 +674,10 @@ async function main() {
         if (!(full.floor > 0) || !/On the floor/.test(full.tags[2] ?? "") || !/floor/.test(full.status)) throw new Error(`A week through the walk-in: frozen at 25% over, no case is shown on the floor: ${JSON.stringify(full)}`);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch4-walkin-week.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch4-walkin-week.png");
+        await page.$eval("[data-wo-stage]", (el) => el.walkin.set({ frozen: true, trucks: 3, cushion: 0.1 }));
+        const thaw = await at(32.12);
+        console.log(`[verify-chrome] A week through the walk-in, frozen, Tuesday's thaw: ${thaw.hud.slice(0, 120)}`);
+        if (thaw.job?.kind !== "thaw" || !/short ribs for Thursday/.test(thaw.hud) || !/chicken thighs for Wednesday/.test(thaw.hud)) throw new Error(`A week through the walk-in: frozen, Tuesday's thaw is not for Thursday's short ribs and Wednesday's chicken: ${JSON.stringify(thaw)}`);
         await page.$eval("[data-wo-stage]", (el) => {
           el.walkin.set({ frozen: false, trucks: 3, cushion: 0.1 });
           el.walkin.hold(false);

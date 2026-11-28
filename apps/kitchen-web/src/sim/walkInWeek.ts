@@ -6,21 +6,24 @@
  * publishes it, last reviewed 2021), refrigerator at 40 °F or below and freezer at 0 °F, counting the day it comes in
  * as day 1 the way the FDA Food Code counts date marking (§3-501.17): fresh chicken pieces and ground beef 1 to 2 days,
  * fatty fish such as salmon 1 to 3, beef roasts 3 to 5; frozen, 2 to 12 months, longer than any week here. Frozen
- * meat thaws in the walk-in: USDA's guidance is a full day even for a pound of ground meat or boneless chicken (about
- * a day per 5 lb bag), after which ground meat, poultry and seafood keep 1 to 2 more days and red meat cuts 3 to 5.
- * Each takes the longest of its range.
+ * meat thaws in the walk-in: USDA's guidance is a full day even for a pound of ground meat or boneless chicken, and for
+ * a large frozen item a day for every 4 to 5 lb. So loose salmon portions and chicken thighs, frozen piece by piece, thaw in
+ * a day, and the 10 lb packs of ground beef and short ribs in two. Thawed, ground meat, poultry and seafood keep 1 to
+ * 2 more days and red meat cuts 3 to 5. Each takes the longest of its range.
  *
  * What the kitchen knows when: the client confirms each lunch's final count by noon the day before. A truck's order
  * goes in by 2 pm the day before it comes (6 am), so it knows the final count for the truck's own day and only the
- * plan for later days; frozen meat is pulled to thaw at 8 am the day before its lunch, before the count is in, so
- * that too goes by the plan. Ordering to the plan adds the cushion. Both come in whole cases, and frozen is pulled to
- * thaw by the case. Whatever is short at the morning's prep is bought locally on the day ("short"); whatever is past
- * its last day at the night's check is thrown out.
+ * plan for later days; frozen meat is pulled to thaw at 8 am, its thawing time ahead of its lunch, before the count
+ * is in, so that too goes by the plan. Ordering to the plan adds the cushion. Both come in whole cases, and frozen is
+ * pulled to thaw by the case. Whatever is short at the morning's prep is bought locally on the day ("short"); whatever
+ * is still there at the night's check on its last day is thrown out.
  *
  * Space: the meat and fish have three shelves of four case places in the walk-in, and as many in the freezer, two
- * cases of a lot stacked in a place. More cases than the shelves hold stand on the floor, which the Food Code does not allow for food (§3-305.11: at
- * least 6 inches above it). On the shelves raw meat stands by the temperature it is cooked to, the hottest lowest, so
- * nothing drips onto a food cooked less than itself (the Food Code's annex: chicken below beef).
+ * cases of a delivery stacked in a place (a case is never stacked on another delivery's, so the older is never buried).
+ * On the shelves raw meat stands by the temperature it is cooked to, the hottest lowest, so nothing drips onto a food
+ * cooked less than itself (the Food Code's annex: chicken below beef), and fish above beef cooked to the same. A case
+ * with no shelf place that keeps that order stands on the floor, which the Food Code does not allow for food
+ * (§3-305.11: at least 6 inches above it).
  */
 
 export const DAY = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
@@ -39,6 +42,8 @@ export interface Item {
   freshDays: number;
   /** Days it keeps once thawed, the day it is ready counted as day 1. */
   thawedDays: number;
+  /** Days it takes to thaw in the walk-in: pulled at 8 am this many days before its lunch. */
+  thawDays: number;
   /** Its quality frozen at 0 °F, months (the chart's longest). */
   frozenMonths: number;
   /** The Food Code's cooking temperature for it, °F (§3-401.11). */
@@ -47,10 +52,10 @@ export interface Item {
 /** In the order they stand on the shelves, top to bottom: the higher a food's cooking temperature, the lower it is
  *  kept, so nothing drips onto a food cooked less (the Food Code's annex: chicken below beef). */
 export const ITEMS: readonly Item[] = [
-  { key: "salmon", name: "Salmon fillets", dish: "Roast salmon", lbPer: 0.375, caseLb: 20, freshDays: 3, thawedDays: 2, frozenMonths: 3, cookF: 145 },
-  { key: "ribs", name: "Beef short ribs", dish: "Short rib braise", lbPer: 0.75, caseLb: 40, freshDays: 5, thawedDays: 5, frozenMonths: 12, cookF: 145 },
-  { key: "beef", name: "Ground beef", dish: "Chili", lbPer: 0.25, caseLb: 40, freshDays: 2, thawedDays: 2, frozenMonths: 4, cookF: 155 },
-  { key: "thighs", name: "Chicken thighs", dish: "Roast chicken thighs", lbPer: 0.375, caseLb: 40, freshDays: 2, thawedDays: 2, frozenMonths: 9, cookF: 165 },
+  { key: "salmon", name: "Salmon fillets", dish: "Roast salmon", lbPer: 0.375, caseLb: 20, freshDays: 3, thawedDays: 2, thawDays: 1, frozenMonths: 3, cookF: 145 },
+  { key: "ribs", name: "Beef short ribs", dish: "Short rib braise", lbPer: 0.75, caseLb: 40, freshDays: 5, thawedDays: 5, thawDays: 2, frozenMonths: 12, cookF: 145 },
+  { key: "beef", name: "Ground beef", dish: "Chili", lbPer: 0.25, caseLb: 40, freshDays: 2, thawedDays: 2, thawDays: 2, frozenMonths: 4, cookF: 155 },
+  { key: "thighs", name: "Chicken thighs", dish: "Roast chicken thighs", lbPer: 0.375, caseLb: 40, freshDays: 2, thawedDays: 2, thawDays: 1, frozenMonths: 9, cookF: 165 },
 ];
 export const ITEM = Object.fromEntries(ITEMS.map((i) => [i.key, i])) as Record<ItemKey, Item>;
 
@@ -221,10 +226,10 @@ export function runWeeks(p: Policy, counts: readonly number[]): WeekResult {
           lots.push(lot);
           came.push({ id: lot.id, item: lot.item, lb: lot.lb });
         } else {
-          // Frozen: what the pulls until the next truck's day will take (lunches tomorrow through that day), by the plan,
-          // less what is in the freezer.
+          // Frozen: what the pulls from this morning until the next truck's will take (each its thawing time ahead of
+          // its lunch), by the plan, less what is in the freezer.
           let want = 0;
-          for (let u = d + 1; u <= next; u++) if (menuOn(u)?.item === it.key) want += planLb(u);
+          for (let x = d; x < next; x++) if (menuOn(x + it.thawDays)?.item === it.key) want += planLb(x + it.thawDays);
           const have = lots.filter((l) => l.item === it.key && l.state === "frozen").reduce((s, l) => s + l.lb, 0);
           const lb = want - have;
           if (lb <= 1e-6) continue;
@@ -238,31 +243,33 @@ export function runWeeks(p: Policy, counts: readonly number[]): WeekResult {
       log(d, 6, "truck", { lots: came });
       peaks(d);
     }
-    // 08:00 frozen: tomorrow's lunch, by the plan, pulled to thaw a day in the walk-in, less what is already thawed and
-    // still good tomorrow; by the case, first in first out.
+    // 08:00 frozen: each lunch its thawing time ahead, by the plan, pulled to thaw in the walk-in, less what is already
+    // thawing or thawed and still good that day; by the case, first in first out.
     if (p.frozen) {
-      const m = menuOn(d + 1);
-      if (m) {
-        const it = ITEM[m.item];
-        const lb = unmet(it.key, [{ u: d + 1, lb: planLb(d + 1) }], lots.filter((l) => l.state === "thawing" || l.state === "thawed"));
+      const pulled: WeekEvent["lots"] = [];
+      for (const it of ITEMS) {
+        const u = d + it.thawDays;
+        if (menuOn(u)?.item !== it.key) continue;
+        const lb = unmet(it.key, [{ u, lb: planLb(u) }], lots.filter((l) => l.state === "thawing" || l.state === "thawed"));
         let pull = lb > 1e-6 ? Math.ceil(lb / it.caseLb - 1e-9) * it.caseLb : 0;
-        if (pull > 0) {
-          let got = 0;
-          for (const l of lots.filter((x) => x.item === it.key && x.state === "frozen").sort((a, b) => a.inDay - b.inDay)) {
-            const take = Math.min(l.lb, pull - got);
-            l.lb -= take;
-            got += take;
-            if (got >= pull - 1e-9) break;
-          }
-          pull = got;
-          if (pull > 1e-9) {
-            const lot: Lot = { id: nextId++, item: it.key, lb: pull, where: "walkin", state: "thawing", inDay: d, readyDay: d + 1, lastDay: d + it.thawedDays };
-            lots.push(lot);
-            lots = lots.filter((l) => l.lb > 1e-9);
-            log(d, 8, "thaw", { lots: [{ id: lot.id, item: lot.item, lb: lot.lb }] });
-            peaks(d);
-          }
+        if (pull <= 0) continue;
+        let got = 0;
+        for (const l of lots.filter((x) => x.item === it.key && x.state === "frozen").sort((a, b) => a.inDay - b.inDay)) {
+          const take = Math.min(l.lb, pull - got);
+          l.lb -= take;
+          got += take;
+          if (got >= pull - 1e-9) break;
         }
+        pull = got;
+        if (pull <= 1e-9) continue;
+        const lot: Lot = { id: nextId++, item: it.key, lb: pull, where: "walkin", state: "thawing", inDay: d, readyDay: u, lastDay: u + it.thawedDays - 1 };
+        lots.push(lot);
+        pulled.push({ id: lot.id, item: lot.item, lb: lot.lb });
+      }
+      if (pulled.length) {
+        lots = lots.filter((l) => l.lb > 1e-9);
+        log(d, 8, "thaw", { lots: pulled });
+        peaks(d);
       }
     }
     // Thawed by morning.
@@ -288,7 +295,7 @@ export function runWeeks(p: Policy, counts: readonly number[]): WeekResult {
       }
       log(d, 9, "prep", { lots: used, lunches: counts[d]!, item: it.key, shortLunches: short });
     }
-    // 22:00 the night's check: whatever is past its last day goes.
+    // 22:00 the night's check: whatever is still there on its last day goes.
     const out = lots.filter((l) => l.lastDay <= d && l.where === "walkin" && l.lb > 1e-9);
     if (out.length) {
       if (inWeek(d))
@@ -351,19 +358,35 @@ const quant = (xs: number[], q: number) => {
 
 /** The same policy over `n` weeks of final counts drawn around the plan (the same weeks for every policy). */
 export function manyWeeks(p: Policy, n = 400, seed = 7): ManyWeeks {
+  const run = manyWeeksRun(p, n, seed);
+  run.step(n);
+  return run.result();
+}
+
+/** manyWeeks a slice at a time: `step(k)` runs up to k more of the weeks and says whether all n are done; `result()`
+ *  then gives what manyWeeks would. */
+export function manyWeeksRun(p: Policy, n = 400, seed = 7): { step: (k: number) => boolean; result: () => ManyWeeks } {
   const g = rng(seed);
   const rows: WeekResult[] = [];
   const floors: Layout["floorMost"][] = [];
-  for (let k = 0; k < n; k++) {
-    const counts: number[] = [];
-    for (let d = 0; d < 21; d++) {
-      const m = menuOn(d);
-      counts.push(m ? Math.max(0, Math.round(m.plan * (1 + COUNT_SD * normal(g)))) : 0);
+  const step = (k: number) => {
+    for (let i = 0; i < k && rows.length < n; i++) {
+      const counts: number[] = [];
+      for (let d = 0; d < 21; d++) {
+        const m = menuOn(d);
+        counts.push(m ? Math.max(0, Math.round(m.plan * (1 + COUNT_SD * normal(g)))) : 0);
+      }
+      const w = runWeeks(p, counts);
+      rows.push(w);
+      floors.push(layoutWeek(w).floorMost);
     }
-    const w = runWeeks(p, counts);
-    rows.push(w);
-    floors.push(layoutWeek(w).floorMost);
-  }
+    return rows.length >= n;
+  };
+  return { step, result: () => summarise(rows, floors) };
+}
+
+function summarise(rows: WeekResult[], floors: Layout["floorMost"][]): ManyWeeks {
+  const n = rows.length;
   const col = (f: (w: WeekResult) => number) => rows.map(f);
   const both = (xs: number[]) => ({ mid: quant(xs, 0.5), p90: quant(xs, 0.9) });
   const mean = (f: (w: WeekResult) => number) => rows.reduce((s, w) => s + f(w), 0) / rows.length;
@@ -394,8 +417,11 @@ export interface Spot {
   col: number;
   level: number;
 }
-/** Floor places in each box, along the wall clear of the way in (a case stacked on each too). */
+/** Floor places in each box, clear of the way in, each a stack of one delivery's cases up to FLOOR_LEVELS high. The
+ *  figure's week never needs more; past them a case takes the next place number all the same. Frozen cases stand
+ *  4 high, 76 cm; the walk-in's, 57 cm. */
 export const FLOOR_ROWS: Record<Where, number> = { walkin: 3, freezer: 2 };
+export const FLOOR_LEVELS: Record<Where, number> = { walkin: 3, freezer: 4 };
 /** Where a carried case comes from or goes: a place, the truck at the dock, or the kitchen (the day's prep, the bin). */
 export type End = Spot | "dock" | "kitchen";
 export interface Move {
@@ -427,15 +453,18 @@ export interface Layout {
   /** The most cases on each floor at once. */
   floorMost: Record<Where, number>;
 }
+/** Each item's place in the shelves' order, 0 the highest (ITEMS is top to bottom). */
+const RANK = Object.fromEntries(ITEMS.map((i, n) => [i.key, n])) as Record<ItemKey, number>;
 const spotKey = (s: Spot) => `${s.box}|${s.floor ? 1 : 0}|${s.tier}|${s.col}|${s.level}`;
 
 /**
  * Where each case goes. A case goes on top of a case of its own lot if one has room, else on a free shelf place
- * where nothing in its column below it is cooked cooler and nothing above it hotter: chicken at the bottom, then
- * ground beef, whole beef and fish as high as they go, each as near the door as it can. When the only free places
- * are under chicken, the cases over one are moved down a shelf each first (moves of their own, shelf to shelf) and
- * the case goes above them. With no shelf place left that keeps that order, it stands on the floor. Cases leave a lot from the floor first
- * and from the top of a stack first. A case pulled from the freezer to thaw is the same case, put in the walk-in.
+ * where the shelves' order holds in its column, top to bottom: salmon, short ribs, ground beef, chicken (ITEMS'
+ * order), each as near the door as it can. When no free place keeps that order, the stacks just over a free place are
+ * moved down a shelf each, or the stacks just under it up a shelf each (moves of their own, shelf to shelf), and the
+ * case goes where the last of them stood. With no shelf place left that keeps the order, it stands on the floor, on
+ * its own lot's stack there if one has room. Cases leave a lot from the floor first, then from half stacks, the top of
+ * a stack first. A case pulled from the freezer to thaw is the same case, put in the walk-in.
  */
 export function layoutWeek(w: WeekResult): Layout {
   const at = new Map<number, CaseAt>();
@@ -457,60 +486,68 @@ export function layoutWeek(w: WeekResult): Layout {
   /** The moves made to make room, waiting to go in the event's list before the case they made room for. */
   let restacks: Move[] = [];
   function place(box: Where, item: ItemKey, lot: number): Spot {
-    const f = ITEM[item].cookF;
-    const mine = (byLot.get(lot) ?? []).map((id) => at.get(id)!).filter((c) => c.at.box === box && c.at.level === 0);
+    const k = RANK[item];
+    const mine = (byLot.get(lot) ?? []).map((id) => at.get(id)!).filter((c) => c.at.box === box);
     // On top of its own lot's case: off the floor first.
     const onTop = mine
-      .map((c) => ({ ...c.at, level: 1 }))
-      .filter((s) => !who(s))
-      .sort((a, b) => Number(a.floor) - Number(b.floor) || a.col - b.col || a.tier - b.tier);
+      .map((c) => ({ ...c.at, level: c.at.level + 1 }))
+      .filter((s) => s.level < (s.floor ? FLOOR_LEVELS[box] : LEVELS) && !who(s))
+      .sort((a, b) => Number(a.floor) - Number(b.floor) || a.col - b.col || a.tier - b.tier || a.level - b.level);
     if (onTop.length) return onTop[0]!;
     const here = [...at.values()].filter((c) => c.at.box === box && !c.at.floor);
-    const fits = (s: Spot, shift: CaseAt[] = []) =>
-      here.every((c) => c.at.col !== s.col || (shift.includes(c) || c.at.tier < s.tier ? ITEM[c.item].cookF >= f : c.at.tier > s.tier ? ITEM[c.item].cookF <= f : true));
+    /** Whether the case may stand at `s`, the cases `under` and `over` (being moved) to end up below and above it. */
+    const fits = (s: Spot, under: CaseAt[] = [], over: CaseAt[] = []) =>
+      here.every((c) => {
+        if (c.at.col !== s.col) return true;
+        if (under.includes(c)) return RANK[c.item] >= k;
+        if (over.includes(c)) return RANK[c.item] <= k;
+        return c.at.tier < s.tier ? RANK[c.item] >= k : c.at.tier > s.tier ? RANK[c.item] <= k : true;
+      });
     const free: Spot[] = [];
     for (let tier = 0; tier < SHELVES; tier++) for (let col = 0; col < COLUMNS; col++) if (!who({ box, floor: false, tier, col, level: 0 })) free.push({ box, floor: false, tier, col, level: 0 });
     const good = free.filter((s) => fits(s));
-    const low = f >= 155;
+    // Ground beef and chicken as low as they go, salmon and short ribs as high.
+    const low = ITEM[item].cookF >= 155;
     const order = (a: Spot, b: Spot) => (low ? a.tier - b.tier : b.tier - a.tier) || a.col - b.col;
     if (good.length) return good.sort(order)[0]!;
-    // Move the stacks just over a free place down a shelf each, the lowest first, and put the case where the last of
-    // them stood, if it fits there: the fewest stacks that do.
-    let best: { top: Spot; block: CaseAt[][] } | null = null;
-    for (const s of free) {
-      const block: CaseAt[][] = [];
-      for (let t = s.tier + 1; t < SHELVES; t++) {
-        const a = who({ ...s, tier: t, level: 0 });
-        if (!a) break;
-        const b = who({ ...s, tier: t, level: 1 });
-        block.push(b ? [a, b] : [a]);
-        if (best && best.block.length <= block.length) break;
-        const top: Spot = { ...s, tier: s.tier + block.length };
-        if (fits(top, block.flat())) {
-          best = { top, block: [...block] };
-          break;
+    // Make room in a column with a free place: move the stacks just over it down a shelf each (the case to go above
+    // them), or the stacks just under it up a shelf each (the case to go below them), the nearest first, and put the
+    // case where the last of them stood, if it fits there. The fewest stacks that do, down before up.
+    let best: { at: Spot; block: CaseAt[][]; step: -1 | 1 } | null = null;
+    for (const step of [-1, 1] as const)
+      for (const s of free) {
+        const block: CaseAt[][] = [];
+        for (let t = s.tier - step; t >= 0 && t < SHELVES; t -= step) {
+          const a = who({ ...s, tier: t, level: 0 });
+          if (!a) break;
+          const b = who({ ...s, tier: t, level: 1 });
+          block.push(b ? [a, b] : [a]);
+          if (best && best.block.length <= block.length) break;
+          const spot: Spot = { ...s, tier: s.tier - step * block.length };
+          if (step < 0 ? fits(spot, block.flat()) : fits(spot, [], block.flat())) {
+            best = { at: spot, block: [...block], step };
+            break;
+          }
         }
       }
-    }
     if (best) {
       for (const [a, b] of best.block) {
-        const t = a!.at.tier;
-        const down: Spot = { ...a!.at, tier: t - 1, level: 0 };
-        // The top case first, onto the shelf below; the one under it then onto that.
+        const to: Spot = { ...a!.at, tier: a!.at.tier + best.step, level: 0 };
+        // The top case first, onto the next shelf; the one under it then onto that.
         const first = b ?? a!;
         const from1 = { ...first.at };
-        put(first, down);
-        restacks.push({ caseId: first.caseId, lot: first.lot, item: first.item, from: from1, to: { ...down } });
+        put(first, to);
+        restacks.push({ caseId: first.caseId, lot: first.lot, item: first.item, from: from1, to: { ...to } });
         if (b) {
           const from2 = { ...a!.at };
-          const on: Spot = { ...down, level: 1 };
+          const on: Spot = { ...to, level: 1 };
           put(a!, on);
           restacks.push({ caseId: a!.caseId, lot: a!.lot, item: a!.item, from: from2, to: { ...on } });
         }
       }
-      return best.top;
+      return best.at;
     }
-    // The floor (a case of its lot there is stacked on, above): no shelf place takes it.
+    // The floor (a case of its lot there is stacked on, above, when it has room): no shelf place takes it.
     if (free.length) shelvedOut++;
     let i = 0;
     while (who({ box, floor: true, tier: 0, col: i, level: 0 })) i++;
@@ -520,10 +557,14 @@ export function layoutWeek(w: WeekResult): Layout {
   /** `n` of a lot's cases: off the floor first, from the top of a stack first, then nearest the door. */
   function take(lot: number, n: number): number[] {
     const ids = byLot.get(lot) ?? [];
+    // Place by place, the top case first: the floor's first, then half stacks, so what is left stands in whole stacks.
+    const placeOf = (s: Spot) => spotKey({ ...s, level: 0 });
+    const inPlace = new Map<string, number>();
+    for (const id of ids) inPlace.set(placeOf(at.get(id)!.at), (inPlace.get(placeOf(at.get(id)!.at)) ?? 0) + 1);
     const order = [...ids].sort((a, b) => {
       const A = at.get(a)!.at;
       const B = at.get(b)!.at;
-      return Number(B.floor) - Number(A.floor) || B.level - A.level || A.col - B.col || B.tier - A.tier;
+      return Number(B.floor) - Number(A.floor) || inPlace.get(placeOf(A))! - inPlace.get(placeOf(B))! || A.col - B.col || B.tier - A.tier || B.level - A.level;
     });
     const out = order.slice(0, Math.max(0, n));
     byLot.set(lot, ids.filter((i) => !out.includes(i)));
@@ -566,13 +607,15 @@ export function layoutWeek(w: WeekResult): Layout {
         for (let k = 0; k < casesOf(lot); k++) arrive(nextCase++, lot, "dock");
       }
     } else if (ev.kind === "thaw") {
-      const lot = now.get(ev.lots[0]!.id)!;
-      for (const [id, l] of prev) {
-        if (l.where !== "freezer" || l.item !== lot.item) continue;
-        for (const cid of take(id, left(id))) {
-          const from = { ...at.get(cid)!.at };
-          at.delete(cid);
-          arrive(cid, lot, from);
+      for (const x of ev.lots) {
+        const lot = now.get(x.id)!;
+        for (const [id, l] of prev) {
+          if (l.where !== "freezer" || l.item !== lot.item) continue;
+          for (const cid of take(id, left(id))) {
+            const from = { ...at.get(cid)!.at };
+            at.delete(cid);
+            arrive(cid, lot, from);
+          }
         }
       }
     } else {

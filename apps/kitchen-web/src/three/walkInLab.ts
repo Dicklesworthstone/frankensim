@@ -21,7 +21,7 @@ import {
   TRUCK_DAYS,
   WALKIN_PLACES,
   layoutWeek,
-  manyWeeks,
+  manyWeeksRun,
   runWeeks,
   thisWeekCounts,
   type CaseAt,
@@ -66,6 +66,9 @@ const FLOOR_Y: Record<Where, number> = { walkin: 0, freezer: PANEL - FZ_SINK };
 const DOOR0 = 0.76;
 const DOOR_W = 0.914;
 const DOOR_X: Record<Where, number> = { walkin: X0.walkin + DOOR0 + DOOR_W / 2, freezer: X0.freezer + DOOR0 + DOOR_W / 2 };
+/** How far from a door's middle the cook is clear of its leaf's swing (half the opening to the hinge, the leaf the
+ *  opening's width, and a body's half width). */
+const CLEAR_M = 1.7;
 
 /** A case: 17.3 x 14 in, 7.5 in deep for 40 lb, 5 in for 20 lb of salmon; its frame at the top's middle (where the
  *  hands' grip is taken from), the long side across the body as it is carried, its label on the side toward the body. */
@@ -139,7 +142,8 @@ const smooth = (x: number) => {
   const t = Math.min(1, Math.max(0, x));
   return t * t * (3 - 2 * t);
 };
-const clockText = (h: number) => {
+const clockText = (hour: number) => {
+  const h = Math.min(hour, 7 * 24 - 1 / 60);
   const day = Math.min(6, Math.floor(h / 24));
   const m = Math.floor((h - day * 24) * 60 + 1e-6);
   const hh = Math.floor(m / 60) % 24;
@@ -382,8 +386,11 @@ interface Job {
   before: CaseAt[];
   routine: Routine | null;
   carries: Carry[];
-  /** Routine seconds each box's door is open (propped for the job). */
+  /** Routine seconds each box's door is open (propped for the job), from it starting to open to it starting to shut. */
   doors: Partial<Record<Where, [number, number]>>;
+  /** Routine seconds the job lasts: its routine, and on (the cook waiting at the dock or the kitchen) until the doors
+   *  are shut. */
+  span: number;
   /** Film seconds it starts and ends, the lapse it plays at. */
   t0: number;
   t1: number;
@@ -557,7 +564,10 @@ export function mountWalkInLab(root: HTMLElement): void {
   const caseOf = (id: number, item: ItemKey, frozen: boolean): CaseMesh => {
     let c = caseMeshes.get(id);
     if (!c || c.item !== item || c.frozen !== frozen) {
-      if (c) c.group.removeFromParent();
+      if (c) {
+        c.group.removeFromParent();
+        (c.label.material as THREE.Material).dispose();
+      }
       c = makeCase(item, frozen);
       caseMeshes.set(id, c);
     }
@@ -578,7 +588,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     spotPose(s, item, p);
     return p;
   };
-  function makeJob(staged: Staged, before: CaseAt[]): Omit<Job, "t0" | "t1" | "lapse"> {
+  function makeJob(staged: Staged, before: CaseAt[]): Omit<Job, "t0" | "t1" | "lapse" | "span"> {
     const ev = staged.ev;
     const job = { staged, before, routine: null as Routine | null, carries: [] as Carry[], doors: {} as Job["doors"], hour: ev.hour };
     if (!staged.moves.length) return job;
@@ -594,15 +604,16 @@ export function mountWalkInLab(root: HTMLElement): void {
       boxSteps[b] = was ? [Math.min(was[0], i0), Math.max(was[1], i1)] : [i0, i1];
     };
     const carryOpts: WorkOpts = { halfWidth: HALF };
-    const walk = (to: Loc, carrying: boolean) => {
+    const walk = (to: Loc, carrying: boolean): XZ[] => {
       const path = route(here, to);
-      if (path.length < 2) return;
+      if (path.length < 2) return [];
       // Face the way off before setting out (a turn about, at the dock or the kitchen).
       const h0 = headingOf(path[0]!, path[1]!);
       if (Math.abs(Math.atan2(Math.sin(h0 - yaw), Math.cos(h0 - yaw))) > 0.35) steps.push({ kind: "turn", yaw: h0, upper: carrying ? "carry" : "free", opts: carrying ? carryOpts : undefined });
       steps.push({ kind: "walk", path: path.slice(1), speed: carrying ? CARRY_MPS : FREE_MPS, upper: carrying ? "carry" : "free", opts: carrying ? carryOpts : undefined });
       yaw = headingOf(path[path.length - 2]!, path[path.length - 1]!);
       here = to;
+      return path;
     };
     const face = (y: number, carrying: boolean) => {
       if (Math.abs(Math.atan2(Math.sin(y - yaw), Math.cos(y - yaw))) > 0.02) steps.push({ kind: "turn", yaw: y, upper: carrying ? "carry" : "free", opts: carrying ? carryOpts : undefined });
@@ -653,8 +664,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     // And away: back to the dock after a truck, else to the kitchen.
     const wasBox = here.kind === "spot" ? here.spot.box : null;
     const iOut = steps.length;
-    walk(startL, false);
-    if (wasBox) touch(wasBox, iOut, steps.length);
+    const outPath = walk(startL, false);
     const s0 = ptOf(startL);
     const routine = new Routine(cook, { x: s0[0], z: s0[1], yaw: startYaw }, steps, false);
     const T = routine.stepTimes;
@@ -664,6 +674,35 @@ export function mountWalkInLab(root: HTMLElement): void {
     for (const b of ["walkin", "freezer"] as const) {
       const s = boxSteps[b];
       if (s) job.doors[b] = [at(s[0]), at(s[1])];
+    }
+    if (wasBox && outPath.length > 1) {
+      // The door the cook leaves by starts to shut once they are out and clear of its swing: the hinge is half the
+      // opening from its middle and the leaf as long as the opening, so 1.7 m off its middle (by the walk out, at its
+      // pace).
+      const c: XZ = [DOOR_X[wasBox], FRONT_OUT];
+      let total = 0;
+      for (let i = 1; i < outPath.length; i++) total += Math.hypot(outPath[i]![0] - outPath[i - 1]![0], outPath[i]![1] - outPath[i - 1]![1]);
+      let gone = total;
+      let run = 0;
+      for (let i = 1; i < outPath.length && gone === total; i++) {
+        const [ax, az] = outPath[i - 1]!;
+        const [bx, bz] = outPath[i]!;
+        const len = Math.hypot(bx - ax, bz - az);
+        for (let k = 1; k <= 20; k++) {
+          const f = k / 20;
+          const x = ax + (bx - ax) * f;
+          const z = az + (bz - az) * f;
+          if (z > FRONT_OUT + 0.1 && Math.hypot(x - c[0], z - c[1]) >= CLEAR_M) {
+            gone = run + len * f;
+            break;
+          }
+        }
+        run += len;
+      }
+      const tw0 = at(steps.length - 1);
+      const tClear = Math.min(routine.duration, tw0 + ((routine.duration - tw0) * gone) / Math.max(1e-6, total));
+      const w = job.doors[wasBox];
+      job.doors[wasBox] = [w ? w[0] : at(iOut), tClear];
     }
     return job;
   }
@@ -683,10 +722,13 @@ export function mountWalkInLab(root: HTMLElement): void {
       const dur = j.routine?.duration ?? 0;
       const most = JOB_BASE_S + JOB_PER_CASE_S * st.moves.length;
       const lapse = dur > 0 ? Math.max(LAPSE_MIN, dur / most) : 1;
-      const len = dur > 0 ? dur / lapse : 1.4;
-      jobs.push({ ...j, t0: t, t1: t + len, lapse });
+      // On until the last door is shut, its swing DOOR_S of film.
+      let span = dur;
+      for (const w of Object.values(j.doors)) if (w) span = Math.max(span, w[1] + DOOR_S * lapse);
+      const len = dur > 0 ? span / lapse : 1.4;
+      jobs.push({ ...j, t0: t, t1: t + len, lapse, span });
       t += len;
-      hour = st.ev.hour + dur / 3600;
+      hour = st.ev.hour + span / 3600;
       before = st.after;
     }
     t += Math.max(0, 7 * 24 - hour) / IDLE_HPS;
@@ -717,7 +759,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     }
     if (!job) {
       // Between jobs: the clock runs on from the last one's end.
-      const base = lastDone ? lastDone.hour + (lastDone.routine?.duration ?? 0) / 3600 : 0;
+      const base = lastDone ? lastDone.hour + lastDone.span / 3600 : 0;
       const from = lastDone ? lastDone.t1 : 0;
       const nextJob = f.jobs.find((j) => j.t0 > ft);
       const hour = Math.min(nextJob ? nextJob.hour : 7 * 24, base + (ft - from) * IDLE_HPS);
@@ -748,7 +790,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     const came = `IN ${DAY3[((l.inDay % 7) + 7) % 7]!.toUpperCase()}`;
     if (l.where === "freezer") return { band: FROZEN, head: "FROZEN", foot: came, state: "frozen" };
     const by = `USE BY ${DAY3[((l.lastDay % 7) + 7) % 7]!.toUpperCase()}`;
-    if (thrown) return { band: PAST, head: by, foot: "PAST ITS DAY", state: "past" };
+    if (thrown) return { band: PAST, head: by, foot: "LAST DAY OVER", state: "past" };
     if (l.readyDay > absDay) return { band: THAWING, head: by, foot: `THAWING · ${came}`, state: "thawing" };
     const n = l.lastDay - absDay + 1;
     return { band: n >= 3 ? GOOD : n === 2 ? SOON : n === 1 ? LAST : PAST, head: by, foot: came, state: n >= 3 ? "good" : n === 2 ? "soon" : n === 1 ? "last" : "past" };
@@ -801,7 +843,8 @@ export function mountWalkInLab(root: HTMLElement): void {
     } else cook.group.visible = false;
     for (const b of ["walkin", "freezer"] as const) {
       const w = m.job?.doors[b];
-      const k = w ? smooth((m.r - w[0]) / (DOOR_S * (m.job?.lapse ?? 1))) * (1 - smooth((m.r - w[1]) / (DOOR_S * (m.job?.lapse ?? 1)))) : 0;
+      const swing = DOOR_S * (m.job?.lapse ?? 1);
+      const k = w ? smooth((m.r - w[0]) / swing) * (1 - smooth((m.r - w[1]) / swing)) : 0;
       if (doorK[b] !== k) {
         doorK[b] = k;
         boxes[b].hooks.set?.("door", k);
@@ -844,7 +887,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     const parts = ["[data-wo-hud-clock]", "[data-wo-hud-doing]", "[data-wo-hud-note]"].map((k) => hudEl.querySelector<HTMLElement>(k));
     const was = parts.map((e) => e?.textContent ?? "");
     if (parts[0]) parts[0].textContent = "Wednesday, 10:00 pm";
-    if (parts[1]) parts[1].textContent = "Into the walk-in to thaw for Thursday: 10 cases of short ribs";
+    if (parts[1]) parts[1].textContent = "Next, Tuesday at 8:00 am, into the walk-in to thaw: 10 cases of short ribs for Thursday and 8 cases of chicken thighs for Wednesday";
     if (parts[2]) parts[2].textContent = "Time-lapse ×12";
     const most = hudEl.offsetTop + hudEl.offsetHeight;
     parts.forEach((e, i) => {
@@ -928,9 +971,17 @@ export function mountWalkInLab(root: HTMLElement): void {
   const tagFloor = q<HTMLElement>('[data-wo-tag="floor"]');
 
   let policy: Policy = { trucks: 3, frozen: false, cushion: 0.1 };
-  let film = makeFilm(policy);
-  let many: ManyWeeks | null = null;
-  let manyKey = "";
+  const keyOf = (p: Policy) => `${p.trucks}|${p.frozen}|${Math.round(p.cushion * 100)}`;
+  const films = new Map<string, Film>();
+  const filmFor = (p: Policy) => {
+    let f = films.get(keyOf(p));
+    if (!f) films.set(keyOf(p), (f = makeFilm(p)));
+    return f;
+  };
+  let film = filmFor(policy);
+  const manys = new Map<string, ManyWeeks>();
+  let manyTimer = 0;
+  let manyRun: { key: string; run: ReturnType<typeof manyWeeksRun> } | null = null;
   const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   let playing = !reduce;
   let held = false;
@@ -945,7 +996,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     let h = 0;
     for (const j of f.jobs) {
       if (hour <= j.hour) return t + (hour - h) / IDLE_HPS;
-      const end = j.hour + (j.routine?.duration ?? 0) / 3600;
+      const end = j.hour + j.span / 3600;
       if (hour < end) return j.t0 + ((hour - j.hour) * 3600) / j.lapse;
       t = j.t1;
       h = end;
@@ -955,17 +1006,34 @@ export function mountWalkInLab(root: HTMLElement): void {
   function setPolicy(p: Policy): void {
     const hour = shown?.hour ?? 0;
     policy = { ...p };
-    film = makeFilm(policy);
+    film = filmFor(policy);
     ft = filmAt(film, hour);
     renderAll();
   }
-  function manyNow(): ManyWeeks {
-    const k = `${policy.trucks}|${policy.frozen}|${policy.cushion}`;
-    if (!many || manyKey !== k) {
-      many = manyWeeks(policy, 300);
-      manyKey = k;
+  /** The 300 weeks for the setting, if worked out yet; else they are, from a moment later (a slider's drag settled),
+   *  a few milliseconds at a time between frames, and then the tiles and status are said again. */
+  function manyNow(): ManyWeeks | null {
+    const m = manys.get(keyOf(policy));
+    if (m) return m;
+    if (!manyTimer) manyTimer = window.setTimeout(manySlice, 80);
+    return null;
+  }
+  function manySlice(): void {
+    manyTimer = 0;
+    const k = keyOf(policy);
+    if (manys.has(k)) return;
+    if (manyRun?.key !== k) manyRun = { key: k, run: manyWeeksRun(policy, 300) };
+    const t0 = performance.now();
+    let done = false;
+    while (!done && performance.now() - t0 < 8) done = manyRun.run.step(1);
+    if (!done) {
+      manyTimer = window.setTimeout(manySlice, 0);
+      return;
     }
-    return many;
+    manys.set(k, manyRun.run.result());
+    manyRun = null;
+    renderTiles();
+    renderStatus();
   }
 
   function renderControls(): void {
@@ -978,26 +1046,55 @@ export function mountWalkInLab(root: HTMLElement): void {
     if (cushVal) cushVal.textContent = `${Math.round(policy.cushion * 100)}% over`;
     if (playBtn) playBtn.textContent = playing ? "Pause" : "Play";
   }
-  const peakOf = (w: WeekResult, L: Layout, b: Where) => {
+  /** The most of a box's shelf places in use at once over the week (its floor's cases not among them). */
+  const peakOf = (L: Layout, b: Where) => {
     let most = 0;
-    for (const st of L.events) most = Math.max(most, st.after.filter((c) => c.at.box === b).length);
-    return b === "walkin" ? Math.max(most, w.walkinPeak) : Math.max(most, w.freezerPeak);
+    for (const st of [{ after: L.start }, ...L.events]) most = Math.max(most, st.after.filter((c) => c.at.box === b && !c.at.floor).length);
+    return most;
+  };
+  /** The most cases on the floors at once, said: "+ 2 on the floor", or "+ 2 on the walk-in's floor, 4 on the freezer's". */
+  const floorSaid = (L: Layout) => {
+    const { walkin, freezer } = L.floorMost;
+    return walkin && freezer ? `+ ${walkin} on the walk-in's floor, ${freezer} on the freezer's` : `+ ${walkin || freezer} on the floor`;
+  };
+  /** The day a box first has cases on its floor, what it holds then, and why they are there. */
+  const crowdSaid = (b: Where): string | null => {
+    const st = film.layout.events.find((x) => x.after.some((c) => c.at.box === b && c.at.floor));
+    if (!st) return null;
+    const day = st.ev.day;
+    const n = film.layout.floorMost[b];
+    const onFloor = `${n === 1 ? "1 case stands" : `up to ${n} cases stand`} on its floor`;
+    if (b === "freezer") {
+      const k = st.after.filter((c) => c.at.box === b).length;
+      const next = TRUCK_DAYS[policy.trucks].find((d) => d > day) ?? TRUCK_DAYS[policy.trucks][0]!;
+      return `On ${DAY[day]} the freezer holds ${k} cases, all the frozen meat until ${DAY[next]}'s truck, and ${onFloor}.`;
+    }
+    // The lunches the walk-in's meat is for: each lot's lunches from then, or its ready day, to its last day.
+    const lunches = new Set<number>();
+    for (const id of new Set(st.after.filter((c) => c.at.box === b).map((c) => c.lot))) {
+      const l = film.lots.get(id);
+      if (!l) continue;
+      for (let u = Math.max(day + 7, l.readyDay); u <= l.lastDay; u++) if (MENU.some((mm) => mm.day === u % 7 && mm.item === l.item)) lunches.add(u - 7);
+    }
+    const said = [...lunches].sort((x, y) => x - y).map((u) => `${u >= 7 ? "next " : ""}${DAY[u % 7]}'s`);
+    return `On ${DAY[day]} the walk-in holds the meat for ${said.length ? `${listAnd(said)} lunch${said.length === 1 ? "" : "es"}` : "the week"} at once, and ${onFloor}.`;
   };
   function renderTiles(): void {
     const w = film.week;
     const m = manyNow();
     if (tiles.thrown.v) tiles.thrown.v.textContent = lb(w.thrownLb);
-    if (tiles.thrown.s) tiles.thrown.s.textContent = `this week\n1 week in 10: over ${lb(m.thrownLb.p90)}`;
+    if (tiles.thrown.s) tiles.thrown.s.textContent = `this week\n1 week in 10: over ${m ? lb(m.thrownLb.p90) : "…"}`;
     const short = w.shortLunches;
     tiles.short.box?.setAttribute("data-ok", String(short === 0));
     if (tiles.short.v) tiles.short.v.textContent = short ? `${short.toLocaleString("en-US")} lunches` : "None";
-    if (tiles.short.s) tiles.short.s.textContent = `${short ? "bought on the day" : "short this week"}\n${Math.round(m.anyShort * 100)}% of weeks short`;
-    const wi = peakOf(w, film.layout, "walkin");
-    const fz = peakOf(w, film.layout, "freezer");
+    if (tiles.short.s) tiles.short.s.textContent = `${short ? "bought on the day" : "short this week"}\n${m ? Math.round(m.anyShort * 100) : "…"}% of weeks short`;
+    const wi = peakOf(film.layout, "walkin");
+    const fz = peakOf(film.layout, "freezer");
     const floor = film.layout.floorMost.walkin + film.layout.floorMost.freezer;
     tiles.full.box?.setAttribute("data-ok", String(floor === 0));
     if (tiles.full.v) tiles.full.v.textContent = policy.frozen ? `${fz} of ${FREEZER_PLACES}` : `${wi} of ${WALKIN_PLACES}`;
-    if (tiles.full.s) tiles.full.s.textContent = floor ? `${floor} on the floor\n${policy.frozen ? `the freezer's places · walk-in ${wi}` : "the walk-in's places"}` : policy.frozen ? `the freezer's places\nwalk-in ${wi} of ${WALKIN_PLACES}` : `the walk-in's places\nat its fullest`;
+    const which = policy.frozen ? `the freezer's, at its fullest\nthe walk-in's: ${wi} of ${WALKIN_PLACES}` : "the walk-in's, at its fullest";
+    if (tiles.full.s) tiles.full.s.textContent = floor ? `${which}\n${floorSaid(film.layout)}` : which;
     const days = TRUCK_DAYS[policy.trucks].map((d) => DAY3[d]).join(", ");
     if (tiles.trucks.v) tiles.trucks.v.textContent = `${policy.trucks} a week`;
     if (tiles.trucks.s) tiles.trucks.s.textContent = `${days}\nordered by 2 pm the day before`;
@@ -1025,17 +1122,25 @@ export function mountWalkInLab(root: HTMLElement): void {
         parts.push(`Every lunch is covered off the trucks: each brings the day's final count and the plan, plus a ${Math.round(policy.cushion * 100)}% cushion, for any lunch before the next truck that its meat will last to.`);
       }
     } else {
+      const lead = (n: number) => listAnd(ITEMS.filter((i) => i.thawDays === n).map((i) => SHORT_NAME[i.key]));
+      const thaw = `The thaw starts at 8 am, a day ahead of the lunch for ${lead(1)} and two for the 10 lb packs of ${lead(2)}, before the final count is in`;
       parts.push(
         shortDays.length
-          ? `The thaw starts at 8 am the day before, before the final count is in, so it goes by the plan: ${shortDays.map((d) => `${DAY[d.day]} comes up ${d.shortLunches} lunches short`).join(", ")} with a ${Math.round(policy.cushion * 100)}% cushion.`
-          : `Frozen keeps for months, so the trucks only decide how full the freezer gets. The thaw starts at 8 am the day before, by the plan and its ${Math.round(policy.cushion * 100)}% cushion, a whole case at a time; once thawed it keeps no longer than fresh.`,
+          ? `${thaw}, so it goes by the plan: ${shortDays.map((d) => `${DAY[d.day]} comes up ${d.shortLunches} lunches short`).join(", ")} with a ${Math.round(policy.cushion * 100)}% cushion.`
+          : `Frozen keeps for months, so the trucks only decide how full the freezer gets. ${thaw}, so it goes by the plan and its ${Math.round(policy.cushion * 100)}% cushion, a whole case at a time; once thawed it keeps no longer than fresh.`,
       );
     }
     const thrownBy = ITEMS.filter((i) => w.thrownBy[i.key] > 0.5).map((i) => `${lb(w.thrownBy[i.key])} of ${SHORT_NAME[i.key]}`);
-    parts.push(thrownBy.length ? `Thrown out this week, past its day: ${listAnd(thrownBy)}, ${lb(w.thrownLb)} in all.` : "Nothing was thrown out this week.");
-    parts.push(`Over 300 weeks of counts within about 10% of the plan, half throw out more than ${lb(m.thrownLb.mid)} and 1 in 10 more than ${lb(m.thrownLb.p90)}; ${m.anyShort > 0.005 ? `${Math.round(m.anyShort * 100)}% come up short somewhere` : "none comes up short"}.`);
+    parts.push(thrownBy.length ? `Thrown out this week, each at the end of its last day: ${listAnd(thrownBy)}, ${lb(w.thrownLb)} in all.` : "Nothing was thrown out this week.");
+    if (m) parts.push(`Over 300 weeks of counts scattered around the plan, two in three within 10% of it, half throw out more than ${lb(m.thrownLb.mid)} and 1 in 10 more than ${lb(m.thrownLb.p90)}; ${m.anyShort > 0.005 ? `${Math.round(m.anyShort * 100)}% come up short somewhere` : "none comes up short"}.`);
     const floor = film.layout.floorMost.walkin + film.layout.floorMost.freezer;
-    if (floor) parts.push(`At its fullest the ${film.layout.floorMost.freezer ? "freezer" : "walk-in"} has no place left on its shelves, and ${floor} case${floor === 1 ? " stands" : "s stand"} on the floor, where the Food Code allows no food: 6 inches up at least.`);
+    if (floor) {
+      for (const b of ["walkin", "freezer"] as const) {
+        const said = crowdSaid(b);
+        if (said) parts.push(said);
+      }
+      parts.push(`No shelf place is left that keeps chicken lowest and fish over beef, and a case goes only on its own delivery's, so those stand where the Food Code allows no food: it wants 6 inches off the floor at least.`);
+    }
     statusEl.textContent = parts.join(" ");
     statusEl.dataset.state = shortDays.length || floor ? "warn" : "ok";
   }
@@ -1052,6 +1157,15 @@ export function mountWalkInLab(root: HTMLElement): void {
     const dw = (R - L) / 7;
     const x = (d: number) => L + d * dw;
     const w = film.week;
+    /** The (absolute) day a lot's last case leaves, by the week's events; 14 if it is there at the week's end. */
+    const goneOn = (l: Lot) => {
+      let seen = w.start.some((x) => x.id === l.id);
+      for (const e of w.events) {
+        if (e.stock.some((x) => x.id === l.id)) seen = true;
+        else if (seen) return e.day + 7;
+      }
+      return 14;
+    };
     const rows = ITEMS.map((it) => {
       const lots = [...film.lots.values()].filter((l) => l.item === it.key && (l.lastDay >= 7 || l.where === "freezer") && l.inDay < 14);
       return { it, lots };
@@ -1067,7 +1181,7 @@ export function mountWalkInLab(root: HTMLElement): void {
         const a = Math.max(7, l.inDay);
         let lane = lanes.findIndex((end) => end < a);
         if (lane < 0) lane = lanes.push(0) - 1;
-        lanes[lane] = l.where === "freezer" ? 99 : l.lastDay;
+        lanes[lane] = l.where === "freezer" ? goneOn(l) : l.lastDay;
         placed.push({ l, lane });
       }
       const n = Math.max(1, lanes.length);
@@ -1076,7 +1190,7 @@ export function mountWalkInLab(root: HTMLElement): void {
       body.push(`<line class="grid" x1="${L}" x2="${R}" y1="${(y + h).toFixed(1)}" y2="${(y + h).toFixed(1)}" />`);
       for (const { l, lane } of placed) {
         const a = Math.max(0, l.inDay - 7);
-        const b = l.where === "freezer" ? 7 : Math.min(7, l.lastDay - 7 + 1);
+        const b = Math.min(7, (l.where === "freezer" ? goneOn(l) : l.lastDay) - 7 + 1);
         const yy = y + 6 + lane * (laneH + 3);
         const cls = l.where === "freezer" ? "lot frozen" : l.state === "thawing" || l.state === "thawed" ? "lot thawed" : "lot";
         body.push(`<rect class="${cls}" x="${(x(a) + 1).toFixed(1)}" y="${yy.toFixed(1)}" width="${Math.max(2, x(b) - x(a) - 2).toFixed(1)}" height="${laneH}" rx="2" style="--c:${ITEM_C[it.key]}" />`);
@@ -1140,13 +1254,14 @@ export function mountWalkInLab(root: HTMLElement): void {
       const next = film.jobs.find((x) => x.hour > m.hour);
       if (!next) return { doing: "The week is done", note: "", kind: "" };
       const time = clockText(next.hour).replace(/^[A-Za-z]+, /, "");
-      const when = Math.floor(next.hour / 24) === Math.floor(m.hour / 24) ? `at ${time}` : `${DAY[next.staged.ev.day]}, ${time}`;
-      return { doing: `Next, ${when}: ${whatOf(next)}`, note: "", kind: "" };
+      const when = Math.floor(next.hour / 24) === Math.floor(m.hour / 24) ? `at ${time}` : `${DAY[next.staged.ev.day]} at ${time}`;
+      const what = whatOf(next);
+      return { doing: `Next, ${when}, ${what[0]!.toLowerCase()}${what.slice(1)}`, note: "", kind: "" };
     }
     const note = j.routine ? `Time-lapse ×${Math.round(j.lapse)}` : "";
     const ev = j.staged.ev;
     if (ev.kind === "prep" && (ev.shortLunches ?? 0) > 0) return { doing: whatOf(j), note: `${ev.shortLunches} lunches short: bought on the day`, kind: "short" };
-    if (ev.kind === "check") return { doing: whatOf(j), note: note || "Past its day", kind: "past" };
+    if (ev.kind === "check") return { doing: whatOf(j), note: "Last day over: to the bin", kind: "past" };
     return { doing: whatOf(j), note, kind: "" };
   }
   function whatOf(j: Job): string {
@@ -1155,13 +1270,19 @@ export function mountWalkInLab(root: HTMLElement): void {
       listAnd(ITEMS.filter((i) => lots.some((l) => l.item === i.key)).map((i) => cases(count(i.key), SHORT_NAME[i.key])));
     const moved = (it: ItemKey) => j.staged.moves.filter((mv) => mv.item === it && (mv.from === "dock" || mv.to === "kitchen" || (typeof mv.from === "object" && mv.from.box === "freezer"))).length;
     if (ev.kind === "truck") return ev.lots.length ? `The truck: ${byItem(ev.lots, moved)}${policy.frozen ? ", into the freezer" : ""}` : `The truck: nothing it needs to bring`;
-    if (ev.kind === "thaw") return `Into the walk-in to thaw for ${DAY[(ev.day + 1) % 7]}: ${byItem(ev.lots, moved)}`;
+    if (ev.kind === "thaw") {
+      const each = ITEMS.filter((i) => ev.lots.some((l) => l.item === i.key)).map((i) => {
+        const l = film.lots.get(ev.lots.find((x) => x.item === i.key)!.id);
+        return `${cases(moved(i.key), SHORT_NAME[i.key])}${l ? ` for ${DAY[l.readyDay % 7]}` : ""}`;
+      });
+      return `Into the walk-in to thaw: ${listAnd(each)}`;
+    }
     if (ev.kind === "prep") {
       const n = j.staged.moves.length;
       return `Prep for ${ev.lunches!.toLocaleString("en-US")} lunches of ${ITEM[ev.item!].dish.toLowerCase()}${n ? `: ${n} case${n === 1 ? "" : "s"} out` : ""}`;
     }
     const n = j.staged.moves.length;
-    return `The night's check: ${n ? `${n} case${n === 1 ? "" : "s"} past their day, ${lb(ev.lots.reduce((s, l) => s + l.lb, 0))}, out` : "nothing past its day"}`;
+    return `The night's check: ${n ? `${n} case${n === 1 ? "" : "s"} on ${n === 1 ? "its" : "their"} last day, ${lb(ev.lots.reduce((s, l) => s + l.lb, 0))}, out` : "nothing on its last day"}`;
   }
   function showHud(m: Moment): void {
     const { doing, note, kind } = doingOf(m);
@@ -1223,7 +1344,8 @@ export function mountWalkInLab(root: HTMLElement): void {
   function showTags(m: Moment): void {
     const W = stageEl!.clientWidth;
     const H = stageEl!.clientHeight;
-    const count = (b: Where) => m.cases.filter((c) => c.at?.box === b).length;
+    const count = (b: Where) => m.cases.filter((c) => c.at?.box === b && !c.at.floor).length;
+    // On a narrow stage the fronts' outer corners are out of view, and the tiles say as much.
     placeTag(tagCooler, coolerTop, ["Walk-in, 38 °F", `${count("walkin")} of ${WALKIN_PLACES} places`], false, "#7dd3fc", W, H);
     placeTag(tagFreezer, freezerTop, ["Freezer, 0 °F", `${count("freezer")} of ${FREEZER_PLACES} places`], false, FROZEN, W, H);
     const onFloor = m.cases.find((c) => c.at?.floor);
