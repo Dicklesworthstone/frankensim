@@ -5185,3 +5185,20 @@ Modal `Shell` (`TensionedDisk`) parts compose with `GasCavity` through `PistonFa
 ## Modal-attachment Hertz contact with strike-station participation (`owners::plate` + `owners::contact`, bead `frankensim-rc-1109-root-3gc12.11.9.4`)
 
 A `HertzContact` between a spherical striker (`Sphere`) and a modal circular `Shell` (`TensionedDisk`) composes directly on the kernel load line (`ContactInterface::reads_mean_flows_only`, no `publishing_ends`/`reading_ends` wiring): `owners::plate` evaluates exact P1 barycentric weights `phi_k(station_x, station_y)` (`TensionedDisk::locate_barycentric`, default `(0, 0)`, no nearest-node snapping) on a dedicated width-1 `ModalAttachment` (`strike_{idx}`) exposed as `mechanics` on the touching surface feature, and exposes `(part, "face")` (`a_k / A`) only when targeted by a source. `owners::plate` refuses combining `PistonFace`/source and `HertzContact` or two `HertzContact` interfaces on the same surface feature, targeting the part entity directly, outside-mesh stations, and zero-participation rim stations; `owners::contact` admits `TensionedDisk` as zero-curvature (`1/R* = 1/R_stick`), refuses `station_x`/`station_y` on non-disk pairs, and refuses rim overhang `hypot(x, y) + R_stick > R`. No-claim: the Hertz half-space `E*` applied to a film much thinner than the contact radius is not the film's physical contact compliance; membrane deflection is carried by the retained modes while the striker tip's own compliance governs local contact.
+
+## Weight along a prismatic joint (bead `frankensim-rc-1109-root-3gc12.13.1`)
+
+A prismatic joint gives its child the weight `m (g . n)`, a constant `Force`
+on the child's mechanics port (`joint.<name>.weight`): `m` is the mass the
+lumped rigid body lowered (density times volume), `g` the environment's
+gravity and `n` the joint's unit axis. The joint's receipt records
+`gravity[i]`, `axis_unit[i]`, `mass` and `weight`. When `g . n = 0`, as on
+every joint of the gallery, nothing is added. With a weight, a prismatic
+joint lowers without stiffness or damping: a free slide. A child is weighed
+once. Refused by name: a second prismatic joint that gives the child another
+`g . n`, and a nonzero `g . n` on a child with no translational lumped mass.
+fs-runtime's `runtime_core` test holds a free fall to `x = a t^2 / 2` and a
+damped spring to its sag `m (g . n) / k`. The lumped body's coordinate is its
+travel along `n`, its initial position still read from `initial.position[0]`.
+No claim: a body with no prismatic joint declares no axis and takes no
+weight, and neither does a revolute child.

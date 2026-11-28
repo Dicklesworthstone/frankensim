@@ -1666,6 +1666,10 @@ pub struct LoweringGraph {
     deferred_signals: Vec<(EntityId, &'static str, EntityId, &'static str, String)>,
     observers: BTreeMap<EntityId, Observer>,
     consumed_sources: BTreeMap<usize, SourceLoweringReceipt>,
+    /// Lowered masses [kg] with their part's geometry, and each child a
+    /// prismatic joint has weighed, with its `g . n` [m/s^2].
+    masses: BTreeMap<EntityId, (f64, ContentHash, String)>,
+    weighed: BTreeMap<EntityId, f64>,
 }
 
 impl LoweringGraph {
@@ -1685,7 +1689,18 @@ impl LoweringGraph {
             deferred_signals: Vec::new(),
             observers: BTreeMap::new(),
             consumed_sources: BTreeMap::new(),
+            masses: BTreeMap::new(),
+            weighed: BTreeMap::new(),
         }
+    }
+
+    /// Record the translational mass [kg], density times volume, that a lumped
+    /// part constructor lowered, so that a prismatic joint whose child the part
+    /// is can give it its weight.
+    pub(crate) fn record_mass(&mut self, ctx: &PartLoweringContext<'_>, mass_kg: f64) {
+        let generator = geometry_generator_label(&ctx.part.geometry);
+        let geometry = (mass_kg, ctx.geometry_fingerprint, generator);
+        self.masses.insert(ctx.part.entity, geometry);
     }
 
     /// Borrow the underlying [`SystemBuilder`] for direct component addition or
@@ -4161,6 +4176,7 @@ fn lower_lumped_rigid_body(
                 &gen_label,
                 "mass = density * volume",
             );
+            graph.record_mass(ctx, mass_kg);
             let comp = Mass::new(mass_kg).map_err(|source| LoweringError::Element {
                 item: scope.clone(),
                 source,
@@ -4232,6 +4248,7 @@ fn lower_lumped_rigid_thermal_body(
         &gen_label,
         "heat_capacity = mass * specific_heat_capacity",
     );
+    graph.record_mass(ctx, mass_kg);
     let init = lumped_initial_motion(ctx.part, &scope, false, &mut recorder)?;
     let t_init = lumped_initial_temp(ctx, &scope, &mut recorder);
 
@@ -4709,6 +4726,12 @@ fn lower_1dof_joint(
         created_nodes.push(name);
     }
 
+    if ctx.joint.kind == JointKind::Prismatic
+        && let Some(name) = lower_weight(ctx, graph, child_port, &scope, &mut recorder)?
+    {
+        created_nodes.push(name);
+    }
+
     if created_nodes.is_empty() {
         return Err(LoweringError::Invalid {
             item: scope,
@@ -4721,6 +4744,73 @@ fn lower_1dof_joint(
         created_nodes,
         parameter_sources,
     })
+}
+
+/// The weight of a prismatic joint's child: the constant force `m (g . n)` on
+/// its port, `m` its recorded mass, `g` the environment's gravity and `n` the
+/// joint's unit axis. `None` when `g . n = 0`, or when an earlier prismatic
+/// joint gave the child the same `g . n`: a child is weighed once.
+fn lower_weight(
+    ctx: &JointLoweringContext<'_>,
+    graph: &mut LoweringGraph,
+    child_port: PortRef,
+    scope: &str,
+    recorder: &mut ProvenanceRecorder,
+) -> Result<Option<String>, LoweringError> {
+    let gravity = &ctx.draft.input().environment.base.gravity;
+    let length = ctx.joint.axis.iter().map(|a| a * a).sum::<f64>().sqrt();
+    let unit = ctx.joint.axis.map(|a| a / length);
+    let along: f64 = gravity.iter().zip(unit).map(|(g, n)| g.value * n).sum();
+    let refuse = |detail: String| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail,
+    };
+    if let Some(&earlier) = graph.weighed.get(&ctx.joint.child) {
+        // Two scalings of one axis may round their unit vectors apart.
+        if (earlier - along).abs() <= 4.0 * f64::EPSILON * earlier.abs().max(along.abs()) {
+            return Ok(None);
+        }
+        return Err(refuse(format!(
+            "another prismatic joint of this child has g . n = {earlier} m/s^2 and this one \
+             {along} m/s^2: a lumped body moves along one axis; give its joints one axis"
+        )));
+    }
+    graph.weighed.insert(ctx.joint.child, along);
+    if along == 0.0 {
+        return Ok(None);
+    }
+    let Some((mass_kg, fingerprint, generator)) = graph.masses.get(&ctx.joint.child).cloned()
+    else {
+        return Err(refuse(format!(
+            "gravity has {along} m/s^2 along this joint's axis, but the child's constructor \
+             recorded no translational mass to weigh; turn the axis normal to gravity or \
+             lower the child as a translational lumped rigid body"
+        )));
+    };
+    for (axis, (g, n)) in gravity.iter().zip(unit).enumerate() {
+        let g_name = format!("gravity[{axis}]");
+        recorder.record_declared_field(&g_name, g.value, g.dims, "environment", &g_name);
+        let n_name = format!("axis_unit[{axis}]");
+        recorder.record_declared_field(n_name, n, Dims::NONE, scope, format!("axis[{axis}]"));
+    }
+    let weight_n = mass_kg * along;
+    let mass_formula = "mass = density * volume";
+    let formula = "weight = mass * dot(gravity, axis_unit), axis_unit = axis / |axis|";
+    let record = |r: &mut ProvenanceRecorder, name: &str, value, dims, formula: &str| {
+        r.record_geometry_derived(name, value, dims, fingerprint, &generator, formula);
+    };
+    record(recorder, "mass", mass_kg, MASS_DIMS, mass_formula);
+    record(recorder, "weight", weight_n, FORCE_DIMS, formula);
+    let force = Waveform::constant(weight_n).map_err(|source| LoweringError::Element {
+        item: scope.to_owned(),
+        source,
+    })?;
+    let name = format!("joint.{}.weight", ctx.joint.name);
+    let account = SourceAccount::default();
+    let node = graph.add_with_tangent_and_residual(&name, None, Force::new(force), account)?;
+    let p = graph.port(node, "p")?;
+    graph.attach_common_flow(child_port, p, 1.0);
+    Ok(Some(name))
 }
 
 fn lower_involute_gear_mesh(

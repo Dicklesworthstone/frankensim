@@ -1,7 +1,8 @@
 //! Option B core tests for `fs-runtime` loading real `.fsim` assemblies:
 //! full 10-example `.fsim` sweep against the shared `fs-cli` lowering registry,
 //! live `set_input` work booking, `seed_override`, `render_f32` halt/silence,
-//! inline probe target guards, and `from_system` per-step latch checks.
+//! inline probe target guards, `from_system` per-step latch checks, and the
+//! weight along a vertical prismatic joint.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -475,4 +476,61 @@ fn from_system_latches_inputs_per_step_and_rejects_bad_bindings() {
             .code,
         "invalid-probe"
     );
+}
+
+/// The child of a vertical prismatic joint takes its weight `m (g . n)`, which
+/// the joint's receipt records. Free, it falls at `a = g . n` with `x = a t^2 /
+/// 2`, exact to rounding because the midpoint rule is exact for a constant
+/// force. On a spring of 200 N/m, damped near critically, it settles at the sag
+/// `m (g . n) / k`.
+#[test]
+fn a_vertical_prismatic_child_falls_free_and_sags_on_a_spring() {
+    let fsim = |joint: &str| {
+        format!(
+            r#"(assembly "vertical"
+  (version 1) (units "SI") (seed 0x23)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 5s :dt 0.01s :sample-rate 100Hz)
+  (part "mass" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (joint "slide" :kind prismatic :parent root :child "mass" :axis (0 0 1){joint})
+  (probe "mass_pos" :kind field-quantity :target "mass"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 100Hz)
+)"#
+        )
+    };
+    let (dt, a, k) = (0.01, -9.806_65, 200.0);
+    let packs = PackCatalog::from_raw_bytes(&[STEEL_PACK]).unwrap();
+    for (joint, steps) in [("", 100), (" :damping 40N*s/m :stiffness 200N/m", 500)] {
+        let text = fsim(joint);
+        let admitted = admit_assembly_source(text.as_bytes(), &packs).unwrap();
+        let lowered = cli_registry().lower(&admitted.draft, &admitted.card_store);
+        let receipt = &lowered.unwrap().receipt.joints[0].parameter_sources;
+        let value = |name: &str| receipt.iter().find(|p| p.parameter == name).unwrap().value;
+        let m = value("mass");
+        let recorded = [value("gravity[2]"), value("axis_unit[2]"), value("weight")];
+        let bits = |v: [f64; 3]| v.map(f64::to_bits);
+        assert_eq!(bits(recorded), bits([a, 1.0, m * a]), "{recorded:?}");
+        let mut rt = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None).unwrap();
+        let (mut buf, at) = (vec![0.0; rt.snapshot_len()], rt.probes().probes[0].offset);
+        let near = |x: f64, exact: f64| (x - exact).abs() <= 1.0e-12 * exact.abs();
+        for step in 1..=steps {
+            rt.step(dt).unwrap();
+            rt.read_probes(&mut buf).unwrap();
+            let t = f64::from(step) * dt;
+            let fall = a * t * t / 2.0;
+            if joint.is_empty() {
+                assert!(near(buf[at], fall), "step {step}: {} m", buf[at]);
+            }
+        }
+        let sag = m * a / k;
+        if !joint.is_empty() {
+            assert!(near(buf[at], sag), "sag {sag} m: {} m", buf[at]);
+        }
+        assert!(rt.ledger().energy_residual_j().abs() < 1.0e-9, "{joint}");
+    }
 }
