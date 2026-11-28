@@ -3404,7 +3404,27 @@ impl LoweringRegistry {
         };
         let plan = system.execution_plan_for_dt(probe_dt);
         let causalization_audit = system.causalization_audit();
-        let acoustic_members = Vec::new();
+        #[cfg(feature = "plate-slices")]
+        let acoustic_members = {
+            let mut m = Vec::new();
+            crate::acoustic::lower_microphone_receipts(input, &radiating_surfaces, &mut m)?;
+            m
+        };
+        #[cfg(not(feature = "plate-slices"))]
+        let acoustic_members = {
+            if let Some(p) = input.probes.iter().find(|p| {
+                matches!(
+                    p.kind,
+                    fs_scenario::assembly::draft::ProbeKind::Microphone { .. }
+                )
+            }) {
+                return Err(LoweringError::Invalid {
+                    item: format!("probe:{}", p.name),
+                    detail: "microphone lowering requires feature plate-slices".to_owned(),
+                });
+            }
+            Vec::new()
+        };
 
         // 7. Assemble and audit receipt completeness.
         let mut receipt = LoweringReceipt {

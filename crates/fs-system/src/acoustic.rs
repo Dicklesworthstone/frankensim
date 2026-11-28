@@ -11,16 +11,24 @@ use std::f64::consts::{PI, TAU};
 use fs_material::gas::GasState;
 use fs_math::{dd::Dd, det};
 use fs_modal::time::ModalAcousticState;
+use fs_qty::Dims;
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftEnvironment, MicrophonePattern, ProbeDecl, ProbeKind,
+    DraftAssembly, DraftAssemblyInput, DraftEnvironment, MicrophonePattern, ProbeDecl, ProbeKind,
+    StepPolicy,
 };
+use fs_scenario::entity::EntityId;
 
 use self::decimate::{Decimator, MAX_MODES};
-use crate::lowering::LoweredSystem;
+use crate::lowering::{
+    AcousticMemberLoweringReceipt, LoweredSystem, LoweringError, ProvenanceRecorder, VELOCITY_DIMS,
+};
 use crate::{NodeId, System};
 
 const MAX_PATCHES: usize = 120_000;
 const MAX_HISTORY: usize = 32_768;
+const DENSITY_DIMS: Dims = Dims([-3, 1, 0, 0, 0, 0]);
+const LENGTH_DIMS: Dims = Dims([1, 0, 0, 0, 0, 0]);
+const FREQUENCY_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 /// One free-node planar surface quadrature element (`z = 0`).
 #[derive(Debug, Clone, PartialEq)]
@@ -335,4 +343,75 @@ impl AcousticMicrophone {
     pub const fn mechanics_dt_s(&self) -> f64 {
         self.mechanics_dt_s
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn lower_microphone_receipts(
+    input: &DraftAssemblyInput,
+    surfaces: &BTreeMap<EntityId, RadiatingModalSurface>,
+    out: &mut Vec<AcousticMemberLoweringReceipt>,
+) -> Result<(), LoweringError> {
+    for p in &input.probes {
+        let ProbeKind::Microphone {
+            target, position, ..
+        } = &p.kind
+        else {
+            continue;
+        };
+        let scope = format!("probe:{}", p.name);
+        let bad = |detail: String| LoweringError::Invalid {
+            item: scope.clone(),
+            detail,
+        };
+        let StepPolicy::Fixed { dt } = input.time_plan.step_policy else {
+            return Err(bad("microphone requires fixed step policy".into()));
+        };
+        let surf = surfaces.get(target).ok_or_else(|| {
+            bad(format!(
+                "microphone target `{}` is not a radiating modal surface",
+                target.token()
+            ))
+        })?;
+        let (_, gas, ratio) =
+            AcousticMicrophone::from_probe(p, &input.environment, surf, dt.value).map_err(bad)?;
+        let (mut rec, src) = (
+            ProvenanceRecorder::default(),
+            "GasState::try_new_moist_air(environment)",
+        );
+        for (k, v, d, s) in [
+            ("exterior_air_density", gas.density, DENSITY_DIMS, src),
+            (
+                "exterior_air_sound_speed",
+                gas.sound_speed,
+                VELOCITY_DIMS,
+                src,
+            ),
+            ("position_x", position[0].value, LENGTH_DIMS, "position_x"),
+            ("position_y", position[1].value, LENGTH_DIMS, "position_y"),
+            ("position_z", position[2].value, LENGTH_DIMS, "position_z"),
+            (
+                "sample_rate_hz",
+                p.sample_rate.value,
+                FREQUENCY_DIMS,
+                "sample_rate",
+            ),
+            (
+                "decimation_ratio",
+                ratio as f64,
+                Dims::NONE,
+                "1/(dt*sample_rate)",
+            ),
+        ] {
+            rec.record_declared_field(k, v, d, &scope, s);
+        }
+        let (property_receipts, parameter_sources) = rec.finish();
+        out.push(AcousticMemberLoweringReceipt {
+            member_name: scope,
+            family: "baffled-pressure-microphone".to_owned(),
+            created_nodes: Vec::new(),
+            property_receipts,
+            parameter_sources,
+        });
+    }
+    Ok(())
 }

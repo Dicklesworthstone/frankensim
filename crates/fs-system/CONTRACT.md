@@ -5221,3 +5221,21 @@ damped spring to its sag `m (g . n) / k`. The lumped body's coordinate is its
 travel along `n`, its initial position still read from `initial.position[0]`.
 No claim: a body with no prismatic joint declares no axis and takes no
 weight, and neither does a revolute child.
+
+## Baffled-pressure modal microphone observer (`acoustic`, bead `.11.9.5`)
+
+Under `plate-slices`, `owners::plate` registers one `RadiatingModalSurface`
+per lowered `TensionedDisk` (P1 lumped free-node areas, outward normal `+z`
+aligned with touching `PistonFace :sign`, default `+1`, refusing conflicting
+signs). `acoustic::AcousticMicrophone` observes modal velocities into acoustic
+pressure [Pa] matching `fs_couple::pcm_wav::baffled::BaffledPressure`
+(`new_multirate`, double-double fractional-delay Rayleigh kernel and
+Blackman-Harris cascade `Decimator`, ratio `1..=16`, zero hot-path allocation).
+Lowering records moist-air `exterior_air_density` and
+`exterior_air_sound_speed` from `GasState::try_new_moist_air` on
+`LoweringReceipt::acoustic_members`, and refuses missing or non-radiating
+targets, adaptive step policies, `z <= 0`, `z < 0.05 m`, non-omnidirectional
+patterns, invalid decimation ratios, and modes crossing `0.45 * mechanics_rate`.
+No-claim: one-way observation only — no radiation backreaction (fluid loading
+or radiation damping) on the modes, and no diffraction or reflection off the
+drum shell or room.

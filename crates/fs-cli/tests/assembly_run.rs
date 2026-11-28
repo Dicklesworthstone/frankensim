@@ -695,8 +695,8 @@ fn admit_refusals_probe_refusals_and_unknown_explain_fail_closed() {
         &mut step_clock(0.1),
         AssemblyCancelPlan::default(),
     )
-    .expect_err("microphone without acoustic lowering refuses");
-    assert_eq!(e_mic.code, "cli-assembly-probe-unsupported");
+    .expect_err("microphone targeting non-radiating mass refuses");
+    assert_eq!(e_mic.code, "cli-assembly-lower");
 
     // 4. Explain on unknown run id refuses cleanly.
     let unk = SolveRunId::parse_hex(&hash_bytes(b"unknown-assembly-run").to_hex()).unwrap();
