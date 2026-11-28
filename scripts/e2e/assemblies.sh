@@ -124,8 +124,9 @@ run_case tmc_modal "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK" --an
 run_case tmc_stationary "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK" --analysis stationary
 run_case tmc_transient "$ASM_DIR/two_mass_chain.fsim" --materials "$STEEL_PACK"
 TMC_HALF="$ARTIFACT_DIR/two_mass_chain_half_dt.fsim"
-sed 's/:dt 0.001s/:dt 0.0005s/' "$ASM_DIR/two_mass_chain.fsim" > "$TMC_HALF"
+sed 's/:dt 0.001s/:dt 0.0005s/; s/:sample-rate 1000Hz/:sample-rate 2000Hz/g' "$ASM_DIR/two_mass_chain.fsim" > "$TMC_HALF"
 grep -q ":dt 0.0005s" "$TMC_HALF" || die "half-step copy of two_mass_chain.fsim has no :dt 0.0005s"
+grep -q ":sample-rate 1000Hz" "$TMC_HALF" && die "half-step copy of two_mass_chain.fsim still samples at 1000 Hz"
 run_case tmc_half "$TMC_HALF" --materials "$STEEL_PACK"
 # Gas piston (adiabatic Ruchardt modal, equilibrium transient, and +500 N compression transient)
 run_case gp_modal "$ASM_DIR/gas_piston.fsim" --materials "$STEEL_PACK" --materials "$N2_PACK" --analysis modal

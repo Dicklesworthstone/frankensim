@@ -12,7 +12,7 @@ use fs_qty::Dims;
 use fs_report::{
     EngineeringReport, LineageItem, NoClaimItem, QoiReportItem, ReportProvenance, StageReceiptItem,
 };
-use fs_scenario::assembly::draft::{ProbeDecl, ProbeKind, TimingEdge};
+use fs_scenario::assembly::draft::{ProbeDecl, ProbeKind, StepPolicy, TimePlan, TimingEdge};
 use fs_scenario::entity::EntityId;
 
 use super::budget::{EvaluatedQoiBudget, QOI_BUDGET_SCHEMA};
@@ -343,11 +343,89 @@ fn make_probe(name: impl Into<String>, kind: &str, unit: &str, values: Vec<f64>)
     }
 }
 
+/// The time plan's fixed step [s], the grid a transient probe's `:sample-rate` is read on.
+pub(crate) fn plan_step_s(plan: &TimePlan) -> Option<f64> {
+    match plan.step_policy {
+        StepPolicy::Fixed { dt } => Some(dt.value),
+        StepPolicy::Adaptive { .. } => None,
+    }
+}
+
+fn rate_refusal(probe: &str, why: impl Into<String>) -> SolveRefusal {
+    staged_refusal(
+        "cli-assembly-probe-rate",
+        "probe",
+        format!("probe `{probe}` {}", why.into()),
+        "declare a :sample-rate of 1/dt, or of 1/dt divided by a whole number",
+    )
+}
+
+/// A transient series at its probe's declared `:sample-rate`, read on the time plan's step `dt`.
+///
+/// A rate of `1 / dt` keeps every accepted step, source knots and the horizon-capped final step
+/// included. A lower rate whose period is a whole number of steps keeps the samples at
+/// `t = t0 + k / rate` (a thermocouple's lag runs at every step first). A faster rate, a
+/// period between whole steps, and a sample time the run did not step on (a source knot moves the
+/// steps after it) refuse by name; no value is interpolated.
+#[allow(clippy::cast_precision_loss)]
+fn at_declared_rate(
+    p: &ProbeDecl,
+    times_s: &[f64],
+    plan_dt_s: Option<f64>,
+    values: Vec<f64>,
+) -> Result<Vec<f64>, SolveRefusal> {
+    let Some(dt) = plan_dt_s else {
+        return Ok(values);
+    };
+    let (rate, step_rate) = (p.sample_rate.value, 1.0 / dt);
+    let steps = step_rate / rate;
+    if (steps - 1.0).abs() <= 1.0e-9 {
+        return Ok(values);
+    }
+    let whole = steps.round();
+    if !(steps.is_finite() && steps > 1.0) {
+        let why =
+            format!("samples at {rate} Hz, faster than the time plan's step rate {step_rate} Hz");
+        return Err(rate_refusal(&p.name, why));
+    }
+    if (steps - whole).abs() > 1.0e-9 * whole {
+        let why = format!(
+            "samples at {rate} Hz, a period of {steps:.6} steps of {dt} s, not a whole number"
+        );
+        return Err(rate_refusal(&p.name, why));
+    }
+    if values.len() != times_s.len() {
+        return Err(rate_refusal(
+            &p.name,
+            "has a series whose length is not the trace's",
+        ));
+    }
+    let Some(&t0) = times_s.first() else {
+        return Ok(values);
+    };
+    let (period, tol) = (whole * dt, 1.0e-4 * dt);
+    let mut kept = Vec::new();
+    for (&t, &v) in times_s.iter().zip(&values) {
+        let next = t0 + kept.len() as f64 * period;
+        if (t - next).abs() <= tol {
+            kept.push(v);
+        } else if t > next {
+            let why = format!(
+                "samples at {rate} Hz, and its sample time {next} s is not a step of this run \
+                 (a source knot moves the steps after it); {step_rate} Hz keeps every step"
+            );
+            return Err(rate_refusal(&p.name, why));
+        }
+    }
+    Ok(kept)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn evaluate_probes(
     probes: &[ProbeDecl],
     names: &BTreeMap<EntityId, String>,
     trace: &RunTrace,
+    plan_dt_s: Option<f64>,
 ) -> Result<(String, RetainedSideArtifact, Vec<EvaluatedProbe>), SolveRefusal> {
     let mut evaluated = Vec::new();
     let heat_rate = |e, n: &str, d| -> Result<Vec<f64>, SolveRefusal> {
@@ -503,6 +581,12 @@ pub(crate) fn evaluate_probes(
                 ProbeKind::StrainGauge { .. } => {
                     return Err(probe_refusal(&p.name, "no lowered continuum strain field"));
                 }
+            };
+            let values = match p.kind {
+                ProbeKind::Thermocouple { .. } | ProbeKind::FieldQuantity { .. } => {
+                    at_declared_rate(p, &trace.times_s, plan_dt_s, values)?
+                }
+                _ => values,
             };
             evaluated.push(make_probe(p.name.clone(), kind, unit, values));
         }
@@ -903,6 +987,7 @@ mod tests {
             harmonic_unit: "SI".to_owned(),
             stationary_norm: None,
             stationary_state: Vec::new(),
+            microphones: BTreeMap::new(),
         };
         // The motion survives the written trace.
         let trace = RunTrace::from_json(&trace.to_json()).unwrap();
@@ -918,7 +1003,8 @@ mod tests {
                 sample_rate: QtyAny::new(10.0, Dims([0, 0, -1, 0, 0, 0])),
                 kind,
             };
-            evaluate_probes(&[probe], &names, &trace).map(|(_, _, probes)| probes[0].clone())
+            let at = evaluate_probes(&[probe], &names, &trace, Some(0.1));
+            at.map(|(_, _, probes)| probes[0].clone())
         };
         let spin = probe("angular-velocity-z", ANGULAR_VELOCITY).unwrap();
         assert_eq!((spin.values, spin.unit.as_str()), (vec![6.0; 2], "rad/s"));

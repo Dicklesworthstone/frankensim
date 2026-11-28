@@ -274,12 +274,12 @@ const HEATED_BODY: &str = r#"(assembly "horizon_heater"
   (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
   (reference-state assembled)
   (environment :ambient-temp 300K :ambient-pressure 101325Pa)
-  (time-plan :horizon 0.01025s :dt 0.003s :sample-rate 1000Hz)
+  (time-plan :horizon 0.01025s :dt 0.003s :sample-rate 333.3333333333333Hz)
   (part "body"
     :kind solid :geometry (box 0.1m 0.1m 0.1m)
     :material "fixture" :query-temp 300K :physics (thermal) :fidelity lumped)
   (source "heater" :part "body" :port "thermal" :history (constant 500W))
-  (probe "temperature" :kind thermocouple :target "body" :sample-rate 1000Hz)
+  (probe "temperature" :kind thermocouple :target "body" :sample-rate 333.3333333333333Hz)
 )"#;
 
 #[test]
@@ -341,6 +341,95 @@ fn transient_horizon_uses_accepted_time_and_caps_the_final_step() {
             .unwrap();
         assert!((final_temperature - (300.0 + horizon)).abs() < 1.0e-11);
     }
+}
+
+/// Bead vr9rw: a transient probe is read at its declared `:sample-rate`, on the time plan's step.
+#[test]
+fn a_probe_reads_at_its_declared_rate_and_refuses_one_the_steps_cannot_hit() {
+    let packs =
+        CardPackSet::admit(vec![material_pack("AISI-304", 8000.0, 500.0, 193.0e9)]).unwrap();
+    let extra = r#"  (probe "slow_temp" :kind thermocouple :target "slider" :sample-rate 200Hz :time-constant 0.005s)
+  (probe "slow_pos" :kind field-quantity :target "slider" :sample-rate 200Hz :quantity "position" :dims (1 0 0 0 0 0))
+"#;
+    let marker = "  (probe \"slider_temp\"";
+    let src = SLIDER_ASSEMBLY.replace(marker, &format!("{extra}{marker}"));
+    assert_ne!(src, SLIDER_ASSEMBLY);
+    let ledger = Ledger::open(":memory:").unwrap();
+    let (out, _) = run_assembly(
+        &ledger,
+        src.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .expect("200 Hz probes on a 1 ms plan run");
+    assert_eq!(out.status, SolveRunStatus::Completed);
+    let exp = explain_assembly_run(&ledger, SolveRunId::parse_hex(&out.run).unwrap()).unwrap();
+    let pj = exp.probe_series_json.as_deref();
+    // 0.05 s at 1 ms: 51 samples at 1000 Hz, every fifth of them (11) at 200 Hz, lag included.
+    for (fast, slow) in [("slider_temp", "slow_temp"), ("slider_pos", "slow_pos")] {
+        let (f, s) = (
+            extract_probe_values(pj, fast),
+            extract_probe_values(pj, slow),
+        );
+        assert_eq!((f.len(), s.len()), (51, 11), "{fast}");
+        let every_fifth: Vec<f64> = f.iter().step_by(5).copied().collect();
+        assert_eq!(s, every_fifth, "{slow}");
+    }
+    for (rate, words) in [
+        ("3000Hz", "faster than the time plan's step rate"),
+        ("300Hz", "not a whole number"),
+    ] {
+        let bad = SLIDER_ASSEMBLY.replace(
+            "(probe \"slider_pos\" :kind field-quantity :target \"slider\" :sample-rate 1000Hz",
+            &format!(
+                "(probe \"slider_pos\" :kind field-quantity :target \"slider\" :sample-rate {rate}"
+            ),
+        );
+        assert_ne!(bad, SLIDER_ASSEMBLY);
+        let e = run_assembly(
+            &Ledger::open(":memory:").unwrap(),
+            bad.as_bytes(),
+            &packs,
+            AssemblyAnalysisMode::Transient,
+            &mut step_clock(0.1),
+            AssemblyCancelPlan::default(),
+        )
+        .expect_err("a rate the steps cannot hit refuses");
+        assert_eq!(
+            (e.code, e.stage),
+            ("cli-assembly-probe-rate", Some("probe"))
+        );
+        assert!(
+            e.what.contains("`slider_pos`") && e.what.contains(words),
+            "{}",
+            e.what
+        );
+    }
+    // A source knot at 4 ms moves the 3 ms steps after it off the 6 ms grid of a 1/(2 dt) probe.
+    let fixture = CardPackSet::admit(vec![material_pack("fixture", 1000.0, 500.0, 1.0e9)]).unwrap();
+    let knotted = HEATED_BODY
+        .replace(
+            "(constant 500W)",
+            "(step :t 0.004s :before 500W :after 500W)",
+        )
+        .replace(
+            ":target \"body\" :sample-rate 333.3333333333333Hz",
+            ":target \"body\" :sample-rate 166.66666666666666Hz",
+        );
+    assert!(knotted.contains("(step :t 0.004s") && knotted.contains("166.66666666666666Hz"));
+    let e = run_assembly(
+        &Ledger::open(":memory:").unwrap(),
+        knotted.as_bytes(),
+        &fixture,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .expect_err("a knot-shifted grid refuses");
+    assert_eq!(e.code, "cli-assembly-probe-rate");
+    assert!(e.what.contains("is not a step of this run"), "{}", e.what);
 }
 
 #[test]

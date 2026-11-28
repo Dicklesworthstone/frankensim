@@ -58,7 +58,7 @@ fn admit_assembly_source(
 }
 use self::report::{
     AssemblyReportInputs, EntitySample, EvaluatedProbe, PROBE_SERIES_KIND, RunTrace,
-    build_assembly_report, dims_to_unit, evaluate_probes,
+    build_assembly_report, dims_to_unit, evaluate_probes, plan_step_s,
 };
 use crate::cards::{CardPackKind, CardPackSet, RawCardPack};
 use crate::import::json_string;
@@ -1057,10 +1057,12 @@ impl StagePipeline for AssemblyPipeline<'_> {
                     .trace
                     .as_ref()
                     .ok_or_else(|| resume_identity("missing run trace"))?;
+                let input = self.admitted.draft.input();
                 let (receipt_json, side, probes) = evaluate_probes(
-                    &self.admitted.draft.input().probes,
+                    &input.probes,
                     &self.admitted.entity_names,
                     trace,
+                    plan_step_s(&input.time_plan),
                 )?;
                 let series_artifact = side.artifact;
                 let mut side_artifacts = vec![side];

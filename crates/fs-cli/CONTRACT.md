@@ -180,6 +180,13 @@ identity domain (`org.frankensim.fs-cli.assembly-run-identity.v1`), and
   and analysis outputs strictly from retained kernel outputs; any probe whose
   observable was not lowered refuses explicitly (`cli-assembly-probe-unsupported`)
   without fabricating values.
+  A transient `Thermocouple` or `FieldQuantity` series is read at its declared
+  `:sample-rate` on the time plan's step `dt`: `1/dt` keeps every accepted
+  step (source knots and the capped final step included); `1/(m dt)` for a
+  whole `m` keeps the samples at `t0 + k m dt`, the horizon's only when it
+  falls on them, so a `final` statistic reads the last of them; a faster rate,
+  a period between whole steps, or a sample time the run did not step on
+  refuses (`cli-assembly-probe-rate`). `Timing` crossings use every step.
 - `report` projects the retained receipts into `EngineeringReport` (HTML + JSON)
   and a format-9 `EvidencePackage` verified by `fs_checker::check`.
 - `explain_assembly_run` projects the retained lowering receipt, execution plan,

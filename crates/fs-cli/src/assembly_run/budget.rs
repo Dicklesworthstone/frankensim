@@ -26,7 +26,7 @@ use fs_system::{
     ParameterSource, SolveConfig,
 };
 
-use super::report::{EvaluatedProbe, RunTrace, UNIT_DIMS, evaluate_probes};
+use super::report::{EvaluatedProbe, RunTrace, UNIT_DIMS, evaluate_probes, plan_step_s};
 use crate::import::json_string as js;
 use crate::json_read::JsonValue;
 use crate::solve::SolveRefusal;
@@ -801,9 +801,12 @@ where
             let st0 = Instant::now();
             let r = build().and_then(|mut ls| {
                 let tr = run_case(&mut ls, run).map_err(|e| e.what)?;
-                let (_, _, ep) =
-                    evaluate_probes(&acc.adm.draft.input().probes, &acc.adm.entity_names, &tr)
-                        .map_err(|e| e.what)?;
+                // The plan's step, not this run's: a step-halved run steps on every nominal time,
+                // so a slower probe reads the nominal sample times there.
+                let inp = acc.adm.draft.input();
+                let dt = plan_step_s(&inp.time_plan);
+                let (_, _, ep) = evaluate_probes(&inp.probes, &acc.adm.entity_names, &tr, dt)
+                    .map_err(|e| e.what)?;
                 let mut vals = Vec::with_capacity(acc.reqs.len());
                 for rq in acc.reqs {
                     let v = ep
