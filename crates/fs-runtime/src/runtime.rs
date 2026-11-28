@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_system::acoustic::AcousticMicrophone;
 use fs_system::elements::Motion;
 use fs_system::lowering::{Observed, Observer};
 use fs_system::{BlockSolveMode, Ledger, NodeId, StepReport, System};
@@ -46,6 +47,7 @@ pub(crate) enum ProbeTarget {
     ObserverCell(usize),
     ObserverHeatRate(usize),
     ObserverBody(usize, usize),
+    AcousticMic(usize),
     Custom(CustomProbeFn),
 }
 
@@ -70,6 +72,7 @@ fn next_offset(d: &ProbeDescriptor, off: usize) -> Option<usize> {
 pub struct AssemblyRuntime {
     system: System,
     observers: Vec<Observer>,
+    microphones: Vec<AcousticMicrophone>,
     pool: ArenaPool,
     gate: CancelGate,
     stream_key: StreamKey,
@@ -128,6 +131,7 @@ impl AssemblyRuntime {
             assembly.into(),
             system,
             Vec::new(),
+            Vec::new(),
             input_descs,
             input_cells,
             probe_descs,
@@ -142,6 +146,7 @@ impl AssemblyRuntime {
         assembly: String,
         system: System,
         observers: Vec<Observer>,
+        microphones: Vec<AcousticMicrophone>,
         input_descs: Vec<InputDescriptor>,
         input_cells: Vec<Arc<AtomicU64>>,
         probe_descs: Vec<ProbeDescriptor>,
@@ -160,6 +165,7 @@ impl AssemblyRuntime {
         Self {
             system,
             observers,
+            microphones,
             pool: ArenaPool::new(ArenaConfig::default()),
             gate: CancelGate::new_clock_free(),
             stream_key: StreamKey {
@@ -243,6 +249,12 @@ impl AssemblyRuntime {
         if !(dt_s.is_finite() && dt_s > 0.0) {
             return Err(self.halt("invalid-dt", format!("dt={dt_s}")));
         }
+        for mic in &self.microphones {
+            let want = mic.mechanics_dt_s();
+            if (dt_s - want).abs() > 1.0e-9 * want {
+                return Err(self.halt("microphone-dt-mismatch", format!("dt={dt_s} != {want}")));
+            }
+        }
         for slot in &self.input_slots {
             slot.live
                 .store(slot.pending.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -257,7 +269,13 @@ impl AssemblyRuntime {
             );
             self.system.step(dt_s, &cx)
         });
-        res.map_err(|e| self.halt("kernel-step-refused", e.to_string()))
+        let rep = res.map_err(|e| self.halt("kernel-step-refused", e.to_string()))?;
+        for mic in &mut self.microphones {
+            if let Err(why) = mic.advance(&self.system) {
+                return Err(self.halt("microphone-step-refused", why.to_owned()));
+            }
+        }
+        Ok(rep)
     }
 
     /// Fill `buffer[..snapshot_len()]` with current probe values without allocating.
@@ -405,6 +423,7 @@ impl AssemblyRuntime {
                     _ => f64::NAN,
                 };
             }
+            ProbeTarget::AcousticMic(i) => dst[0] = self.microphones[*i].last_pressure_pa(),
             ProbeTarget::Custom(f) => f(&self.system, dst),
         }
     }

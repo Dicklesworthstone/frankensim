@@ -104,12 +104,12 @@ fn roundoff_term(
     };
     let inp = adm.draft.input();
     let pdef = inp.probes.iter().find(|p| p.name == probe);
-    let ent = pdef.and_then(|p| match &p.kind {
-        ProbeKind::Thermocouple { location, .. } => Some(*location),
+    let ent = pdef.map(|p| match &p.kind {
+        ProbeKind::Thermocouple { location, .. } => *location,
         ProbeKind::Timing { target, .. }
         | ProbeKind::FieldQuantity { target, .. }
-        | ProbeKind::StrainGauge { target, .. } => Some(*target),
-        ProbeKind::Microphone { .. } => None,
+        | ProbeKind::StrainGauge { target, .. }
+        | ProbeKind::Microphone { target, .. } => *target,
     });
     let Some(ent) = ent else {
         return nodata("probe has no single target part");

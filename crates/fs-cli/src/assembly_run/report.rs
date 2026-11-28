@@ -52,6 +52,7 @@ pub(crate) struct RunTrace {
     pub(crate) analysis: String,
     pub(crate) times_s: Vec<f64>,
     pub(crate) entities: BTreeMap<String, Vec<EntitySample>>,
+    pub(crate) microphones: BTreeMap<String, Vec<f64>>,
     pub(crate) modal_modes: Vec<(f64, f64, f64)>,
     pub(crate) harmonic_points: Vec<(f64, f64, f64)>,
     pub(crate) harmonic_unit: String,
@@ -149,6 +150,17 @@ impl RunTrace {
             }
             out.push(']');
         }
+        if !self.microphones.is_empty() {
+            out.push_str(",\"microphones\":{");
+            for (i, (name, vals)) in self.microphones.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "{}:", json_string(name));
+                push_f64_list(&mut out, vals);
+            }
+            out.push('}');
+        }
         out.push('}');
         out
     }
@@ -217,6 +229,17 @@ impl RunTrace {
                     .collect()
             })
             .unwrap_or_default();
+        let mut microphones = BTreeMap::new();
+        if let Some(JsonValue::Object(entries)) = root.get("microphones") {
+            for (k, v) in entries {
+                if let Some(arr) = v.as_array() {
+                    microphones.insert(
+                        k.clone(),
+                        arr.iter().filter_map(JsonValue::as_f64).collect(),
+                    );
+                }
+            }
+        }
         Ok(Self {
             analysis: root
                 .str_field("analysis")
@@ -228,6 +251,7 @@ impl RunTrace {
                 .map(|a| a.iter().filter_map(JsonValue::as_f64).collect())
                 .unwrap_or_default(),
             entities,
+            microphones,
             modal_modes: parse_triples("modal_modes"),
             harmonic_points: parse_triples("harmonic_points"),
             harmonic_unit: root.str_field("harmonic_unit").unwrap_or("SI").to_string(),
@@ -469,7 +493,12 @@ pub(crate) fn evaluate_probes(
                     }
                 },
                 ProbeKind::Microphone { .. } => {
-                    return Err(probe_refusal(&p.name, "no lowered acoustic field"));
+                    let series = trace
+                        .microphones
+                        .get(&p.name)
+                        .cloned()
+                        .ok_or_else(|| probe_refusal(&p.name, "no lowered acoustic field"))?;
+                    ("microphone", "Pa", series)
                 }
                 ProbeKind::StrainGauge { .. } => {
                     return Err(probe_refusal(&p.name, "no lowered continuum strain field"));

@@ -28,7 +28,8 @@ use fs_gas::component::ClosedGasParcel;
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
 use fs_ports::component::PortSpec;
 use fs_qty::Dims;
-use fs_scenario::assembly::draft::{FidelityRung, PhysicsDomain, StepPolicy};
+use fs_scenario::assembly::draft::{FidelityRung, PhysicsDomain, ProbeKind, StepPolicy};
+use fs_system::acoustic::AcousticMicrophone;
 use fs_system::elements::Motion;
 use fs_system::lowering::Observed;
 use fs_system::{
@@ -496,6 +497,27 @@ impl AssemblyPipeline<'_> {
                 }
             }
         };
+        let mut mics: Vec<(String, AcousticMicrophone, Vec<f64>)> = Vec::new();
+        for p in &self.admitted.draft.input().probes {
+            if matches!(p.kind, ProbeKind::Microphone { .. }) {
+                let mic = AcousticMicrophone::from_draft_and_lowered(
+                    p,
+                    &self.admitted.draft,
+                    lowered,
+                    dt_s,
+                )
+                .map_err(|why| {
+                    staged_refusal(
+                        "cli-assembly-probe-unsupported",
+                        "run",
+                        format!("microphone `{}` refused: {why}", p.name),
+                        "check microphone target, position, decimation ratio, and Nyquist limits",
+                    )
+                })?;
+                let cap = steps / mic.decimation_ratio() + 1;
+                mics.push((p.name.clone(), mic, Vec::with_capacity(cap)));
+            }
+        }
         times_s.push(lowered.system.time_s());
         sample(&lowered.system, &mut entities);
         ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -540,16 +562,42 @@ impl AssemblyPipeline<'_> {
                         "increase the step size or rescale the simulation time",
                     ));
                 }
+                if !mics.is_empty() {
+                    let step_dt = after_s - before_s;
+                    if (step_dt - dt_s).abs() <= 1.0e-6 * dt_s {
+                        for (name, mic, series) in &mut mics {
+                            if let Some(pa) = mic.advance(&lowered.system).map_err(|why| {
+                                staged_refusal(
+                                    "cli-assembly-step",
+                                    "run",
+                                    format!("microphone `{name}` failed: {why}"),
+                                    "check modal stability and microphone bounds",
+                                )
+                            })? {
+                                series.push(pa);
+                            }
+                        }
+                    } else if after_s < end_s - 1.0e-6 * dt_s {
+                        return Err(staged_refusal(
+                            "cli-assembly-probe-unsupported",
+                            "run",
+                            "microphone requires uniform fixed steps without mid-run shortening",
+                            "use a uniform fixed step plan for microphone probes",
+                        ));
+                    }
+                }
                 times_s.push(after_s);
                 sample(&lowered.system, &mut entities);
             }
             Ok(())
         })?;
+        let microphones = mics.into_iter().map(|(n, _, s)| (n, s)).collect();
         Ok((
             RunTrace {
                 analysis: "transient".into(),
                 times_s,
                 entities,
+                microphones,
                 modal_modes: Vec::new(),
                 harmonic_points: Vec::new(),
                 harmonic_unit: "SI".into(),
@@ -674,6 +722,7 @@ impl AssemblyPipeline<'_> {
             analysis: self.analysis.as_str().into(),
             times_s: Vec::new(),
             entities: BTreeMap::new(),
+            microphones: BTreeMap::new(),
             modal_modes: Vec::new(),
             harmonic_points: Vec::new(),
             harmonic_unit,

@@ -8,8 +8,9 @@ use fs_fsim::dims_to_unit;
 use fs_qty::Dims;
 use fs_scenario::EntityId;
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftGeometrySource, PhysicsDomain, ProbeDecl, ProbeKind,
+    DraftAssembly, DraftGeometrySource, PhysicsDomain, ProbeDecl, ProbeKind, StepPolicy,
 };
+use fs_system::acoustic::{AcousticMicrophone, RadiatingModalSurface};
 use fs_system::elements::Motion;
 use fs_system::lowering::{Observed, Observer};
 use fs_system::{LoweredSystem, NodeId, System};
@@ -22,6 +23,7 @@ const VEL_D: [i8; 6] = [1, 0, -1, 0, 0, 0];
 const OMG_D: [i8; 6] = [0, 0, -1, 0, 0, 0];
 const TMP_D: [i8; 6] = [0, 0, 0, 1, 0, 0];
 const PWR_D: [i8; 6] = [2, 1, -3, 0, 0, 0];
+const PRS_D: [i8; 6] = [-1, 1, -2, 0, 0, 0];
 
 pub(crate) fn load_err(code: &'static str, msg: impl Into<String>) -> RuntimeRefusal {
     RuntimeRefusal::new(code, "load", msg)
@@ -45,10 +47,12 @@ pub(crate) fn from_lowered(
         nodes: &lowered.entity_nodes,
         obs: &obs,
         obs_idx: &obs_idx,
+        surfaces: &lowered.radiating_surfaces,
     };
-    let (mut descs, mut probes, mut offset) = (Vec::new(), Vec::new(), 0usize);
+    let (mut descs, mut probes, mut mics, mut offset) =
+        (Vec::new(), Vec::new(), Vec::new(), 0usize);
     for (i, decl) in draft.input().probes.iter().enumerate() {
-        let (desc, target) = ctx.resolve_probe(i, offset, decl)?;
+        let (desc, target) = ctx.resolve_probe(i, offset, decl, &mut mics)?;
         offset += desc.len;
         probes.push(ResolvedProbe {
             offset: desc.offset,
@@ -61,6 +65,7 @@ pub(crate) fn from_lowered(
         draft.input().name.clone(),
         lowered.system,
         obs,
+        mics,
         input_descs,
         input_cells,
         descs,
@@ -76,6 +81,7 @@ struct ProbeCtx<'a> {
     nodes: &'a BTreeMap<EntityId, Vec<NodeId>>,
     obs: &'a [Observer],
     obs_idx: &'a BTreeMap<EntityId, usize>,
+    surfaces: &'a BTreeMap<EntityId, RadiatingModalSurface>,
 }
 
 fn motion_axis(name: &str, d: [i8; 6]) -> Option<usize> {
@@ -169,9 +175,38 @@ impl ProbeCtx<'_> {
         idx: usize,
         off: usize,
         decl: &ProbeDecl,
+        mics: &mut Vec<AcousticMicrophone>,
     ) -> Result<(ProbeDescriptor, ProbeTarget), RuntimeRefusal> {
         let miss = |msg: String| load_err("probe-unlowered", msg);
         match &decl.kind {
+            ProbeKind::Microphone { target, .. } => {
+                let StepPolicy::Fixed { dt } = self.draft.input().time_plan.step_policy else {
+                    return Err(load_err(
+                        "microphone-refused",
+                        format!("`{}` requires fixed step policy", decl.name),
+                    ));
+                };
+                let surf = self.surfaces.get(target).ok_or_else(|| {
+                    miss(format!(
+                        "`{}` target is not a radiating modal surface",
+                        decl.name
+                    ))
+                })?;
+                let (mic, _, _) = AcousticMicrophone::from_probe(
+                    decl,
+                    &self.draft.input().environment,
+                    surf,
+                    dt.value,
+                )
+                .map_err(|e| load_err("microphone-refused", e))?;
+                let slot = mics.len();
+                mics.push(mic);
+                let m = ("microphone", *target, "pressure", Dims(PRS_D));
+                Ok((
+                    self.scalar(idx, off, &decl.name, m),
+                    ProbeTarget::AcousticMic(slot),
+                ))
+            }
             ProbeKind::Thermocouple {
                 time_constant: Some(_),
                 ..
@@ -307,12 +342,14 @@ mod tests {
 
         // 1. Multi-Motion part refuses `position` and `velocity` as `probe-ambiguous`.
         let multi = BTreeMap::from([(eid, vec![m1, m2])]);
+        let empty_s = BTreeMap::new();
         let ctx_m = ProbeCtx {
             draft: &draft,
             sys: &sys,
             nodes: &multi,
             obs: &[],
             obs_idx: &empty,
+            surfaces: &empty_s,
         };
         assert_eq!(
             ctx_m
@@ -343,6 +380,7 @@ mod tests {
             nodes: &single,
             obs: &[],
             obs_idx: &empty,
+            surfaces: &empty_s,
         };
         assert!(
             ctx_el
@@ -367,6 +405,7 @@ mod tests {
             nodes: &single,
             obs: &[],
             obs_idx: &empty,
+            surfaces: &empty_s,
         };
         assert!(
             ctx_sp
