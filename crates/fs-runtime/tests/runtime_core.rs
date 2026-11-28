@@ -589,6 +589,7 @@ fn a_revolute_child_swings_about_its_centroid_on_a_torsional_spring() {
         let exact = rho * (v * sums[i] / 12.0);
         assert_eq!(inertia.to_bits(), exact.to_bits(), "{n:?}");
         let (theta0, omega) = (value("initial_turn_rad"), (2000.0 / inertia).sqrt());
+        assert!((theta0 - 2.0 * half).abs() <= 1.0e-15, "{n:?}: {theta0}");
         let phi = 2.0 * (omega * dt / 2.0).atan();
         let mut rt = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None).unwrap();
         let mut buf = vec![0.0; rt.snapshot_len()];
@@ -626,5 +627,45 @@ fn a_revolute_child_swings_about_its_centroid_on_a_torsional_spring() {
     for text in [angle, place, spun] {
         let load = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None);
         assert_eq!(load.err().unwrap().code, "probe-unlowered");
+    }
+}
+
+/// A revolute box's receipt inertia is `rho n^T J n` for the unit vector `n` of
+/// its joint's axis: about the oblique `(0 0.6 0.8)` it is `0.36 J_y + 0.64 J_z`,
+/// and about `(0 0 2)` and `(0 0 -1)` it is the inertia about `(0 0 1)`.
+#[test]
+fn a_revolute_childs_inertia_is_the_quadratic_form_of_its_unit_axis() {
+    let [lx, ly, lz] = [0.5, 0.4, 0.1];
+    let packs = PackCatalog::from_raw_bytes(&[STEEL_PACK]).unwrap();
+    let lowered = |axis: &str| {
+        let text = format!(
+            r#"(assembly "rotor"
+  (version 1) (units "SI") (seed 0x23)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 1s :dt 0.001s :sample-rate 1000Hz)
+  (part "rotor" :kind rigid-body :geometry (box {lx}m {ly}m {lz}m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (joint "pin" :kind revolute :parent root :child "rotor" :axis ({axis})
+    :stiffness 2000N*m/rad)
+)"#
+        );
+        let admitted = admit_assembly_source(text.as_bytes(), &packs).unwrap();
+        let lowered = cli_registry().lower(&admitted.draft, &admitted.card_store);
+        let receipt = lowered.unwrap().receipt;
+        let rotor = &receipt.components[0].parameter_sources;
+        let value = |name: &str| rotor.iter().find(|p| p.parameter == name).unwrap().value;
+        ["density", "moment_of_inertia"].map(value)
+    };
+    let [rho, oblique] = lowered("0 0.6 0.8");
+    let [j_y, j_z] = [lx * lx + lz * lz, lx * lx + ly * ly].map(|s| lx * ly * lz * s / 12.0);
+    let (exact, tol) = (rho * (0.36 * j_y + 0.64 * j_z), 1.0e-15);
+    assert!((oblique / exact - 1.0).abs() <= tol, "{oblique} {exact}");
+    let unit = lowered("0 0 1")[1];
+    for axis in ["0 0 2", "0 0 -1"] {
+        assert_eq!(lowered(axis)[1].to_bits(), unit.to_bits(), "{axis}");
     }
 }
