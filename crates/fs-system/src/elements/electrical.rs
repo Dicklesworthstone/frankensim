@@ -109,7 +109,8 @@ impl LoadLine for IdealDiode {
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
         validate(dt_s, inputs, 1, compliance, outputs)?;
-        let (voltage, receipt) = relation(dt_s, inputs[0], compliance[0], inputs[0] >= 0.0)?;
+        let words = open_words(self.ports[0].carrier());
+        let (voltage, receipt) = relation(dt_s, inputs[0], compliance[0], inputs[0] >= 0.0, words)?;
         cx.checkpoint()?;
         outputs[0] = voltage;
         Ok(Proposal::Step(receipt))
@@ -256,7 +257,8 @@ impl LoadLine for IdealSwitch {
                 value: inputs[1],
             });
         }
-        let (voltage, receipt) = relation(dt_s, inputs[0], compliance[0], inputs[1] == 1.0)?;
+        let words = open_words(self.ports[0].carrier());
+        let (voltage, receipt) = relation(dt_s, inputs[0], compliance[0], inputs[1] == 1.0, words)?;
         cx.checkpoint()?;
         outputs[0] = voltage;
         Ok(Proposal::Step(receipt))
@@ -288,12 +290,28 @@ fn validate(
     Ok(())
 }
 
-/// Solve i = released - compliance * v, either v = 0 or i = 0.
+/// What a refusal calls an open element, its flow and its effort, in its
+/// port's domain: an open mechanical switch is a latch, a rotational a brake.
+fn open_words(carrier: Carrier) -> [&'static str; 3] {
+    match carrier {
+        Carrier::Power(PortKind::MechanicalForceVelocity) => {
+            ["latch", "velocity", "ideal latch force [N]"]
+        }
+        Carrier::Power(PortKind::RotationalTorqueAngularVelocity) => {
+            ["brake", "angular velocity", "ideal brake torque [N m]"]
+        }
+        _ => ["circuit", "current", "ideal open-circuit voltage [V]"],
+    }
+}
+
+/// Solve i = released - compliance * v, either v = 0 or i = 0, refusing in
+/// the `[open, flow, effort]` words of the port's domain.
 fn relation(
     dt_s: f64,
     released_a: f64,
     compliance_s: f64,
     closed: bool,
+    [open, flow, effort]: [&'static str; 3],
 ) -> Result<(f64, Receipt), ElementError> {
     if closed || released_a == 0.0 {
         // At C = i = 0 every open-circuit voltage is possible. Zero is the
@@ -303,15 +321,16 @@ fn relation(
     }
     if compliance_s == 0.0 {
         return Err(ElementError::Law {
-            reason: "an ideal open circuit cannot accept a prescribed nonzero current; \
-                     supply circuit impedance or a physical switching model"
-                .to_owned(),
+            reason: format!(
+                "an ideal open {open} cannot accept a prescribed nonzero {flow}; \
+                 supply an impedance or a physical switching model"
+            ),
         });
     }
-    let voltage_v = finite("ideal open-circuit voltage [V]", released_a / compliance_s)?;
+    let voltage_v = finite(effort, released_a / compliance_s)?;
     if voltage_v == 0.0 {
         return Err(ElementError::Law {
-            reason: "the nonzero open-circuit voltage is below representable resolution".to_owned(),
+            reason: format!("the nonzero {effort} is below representable resolution"),
         });
     }
     // Only division and subtraction roundoff is permitted: the ideal law

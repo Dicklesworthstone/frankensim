@@ -4554,9 +4554,11 @@ not a continuous control law for instantaneous feedback inside a nonlinear solve
 port, where closed (zero effort) is free, a cut or a released clutch, and open
 (zero flow) holds the port still, a latch or a brake. Thermal, fluid, magnetic
 and chemical ports are refused by name. Only these two append an identity
-word, naming the domain; refusal texts keep their electrical words. A test
-frees a held mass on a spring at a scheduled event, step by step on the
-midpoint rule's turn.
+word, naming the domain. An open switch refuses a prescribed flow, or an
+effort it cannot represent, in its domain's words: a latch's velocity and
+force [N], a brake's angular velocity and torque [N m]. A test frees a held
+mass on a spring at a scheduled event, step by step on the midpoint rule's
+turn.
 
 Run `cargo run -p fs-system --example electrical_switching` for two RC branches
 whose resistors heat a shared thermal capacity. One diode blocks discharge

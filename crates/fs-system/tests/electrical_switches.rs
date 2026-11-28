@@ -387,6 +387,35 @@ fn native_codecs_are_stateless_and_the_two_laws_have_distinct_identities() {
         let reason = IdealSwitch::in_domain(kind).unwrap_err().to_string();
         assert!(reason.contains(&format!("{kind:?} domain")), "{reason}");
     }
+    // Open, given a flow with no compliance, or with one so small that the effort overflows,
+    // a switch refuses in its domain's words.
+    let kinds = [
+        PortKind::ElectricalVoltageCurrent,
+        PortKind::MechanicalForceVelocity,
+        PortKind::RotationalTorqueAngularVelocity,
+    ];
+    let words = [
+        ["open circuit", "current", "voltage [V]"],
+        ["open latch", "velocity", "force [N]"],
+        ["open brake", "angular velocity", "torque [N m]"],
+    ];
+    for (kind, [open, flow, effort]) in kinds.into_iter().zip(words) {
+        let switch = IdealSwitch::in_domain(kind).unwrap();
+        let refuse = |compliance: f64| {
+            let (gate, inputs, mut out) = (CancelGate::new_clock_free(), [1.0, 0.0], [0.0]);
+            let step = with_cx(&gate, |cx| {
+                switch.propose_on_line(&(), 0.1, &inputs, &[compliance], &mut (), &mut out, cx)
+            });
+            step.unwrap_err().to_string()
+        };
+        let reasons = [refuse(0.0), refuse(f64::from_bits(1))];
+        let flowed = format!(
+            "{open} cannot accept a prescribed nonzero {flow}; \
+             supply an impedance or a physical switching model"
+        );
+        let named = [reasons[0].contains(&flowed), reasons[1].contains(effort)];
+        assert_eq!(named, [true; 2], "{reasons:?}");
+    }
 }
 
 /// A mass held still against a stretched spring by an open mechanical switch
