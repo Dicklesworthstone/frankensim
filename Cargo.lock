@@ -1648,6 +1648,7 @@ dependencies = [
  "fs-blake3",
  "fs-obs",
  "fs-propcheck",
+ "fs-rand",
  "fs-substrate",
 ]
 
