@@ -888,7 +888,7 @@
                     <div class="seg fill" role="group" aria-label="How many trucks come a week">
                       <button type="button" data-wo-trucks="2" aria-pressed="false">2 · Mon, Thu</button>
                       <button type="button" data-wo-trucks="3" aria-pressed="true">3 · Mon, Wed, Fri</button>
-                      <button type="button" data-wo-trucks="5" aria-pressed="false">5 · daily</button>
+                      <button type="button" data-wo-trucks="5" aria-pressed="false">5 · weekdays</button>
                     </div>
                   </div>
                   <div class="field">
@@ -919,13 +919,13 @@
                 <summary class="how-title">How it's computed</summary>
                 <div class="how-body">
               <div>
-                <p>How long each keeps is the federal cold storage chart's, at 40 °F or below in the walk-in and 0 °F in the freezer, each at the longest of its range: fresh chicken pieces and ground beef 1 to 2 days, fatty fish such as salmon 1 to 3, beef roasts 3 to 5; frozen, 3 to 12 months. The Food Code counts the day it comes in as day 1, and the case is used or thrown out by the end of its last day. Thawing in the walk-in takes a full day even for a pound of ground meat, and a large frozen piece a day for every 4 to 5 lb (USDA): a day for salmon portions and chicken thighs frozen piece by piece, two for the 10 lb packs of short ribs and ground beef. Once thawed, ground meat, poultry and fish keep 1 to 2 more days and red meat cuts 3 to 5.</p>
+                <p>How long each keeps is the federal cold storage chart's, at 40 °F or below in the walk-in and 0 °F in the freezer, each at the longest of its range: fresh chicken pieces and ground beef 1 to 2 days, fatty fish such as salmon 1 to 3, beef roasts 3 to 5; frozen, 2 to 12 months. The day it comes in counts as day 1, the way the Food Code counts its date marks, and the case is used or thrown out by the end of its last day. Thawing in the walk-in takes a full day even for a pound of ground meat, and a large frozen piece a day for every 4 to 5 lb (USDA): a day for salmon portions and chicken thighs frozen piece by piece, two for the 10 lb packs of short ribs and ground beef. Once thawed, ground meat, poultry and fish keep 1 to 2 more days and red meat cuts 3 to 5. On a cool, dry shelf, unopened cans keep far longer than any week: the chili's tomatoes 12 to 18 months, its beans 2 to 5 years, so of the three places food keeps, only the walk-in and the freezer set the week's timing.</p>
                 <p>The client confirms each lunch's final count by noon the day before. A truck's order goes in by 2 pm the day before it comes at 6 am, so it knows its own day's final count and only the plan, plus the cushion, for the days after. Frozen is pulled to thaw at 8 am, its thawing time ahead of the lunch, before the count is in, so it goes by the plan and the cushion, a whole case at a time. What is short at the 9 am prep is bought locally on the day; what is still there at the 10 pm check on its last day is thrown out. Each lunch's final count falls around the plan, two in three within 10% either way; the many weeks are 300 of those.</p>
                 <p>Raw meat stands by the temperature it is cooked to, the hottest lowest (the Food Code's annex): chicken at 165 °F at the bottom, ground beef at 155 °F above it, short ribs and then salmon, both 145 °F, at the top, so nothing drips onto a food cooked less than itself, and fish never sits under meat. A case is stacked only on a case of its own delivery, so the older is never buried. Food stands at least 6 inches off the floor (§3-305.11); a case with no shelf place left that keeps that order has only the floor.</p>
               </div>
               <div>
                 <code class="formula">last day = day in + keeps − 1<br />order = ⌈(count of the truck's day + plan · (1 + cushion) of later days it lasts to − on hand) / case⌉ · case<br />thaw = ⌈(plan · (1 + cushion) − thawed on hand) / case⌉ · case, its thawing days ahead</code>
-                <p class="model">Model: <code>walkInWeek</code>, three weeks run and the middle one shown, its stock carried in from the week before. Keeping times: the federal cold storage chart (foodsafety.gov) and USDA's guidance on thawing. Date marking, storage height and shelf order: the FDA Food Code (§3-501.17, §3-305.11 and its annex).</p>
+                <p class="model">Model: <code>walkInWeek</code>, three weeks run and the middle one shown, its stock carried in from the week before. Keeping times: the federal cold storage chart (foodsafety.gov), USDA's guidance on thawing and Clemson Extension's on canned goods. Counting the days as date marks do, storage height and shelf order: the FDA Food Code (§3-501.17, §3-305.11 and its annex).</p>
               </div>
                 </div>
               </details>

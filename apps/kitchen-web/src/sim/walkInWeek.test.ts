@@ -102,13 +102,17 @@ describe("a week of meat and fish through the walk-in", () => {
     const a = manyWeeks({ trucks: 3, frozen: false, cushion: 0.1 }, 120);
     const b = manyWeeks({ trucks: 3, frozen: false, cushion: 0.1 }, 120);
     expect(a).toEqual(b);
+    // The middle week is short of nothing in most settings, so the weeks short at all and the worst tenth are what tell.
     for (const frozen of [false, true]) {
-      let last = Infinity;
+      let last = { mid: Infinity, p90: Infinity, any: Infinity };
       for (const c of [0, 0.05, 0.1, 0.15, 0.2, 0.25]) {
         const m = manyWeeks({ trucks: 3, frozen, cushion: c }, 120);
-        expect(m.shortLunches.mid).toBeLessThanOrEqual(last);
-        last = m.shortLunches.mid;
+        expect(m.shortLunches.mid).toBeLessThanOrEqual(last.mid);
+        expect(m.shortLunches.p90).toBeLessThanOrEqual(last.p90);
+        expect(m.anyShort).toBeLessThanOrEqual(last.any);
+        last = { mid: m.shortLunches.mid, p90: m.shortLunches.p90, any: m.anyShort };
       }
+      expect(last.any).toBeLessThan(manyWeeks({ trucks: 3, frozen, cushion: 0 }, 120).anyShort);
     }
   });
 

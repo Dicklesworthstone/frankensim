@@ -659,6 +659,9 @@ async function main() {
         const base = await info();
         console.log(`[verify-chrome] A week through the walk-in: ${JSON.stringify(base.week)} | ${base.status.slice(0, 90)}`);
         if (base.policy.trucks !== 3 || base.policy.frozen || base.week.shortLunches !== 0 || base.week.thrownLb !== 158) throw new Error(`A week through the walk-in: as set on arrival the week is not as expected: ${JSON.stringify(base)}`);
+        // The door is pulled open as the cook comes to it: just off the dock with the first case, it is still shut.
+        const setOut = await at(6.0003);
+        if (setOut.job?.kind !== "truck" || !setOut.cook || setOut.cook.x < 3 || setOut.doors.walkin !== 0 || setOut.doors.freezer !== 0) throw new Error(`A week through the walk-in: a door opens before the cook comes to it: ${JSON.stringify(setOut)}`);
         const truck = await at(6.004);
         if (truck.job?.kind !== "truck" || !truck.cook || truck.doors.walkin !== 1 || truck.doors.freezer !== 0) throw new Error(`A week through the walk-in: during Monday's truck the cook is not out or the doors are wrong: ${JSON.stringify(truck)}`);
         const done = await at(6.2);

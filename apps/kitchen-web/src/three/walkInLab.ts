@@ -70,6 +70,11 @@ const DOOR_X: Record<Where, number> = { walkin: X0.walkin + DOOR0 + DOOR_W / 2, 
 /** How far from a door's middle the cook is clear of its leaf's swing (half the opening to the hinge, the leaf the
  *  opening's width, and a body's half width). */
 const CLEAR_M = 1.7;
+/** Each door's hinge pin, on the opening's left, 5 cm out from the front; and how far from it the leaf (1.01 m with
+ *  its lap) reaches, with a foot beside it. The leaf swings out and round to the left, 110 degrees. */
+const HINGE_X: Record<Where, number> = { walkin: X0.walkin + DOOR0 - 0.049, freezer: X0.freezer + DOOR0 - 0.049 };
+const HINGE_Z_OUT = 0.05;
+const REACH_M = 1.18;
 
 /** A case: 17.3 x 14 in, 7.5 in deep for 40 lb, 5 in for 20 lb of salmon; its frame at the top's middle (where the
  *  hands' grip is taken from), the long side across the body as it is carried, its label on the side toward the body. */
@@ -96,9 +101,10 @@ const FLOOR_BOX: Record<Where, { x: number; z: readonly number[] }> = {
   freezer: { x: 1.68, z: [-0.5, -1.0] },
 };
 /** Outside: the lane along the fronts to the dock (off to the right), and the one further out to the kitchen (off to
- *  the left), clear of the doors' swing. Inside: just in, past the side shelving, and level with the back. */
+ *  the left), a foot's width clear of an open door's tip (0.99 m out, propped open; the door only swings with the
+ *  cook further off than its reach). Inside: just in, past the side shelving, and level with the back. */
 const LANE_DOCK = FRONT_OUT + 0.47;
-const LANE_KITCHEN = FRONT_OUT + 1.15;
+const LANE_KITCHEN = FRONT_OUT + 1.25;
 const DOCK: XZ = [4.4, LANE_DOCK];
 const KITCHEN: XZ = [-4.4, LANE_KITCHEN];
 const AT_DOOR = FRONT_OUT + 0.35;
@@ -114,8 +120,11 @@ const JOB_BASE_S = 6;
 const JOB_PER_CASE_S = 1.1;
 /** The clock's hours a second between jobs. */
 const IDLE_HPS = 5;
-/** How long a door takes to swing (s, the stage's time). */
+/** How long a door takes to swing shut on its closer (s, the stage's time), and to be pulled open (s, the job's own
+ *  time, as a door is), done this long before the cook is within its leaf's reach. */
 const DOOR_S = 0.35;
+const OPEN_S = 1.2;
+const OPEN_LEAD_S = 0.3;
 
 /** The label's colours: three days or more to go, two, the last day, past it; frozen; thawing. */
 const GOOD = "#4ade80";
@@ -154,6 +163,7 @@ const clockText = (hour: number) => {
   return `${DAY[day]}, ${h12}:${String(mm).padStart(2, "0")} ${ap}`;
 };
 const cases = (n: number, what: string) => `${n} case${n === 1 ? "" : "s"} of ${what}`;
+const lunchesN = (n: number) => `${n.toLocaleString("en-US")} lunch${n === 1 ? "" : "es"}`;
 const listAnd = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 
 /* ------------------------------------------------------------------------------------------------------------ */
@@ -605,6 +615,7 @@ export function mountWalkInLab(root: HTMLElement): void {
       boxSteps[b] = was ? [Math.min(was[0], i0), Math.max(was[1], i1)] : [i0, i1];
     };
     const carryOpts: WorkOpts = { halfWidth: HALF };
+    const walks: { i: number; path: XZ[] }[] = [];
     const walk = (to: Loc, carrying: boolean): XZ[] => {
       const path = route(here, to);
       if (path.length < 2) return [];
@@ -612,6 +623,7 @@ export function mountWalkInLab(root: HTMLElement): void {
       const h0 = headingOf(path[0]!, path[1]!);
       if (Math.abs(Math.atan2(Math.sin(h0 - yaw), Math.cos(h0 - yaw))) > 0.35) steps.push({ kind: "turn", yaw: h0, upper: carrying ? "carry" : "free", opts: carrying ? carryOpts : undefined });
       steps.push({ kind: "walk", path: path.slice(1), speed: carrying ? CARRY_MPS : FREE_MPS, upper: carrying ? "carry" : "free", opts: carrying ? carryOpts : undefined });
+      walks.push({ i: steps.length - 1, path });
       yaw = headingOf(path[path.length - 2]!, path[path.length - 1]!);
       here = to;
       return path;
@@ -663,47 +675,59 @@ export function mountWalkInLab(root: HTMLElement): void {
       touch(to.spot.box, i0, steps.length);
     }
     // And away: back to the dock after a truck, else to the kitchen.
-    const wasBox = here.kind === "spot" ? here.spot.box : null;
-    const iOut = steps.length;
-    const outPath = walk(startL, false);
+    walk(startL, false);
     const s0 = ptOf(startL);
     const routine = new Routine(cook, { x: s0[0], z: s0[1], yaw: startYaw }, steps, false);
     const T = routine.stepTimes;
     const at = (i: number) => T[i] ?? routine.duration;
     job.routine = routine;
     job.carries = marks.map(({ i0, i1, m }) => ({ caseId: m.caseId, item: m.item, lot: m.lot, from: m.from, to: m.to, t0: at(i0), t1: at(i1) }));
-    for (const b of ["walkin", "freezer"] as const) {
-      const s = boxSteps[b];
-      if (s) job.doors[b] = [at(s[0]), at(s[1])];
-    }
-    if (wasBox && outPath.length > 1) {
-      // The door the cook leaves by starts to shut once they are out and clear of its swing: the hinge is half the
-      // opening from its middle and the leaf as long as the opening, so 1.7 m off its middle (by the walk out, at its
-      // pace).
-      const c: XZ = [DOOR_X[wasBox], FRONT_OUT];
-      let total = 0;
-      for (let i = 1; i < outPath.length; i++) total += Math.hypot(outPath[i]![0] - outPath[i - 1]![0], outPath[i]![1] - outPath[i - 1]![1]);
-      let gone = total;
+    // Each door the job uses is pulled open as the cook comes to it, done before they are within its leaf's reach,
+    // stays propped while they come and go, and starts to shut on its closer once they are out and clear of its swing
+    // after their last time in that box. A walk's times go by its length, at its pace.
+    const along = (path: XZ[]) => {
+      const pts: { p: XZ; d: number }[] = [{ p: path[0]!, d: 0 }];
       let run = 0;
-      for (let i = 1; i < outPath.length && gone === total; i++) {
-        const [ax, az] = outPath[i - 1]!;
-        const [bx, bz] = outPath[i]!;
+      for (let i = 1; i < path.length; i++) {
+        const [ax, az] = path[i - 1]!;
+        const [bx, bz] = path[i]!;
         const len = Math.hypot(bx - ax, bz - az);
-        for (let k = 1; k <= 20; k++) {
-          const f = k / 20;
-          const x = ax + (bx - ax) * f;
-          const z = az + (bz - az) * f;
-          if (z > FRONT_OUT + 0.1 && Math.hypot(x - c[0], z - c[1]) >= CLEAR_M) {
-            gone = run + len * f;
-            break;
-          }
-        }
+        const n = Math.max(1, Math.ceil(len / 0.05));
+        for (let k = 1; k <= n; k++) pts.push({ p: [ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n], d: run + (len * k) / n });
         run += len;
       }
-      const tw0 = at(steps.length - 1);
-      const tClear = Math.min(routine.duration, tw0 + ((routine.duration - tw0) * gone) / Math.max(1e-6, total));
-      const w = job.doors[wasBox];
-      job.doors[wasBox] = [w ? w[0] : at(iOut), tClear];
+      return pts;
+    };
+    const timeOn = (wk: { i: number; path: XZ[] }, d: number, len: number) => at(wk.i) + ((at(wk.i + 1) - at(wk.i)) * d) / Math.max(1e-6, len);
+    const other = (b: Where): Where => (b === "walkin" ? "freezer" : "walkin");
+    const inBox = (b: Where, [x, z]: XZ) => z < FRONT_OUT && Math.abs(x - DOOR_X[b]) < Math.abs(x - DOOR_X[other(b)]);
+    const inReach = (b: Where, [x, z]: XZ) => z > FRONT_OUT - 0.05 && Math.hypot(x - HINGE_X[b], z - FRONT_OUT - HINGE_Z_OUT) < REACH_M;
+    const clear = (b: Where, [x, z]: XZ) => z > FRONT_OUT + 0.1 && Math.hypot(x - DOOR_X[b], z - FRONT_OUT) >= CLEAR_M;
+    for (const b of ["walkin", "freezer"] as const) {
+      const s = boxSteps[b];
+      if (!s) continue;
+      let open = at(s[0]);
+      reach: for (const wk of walks) {
+        const pts = along(wk.path);
+        for (const q of pts)
+          if (inReach(b, q.p)) {
+            open = timeOn(wk, q.d, pts[pts.length - 1]!.d) - OPEN_LEAD_S;
+            break reach;
+          }
+      }
+      let shut = at(s[1]);
+      for (let k = walks.length - 1; k >= 0; k--) {
+        const wk = walks[k]!;
+        const pts = along(wk.path);
+        let last = -1;
+        for (let n = pts.length - 1; n >= 0 && last < 0; n--) if (inBox(b, pts[n]!.p)) last = n;
+        if (last < 0) continue;
+        const out = pts.findIndex((q, n) => n > last && clear(b, q.p));
+        const len = pts[pts.length - 1]!.d;
+        shut = timeOn(wk, out >= 0 ? pts[out]!.d : len, len);
+        break;
+      }
+      job.doors[b] = [Math.max(0, open - OPEN_S), Math.max(open, shut)];
     }
     return job;
   }
@@ -837,7 +861,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     }
     for (let i = floorN; i < rings.length; i++) rings[i]!.visible = false;
     for (const [id, cm] of caseMeshes) if (!live.has(id) && cm.group.parent) cm.group.removeFromParent();
-    // The cook, at work or away; the doors propped open for the job.
+    // The cook, at work or away; the doors pulled open as the cook comes, propped, and shut on their closers.
     if (m.job?.routine) {
       cook.group.visible = true;
       m.job.routine.apply(Math.min(m.r, m.job.routine.duration));
@@ -845,7 +869,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     for (const b of ["walkin", "freezer"] as const) {
       const w = m.job?.doors[b];
       const swing = DOOR_S * (m.job?.lapse ?? 1);
-      const k = w ? smooth((m.r - w[0]) / swing) * (1 - smooth((m.r - w[1]) / swing)) : 0;
+      const k = w ? smooth((m.r - w[0]) / OPEN_S) * (1 - smooth((m.r - w[1]) / swing)) : 0;
       if (doorK[b] !== k) {
         doorK[b] = k;
         boxes[b].hooks.set?.("door", k);
@@ -867,13 +891,15 @@ export function mountWalkInLab(root: HTMLElement): void {
     const wide = stageEl.clientWidth >= 1.3 * stageEl.clientHeight;
     VIEW.set(0, wide ? 0.3 : 0.42, 1).normalize();
     keep.length = 0;
-    // Both back shelvings top to bottom, the doors' cut fronts, and the cook's feet on the near lane outside them.
+    // Both back shelvings top to bottom, the doors' cut fronts, and the cook's feet on the near lane outside them; on a
+    // tall stage, on the kitchen's lane too (on a wide one that would cost the boxes a quarter of their size).
     const l = X0.walkin + BACK_SHELF.x0[0]!;
     const r = X0.freezer + BACK_SHELF.x0[1]! + BACK_SHELF.L;
     for (const x of [l, r]) keep.push(new THREE.Vector3(x, BACK_SHELF.H + 0.28, CASE_Z), new THREE.Vector3(x, BACK_SHELF.tiers[0]!, BACK_FRONT_Z));
     for (const b of ["walkin", "freezer"] as const) {
       keep.push(new THREE.Vector3(X0[b] + DOOR0 - 0.15, CUT_Y, FRONT_OUT), new THREE.Vector3(X0[b] + DOOR0 + DOOR_W + 0.15, CUT_Y, FRONT_OUT));
       keep.push(new THREE.Vector3(DOOR_X[b], 0, LANE_DOCK + 0.2));
+      if (!wide) keep.push(new THREE.Vector3(DOOR_X[b], 0, LANE_KITCHEN + 0.15));
     }
   };
   const controls = createScrollSafeOrbit(camera, canvas, [TARGET.x, TARGET.y, TARGET.z], { minDistance: 1.2, maxDistance: 16, maxPolarAngle: Math.PI * 0.47 });
@@ -888,8 +914,9 @@ export function mountWalkInLab(root: HTMLElement): void {
     const parts = ["[data-wo-hud-clock]", "[data-wo-hud-doing]", "[data-wo-hud-note]"].map((k) => hudEl.querySelector<HTMLElement>(k));
     const was = parts.map((e) => e?.textContent ?? "");
     if (parts[0]) parts[0].textContent = "Wednesday, 10:00 pm";
-    if (parts[1]) parts[1].textContent = "Next, Tuesday at 8:00 am, into the walk-in to thaw: 10 cases of short ribs for Thursday and 8 cases of chicken thighs for Wednesday";
-    if (parts[2]) parts[2].textContent = "Time-lapse ×12";
+    // Longer than any line the week says in any setting (the longest, 153 characters, a frozen truck's four meats).
+    if (parts[1]) parts[1].textContent = "Next, Wednesday at 10:00 pm, the truck: 10 cases of salmon, 11 cases of short ribs, 10 cases of ground beef and 11 cases of chicken thighs, into the freezer";
+    if (parts[2]) parts[2].textContent = "1,234 lunches short: bought on the day";
     const most = hudEl.offsetTop + hudEl.offsetHeight;
     parts.forEach((e, i) => {
       if (e) e.textContent = was[i]!;
@@ -1057,11 +1084,14 @@ export function mountWalkInLab(root: HTMLElement): void {
     for (const st of [{ after: L.start }, ...L.events]) most = Math.max(most, st.after.filter((c) => c.at.box === b && !c.at.floor).length);
     return most;
   };
-  /** The most cases on the floors at once, said: "+ 2 on the floor", or "+ 2 on the walk-in's floor, 4 on the freezer's". */
+  /** The most cases on the floors at once, said: "+ 2 on the walk-in's floor", or "+ 2 on the walk-in's floor, 4 on the
+   *  freezer's". */
   const floorSaid = (L: Layout) => {
     const { walkin, freezer } = L.floorMost;
-    return walkin && freezer ? `+ ${walkin} on the walk-in's floor, ${freezer} on the freezer's` : `+ ${walkin || freezer} on the floor`;
+    return walkin && freezer ? `+ ${walkin} on the walk-in's floor, ${freezer} on the freezer's` : `+ ${walkin || freezer} on the ${walkin ? "walk-in's" : "freezer's"} floor`;
   };
+  /** The share of the 300 weeks with a lunch short, said: "6% of weeks", or "1 in 300 weeks" under half a percent. */
+  const shareSaid = (a: number) => (a > 0 && a < 0.005 ? `${Math.round(a * 300)} in 300 weeks` : `${Math.round(a * 100)}% of weeks`);
   /** The day a box first has cases on its floor, what it holds then, and why they are there. */
   const crowdSaid = (b: Where): string | null => {
     const st = film.layout.events.find((x) => x.after.some((c) => c.at.box === b && c.at.floor));
@@ -1092,7 +1122,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     const short = w.shortLunches;
     tiles.short.box?.setAttribute("data-ok", String(short === 0));
     if (tiles.short.v) tiles.short.v.textContent = short ? `${short.toLocaleString("en-US")} lunches` : "None";
-    if (tiles.short.s) tiles.short.s.textContent = `${short ? "bought on the day" : "short this week"}\n${m ? Math.round(m.anyShort * 100) : "…"}% of weeks short`;
+    if (tiles.short.s) tiles.short.s.textContent = `${short ? "bought on the day" : "short this week"}\n${m ? shareSaid(m.anyShort) : "…"} short`;
     const wi = peakOf(film.layout, "walkin");
     const fz = peakOf(film.layout, "freezer");
     const floor = film.layout.floorMost.walkin + film.layout.floorMost.freezer;
@@ -1131,20 +1161,20 @@ export function mountWalkInLab(root: HTMLElement): void {
       const thaw = `The thaw starts at 8 am, a day ahead of the lunch for ${lead(1)} and two for the 10 lb packs of ${lead(2)}, before the final count is in`;
       parts.push(
         shortDays.length
-          ? `${thaw}, so it goes by the plan: ${shortDays.map((d) => `${DAY[d.day]} comes up ${d.shortLunches} lunches short`).join(", ")} with a ${Math.round(policy.cushion * 100)}% cushion.`
+          ? `${thaw}, so it goes by the plan: ${listAnd(shortDays.map((d) => `${DAY[d.day]} comes up ${lunchesN(d.shortLunches!)} short`))} with a ${Math.round(policy.cushion * 100)}% cushion.`
           : `Frozen keeps for months, so the trucks only decide how full the freezer gets. ${thaw}, so it goes by the plan and its ${Math.round(policy.cushion * 100)}% cushion, a whole case at a time; once thawed it keeps no longer than fresh.`,
       );
     }
     const thrownBy = ITEMS.filter((i) => w.thrownBy[i.key] > 0.5).map((i) => `${lb(w.thrownBy[i.key])} of ${SHORT_NAME[i.key]}`);
     parts.push(thrownBy.length ? `Thrown out this week, each at the end of its last day: ${listAnd(thrownBy)}, ${lb(w.thrownLb)} in all.` : "Nothing was thrown out this week.");
-    if (m) parts.push(`Over 300 weeks of counts scattered around the plan, two in three within 10% of it, half throw out more than ${lb(m.thrownLb.mid)} and 1 in 10 more than ${lb(m.thrownLb.p90)}; ${m.anyShort > 0.005 ? `${Math.round(m.anyShort * 100)}% come up short somewhere` : "none comes up short"}.`);
+    if (m) parts.push(`Over 300 weeks of counts scattered around the plan, two in three within 10% of it, half throw out more than ${lb(m.thrownLb.mid)} and 1 in 10 more than ${lb(m.thrownLb.p90)}; ${m.anyShort === 0 ? "none comes up short" : m.anyShort < 0.005 ? `${Math.round(m.anyShort * 300)} in 300 come up short somewhere` : `${Math.round(m.anyShort * 100)}% come up short somewhere`}.`);
     const floor = film.layout.floorMost.walkin + film.layout.floorMost.freezer;
     if (floor) {
       for (const b of ["walkin", "freezer"] as const) {
         const said = crowdSaid(b);
         if (said) parts.push(said);
       }
-      parts.push(`No shelf place is left that keeps chicken lowest and fish over beef, and a case goes only on its own delivery's, so those stand where the Food Code allows no food: it wants 6 inches off the floor at least.`);
+      parts.push(`No shelf place is left that keeps chicken lowest and fish over beef, and a case goes only on its own delivery's, so those stand on the bare floor, where the Food Code allows no case of meat: it wants food at least 6 inches up.`);
     }
     statusEl.textContent = parts.join(" ");
     statusEl.dataset.state = shortDays.length || floor ? "warn" : "ok";
@@ -1265,7 +1295,7 @@ export function mountWalkInLab(root: HTMLElement): void {
     }
     const note = j.routine ? `Time-lapse ×${Math.round(j.lapse)}` : "";
     const ev = j.staged.ev;
-    if (ev.kind === "prep" && (ev.shortLunches ?? 0) > 0) return { doing: whatOf(j), note: `${ev.shortLunches} lunches short: bought on the day`, kind: "short" };
+    if (ev.kind === "prep" && (ev.shortLunches ?? 0) > 0) return { doing: whatOf(j), note: `${lunchesN(ev.shortLunches!)} short: bought on the day`, kind: "short" };
     if (ev.kind === "check") return { doing: whatOf(j), note: "Last day over: to the bin", kind: "past" };
     return { doing: whatOf(j), note, kind: "" };
   }
@@ -1273,14 +1303,18 @@ export function mountWalkInLab(root: HTMLElement): void {
     const ev = j.staged.ev;
     const byItem = (lots: { item: ItemKey; lb: number }[], count: (it: ItemKey) => number) =>
       listAnd(ITEMS.filter((i) => lots.some((l) => l.item === i.key)).map((i) => cases(count(i.key), SHORT_NAME[i.key])));
-    const moved = (it: ItemKey) => j.staged.moves.filter((mv) => mv.item === it && (mv.from === "dock" || mv.to === "kitchen" || (typeof mv.from === "object" && mv.from.box === "freezer"))).length;
-    if (ev.kind === "truck") return ev.lots.length ? `The truck: ${byItem(ev.lots, moved)}${policy.frozen ? ", into the freezer" : ""}` : `The truck: nothing it needs to bring`;
+    const shelfMove = (mv: Staged["moves"][number]) => typeof mv.from === "object" && typeof mv.to === "object" && mv.from.box === mv.to.box;
+    const moved = (it: ItemKey) =>
+      j.staged.moves.filter((mv) => mv.item === it && !shelfMove(mv) && (mv.from === "dock" || mv.to === "kitchen" || (typeof mv.from === "object" && mv.from.box === "freezer"))).length;
+    const shifted = j.staged.moves.filter(shelfMove).length;
+    const room = shifted ? `, with ${shifted} case${shifted === 1 ? "" : "s"} moved a shelf to make room` : "";
+    if (ev.kind === "truck") return ev.lots.length ? `The truck: ${byItem(ev.lots, moved)}${policy.frozen ? ", into the freezer" : ""}${room}` : `The truck: nothing it needs to bring`;
     if (ev.kind === "thaw") {
       const each = ITEMS.filter((i) => ev.lots.some((l) => l.item === i.key)).map((i) => {
         const l = film.lots.get(ev.lots.find((x) => x.item === i.key)!.id);
         return `${cases(moved(i.key), SHORT_NAME[i.key])}${l ? ` for ${DAY[l.readyDay % 7]}` : ""}`;
       });
-      return `Into the walk-in to thaw: ${listAnd(each)}`;
+      return `Into the walk-in to thaw: ${listAnd(each)}${room}`;
     }
     if (ev.kind === "prep") {
       const n = j.staged.moves.length;
