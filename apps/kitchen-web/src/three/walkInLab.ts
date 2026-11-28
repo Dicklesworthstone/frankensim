@@ -21,6 +21,7 @@ import {
   TRUCK_DAYS,
   WALKIN_PLACES,
   layoutWeek,
+  manyWeeks,
   manyWeeksRun,
   runWeeks,
   thisWeekCounts,
@@ -982,6 +983,9 @@ export function mountWalkInLab(root: HTMLElement): void {
   const manys = new Map<string, ManyWeeks>();
   let manyTimer = 0;
   let manyRun: { key: string; run: ReturnType<typeof manyWeeksRun> } | null = null;
+  // The setting a reader arrives to, worked out now: the status is whole from the first, and the page below never
+  // moves when a sentence lands later.
+  manys.set(keyOf(policy), manyWeeks(policy, 300));
   const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   let playing = !reduce;
   let held = false;
@@ -1010,8 +1014,9 @@ export function mountWalkInLab(root: HTMLElement): void {
     ft = filmAt(film, hour);
     renderAll();
   }
-  /** The 300 weeks for the setting, if worked out yet; else they are, from a moment later (a slider's drag settled),
-   *  a few milliseconds at a time between frames, and then the tiles and status are said again. */
+  /** The 300 weeks for the setting, if worked out yet; else (a setting the reader picked) they are, from a moment
+   *  later (a slider's drag settled), a few milliseconds at a time between frames, and then the tiles and status are
+   *  said again. */
   function manyNow(): ManyWeeks | null {
     const m = manys.get(keyOf(policy));
     if (m) return m;
@@ -1354,7 +1359,8 @@ export function mountWalkInLab(root: HTMLElement): void {
       floorAt.y += 0.05;
     }
     const n = m.cases.filter((c) => c.at?.floor).length;
-    placeTag(tagFloor, onFloor?.at ? floorAt : null, ["On the floor", `${n} case${n === 1 ? "" : "s"}: no shelf place`], true, PAST, W, H);
+    // Its first line is hidden on a phone, so the second says where they are.
+    placeTag(tagFloor, onFloor?.at ? floorAt : null, ["No shelf place", `${n} case${n === 1 ? "" : "s"} on the floor`], true, PAST, W, H);
   }
 
   /* ---------------------------------------------------------------------------------------------------------- */

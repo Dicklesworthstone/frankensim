@@ -671,7 +671,7 @@ async function main() {
         await page.$eval("[data-wo-stage]", (el) => el.walkin.set({ frozen: true, trucks: 2, cushion: 0.25 }));
         const full = await at(56.5);
         console.log(`[verify-chrome] A week through the walk-in, frozen, 25% over: floor ${full.floor}, ${JSON.stringify(full.shelved)}, ${JSON.stringify(full.tags)}`);
-        if (!(full.floor > 0) || !/On the floor/.test(full.tags[2] ?? "") || !/floor/.test(full.status)) throw new Error(`A week through the walk-in: frozen at 25% over, no case is shown on the floor: ${JSON.stringify(full)}`);
+        if (!(full.floor > 0) || !/cases? on the floor$/.test(full.tags[2] ?? "") || !/floor/.test(full.status)) throw new Error(`A week through the walk-in: frozen at 25% over, no case is shown on the floor: ${JSON.stringify(full)}`);
         await page.screenshot({ path: path.join(VERIFY_DIR, "ch4-walkin-week.png"), fullPage: false });
         console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch4-walkin-week.png");
         await page.$eval("[data-wo-stage]", (el) => el.walkin.set({ frozen: true, trucks: 3, cushion: 0.1 }));
