@@ -1,8 +1,8 @@
 //! Option B core tests for `fs-runtime` loading real `.fsim` assemblies:
 //! full 10-example `.fsim` sweep against the shared `fs-cli` lowering registry,
 //! live `set_input` work booking, `seed_override`, `render_f32` halt/silence,
-//! inline probe target guards, `from_system` per-step latch checks, and the
-//! weight along a vertical prismatic joint.
+//! inline probe target guards, `from_system` per-step latch checks, the weight
+//! along a vertical prismatic joint, and a revolute child's swing.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -532,5 +532,99 @@ fn a_vertical_prismatic_child_falls_free_and_sags_on_a_spring() {
             assert!(near(buf[at], sag), "sag {sag} m: {} m", buf[at]);
         }
         assert!(rt.ledger().energy_residual_j().abs() < 1.0e-9, "{joint}");
+    }
+}
+
+/// A revolute box turns about its centroid with the receipt's `rho n^T J n`. On
+/// a spring at rest at its turn `theta0` it swings `theta_n = theta0 + (w0 /
+/// omega) sin(n phi)`, `tan(phi / 2) = omega dt / 2`, also on a falling platform.
+#[test]
+fn a_revolute_child_swings_about_its_centroid_on_a_torsional_spring() {
+    let ([lx, ly, lz], half, w0, dt) = ([0.5, 0.4, 0.1], 0.3_f64, 10.0, 0.001);
+    let fsim = |n: [f64; 3], parent: &str, extra: &str| {
+        let v = |s: f64, unit: &str| n.map(|a| format!("{:?}{unit}", s * a)).join(" ");
+        let (axis, spin) = (v(1.0, ""), v(w0, "rad/s"));
+        let turn = format!("{:?} {}", half.cos(), v(half.sin(), ""));
+        format!(
+            r#"(assembly "rotor"
+  (version 1) (units "SI") (seed 0x23)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 1s :dt 0.001s :sample-rate 1000Hz)
+  (part "rotor" :kind rigid-body :geometry (box {lx}m {ly}m {lz}m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation ({turn})
+      :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity ({spin})))
+  (probe "turn" :kind field-quantity :target "rotor"
+    :quantity "angle" :dims (0 0 0 0 0 0) :sample-rate 1000Hz){extra}
+  (joint "pin" :kind revolute :parent {parent} :child "rotor" :axis ({axis})
+    :stiffness 2000N*m/rad)
+)"#
+        )
+    };
+    let platform = r#"
+  (part "platform" :kind rigid-body :geometry (box 0.1m 0.05m 0.05m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (joint "slide" :kind prismatic :parent root :child "platform" :axis (0 0 1))
+  (probe "fall" :kind field-quantity :target "platform"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 1000Hz)"#;
+    let packs = PackCatalog::from_raw_bytes(&[STEEL_PACK]).unwrap();
+    let lower = |text: &str| {
+        let admitted = admit_assembly_source(text.as_bytes(), &packs).unwrap();
+        cli_registry().lower(&admitted.draft, &admitted.card_store)
+    };
+    let (x, y, z) = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+    let sums = [ly * ly + lz * lz, lx * lx + lz * lz, lx * lx + ly * ly];
+    let on = "\"platform\"";
+    for (i, n, parent, extra) in [(0, x, "root", ""), (1, y, "root", ""), (2, z, on, platform)] {
+        let text = fsim(n, parent, extra);
+        let receipt = lower(&text).unwrap().receipt;
+        let rotor = &receipt.components[0].parameter_sources;
+        let value = |name: &str| rotor.iter().find(|p| p.parameter == name).unwrap().value;
+        let [rho, v, inertia] = ["density", "volume", "moment_of_inertia"].map(value);
+        let exact = rho * (v * sums[i] / 12.0);
+        assert_eq!(inertia.to_bits(), exact.to_bits(), "{n:?}");
+        let (theta0, omega) = (value("initial_turn_rad"), (2000.0 / inertia).sqrt());
+        let phi = 2.0 * (omega * dt / 2.0).atan();
+        let mut rt = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None).unwrap();
+        let mut buf = vec![0.0; rt.snapshot_len()];
+        let at: Vec<usize> = rt.probes().probes.iter().map(|p| p.offset).collect();
+        for step in 1..=500_u32 {
+            let refusal = rt.step(dt).err();
+            assert!(refusal.is_none(), "{n:?} {step}: {refusal:?}");
+            rt.read_probes(&mut buf).unwrap();
+            let k = f64::from(step);
+            let theta = theta0 + w0 / omega * (k * phi).sin();
+            let (got, tol) = (buf[at[0]], 16.0 * f64::EPSILON * (theta0 + w0 / omega) * k);
+            assert!((got - theta).abs() <= tol, "{n:?} {step}: {got}");
+            if let Some(&j) = at.get(1) {
+                let (fell, fall) = (buf[j], -9.806_65 * (k * dt) * (k * dt) / 2.0);
+                assert!((fell / fall - 1.0).abs() <= 1.0e-12, "{step}: {fell}");
+            }
+        }
+        assert!(rt.ledger().energy_residual_j().abs() < 1.0e-9, "{n:?}");
+    }
+    let refused = |text: &str, why: &str| {
+        let refusal = format!("{:?}", lower(text).err().unwrap());
+        assert!(refusal.contains(why), "{refusal}");
+    };
+    let slid = platform.replace(":child \"platform\"", ":child \"rotor\"");
+    refused(&fsim(z, "root", &slid), "prismatic joint `slide`");
+    let turning = platform.replace("prismatic", "revolute");
+    let turning = turning.replace("(0 0 1))", "(0 0 1) :stiffness 1N*m/rad)");
+    refused(&fsim(z, on, &turning), "its parent turns");
+    let off = fsim(x, "root", "").replace(":axis (1.0 0.0 0.0)", ":axis (0.0 1.0 0.0)");
+    refused(&off, "it refuses initial.orientation");
+    let angled = platform.replace("\"position\" :dims (1", "\"angle\" :dims (0");
+    let angle = fsim(z, on, &angled);
+    let place = fsim(z, "root", "").replace("\"angle\" :dims (0", "\"position\" :dims (1");
+    let spun = place.replace("\"position\" :dims (1 0 0", "\"velocity\" :dims (1 0 -1");
+    for text in [angle, place, spun] {
+        let load = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None);
+        assert_eq!(load.err().unwrap().code, "probe-unlowered");
     }
 }

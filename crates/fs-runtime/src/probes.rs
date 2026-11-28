@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use fs_fsim::dims_to_unit;
+use fs_ports::PortKind;
+use fs_ports::component::Carrier;
 use fs_qty::Dims;
 use fs_scenario::EntityId;
 use fs_scenario::assembly::draft::{
@@ -18,6 +20,7 @@ use fs_system::{LoweredSystem, NodeId, System};
 use crate::descriptor::{InputDescriptor, ProbeDescriptor, RuntimeRefusal};
 use crate::runtime::{AssemblyRuntime, ProbeTarget, ResolvedProbe};
 
+const NONE_D: [i8; 6] = [0; 6];
 const LEN_D: [i8; 6] = [1, 0, 0, 0, 0, 0];
 const VEL_D: [i8; 6] = [1, 0, -1, 0, 0, 0];
 const OMG_D: [i8; 6] = [0, 0, -1, 0, 0, 0];
@@ -110,6 +113,13 @@ impl ProbeCtx<'_> {
                 && !p.physics.contains(&PhysicsDomain::Thermal)
                 && !matches!(p.geometry, DraftGeometrySource::SpiralSpring(_))
         })
+    }
+
+    /// Whether node `n`'s port `p` is rotational, so that its position is a turn [rad].
+    fn turns(&self, n: NodeId) -> bool {
+        let spec = self.sys.port(n, "p").and_then(|p| self.sys.port_spec(p));
+        let rotational = Carrier::Power(PortKind::RotationalTorqueAngularVelocity);
+        spec.is_some_and(|s| s.carrier() == rotational)
     }
 
     fn unique_motion(&self, eid: EntityId, decl: &str) -> Result<Option<NodeId>, RuntimeRefusal> {
@@ -258,14 +268,21 @@ impl ProbeCtx<'_> {
         match (name, d) {
             ("position" | "displacement", LEN_D) => {
                 if let Some(n) = self.unique_motion(eid, decl)? {
-                    Ok(Some(ProbeTarget::MotionPos(n)))
+                    Ok((!self.turns(n)).then_some(ProbeTarget::MotionPos(n)))
                 } else if self.is_translational_mechanical(eid) {
                     Ok(self.unique_scalar(eid, decl)?.map(ProbeTarget::ScalarState))
                 } else {
                     Ok(None)
                 }
             }
-            ("velocity", VEL_D) => Ok(self.unique_motion(eid, decl)?.map(ProbeTarget::MotionVel)),
+            ("velocity", VEL_D) => {
+                let node = self.unique_motion(eid, decl)?.filter(|&n| !self.turns(n));
+                Ok(node.map(ProbeTarget::MotionVel))
+            }
+            ("angle", NONE_D) => {
+                let node = self.unique_motion(eid, decl)?.filter(|&n| self.turns(n));
+                Ok(node.map(ProbeTarget::MotionPos))
+            }
             ("temperature", TMP_D) => self.find_temp(eid, decl),
             ("heat_rate", PWR_D) => {
                 Ok(obs(|o| matches!(o, Observed::HeatRate(_))).map(ProbeTarget::ObserverHeatRate))

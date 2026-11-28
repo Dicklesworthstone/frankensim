@@ -16,6 +16,9 @@
 - When live inputs are attached in `from_draft`/`from_draft_inputs`, the draft is re-admitted under world-frame `Scenario::new(&name, seed, environment.base)` (matching `fs-fsim::admit_assembly_source`); custom non-world frames refuse at re-admission (`admit-refused`).
 - Per-step input latching: `set_input` / `set_input_by_name` writes only a `pending` `AtomicU64`; `AssemblyRuntime::step` copies `pending -> live` once before entering `System::step`, so a mid-step write cannot skew `residual` vs `accept` energy booking.
 - Probe resolution rejects unlowered quantities (`probe-unlowered`), lag-filtered thermocouples (`probe-unsupported`), ambiguous parts with multiple `Motion` or scalar `f64` nodes (`probe-ambiguous`), non-translational-mechanical scalar fallback into `position` (blocking thermal, non-mechanical, and rotational `SpiralSpring` leakage), and 3D `velocity-x` probes on 1D parts.
+- An `angle` probe (`:dims (0 0 0 0 0 0)`) reads a `Motion` node whose port
+  `p` is rotational, its turn [rad]; `position` and `velocity` read only one
+  that is not. Any other pairing is `probe-unlowered` (`tests/runtime_core.rs`).
 - On refusal or non-finite/overflowing probe output during `render_f32`, the runtime halts, writes exact `0.0` silence for remaining frames, and returns the refusal once from `take_refusal()`.
 - Canonical JSON encoders escape strings deterministically and emit `null` for non-finite `default_value`.
 

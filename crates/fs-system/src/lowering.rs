@@ -4157,6 +4157,140 @@ fn lumped_initial_motion(
     })
 }
 
+/// The unit axis and scope of the revolute joint whose child the part is, if
+/// one is. A child of a second joint is refused by name: a lumped body has one
+/// coordinate.
+fn revolute_axis(
+    ctx: &PartLoweringContext<'_>,
+    scope: &str,
+) -> Result<Option<([f64; 3], String)>, LoweringError> {
+    let all = &ctx.draft.input().joints;
+    let mut joints = all.iter().filter(|j| j.child == ctx.part.entity);
+    let Some(first) = joints.clone().find(|j| j.kind == JointKind::Revolute) else {
+        return Ok(None);
+    };
+    if let Some(other) = joints.find(|j| j.name != first.name) {
+        let detail = format!(
+            "the child of revolute joint `{}` is also the child of {} joint `{}`: a lumped \
+             body has one coordinate",
+            first.name,
+            JointLoweringKey(other.kind).as_str(),
+            other.name,
+        );
+        return Err(LoweringError::Invalid {
+            item: scope.to_owned(),
+            detail,
+        });
+    }
+    let length = first.axis.iter().map(|a| a * a).sum::<f64>().sqrt();
+    let n = first.axis.map(|a| a / length);
+    Ok(Some((n, format!("joint:{}", first.name))))
+}
+
+/// The rotational `Mass` `rho n^T J n` of a revolute child of density and volume
+/// `[rho, vol]` about the unit axis `n` of its joint `joint`: a box, whose inertia
+/// `J` about its centroid, its pivot, is closed-form along its body axes.
+fn revolute_mass(
+    ctx: &PartLoweringContext<'_>,
+    [rho, vol]: [f64; 2],
+    n: [f64; 3],
+    joint: &str,
+    scope: &str,
+    recorder: &mut ProvenanceRecorder,
+) -> Result<Mass, LoweringError> {
+    let DraftGeometrySource::Primitive(PrimitiveShape::Box { lx, ly, lz }) = &ctx.part.geometry
+    else {
+        return Err(LoweringError::Invalid {
+            item: scope.to_owned(),
+            detail: "a revolute child needs a box, whose inertia about its centroid, its \
+                     pivot, is closed-form"
+                .to_owned(),
+        });
+    };
+    for (i, n_i) in n.iter().enumerate() {
+        let (name, field) = (format!("axis_unit[{i}]"), format!("axis[{i}]"));
+        recorder.record_declared_field(name, *n_i, Dims::NONE, joint, field);
+    }
+    let [x, y, z] = [lx.value, ly.value, lz.value].map(|l| l * l);
+    let j = [y + z, x + z, x + y].map(|s| vol * s / 12.0);
+    let inertia = rho * j.iter().zip(n).map(|(j, n)| j * n * n).sum::<f64>();
+    recorder.record_geometry_derived(
+        "moment_of_inertia",
+        inertia,
+        INERTIA_DIMS,
+        ctx.geometry_fingerprint,
+        geometry_generator_label(&ctx.part.geometry),
+        "I = density * n^T J n, J = V diag(ly^2 + lz^2, lx^2 + lz^2, lx^2 + ly^2) / 12",
+    );
+    Mass::in_domain(PortKind::RotationalTorqueAngularVelocity, inertia).map_err(|source| {
+        LoweringError::Element {
+            item: scope.to_owned(),
+            source,
+        }
+    })
+}
+
+/// Refuses a revolute joint whose parent turns: it is lowered only on a parent
+/// that translates, which does not turn, or on the ground.
+fn refuse_turning_parent(
+    ctx: &JointLoweringContext<'_>,
+    graph: &LoweringGraph,
+    scope: &str,
+) -> Result<(), LoweringError> {
+    if graph.entity_port(ctx.joint.parent, "rotation").is_none() {
+        return Ok(());
+    }
+    Err(LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: "its parent turns; a revolute joint is lowered only on a parent that \
+                 translates or on the ground"
+            .to_owned(),
+    })
+}
+
+/// The start of a revolute child about its unit axis `n`: its orientation must
+/// be a turn about `n`, `2 atan2(v . n, w)`, and its angular velocity must lie
+/// along `n`. Its position is the pivot's place, not a coordinate, and it may
+/// not translate.
+fn revolute_initial_motion(
+    init: &fs_scenario::assembly::draft::DraftInitialState,
+    scope: &str,
+    n: [f64; 3],
+    rec: &mut ProvenanceRecorder,
+) -> Result<Motion, LoweringError> {
+    let refuse = |field: &str, val: String| LoweringError::Invalid {
+        item: scope.to_owned(),
+        detail: format!(
+            "a revolute child turns about its joint's axis only; it refuses {field} = {val}"
+        ),
+    };
+    let along = |v: [f64; 3]| v.iter().zip(n).map(|(v, n)| v * n).sum::<f64>();
+    let off = |v: [f64; 3], a: f64| v.iter().zip(n).any(|(v, n)| (v - a * n).abs() > 1.0e-12);
+    let q = init.orientation;
+    let half = along([q[1], q[2], q[3]]);
+    if off([q[1], q[2], q[3]], half) {
+        return Err(refuse("initial.orientation", format!("{q:?}")));
+    }
+    let omega = init.angular_velocity.map(|w| w.value);
+    let spin = along(omega);
+    if off(omega, spin) {
+        return Err(refuse("initial.angular_velocity", format!("{omega:?}")));
+    }
+    if init.linear_velocity.iter().any(|v| v.value != 0.0) {
+        let v = init.linear_velocity.map(|v| v.value);
+        return Err(refuse("initial.linear_velocity", format!("{v:?}")));
+    }
+    let turn = 2.0 * half.atan2(q[0]);
+    let (name, field) = ("initial_turn_rad", "initial.orientation");
+    rec.record_declared_field(name, turn, Dims::NONE, scope, field);
+    let (name, field) = ("initial_angular_velocity_rad_s", "initial.angular_velocity");
+    rec.record_declared_field(name, spin, FREQUENCY_DIMS, scope, field);
+    Ok(Motion {
+        position_m: turn,
+        velocity_m_s: spin,
+    })
+}
+
 fn lumped_initial_temp(
     ctx: &PartLoweringContext<'_>,
     scope: &str,
@@ -4183,6 +4317,7 @@ fn lower_lumped_rigid_body(
     let (rho, _) = ctx.query_material(&mut recorder, 0, "density", "density")?;
     let gen_label = geometry_generator_label(&ctx.part.geometry);
 
+    let mut turn_axis = None;
     let (component, node_name, port_name) =
         if let DraftGeometrySource::Gear(_) = &ctx.part.geometry {
             let (i_over_rho, formula) = geometry_polar_inertia_over_rho(&ctx.part.geometry)
@@ -4220,23 +4355,38 @@ fn lower_lumped_rigid_body(
                 &gen_label,
                 vol_formula,
             );
+            let revolute = revolute_axis(ctx, &scope)?;
+            let mass_formula = if revolute.is_some() {
+                "mass = density * volume; it turns only, its parent does not carry it"
+            } else {
+                "mass = density * volume"
+            };
             recorder.record_geometry_derived(
                 "mass",
                 mass_kg,
                 MASS_DIMS,
                 ctx.geometry_fingerprint,
                 &gen_label,
-                "mass = density * volume",
+                mass_formula,
             );
-            graph.record_mass(ctx, mass_kg);
-            let comp = Mass::new(mass_kg).map_err(|source| LoweringError::Element {
-                item: scope.clone(),
-                source,
-            })?;
-            (comp, ctx.part.name.clone(), "mechanics")
+            if let Some((n, joint)) = revolute {
+                let comp = revolute_mass(ctx, [rho.value, vol], n, &joint, &scope, &mut recorder)?;
+                turn_axis = Some(n);
+                (comp, ctx.part.name.clone(), "rotation")
+            } else {
+                graph.record_mass(ctx, mass_kg);
+                let comp = Mass::new(mass_kg).map_err(|source| LoweringError::Element {
+                    item: scope.clone(),
+                    source,
+                })?;
+                (comp, ctx.part.name.clone(), "mechanics")
+            }
         };
 
-    let init = lumped_initial_motion(ctx.part, &scope, port_name == "rotation", &mut recorder)?;
+    let init = match (turn_axis, &ctx.part.initial) {
+        (Some(n), Some(init)) => revolute_initial_motion(init, &scope, n, &mut recorder)?,
+        _ => lumped_initial_motion(ctx.part, &scope, port_name == "rotation", &mut recorder)?,
+    };
     let component = control::publish_if_sensed(ctx, component);
     let node =
         graph.add_with_tangent_and_residual(&node_name, Some(ctx.part.entity), component, init)?;
@@ -4717,7 +4867,7 @@ fn lower_1dof_joint(
             entity: ctx.joint.child,
             port: preferred_port.to_owned(),
         })?;
-    let parent_port = if ctx.joint.parent == root {
+    let mut parent_port = if ctx.joint.parent == root {
         None
     } else {
         Some(
@@ -4731,6 +4881,11 @@ fn lower_1dof_joint(
                 })?,
         )
     };
+    if ctx.joint.kind == JointKind::Revolute {
+        // A parent that translates does not turn: the far end is the ground.
+        refuse_turning_parent(ctx, graph, &scope)?;
+        parent_port = None;
+    }
 
     if let Some(k) = ctx.joint.stiffness
         && k.value > 0.0

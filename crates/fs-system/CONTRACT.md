@@ -5239,3 +5239,20 @@ patterns, invalid decimation ratios, and modes crossing `0.45 * mechanics_rate`.
 No-claim: one-way observation only — no radiation backreaction (fluid loading
 or radiation damping) on the modes, and no diffraction or reflection off the
 drum shell or room.
+
+## A revolute child turns (bead `frankensim-rc-1109-root-3gc12.13.1`)
+
+The child of a revolute joint, a lumped box, lowers as a rotational `Mass`
+whose coordinate is its turn [rad] about the joint's unit axis `n`, pivoted
+at its centroid (so gravity gives it no torque), with the inertia `rho n^T J
+n` of the box about it. Its receipt records `axis_unit[i]`,
+`moment_of_inertia`, its spin and `initial_turn_rad = 2 atan2(v . n, w)` of
+its orientation `(w, v)`, at which its spring rests. A parent that
+translates does not turn: the joint's far end is then the ground. Refused by
+name: a second joint of the child, a parent that turns, another shape, an
+orientation or angular velocity off `n`, and any linear velocity.
+fs-runtime's `runtime_core` test holds the inertia bit for bit about x, y and
+z and the swing `theta_n = theta0 + (w0 / omega) sin(n phi)`, `tan(phi / 2) =
+omega dt / 2`, on the ground and on a falling platform. No claim: a pivot off
+the centroid, and the child's mass in its parent's: the parent moves as if the
+child were not on it.
