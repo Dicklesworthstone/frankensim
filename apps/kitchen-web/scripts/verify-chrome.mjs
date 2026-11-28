@@ -166,7 +166,7 @@ async function main() {
     }
 
     // 4. Mount all chapters cleanly by scrolling through each and verifying every figure's WebGL canvas renders non-blank frames
-    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+    const sectionIds = ["hero", "equipment", "stove", "boil", "oven", "cold", "walkin-week", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
     const canvasSelectors = [
       "[data-hero-canvas]",
       "[data-eq-canvas]",
@@ -174,6 +174,7 @@ async function main() {
       "[data-bo-canvas]",
       "[data-oven-canvas]",
       "[data-cold-canvas]",
+      "[data-wo-canvas]",
       "[data-brigade-canvas]",
       "[data-pivot-canvas]",
       "[data-week-canvas]",
@@ -639,6 +640,42 @@ async function main() {
         await page.$eval("[data-hd-stage]", (el) => el.hold.hold(null));
       }
 
+      if (sid === "walkin-week") {
+        // As set on arrival (3 fresh trucks, 10% over the plan): no lunch short and 158 lb thrown out. On 2 trucks
+        // Wednesday's 741 lunches of chicken thighs come up short: Monday's are past their day by Tuesday night and
+        // Thursday's truck is too late. Frozen on 2 trucks at 25% over, cases end up on the floor. Over a truck's job
+        // the cook is out carrying a case, and the walk-in's door is open for it.
+        const info = () => page.$eval("[data-wo-stage]", (el) => el.walkin.info());
+        const at = async (h) => {
+          await page.$eval("[data-wo-stage]", (el, h) => {
+            el.walkin.hold(true);
+            el.walkin.seek(h);
+          }, h);
+          await sleep(700);
+          return info();
+        };
+        const base = await info();
+        console.log(`[verify-chrome] A week through the walk-in: ${JSON.stringify(base.week)} | ${base.status.slice(0, 90)}`);
+        if (base.policy.trucks !== 3 || base.policy.frozen || base.week.shortLunches !== 0 || base.week.thrownLb !== 158) throw new Error(`A week through the walk-in: as set on arrival the week is not as expected: ${JSON.stringify(base)}`);
+        const truck = await at(6.004);
+        if (truck.job?.kind !== "truck" || !truck.cook || truck.doors.walkin !== 1 || truck.doors.freezer !== 0) throw new Error(`A week through the walk-in: during Monday's truck the cook is not out or the doors are wrong: ${JSON.stringify(truck)}`);
+        await page.click('[data-wo-trucks="2"]');
+        await sleep(300);
+        const two = await at(57.2);
+        console.log(`[verify-chrome] A week through the walk-in, 2 trucks: ${JSON.stringify(two.week)} | ${two.hud.slice(0, 80)}`);
+        if (two.week.shortLunches !== 741 || !/short by 741/.test(two.status) || !/^Wednesday/.test(two.hud)) throw new Error(`A week through the walk-in: on 2 trucks Wednesday is not 741 lunches short: ${JSON.stringify(two)}`);
+        await page.$eval("[data-wo-stage]", (el) => el.walkin.set({ frozen: true, trucks: 2, cushion: 0.25 }));
+        const full = await at(56.5);
+        console.log(`[verify-chrome] A week through the walk-in, frozen, 25% over: floor ${full.floor}, ${JSON.stringify(full.shelved)}, ${JSON.stringify(full.tags)}`);
+        if (!(full.floor > 0) || !/On the floor/.test(full.tags[2] ?? "") || !/floor/.test(full.status)) throw new Error(`A week through the walk-in: frozen at 25% over, no case is shown on the floor: ${JSON.stringify(full)}`);
+        await page.screenshot({ path: path.join(VERIFY_DIR, "ch4-walkin-week.png"), fullPage: false });
+        console.log("[verify-chrome] Saved /tmp/kitchen_web_verify/ch4-walkin-week.png");
+        await page.$eval("[data-wo-stage]", (el) => {
+          el.walkin.set({ frozen: false, trucks: 3, cushion: 0.1 });
+          el.walkin.hold(false);
+        });
+      }
+
       if (sid === "hood") {
         // Flush with the hood's edge and the gap open, the broilers need 5,100 cfm: at the code's 4,000 smoke rolls out
         // under the edge. Pushed 12 inches back with the gap sealed they need 2,800: all of it caught, and none out in
@@ -809,9 +846,9 @@ async function main() {
       }
     }
 
-    // 5. Verify ALL 24 WebGL canvases (20 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
+    // 5. Verify ALL 25 WebGL canvases (21 figures; the two-kitchen figure has two, the combi trip has its two screens, the camera glasses their own) render non-blank pixels via direct pixel sampling after capture
     const nonBlankSummary = await page.evaluate(async () => {
-      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
+      const ids = ["hero", "equipment", "stove", "boil", "oven", "cold", "walkin-week", "brigade", "pivot", "week", "cool", "hold", "floor", "hood", "rush", "glasses", "morning", "crowd", "pair", "kit", "trip"];
       const sels = [
         "[data-hero-canvas]",
         "[data-eq-canvas]",
@@ -819,6 +856,7 @@ async function main() {
         "[data-bo-canvas]",
         "[data-oven-canvas]",
         "[data-cold-canvas]",
+        "[data-wo-canvas]",
         "[data-brigade-canvas]",
         "[data-pivot-canvas]",
         "[data-week-canvas]",
@@ -844,7 +882,7 @@ async function main() {
         return { id, w: c?.width || 0, h: c?.height || 0 };
       });
     });
-    console.log("[verify-chrome] All 24 WebGL canvases active:", nonBlankSummary);
+    console.log("[verify-chrome] All 25 WebGL canvases active:", nonBlankSummary);
     for (const item of nonBlankSummary) {
       if (item.w < 200 || item.h < 200) {
         throw new Error(`Canvas backing buffer too small: ${JSON.stringify(item)}`);

@@ -1818,6 +1818,9 @@ register({
   "NSF-WALKIN-FREEZER-8X8": freezer8x8,
   "NSF-WALKIN-FREEZER-8X10": walkIn({ freezer: true, door0: 0.76, doorW: 0.914, units: 1, fans: 2 }),
   "NSF-WALKIN-FREEZER-10X14": walkIn({ freezer: true, door0: 0.99, doorW: 1.067, units: 1, fans: 3 }),
+  // The same 8 x 10 boxes with empty shelving along the back, for meat and fish placed case by case.
+  "NSF-WALKIN-COOLER-8X10-BACK": walkIn({ freezer: false, door0: 0.76, doorW: 0.914, units: 1, fans: 2, back: true }),
+  "NSF-WALKIN-FREEZER-8X10-BACK": walkIn({ freezer: true, door0: 0.76, doorW: 0.914, units: 1, fans: 2, back: true }),
   "NSF-WIRE-SHELVING-48": shelving,
   "NSF-WIRE-SHELVING-48IN": shelving,
   "NSF-SPEEDRACK-20PAN": speedRack,
@@ -1842,7 +1845,15 @@ interface WalkInSpec {
   /** Unit coolers on the back wall, and fans on each. */
   units: number;
   fans: number;
+  /** Shelving along the back wall as well, under the unit cooler: BACK_SHELF, left empty for cases put on it one by
+   *  one. The shelving down the sides stops short of it, one unit a side, leaving room to stand at it. */
+  back?: boolean;
 }
+
+/** A walk-in's back-wall shelving (WalkInSpec.back), in the box's frame: two 42 in units side by side from `x0`, 18 in
+ *  deep, their backs `gap` off the back wall's inside, on three shelves (the posts clear of the unit cooler's drain,
+ *  which goes into the wall 1.29 m up). */
+export const BACK_SHELF = { L: 1.067, D: 0.457, H: 1.27, tiers: [0.2, 0.67, 1.14] as readonly number[], x0: [PANEL + 0.012, PANEL + 0.012 + 1.067 + 0.01] as readonly number[], gap: 0.012 } as const;
 
 /** A panel joint's groove: the width of the dark line it draws, its skins turned in either side. */
 const GROOVE = 0.004;
@@ -2574,9 +2585,10 @@ function walkIn(k: WalkInSpec): Builder {
       }
     }
 
-    // Shelving down both sides.
+    // Shelving down both sides, and along the back if asked for.
     const Ds = w < 2.7 ? 0.457 : 0.61;
-    const run = zi - 0.06 - (zb + 0.03);
+    const run = zi - 0.06 - (k.back ? zb + BACK_SHELF.gap + BACK_SHELF.D + 0.52 : zb + 0.03);
+    if (k.back) for (const x of BACK_SHELF.x0) s.at([x, floorY, zb + BACK_SHELF.gap + BACK_SHELF.D], [0, 0, 0], () => wireShelving(s, BACK_SHELF.L, BACK_SHELF.D, BACK_SHELF.H, { grooves: false, lite: true, tiers: [...BACK_SHELF.tiers] }));
     const lens: number[] = [];
     {
       let left = run;

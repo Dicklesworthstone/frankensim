@@ -13,6 +13,7 @@ import { BOIL_PIECES, mountBoilLab } from "./three/boilLab";
 import { coolPieces, mountCoolLab } from "./three/coolLab";
 import { holdPieces, mountHoldLab } from "./three/holdLab";
 import { hoodPieces, mountHoodLab } from "./three/hoodLab";
+import { mountWalkInLab, walkInPieces } from "./three/walkInLab";
 import { prefetchSteakTissue } from "./three/models/steakPrefetch";
 import { prefetchBouleLayers } from "./three/models/boulePrefetch";
 import { prefetchFoodTexels } from "./three/models/foodPrefetch";
@@ -306,6 +307,7 @@ function bootstrap(): void {
     { id: "boil", el: document.getElementById("boil")!, mount: mountBoilLab, done: false, pieces: BOIL_PIECES },
     { id: "oven", el: document.getElementById("oven")!, mount: mountOvenLab, done: false, pieces: OVEN_PIECES },
     { id: "cold", el: document.getElementById("cold")!, mount: mountColdChainLab, done: false, pieces: coldPieces() },
+    { id: "walkin-week", el: document.getElementById("walkin-week")!, mount: mountWalkInLab, done: false, pieces: walkInPieces() },
     { id: "brigade", el: document.getElementById("brigade")!, mount: mountBrigadeStage, done: false, pieces: BRIGADE_PIECES },
     { id: "pivot", el: document.getElementById("pivot")!, mount: mountPivotLab, done: false, pieces: PIVOT_PIECES },
     { id: "week", el: document.getElementById("week")!, mount: mountWeekLab, done: false, pieces: WEEK_PIECES },

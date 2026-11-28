@@ -775,7 +775,7 @@
               <p class="kick"><span class="joint on" aria-hidden="true"></span><b>04</b><i></i>Cold chain</p>
               <h2 class="d3" id="cold-title">From the walk-in <em class="g">to the doorstep</em>.</h2>
               <p class="kicker">
-                In the walk-in, hot pans and an open door work against the cooling coil. In the delivery box, the vent trades heat for crispness. Both are live models, and both tell you when the food crosses a safety line.
+                In the walk-in, hot pans and an open door work against the cooling coil. In the delivery box, the vent trades heat for crispness. Over a week, every case of meat and fish has to come in before its lunch and go out before its last day. All three are live models, and each tells you when the food crosses a safety line.
               </p>
             </div>
             <a class="more" href="#cold-how">How it's computed<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg></a>
@@ -848,6 +848,84 @@
               <div>
                 <code class="formula">Q_door ∝ A · √(g · H · Δρ / ρ) · f_open<br />T_g = (w_s · T_gs + k · w_w · T_gw) / (w_s + k · w_w)</code>
                 <p class="model">Models: <code>stepWalkinKernel</code> and <code>stepCarrierKernel</code>; the fast estimate is a table of <code>stepCarrierKernel</code> runs with its error measured against more of them. Doorway exchange after Gosney and Olama; crust glass transition by Gordon-Taylor with a fitted k = 4.6.</p>
+              </div>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+          <figure class="fig reveal bo-fig wo-fig" id="walkin-week">
+            <header class="fig-head">
+              <p class="todo">Order each case in time, use it before its day runs out</p>
+              <span class="tagged">Interactive</span>
+            </header>
+            <div class="fig-body">
+              <div class="stage bo-stage wo-stage" data-wo-stage>
+                <canvas data-wo-canvas tabindex="0" aria-label="A walk-in cooler and a walk-in freezer side by side, their roofs off and their fronts cut low, with wire shelving along each back wall. Cases of salmon, short ribs, ground beef and chicken thighs stand on the shelves, chicken lowest, each with a coloured label giving the day it must be used by. Through a week, a cook carries each case in off the truck, from the freezer to the walk-in to thaw, out to the kitchen for the morning's prep, or out to the bin at the night's check. Drag to look around."></canvas>
+                <div class="wk-hud bo-hud wo-hud" aria-hidden="true"><b data-wo-hud-clock>Monday, 12:00 am</b><span data-wo-hud-doing>…</span><em data-wo-hud-note data-kind="" hidden></em></div>
+                <span class="bo-tag" data-wo-tag="walkin" style="--c:#7dd3fc" hidden aria-hidden="true"><i>Walk-in</i><b>…</b></span>
+                <span class="bo-tag" data-wo-tag="freezer" style="--c:#60a5fa" hidden aria-hidden="true"><i>Freezer</i><b>…</b></span>
+                <span class="bo-tag" data-wo-tag="floor" style="--c:#f43f5e" hidden aria-hidden="true"><i>On the floor</i><b>…</b></span>
+                <p class="wk-legend wo-legend" aria-hidden="true"><span style="--k:#4ade80">3+ days left</span><span style="--k:#fbbf24">2 days</span><span style="--k:#fb923c">Last day</span><span style="--k:#f43f5e">Past its day</span><span style="--k:#60a5fa">Frozen</span><span style="--k:#c4b5fd">Thawing</span></p>
+              </div>
+              <div class="lab bo-lab wo-lab">
+                <div class="lab-view">
+                  <div class="wk-tiles bo-tiles wo-tiles">
+                    <div class="wk-tile bo-tile" style="--c:#fb7185"><span>Thrown out</span><b><i data-wo-thrown>…</i></b><small data-wo-thrown-s>…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#fbbf24" data-wo-short-box><span>Lunches short</span><b><i data-wo-short>…</i></b><small data-wo-short-s>…</small></div>
+                    <div class="wk-tile bo-tile cd-tile" style="--c:#7dd3fc" data-wo-full-box><span>Shelf places used</span><b><i data-wo-full>…</i></b><small data-wo-full-s>…</small></div>
+                    <div class="wk-tile bo-tile" style="--c:#c084fc"><span>Trucks</span><b><i data-wo-trucks-t>…</i></b><small data-wo-trucks-s>…</small></div>
+                  </div>
+                  <div class="bo-chart-wrap">
+                    <p class="rs-map-head"><b>Every lot of the week, from the day it comes in to its last day</b><span class="wk-keys wo-keys"><span style="--k:#fde68a">Fresh</span><span class="frz" style="--k:#60a5fa">Frozen</span><span class="thw" style="--k:#c4b5fd">Thawed</span><span class="note">✕ thrown out</span></span></p>
+                    <div class="bo-chart wo-chart" data-wo-chart role="img" aria-label="The week's lots of salmon, short ribs, ground beef and chicken thighs, each a bar from the day it came in to the last day it can be used, with the trucks' days, each day's lunches, what came up short and what was thrown out. Click a day to go to it."></div>
+                    <p class="rs-map-note">Each meat keeps only so many days in the walk-in, counting the day it comes in: chicken thighs and ground beef 2, salmon 3, short ribs 5. A truck can only bring what will still be good on the day of its lunch, so a lunch further from its truck than its meat keeps has nothing to come from. Frozen keeps for months, but it has to be pulled to thaw the morning before, before the day's count is in.</p>
+                  </div>
+                </div>
+                <div class="lab-side">
+                  <p class="pv-lead">A week of catered lunches: chicken thighs Monday and Wednesday, salmon Tuesday, short ribs Thursday, chili Friday. The meat and fish come by truck in whole cases, ordered by 2 pm the day before. Pick how many trucks come, fresh or frozen, and how much over the plan to order, then watch every case come in, go to prep, or go in the bin.</p>
+                  <div class="field">
+                    <p class="micro">Trucks a week</p>
+                    <div class="seg fill" role="group" aria-label="How many trucks come a week">
+                      <button type="button" data-wo-trucks="2" aria-pressed="false">2 · Mon, Thu</button>
+                      <button type="button" data-wo-trucks="3" aria-pressed="true">3 · Mon, Wed, Fri</button>
+                      <button type="button" data-wo-trucks="5" aria-pressed="false">5 · daily</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <p class="micro">The meat and fish come</p>
+                    <div class="seg fill" role="group" aria-label="Fresh or frozen">
+                      <button type="button" data-wo-keep="fresh" aria-pressed="true">Fresh</button>
+                      <button type="button" data-wo-keep="frozen" aria-pressed="false">Frozen</button>
+                    </div>
+                  </div>
+                  <label class="range"><span><b>Ordered over the plan</b><output data-wo-cushion-val>10% over</output></span><input type="range" min="0" max="25" step="5" value="10" data-wo-cushion aria-label="How much over the planned lunches to order, in percent" /></label>
+                  <div class="field">
+                    <p class="micro">Go to a day</p>
+                    <div class="seg fill wo-days" role="group" aria-label="Go to a day of the week">
+                      <button type="button" data-wo-day="0" aria-pressed="true">Mon</button>
+                      <button type="button" data-wo-day="1" aria-pressed="false">Tue</button>
+                      <button type="button" data-wo-day="2" aria-pressed="false">Wed</button>
+                      <button type="button" data-wo-day="3" aria-pressed="false">Thu</button>
+                      <button type="button" data-wo-day="4" aria-pressed="false">Fri</button>
+                      <button type="button" class="wo-play" data-wo-play>Pause</button>
+                    </div>
+                  </div>
+                  <div class="status" data-wo-status data-state="warn">Setting up the week…</div>
+                </div>
+              </div>
+            </div>
+            <figcaption class="fig-foot how" id="walkin-week-how">
+              <details>
+                <summary class="how-title">How it's computed</summary>
+                <div class="how-body">
+              <div>
+                <p>How long each keeps is the federal cold storage chart's, at 40 °F or below in the walk-in and 0 °F in the freezer, each at the longest of its range: fresh chicken pieces and ground beef 1 to 2 days, fatty fish such as salmon 1 to 3, beef roasts 3 to 5; frozen, 3 to 12 months. The Food Code counts the day it comes in as day 1, and the case is used or thrown out by the end of its last day. Thawed in the walk-in, meat takes a full day, and after that ground meat, poultry and fish keep 1 to 2 more days and red meat cuts 3 to 5 (USDA).</p>
+                <p>The client confirms each lunch's final count by noon the day before. A truck's order goes in by 2 pm the day before it comes at 6 am, so it knows its own day's final count and only the plan, plus the cushion, for the days after. Frozen is pulled to thaw at 8 am the day before, before the count is in, so it goes by the plan and the cushion, a whole case at a time. What is short at the 9 am prep is bought locally on the day; what is past its last day at the 10 pm check is thrown out. Each lunch's count is the plan within about 10% either way; the many weeks are 300 of those.</p>
+                <p>Raw meat stands by the temperature it is cooked to, the hottest lowest (the Food Code's annex): chicken at 165 °F at the bottom, ground beef at 155 °F above it, whole beef and fish at 145 °F at the top, so nothing drips onto a food cooked less than itself. Food stands at least 6 inches off the floor (§3-305.11); a case with no shelf place left has only the floor.</p>
+              </div>
+              <div>
+                <code class="formula">last day = day in + keeps − 1<br />order = ⌈(count of the truck's day + plan · (1 + cushion) of later days it lasts to − on hand) / case⌉ · case</code>
+                <p class="model">Model: <code>walkInWeek</code>, three weeks run and the middle one shown, its stock carried in from the week before. Keeping times: the federal cold storage chart (foodsafety.gov) and USDA's guidance on thawing. Date marking, storage height and shelf order: the FDA Food Code (§3-501.17, §3-305.11 and its annex).</p>
               </div>
                 </div>
               </details>

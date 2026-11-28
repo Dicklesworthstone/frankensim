@@ -4548,3 +4548,128 @@ button.wk-dish[aria-pressed="true"] {
   color: var(--soft);
   background: rgb(10 10 12 / 0.62);
 }
+/* A week through the walk-in (chapter 04, after the cold chain). */
+.wo-legend span {
+  padding: 0.18rem 0.5rem;
+  border-radius: 99px;
+  color: var(--soft);
+  background: rgb(10 10 12 / 0.62);
+}
+.wo-hud b,
+.wo-hud span {
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.4rem;
+  background: rgb(10 10 12 / 0.7);
+}
+.wo-hud b {
+  font-size: 1.1rem;
+}
+.wo-hud em {
+  color: #bbf7d0;
+  background: rgb(10 10 12 / 0.7);
+  box-shadow: inset 0 0 0 1px rgb(134 239 172 / 0.45);
+}
+.wo-hud em[data-kind="short"] {
+  color: #fde68a;
+  box-shadow: inset 0 0 0 1px rgb(251 191 36 / 0.6);
+}
+.wo-hud em[data-kind="past"] {
+  color: #fecdd3;
+  box-shadow: inset 0 0 0 1px rgb(244 63 94 / 0.6);
+}
+.wo-svg .day {
+  cursor: pointer;
+}
+.wo-svg .day .hit {
+  fill: transparent;
+}
+.wo-svg .day:hover .hit {
+  fill: rgb(255 255 255 / 0.04);
+}
+.wo-svg .xa.truck {
+  fill: #e9d5ff;
+  font-weight: 600;
+}
+.wo-svg .ya.it {
+  fill: var(--soft);
+  font-weight: 600;
+}
+.wo-svg .grid {
+  stroke: rgb(255 255 255 / 0.08);
+  stroke-width: 1;
+}
+.wo-svg .grid.v {
+  stroke: rgb(255 255 255 / 0.05);
+}
+.wo-svg .lot {
+  fill: color-mix(in srgb, var(--c) 58%, transparent);
+  stroke: var(--c);
+  stroke-width: 1;
+}
+.wo-svg .lot.frozen {
+  fill: rgb(96 165 250 / 0.28);
+  stroke: #60a5fa;
+  stroke-dasharray: 3 2;
+}
+.wo-svg .lot.thawed {
+  fill: rgb(196 181 253 / 0.42);
+  stroke: #c4b5fd;
+}
+.wo-svg .out {
+  fill: #fda4af;
+  font-weight: 600;
+  font-size: 9.5px;
+  paint-order: stroke;
+  stroke: rgb(14 13 11 / 0.9);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.wo-svg .lunch {
+  fill: var(--muted);
+  font-size: 9.5px;
+}
+.wo-svg .lunch.short {
+  fill: #fbbf24;
+  font-weight: 700;
+}
+.wo-svg .now {
+  stroke: #fff;
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.wo-svg .xa.sub {
+  fill: var(--muted);
+}
+.wo-keys .frz::before {
+  background: rgb(96 165 250 / 0.28);
+  border: 1px dashed #60a5fa;
+}
+.wo-keys .thw::before {
+  background: rgb(196 181 253 / 0.42);
+  border: 1px solid #c4b5fd;
+}
+.wo-days {
+  grid-auto-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr);
+}
+.wo-days .wo-play {
+  color: #fff;
+}
+@media (max-width: 720px) {
+  .wo-hud b {
+    font-size: 0.95rem;
+  }
+  .wo-hud span {
+    flex-basis: 100%;
+    font-size: 0.7rem;
+  }
+  .wo-legend {
+    gap: 0.25rem 0.35rem;
+    font-size: 0.62rem;
+  }
+  .wo-legend span {
+    padding: 0.12rem 0.38rem;
+  }
+  .wo-legend span::before {
+    margin-right: 0.25rem;
+  }
+}
