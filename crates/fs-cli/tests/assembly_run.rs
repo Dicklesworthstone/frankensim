@@ -685,7 +685,7 @@ fn admit_refusals_probe_refusals_and_unknown_explain_fail_closed() {
 
     let mic_src = OSCILLATOR_ASSEMBLY.replace(
         "(analysis-options :harmonic-frequencies (1.0 2.0 5.0) :modal-max 4)",
-        "(probe \"mic1\" :kind microphone :sample-rate 1000Hz)",
+        "(probe \"mic1\" :kind microphone :target \"mass\" :sample-rate 1000Hz)",
     );
     let e_mic = run_assembly(
         &ledger,

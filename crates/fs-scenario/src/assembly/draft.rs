@@ -848,9 +848,11 @@ pub enum TimingEdge {
 /// Receiver / transducer model for a physical probe.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProbeKind {
-    /// Acoustic microphone receiver with position, aim vector, and polar pattern.
+    /// Acoustic microphone receiver with target, position, aim vector, and polar pattern.
     Microphone {
-        /// Receiver position [m].
+        /// Target radiating part or surface entity.
+        target: EntityId,
+        /// Receiver position [m] in target outward-normal frame (`+z` away from cavity).
         position: [QtyAny; 3],
         /// Aim unit/direction vector (must be finite and nonzero).
         aim_direction: [f64; 3],
@@ -2300,10 +2302,12 @@ impl DraftAssembly {
             )?;
             match &probe.kind {
                 ProbeKind::Microphone {
+                    target,
                     position,
                     aim_direction,
                     ..
                 } => {
+                    check_entity(&input.catalog, *target, None, input.root, &scope)?;
                     for (i, p) in position.iter().enumerate() {
                         check_qty(*p, LENGTH, &format!("{scope}.position[{i}]"), false, false)?;
                     }

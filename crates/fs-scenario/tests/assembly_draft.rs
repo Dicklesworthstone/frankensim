@@ -550,6 +550,7 @@ fn build_slice_d_modal_acoustics(scenario: &Scenario) -> DraftAssembly {
             frame: FrameId(0),
             sample_rate: QtyAny::new(48_000.0, FREQUENCY),
             kind: ProbeKind::Microphone {
+                target: plate,
                 position: [
                     QtyAny::new(0.0, LENGTH),
                     QtyAny::new(0.0, LENGTH),
@@ -973,6 +974,7 @@ fn build_clarinet_note(scenario: &Scenario) -> DraftAssembly {
             frame: FrameId(0),
             sample_rate: QtyAny::new(48_000.0, FREQUENCY),
             kind: ProbeKind::Microphone {
+                target: bore,
                 position: [
                     QtyAny::new(0.0, LENGTH),
                     QtyAny::new(0.0, LENGTH),
@@ -1217,6 +1219,7 @@ fn build_mechanical_watch(scenario: &Scenario) -> DraftAssembly {
                 frame: FrameId(0),
                 sample_rate: QtyAny::new(48_000.0, FREQUENCY),
                 kind: ProbeKind::Microphone {
+                    target: balance,
                     position: [
                         QtyAny::new(0.0, LENGTH),
                         QtyAny::new(0.0, LENGTH),

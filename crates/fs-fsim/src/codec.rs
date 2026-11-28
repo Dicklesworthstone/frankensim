@@ -882,11 +882,18 @@ fn parse_probe(
             "quantity",
             "dims",
             "direction",
+            "position",
+            "pattern",
         ],
         &scope,
     )?;
     let sample_rate = as_qty_d(req(&kw, "sample-rate", &scope)?, FREQUENCY, "sample-rate")?;
     let zero = [QtyAny::new(0.0, Dims([1, 0, 0, 0, 0, 0])); 3];
+    let pos = kw
+        .get("position")
+        .map(|n| as_qty3(n, "position"))
+        .transpose()?
+        .unwrap_or(zero);
     let target = || -> Result<EntityId, SolveRefusal> {
         let tn = as_str(req(&kw, "target", &scope)?, "target")?;
         parts
@@ -894,7 +901,11 @@ fn parse_probe(
             .copied()
             .ok_or_else(|| err(format!("{scope} unknown target `{tn}`")))
     };
-    let kind = match as_sym(req(&kw, "kind", &scope)?, "probe.kind")? {
+    let kind_sym = as_sym(req(&kw, "kind", &scope)?, "probe.kind")?;
+    if kind_sym != "microphone" && kw.contains_key("pattern") {
+        return Err(err(format!("{scope} :pattern requires :kind microphone")));
+    }
+    let kind = match kind_sym {
         "thermocouple" => ProbeKind::Thermocouple {
             location: target()?,
             position: zero,
@@ -913,25 +924,14 @@ fn parse_probe(
                 Some(o) => return Err(err(format!("unknown timing edge `{o}`"))),
             },
         },
-        "field-quantity" => {
-            let qn = as_str(req(&kw, "quantity", &scope)?, "quantity")?.to_string();
-            let dn = as_list(req(&kw, "dims", &scope)?, "dims")?;
-            if dn.len() != 6 {
-                return Err(err("probe :dims requires 6 integers"));
-            }
-            let mut exps = [0i8; 6];
-            for (slot, node) in exps.iter_mut().zip(dn) {
-                let NodeKind::Int(i) = node.kind else {
-                    return Err(err("dims must be ints"));
-                };
-                *slot = i8::try_from(i).map_err(|_| err("dims exponent out of i8 range"))?;
-            }
-            ProbeKind::FieldQuantity {
-                target: target()?,
-                position: zero,
-                quantity: ParameterKey::new(qn, Dims(exps)),
-            }
-        }
+        "field-quantity" => ProbeKind::FieldQuantity {
+            target: target()?,
+            position: zero,
+            quantity: ParameterKey::new(
+                as_str(req(&kw, "quantity", &scope)?, "quantity")?.to_string(),
+                parse_dims(req(&kw, "dims", &scope)?)?,
+            ),
+        },
         "strain-gauge" => ProbeKind::StrainGauge {
             target: target()?,
             position: zero,
@@ -940,11 +940,12 @@ fn parse_probe(
                 .map_or(Ok([1.0, 0.0, 0.0]), |n| as_vec3(n, "direction"))?,
         },
         "microphone" => ProbeKind::Microphone {
-            position: zero,
+            target: target()?,
+            position: pos,
             aim_direction: kw
                 .get("direction")
-                .map_or(Ok([1.0, 0.0, 0.0]), |n| as_vec3(n, "direction"))?,
-            pattern: MicrophonePattern::Omnidirectional,
+                .map_or(Ok([0.0, 0.0, -1.0]), |n| as_vec3(n, "direction"))?,
+            pattern: parse_mic_pattern(kw.get("pattern").copied())?,
         },
         o => return Err(err(format!("unsupported probe kind `{o}`"))),
     };
@@ -954,6 +955,31 @@ fn parse_probe(
         sample_rate,
         kind,
     })
+}
+
+fn parse_dims(node: &Node) -> Result<Dims, SolveRefusal> {
+    let dn = as_list(node, "dims")?;
+    if dn.len() != 6 {
+        return Err(err("probe :dims requires 6 integers"));
+    }
+    let mut exps = [0i8; 6];
+    for (slot, n) in exps.iter_mut().zip(dn) {
+        let NodeKind::Int(i) = n.kind else {
+            return Err(err("dims must be ints"));
+        };
+        *slot = i8::try_from(i).map_err(|_| err("dims exponent out of i8 range"))?;
+    }
+    Ok(Dims(exps))
+}
+
+fn parse_mic_pattern(node: Option<&Node>) -> Result<MicrophonePattern, SolveRefusal> {
+    match node.map(|n| as_sym(n, "pattern")).transpose()? {
+        None | Some("omnidirectional") => Ok(MicrophonePattern::Omnidirectional),
+        Some("cardioid") => Ok(MicrophonePattern::Cardioid),
+        Some("figure-eight") => Ok(MicrophonePattern::FigureEight),
+        Some("supercardioid") => Ok(MicrophonePattern::Supercardioid),
+        Some(o) => Err(err(format!("unknown microphone pattern `{o}`"))),
+    }
 }
 
 fn parse_envelope(items: &[Node], out: &mut DeclaredEnvelopes) -> Result<(), SolveRefusal> {
@@ -1249,7 +1275,7 @@ pub fn admit_assembly_source(
                 {
                     let kw = kwargs(
                         &items[1..],
-                        &["ambient-temp", "ambient-pressure"],
+                        &["ambient-temp", "ambient-pressure", "relative-humidity"],
                         "environment",
                     )?;
                     if let Some(t) = kw.get("ambient-temp") {
@@ -1257,6 +1283,9 @@ pub fn admit_assembly_source(
                     }
                     if let Some(p) = kw.get("ambient-pressure") {
                         e.base.ambient_pressure = as_qty_d(p, PRESSURE, "ambient-pressure")?;
+                    }
+                    if let Some(rh) = kw.get("relative-humidity") {
+                        e.relative_humidity = as_f64(rh, "relative-humidity")?;
                     }
                 }
                 env = Some(e);
@@ -2563,6 +2592,75 @@ mod tests {
                 format!("{f} {ex}")
             };
             assert!(run(k, &arg).err().unwrap().what.contains(w));
+        }
+    }
+
+    #[test]
+    fn microphone_probe_admits_roundtrips_and_refuses() {
+        let s: &[u8] = include_bytes!(
+            "../../../examples/assemblies/packs/steel-music-wire-heptonstall-ligo-p1400229.fsmcdpk"
+        );
+        let packs = PackCatalog::from_raw_bytes(&[s]).unwrap();
+        let run = |pr: &str| {
+            let src = format!(
+                "(assembly \"m\" (version 1) (units \"SI\") (seed 0x1) \
+                 (versions (constellation \"2026-07\") (workspace \"t\")) \
+                 (budget (wall 60s) (mem 64MiB)) \
+                 (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*)) \
+                 (reference-state assembled) \
+                 (environment :ambient-temp 293.15K :ambient-pressure 101325Pa :relative-humidity 0) \
+                 (time-plan :horizon 0.01s :dt 0.0001s :sample-rate 10000Hz) \
+                 (part \"hd\" :kind shell :geometry {VALID_TENSIONED_DISK} \
+                   :material \"steel-music-wire-ligo-p1400229\" :query-temp 293.15K :physics (mechanics) :fidelity (modal 3)) \
+                 {pr})"
+            );
+            admit_assembly_source(src.as_bytes(), &packs)
+        };
+        let ok = run("(probe \"mic\" :kind microphone :target \"hd\" :position (0.08m 0.05m 0.35m) :pattern omnidirectional :sample-rate 48000Hz)").unwrap();
+        let ast = crate::sexpr::parse(std::str::from_utf8(&ok.canonical_source).unwrap()).unwrap();
+        let js = crate::json::print_checked(&ast).unwrap();
+        for b in [ok.canonical_source.as_slice(), js.as_bytes()] {
+            let a = admit_assembly_source(b, &packs).unwrap();
+            assert_eq!(
+                a.draft.input().environment.relative_humidity.to_bits(),
+                0.0_f64.to_bits()
+            );
+            let ProbeKind::Microphone {
+                target,
+                position,
+                pattern,
+                ..
+            } = &a.draft.input().probes[0].kind
+            else {
+                panic!()
+            };
+            assert_eq!(*target, a.draft.input().parts[0].entity);
+            assert_eq!(position[2], QtyAny::new(0.35, LENGTH));
+            assert_eq!(*pattern, MicrophonePattern::Omnidirectional);
+        }
+        for (pr, w) in [
+            (
+                "(probe \"m\" :kind microphone :position (0m 0m 0.5m) :sample-rate 48000Hz)",
+                "missing `:target`",
+            ),
+            (
+                "(probe \"m\" :kind microphone :target \"nope\" :position (0m 0m 0.5m) :sample-rate 48000Hz)",
+                "unknown target",
+            ),
+            (
+                "(probe \"m\" :kind microphone :target \"hd\" :position (0m 0m 0.5m) :pattern laser :sample-rate 48000Hz)",
+                "unknown microphone pattern",
+            ),
+            (
+                "(probe \"m\" :kind microphone :target \"hd\" :position (0m 0m 1N) :sample-rate 48000Hz)",
+                "dimension",
+            ),
+            (
+                "(probe \"t\" :kind thermocouple :target \"hd\" :pattern cardioid :sample-rate 100Hz)",
+                ":pattern requires :kind microphone",
+            ),
+        ] {
+            assert!(run(pr).err().unwrap().what.contains(w));
         }
     }
 }
