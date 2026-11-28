@@ -13,7 +13,9 @@ use fs_ports::component::{
     Class, Component, PortSpec, PortTangent, Proposal, Receipt, StageResidual,
 };
 use fs_ports::{PortKind, StableId};
-use fs_system::elements::{ControlledSource, ElementError, Mass, Motion, SourceAccount, Storage};
+use fs_system::elements::{
+    ControlledSource, ElementError, Heater, Mass, Motion, SourceAccount, Storage,
+};
 use fs_system::{BlockSolveMode, SystemBuilder};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -80,6 +82,46 @@ fn commanded_effort_and_flow_conform_in_each_domain_with_their_full_tangent() {
             }
         }
     }
+}
+
+#[test]
+fn a_commanded_heater_conforms_turns_its_command_into_heat_and_refuses_to_cool() {
+    let gate = CancelGate::new_clock_free();
+    let mut state = SourceAccount::starting_at(0.25);
+    state.energy_in_j = -12.0;
+    let stale = SourceAccount::starting_at(-1.0);
+    let heater = Heater::commanded();
+    for kelvin in [250.0, 300.0] {
+        for command in [0.5, 3.0] {
+            let inputs = [kelvin, command];
+            let case = Case {
+                state: &state,
+                stale: &stale,
+                dt_s: 0.125,
+                inputs: &inputs,
+            };
+            with_cx(&gate, |cx| {
+                let Observed::Stepped {
+                    receipt, outputs, ..
+                } = check_component(&heater, &case, cx).unwrap()
+                else {
+                    panic!("a commanded heater does not shorten");
+                };
+                assert_eq!(outputs, [-command]);
+                assert_eq!(receipt.stored_change_j, -0.125 * command);
+                assert_eq!(receipt.dissipated_j, 0.125 * command);
+                assert_eq!(receipt.entropy_generated_j_per_k, 0.125 * command / kelvin);
+                check_port_tangent(&heater, &case, 1.0e-7, 1.0e-8, cx).unwrap();
+                check_stage_residual(&heater, &case, &[], 1.0e-8, 1.0e-10, cx).unwrap();
+            });
+        }
+    }
+    let (mut next, mut out) = (state, [0.0]);
+    let refused = with_cx(&gate, |cx| {
+        heater.propose(&state, 0.125, &[300.0, -1.0], &mut next, &mut out, cx)
+    });
+    assert!(matches!(refused, Err(ElementError::Parameter { value, .. }) if value == -1.0));
+    assert_eq!((next, out), (state, [0.0]));
 }
 
 #[test]

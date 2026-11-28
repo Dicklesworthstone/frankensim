@@ -4267,6 +4267,7 @@ fn lower_lumped_rigid_thermal_body(
         item: scope,
         source,
     })?;
+    let cap = control::publish_heat_if_sensed(ctx, cap);
 
     let mech_node =
         graph.add_with_tangent_and_residual(&mech_name, Some(ctx.part.entity), mass, init)?;
@@ -4278,6 +4279,7 @@ fn lower_lumped_rigid_thermal_body(
     graph.expose_port(ctx.part.entity, "mechanics", mech_port);
     graph.expose_port(ctx.part.entity, "thermal", therm_port);
     control::expose_signals(graph, ctx.part.entity, mech_node);
+    control::expose_signals(graph, ctx.part.entity, therm_node);
 
     let (property_receipts, parameter_sources) = recorder.finish();
     Ok(LoweredPartOutput {
@@ -4330,10 +4332,12 @@ fn lower_lumped_thermal_solid(
         item: scope,
         source,
     })?;
+    let cap = control::publish_heat_if_sensed(ctx, cap);
     let node =
         graph.add_with_tangent_and_residual(&ctx.part.name, Some(ctx.part.entity), cap, t_init)?;
     let port = graph.port(node, "heat")?;
     graph.expose_port(ctx.part.entity, "thermal", port);
+    control::expose_signals(graph, ctx.part.entity, node);
 
     let (property_receipts, parameter_sources) = recorder.finish();
     Ok(LoweredPartOutput {

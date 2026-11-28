@@ -2374,8 +2374,8 @@ fn a_controller_that_cannot_lower_refuses_by_name() {
             let s = i.controllers[0].sensor_ports[0].clone();
             i.controllers[0].sensor_ports.push(s);
         }),
-        ("sensor 'temperature'", |i| {
-            i.controllers[0].sensor_ports[0].1 = "temperature".to_owned();
+        ("sensor 'acceleration'", |i| {
+            i.controllers[0].sensor_ports[0].1 = "acceleration".to_owned();
         }),
         ("kp has dimensions [0, 1, -1, 0, 0, 0]", |i| {
             if let ControllerLaw::Pid { kp, .. } = &mut i.controllers[0].law {
@@ -2385,7 +2385,7 @@ fn a_controller_that_cannot_lower_refuses_by_name() {
     ];
     let mut heat = inp.clone();
     heat.controllers[0].actuator_port = (warm, "thermal".to_owned());
-    let mut refusals = vec![("a heat port", heat)];
+    let mut refusals = vec![("need [1, 1, -3, 0, 0, 0]", heat)];
     for (want, edit) in cases {
         let mut i = inp.clone();
         edit(&mut i);
@@ -2398,6 +2398,85 @@ fn a_controller_that_cannot_lower_refuses_by_name() {
             if item == "controller:servo" && detail.contains(want));
         assert!(named, "{want}: {error:?}");
     }
+}
+
+/// A PI thermostat [W/K, W/(K s)] on the thermal solid `warm` of [`servo_draft`], which
+/// loses no heat, raising it 5 K from ambient through a heater behind a limiter at 0.
+/// The pushed body beside it shares no port with `warm`.
+const THERMOSTAT: [f64; 3] = [8000.0, 16000.0, 5.0];
+
+#[test]
+fn a_declared_thermostat_heats_through_a_limiter_and_never_cools() {
+    let ([kp, ki, rise], (t, dt), q) = (THERMOSTAT, (1.0 / 16.0, 1.0 / 64.0), QtyAny::new);
+    let (cards, mut inp, warm) = servo_draft();
+    let t0 = inp.environment.base.ambient_temperature.value;
+    let r = t0 + rise;
+    inp.controllers[0] = ControllerDecl {
+        name: "thermostat".to_owned(),
+        sensor_ports: vec![(warm, "temperature".to_owned())],
+        actuator_port: (warm, "thermal".to_owned()),
+        sample_rate: q(16.0, FREQUENCY),
+        law: ControllerLaw::Pid {
+            kp: q(kp, Dims([2, 1, -3, -1, 0, 0])),
+            ki: q(ki, Dims([2, 1, -4, -1, 0, 0])),
+            kd: q(0.0, Dims([2, 1, -2, -1, 0, 0])),
+            setpoint: q(r, TEMPERATURE),
+        },
+    };
+    let draft = DraftAssembly::admit(inp, &base_scenario("servo")).unwrap();
+    let mut lo = LoweringRegistry::with_kernel_defaults()
+        .lower(&draft, &cards)
+        .unwrap();
+    let row = lo
+        .receipt
+        .sources
+        .iter()
+        .find(|s| s.source_name == "controller:thermostat");
+    let names = [
+        "controller.thermostat",
+        "controller.thermostat.limit",
+        "controller.thermostat.drive",
+    ];
+    assert_eq!(row.unwrap().created_nodes, names);
+    let part = lo
+        .receipt
+        .components
+        .iter()
+        .find(|c| c.part_name == "warm")
+        .unwrap();
+    let c = part
+        .parameter_sources
+        .iter()
+        .find(|p| p.parameter == "heat_capacity")
+        .unwrap()
+        .value;
+
+    // The loop written out: the heater takes max(u, 0) and the solid stores all of it.
+    let (gate, node) = (CancelGate::new(), lo.node_map["warm"]);
+    let (mut temp, mut sum, mut worst, mut work, mut cut) = (t0, 0.0, 0.0_f64, 0.0, 0);
+    let mut last = t0;
+    for _ in 0..96 {
+        let e = r - temp;
+        sum += e;
+        let u: f64 = kp * e + ki * t * sum;
+        cut += usize::from(u < 0.0);
+        for _ in 0..4 {
+            temp += u.max(0.0) * dt / c;
+            work += u.max(0.0) * dt;
+            with_cx(&gate, |cx| lo.system.step(dt, cx).unwrap());
+            let got = *lo.system.state::<f64>(node).unwrap();
+            assert!(got >= last, "the solid cooled: {last} K -> {got} K");
+            (worst, last) = (worst.max((got - temp).abs()), got);
+        }
+    }
+    assert!(worst <= 1e-10, "{worst:e} K");
+    // It overshoots, the law then asks for cooling, and the heater rests at 0 W.
+    assert!(cut > 0 && last > r + 0.1, "{cut} {last} {r}");
+    assert!(
+        (c * (last - t0) - work).abs() <= 1e-9 * work,
+        "{} J {work} J",
+        c * (last - t0)
+    );
 }
 
 #[test]

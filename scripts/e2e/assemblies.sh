@@ -62,7 +62,7 @@ FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR
   "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK"
   "$ASM_DIR/block_on_belt.fsim" "$KATS_PACK"
   "$ASM_DIR/rubber_mount_creep_288k.fsim" "$ASM_DIR/rubber_mount_creep_298k.fsim" "$RUBBER_PACK"
-  "$ASM_DIR/servo_mass.fsim")
+  "$ASM_DIR/servo_mass.fsim" "$ASM_DIR/thermostat_pair.fsim")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -142,6 +142,8 @@ for t in 288k 298k; do
 done
 # A PID position servo lowered from the file (.11.15), against the same loop written out
 run_case servo "$ASM_DIR/servo_mass.fsim" --materials "$STEEL_PACK"
+# A PI thermostat on the two_body pair (.11.15): a heater behind a limiter at 0 W, against the loop written out
+run_case thermostat "$ASM_DIR/thermostat_pair.fsim" --materials "$ALUM_PACK" --interfaces "$ATKINS_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -481,6 +483,28 @@ sv_off = abs(psv["mass_pos"][-1] - sv_r)
 assert len(psv["mass_pos"]) == len(sv_xs) == 769 and sv_ex <= 1e-12 and sv_ev <= 1e-12, (sv_ex, sv_ev, len(psv["mass_pos"]))
 assert sv_off <= 1e-4 and wres(e_sv) <= 1e-12, (sv_off, wres(e_sv))
 
+# 12. PI thermostat (the two_body pair; PI on "hot" at 16 Hz, its command clamped at 0 W and held over four 1/64 s steps)
+e_th = ld("thermostat.explain.json"); pth = probes(e_th); rb_th = e_th["lowering_receipt"]["body"]
+th_C = {c["part_name"]: next(p["value"] for p in c["parameter_sources"] if p["parameter"] == "heat_capacity")
+        for c in rb_th["components"]}
+th_G = next(p["value"] for p in rb_th["interfaces"][0]["parameter_sources"] if p["parameter"] == "thermal_conductance")
+th_Ch, th_Cc, th_a, th_T0, th_r = th_C["hot"], th_C["cold"], 0.5 * sv_dt * th_G, 293.15, 303.15
+th_h, th_c, th_s, th_cut, th_w, th_hs, th_cs = th_T0, th_T0, 0.0, 0, 0.0, [th_T0], [th_T0]
+for _ in range(960):
+  th_e = th_r - th_h; th_s += th_e; th_u = 200.0 * th_e + 40.0 * sv_T * th_s; th_p = max(th_u, 0.0); th_cut += th_u < 0.0
+  for _ in range(4):
+    th_b1 = (th_Ch - th_a) * th_h + th_a * th_c + sv_dt * th_p; th_b2 = th_a * th_h + (th_Cc - th_a) * th_c
+    th_det = (th_Ch + th_a) * (th_Cc + th_a) - th_a * th_a
+    th_h, th_c = (th_b1 * (th_Cc + th_a) + th_a * th_b2) / th_det, ((th_Ch + th_a) * th_b2 + th_a * th_b1) / th_det
+    th_w += th_p * sv_dt; th_hs.append(th_h); th_cs.append(th_c)
+Th8, Tc8 = pth["hot_temp"], pth["cold_temp"]
+th_eh = max(abs(a - b) for a, b in zip(Th8, th_hs)); th_ec = max(abs(a - b) for a, b in zip(Tc8, th_cs))
+# Every heat the heater gave is in the two blocks; a loop whose heater could cool would differ from this one by 0.066 K
+th_en = abs(th_Ch * (Th8[-1] - th_T0) + th_Cc * (Tc8[-1] - th_T0) - th_w)
+assert len(Th8) == len(th_hs) == 3841 and th_cut > 0 and th_eh <= 1e-9 and th_ec <= 1e-9, (th_eh, th_ec, th_cut, len(Th8))
+assert th_en <= 1e-6 and abs(Th8[-1] - th_r) <= 0.02 and wres(e_th) <= 1e-9, (th_en, Th8[-1], wres(e_th))
+assert 289.35 <= min(Tc8) and max(Th8) <= 305.85, (min(Tc8), max(Th8))
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -514,6 +538,9 @@ receipt = {
     "rubber_mount_creep": {"runs": {t: ld(f"rubber_{t}.run.json")["run"] for t in ("288k", "298k")}, "errors": rb},
     "servo_mass": {"run": ld("servo.run.json")["run"],
       "errors": {"pos_m": sv_ex, "vel_m_s": sv_ev, "final_offset_m": sv_off, "energy_residual_j": wres(e_sv)}},
+    "thermostat_pair": {"run": ld("thermostat.run.json")["run"], "clamped_samples": th_cut,
+      "errors": {"hot_temp_k": th_eh, "cold_temp_k": th_ec, "heat_j": th_en, "final_offset_k": abs(Th8[-1] - th_r),
+                 "energy_residual_j": wres(e_th)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx", "bob_ood_n"]},
 }

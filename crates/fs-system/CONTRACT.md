@@ -85,9 +85,12 @@ u[k] = kp e[k] + ki t S[k] + kd (e[k] - e[k-1]) / t. The first sample's
 derivative therefore sees the error rise from zero. The gains' dimensions
 must be the actuator's effort over the sensor's quantity, times s^-1 for ki
 and s for kd. Its receipt row joins the sources as `controller:<name>`. A
-lookup-table or card-backed law, more than one sensor, another sensor
-signal, a heat actuator and wrong gain units refuse by name; a feedback law
-is never silently dropped. Parts no controller reads lower as before.
+lumped thermal body publishes its `temperature` the same way, and a law whose
+actuator is a thermal port commands a `Heater::commanded()` through a
+`SignalLimiter` at [0, f64::MAX]: a heater does not cool. A lookup-table or
+card-backed law, more than one sensor, another sensor signal and wrong gain
+units refuse by name; a feedback law is never silently dropped. Parts no
+controller reads lower as before.
 Regression coverage uses the lowering source tests and the real mechanical,
 thermal and electrical graphs in `tests/lowering_registry.rs`.
 
@@ -4311,6 +4314,14 @@ physical port value positive into its owner: a negative electrical flow command
 supplies positive current to a connected capacitor. A command signal carries
 zero power; all exchanged work enters the existing `SourceAccount`, negative
 when the source delivers energy. Its compensated clock advances with the step.
+
+`elements::Heater::commanded()` is the thermal counterpart: port `heat`
+returns the heat rate [W] its signal input `command` sets into the node,
+held over the step, and a negative command refuses, since Joule heating
+only turns work into heat. Its account and receipt are the prescribed
+heater's: work `-dt P`, dissipation `dt P`, entropy `dt P / T`. Its port
+derivative is `[0, -1]` in input order `[temperature, command]`.
+`tests/controlled_sources.rs` checks its conformance and refusal.
 
 The complete port derivative is `[0, 1]` in input order `[conjugate, command]`;
 JVP and VJP preserve that signal-to-power response. Wrong extents, nonfinite

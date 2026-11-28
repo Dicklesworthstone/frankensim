@@ -2954,14 +2954,15 @@ impl StageResidual for Conductance {
     }
 }
 
-/// A Joule heater: prescribed electrical power [W] turned into heat at the
-/// temperature port `heat` receives. Its stored energy is the account of the
-/// energy it has delivered (negative), and the conversion generates
-/// `P / T` of entropy per second.
+/// A Joule heater: electrical power [W], prescribed or commanded, turned into
+/// heat at the temperature port `heat` receives. Its stored energy is the
+/// account of the energy it has delivered (negative), and the conversion
+/// generates `P / T` of entropy per second.
 #[derive(Debug, Clone)]
 pub struct Heater {
-    power_w: Waveform,
-    ports: [PortSpec; 1],
+    /// The prescribed power, or `None` when the signal input `command` sets it.
+    power_w: Option<Waveform>,
+    ports: Vec<PortSpec>,
 }
 
 impl Heater {
@@ -2973,9 +2974,34 @@ impl Heater {
     pub fn new(power_w: Waveform) -> Result<Self, ElementError> {
         nonnegative("power_w", power_w.lowest())?;
         Ok(Self {
-            power_w,
-            ports: [heat("heat", PortRole::EffortIn)],
+            power_w: Some(power_w),
+            ports: vec![heat("heat", PortRole::EffortIn)],
         })
+    }
+
+    /// A heater whose power [W] the signal input `command` sets, held over
+    /// the step. A negative command refuses, as Joule heating only turns work
+    /// into heat: a feedback law that can ask for cooling reaches it through
+    /// a [`SignalLimiter`] with lower bound 0.
+    #[must_use]
+    pub fn commanded() -> Self {
+        let id = StableId::new("command").expect("element port names are valid stable ids");
+        Self {
+            power_w: None,
+            ports: vec![
+                heat("heat", PortRole::EffortIn),
+                PortSpec::signal_in(id, NonZeroUsize::MIN),
+            ],
+        }
+    }
+
+    /// The power over the step: the prescribed mean, non-negative by
+    /// construction, or the command.
+    fn power(&self, old: &SourceAccount, dt_s: f64, inputs: &[f64]) -> Result<f64, ElementError> {
+        match &self.power_w {
+            Some(wave) => Ok(prescribed(wave, old, dt_s)?.max(0.0)),
+            None => nonnegative("commanded heater power [W]", inputs[1]),
+        }
     }
 }
 
@@ -3001,7 +3027,10 @@ impl Component for Heater {
     }
 
     fn identity_words(&self, words: &mut Vec<u64>) {
-        self.power_w.identity_words(words);
+        match &self.power_w {
+            Some(wave) => wave.identity_words(words),
+            None => words.push(u64::from_le_bytes(*b"command ")),
+        }
     }
 
     fn ports(&self) -> &[PortSpec] {
@@ -3017,11 +3046,12 @@ impl Component for Heater {
     }
 
     fn next_event_s(&self, state: &SourceAccount) -> Option<f64> {
-        self.power_w.next_event_s(state.clock_s)
+        self.power_w.as_ref()?.next_event_s(state.clock_s)
     }
 
     fn limit_dt_s(&self, state: &SourceAccount, proposed_s: f64) -> Result<f64, ElementError> {
-        Ok(self.power_w.limit_dt_s(state.clock_s, proposed_s))
+        let wave = self.power_w.as_ref();
+        Ok(wave.map_or(proposed_s, |w| w.limit_dt_s(state.clock_s, proposed_s)))
     }
 
     fn propose(
@@ -3035,9 +3065,7 @@ impl Component for Heater {
     ) -> Result<Proposal, ElementError> {
         cx.checkpoint()?;
         let kelvin = temperature(inputs[0])?;
-        // Non-negative by construction; the mean of a non-negative waveform
-        // is non-negative.
-        let power_w = prescribed(&self.power_w, old, dt_s)?.max(0.0);
+        let power_w = self.power(old, dt_s, inputs)?;
         outputs[0] = -power_w;
         let (next, mut receipt) = source_step(old, dt_s, -dt_s * power_w);
         *new = next;
@@ -3053,11 +3081,15 @@ impl PortTangent for Heater {
         _old: &SourceAccount,
         _dt_s: f64,
         _inputs: &[f64],
-        _d_inputs: &[f64],
+        d_inputs: &[f64],
         d_outputs: &mut [f64],
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
-        d_outputs[0] = 0.0;
+        d_outputs[0] = if self.power_w.is_some() {
+            0.0
+        } else {
+            -d_inputs[1]
+        };
         Ok(())
     }
 
@@ -3066,11 +3098,14 @@ impl PortTangent for Heater {
         _old: &SourceAccount,
         _dt_s: f64,
         _inputs: &[f64],
-        _bar_outputs: &[f64],
+        bar_outputs: &[f64],
         bar_inputs: &mut [f64],
         _cx: &Cx<'_>,
     ) -> Result<(), ElementError> {
         bar_inputs[0] = 0.0;
+        if self.power_w.is_none() {
+            bar_inputs[1] = -bar_outputs[0];
+        }
         Ok(())
     }
 }
@@ -3102,7 +3137,7 @@ impl StageResidual for Heater {
     ) -> Result<(), ElementError> {
         cx.checkpoint()?;
         let _ = temperature(inputs[0])?;
-        let power_w = prescribed(&self.power_w, old, dt_s)?.max(0.0);
+        let power_w = self.power(old, dt_s, inputs)?;
         outputs[0] = -power_w;
         Ok(())
     }
@@ -3148,7 +3183,7 @@ impl StageResidual for Heater {
         _cx: &Cx<'_>,
     ) -> Result<Receipt, ElementError> {
         let kelvin = temperature(inputs[0])?;
-        let power_w = prescribed(&self.power_w, old, dt_s)?.max(0.0);
+        let power_w = self.power(old, dt_s, inputs)?;
         let (next, mut receipt) = source_step(old, dt_s, -dt_s * power_w);
         *new = next;
         receipt.dissipated_j = dt_s * power_w;

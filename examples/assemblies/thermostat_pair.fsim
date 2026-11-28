@@ -1,0 +1,26 @@
+(assembly "thermostat_pair"
+  (version 1) (units "SI") (seed 0x2c)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state assembled)
+  (environment :ambient-temp 293.15K :ambient-pressure 101325Pa)
+  (time-plan :horizon 60s :dt 0.015625s :sample-rate 64Hz)
+  ; The aluminium pair of two_body_conduction, its 500 W heater replaced by a PI
+  ; thermostat on "hot" sampled at 16 Hz (four steps a sample): the law commands a
+  ; heater behind a limiter at 0 W, so "hot" is never cooled, and "cold" warms
+  ; only through the Atkins contact
+  (part "hot" :kind solid :geometry (box 0.06m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped)
+  (part "cold" :kind solid :geometry (box 0.04m 0.05m 0.05m)
+    :material "aluminum-pure-nbs-c447" :query-temp 293.15K
+    :physics (thermal) :fidelity lumped)
+  (interface "atkins_joint" :kind thermal-contact :a "hot" :b "cold"
+    :card "6061-T6 aluminum alloy" :family "thermal-contact-resistance"
+    :area 0.0025m^2 :normal-pressure 313000Pa)
+  (controller "thermostat" :sensor ("hot" "temperature") :actuator ("hot" "thermal")
+    :sample-rate 16Hz :law (pid :kp 200W/K :ki 40W/K/s :kd 0W*s/K :setpoint 303.15K))
+  (probe "hot_temp" :kind thermocouple :target "hot" :sample-rate 64Hz)
+  (probe "cold_temp" :kind thermocouple :target "cold" :sample-rate 64Hz)
+)
