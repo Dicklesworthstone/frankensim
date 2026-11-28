@@ -187,6 +187,10 @@ identity domain (`org.frankensim.fs-cli.assembly-run-identity.v1`), and
   falls on them, so a `final` statistic reads the last of them; a faster rate,
   a period between whole steps, or a sample time the run did not step on
   refuses (`cli-assembly-probe-rate`). `Timing` crossings use every step.
+  A body whose `Motion` node's port `p` is rotational (a gear, a revolute
+  child) records its turn, not a position: `angle` (dims 0) reads it in rad,
+  and `position` and `velocity` refuse on it, naming `angle`, as fs-runtime's
+  probes do.
 - `report` projects the retained receipts into `EngineeringReport` (HTML + JSON)
   and a format-9 `EvidencePackage` verified by `fs_checker::check`.
 - `explain_assembly_run` projects the retained lowering receipt, execution plan,

@@ -1805,3 +1805,105 @@ fn dry_friction_fsim_reversing_table_belt() {
     let msg = run_dry_fsim(&ledger, &packs, &bad).unwrap_err();
     assert!(msg.contains("at least two"), "got: {msg}");
 }
+
+/// A revolute steel box turned 0.6 rad about z and spinning at 10 rad/s, on a
+/// spring of 2000 N m/rad, with a probe of `quantity` and `dims`.
+fn rotor(quantity: &str, dims: &str) -> String {
+    let (c, s) = (0.3_f64.cos(), 0.3_f64.sin());
+    format!(
+        r#"(assembly "rotor"
+  (version 1) (units "SI") (seed 0x23)
+  (versions (constellation "2026-07") (workspace "stage2-e2e"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 0.05s :dt 0.001s :sample-rate 1000Hz)
+  (part "rotor" :kind rigid-body :geometry (box 0.5m 0.4m 0.1m)
+    :material "AISI-304" :query-temp 293.15K :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation ({c:?} 0 0 {s:?})
+      :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity (0rad/s 0rad/s 10rad/s)))
+  (joint "pin" :kind revolute :parent root :child "rotor" :axis (0 0 1)
+    :stiffness 2000N*m/rad)
+  (probe "turn" :kind field-quantity :target "rotor" :sample-rate 1000Hz
+    :quantity "{quantity}" :dims ({dims}))
+)"#
+    )
+}
+
+/// A turning body reports its turn (bead wkb9e): `angle` reads the swing
+/// `theta0 + (w0 / omega) sin(n phi)`, `tan(phi / 2) = omega dt / 2`, with `I = rho V
+/// (lx^2 + ly^2) / 12` from the card's density alone, within O4c's per-step bound;
+/// `position` and `velocity` refuse on it, naming `angle`.
+#[test]
+fn a_turning_body_reports_its_angle_and_refuses_a_position() {
+    let packs =
+        CardPackSet::admit(vec![material_pack("AISI-304", 8000.0, 500.0, 193.0e9)]).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let (out, _) = run_assembly(
+        &ledger,
+        rotor("angle", "0 0 0 0 0 0").as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut step_clock(0.1),
+        AssemblyCancelPlan::default(),
+    )
+    .expect("an angle probe on a revolute box runs");
+    assert_eq!(out.status, SolveRunStatus::Completed);
+    let exp = explain_assembly_run(&ledger, SolveRunId::parse_hex(&out.run).unwrap()).unwrap();
+    let turn = extract_probe_values(exp.probe_series_json.as_deref(), "turn");
+    let inertia = 8000.0_f64 * (0.5 * 0.4 * 0.1) * (0.5 * 0.5 + 0.4 * 0.4) / 12.0;
+    let (theta0, w0, omega) = (0.6, 10.0, (2000.0 / inertia).sqrt());
+    let phi = 2.0 * (omega * 0.001 / 2.0).atan();
+    assert_eq!(turn.len(), 51);
+    for (n, got) in (0_u32..).zip(&turn) {
+        let k = f64::from(n);
+        let want = theta0 + w0 / omega * (k * phi).sin();
+        let tol = 16.0 * f64::EPSILON * (theta0 + w0 / omega) * k.max(1.0);
+        assert!((got - want).abs() <= tol, "{n}: {got} {want}");
+    }
+    // Killed after the run, the resumed probe stage reads the turn from the retained trace.
+    let killed = Ledger::open(":memory:").unwrap();
+    let plan = AssemblyCancelPlan {
+        cancel_after: Some(AssemblyStage::Run),
+        cancel_pre_publish: None,
+    };
+    let src = rotor("angle", "0 0 0 0 0 0");
+    let mut clk = step_clock(0.1);
+    let err = run_assembly(
+        &killed,
+        src.as_bytes(),
+        &packs,
+        AssemblyAnalysisMode::Transient,
+        &mut clk,
+        plan,
+    )
+    .expect_err("cancelled after the run");
+    assert_eq!(err.code, "cli-solve-cancelled");
+    let run_id = SolveRunId::parse_hex(&out.run).unwrap();
+    let (resumed, _) = resume_assembly(&killed, run_id, &mut clk, AssemblyCancelPlan::default())
+        .expect("the probe stage resumes from the retained trace");
+    assert_eq!(
+        resumed.prior_stages as usize,
+        AssemblyStage::Run as usize + 1
+    );
+    assert_eq!(
+        resumed.stages.last().unwrap().receipt,
+        out.stages.last().unwrap().receipt
+    );
+    for (quantity, dims) in [("position", "1 0 0 0 0 0"), ("velocity", "1 0 -1 0 0 0")] {
+        let e = run_assembly(
+            &Ledger::open(":memory:").unwrap(),
+            rotor(quantity, dims).as_bytes(),
+            &packs,
+            AssemblyAnalysisMode::Transient,
+            &mut step_clock(0.1),
+            AssemblyCancelPlan::default(),
+        )
+        .expect_err("a position or velocity probe on a turning body refuses");
+        assert_eq!(
+            (e.code, e.stage),
+            ("cli-assembly-probe-unsupported", Some("probe"))
+        );
+        assert!(e.what.contains("probe `angle`"), "{quantity}: {}", e.what);
+    }
+}

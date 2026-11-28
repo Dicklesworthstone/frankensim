@@ -26,7 +26,8 @@ use fs_exec::solver::{
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_gas::component::ClosedGasParcel;
 use fs_ledger::{EdgeRole, Ledger, LedgerError};
-use fs_ports::component::PortSpec;
+use fs_ports::PortKind;
+use fs_ports::component::{Carrier, PortSpec};
 use fs_qty::Dims;
 use fs_scenario::assembly::draft::{FidelityRung, PhysicsDomain, ProbeKind, StepPolicy};
 use fs_system::acoustic::AcousticMicrophone;
@@ -480,8 +481,12 @@ impl AssemblyPipeline<'_> {
                 }
                 for &node in lowered.entity_nodes.get(&part.entity).into_iter().flatten() {
                     if let Some(m) = sys.state::<Motion>(node) {
-                        s.position_m = Some(m.position_m);
-                        s.velocity_m_s = Some(m.velocity_m_s);
+                        if turns(sys, node) {
+                            s.turn_rad = Some(m.position_m);
+                        } else {
+                            s.position_m = Some(m.position_m);
+                            s.velocity_m_s = Some(m.velocity_m_s);
+                        }
                     } else if let Some(&v) = sys.state::<f64>(node) {
                         if part.physics.contains(&PhysicsDomain::Thermal) {
                             s.temperature_k = Some(v);
@@ -1776,4 +1781,12 @@ pub fn explain_assembly_run(
         qoi_budget_json,
         stages,
     })
+}
+
+/// Whether node `n`'s port `p` is rotational, so that its `Motion` is a turn [rad]
+/// (fs-runtime's probe rule).
+fn turns(sys: &System, n: NodeId) -> bool {
+    let rotational = Carrier::Power(PortKind::RotationalTorqueAngularVelocity);
+    let spec = sys.port(n, "p").and_then(|p| sys.port_spec(p));
+    spec.is_some_and(|s| s.carrier() == rotational)
 }

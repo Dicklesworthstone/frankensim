@@ -41,6 +41,9 @@ pub(crate) use fs_fsim::{UNIT_DIMS, dims_to_unit};
 pub(crate) struct EntitySample {
     pub(crate) position_m: Option<f64>,
     pub(crate) velocity_m_s: Option<f64>,
+    /// A turning body's turn about its joint's axis [rad]: its `Motion` node's port
+    /// `p` is rotational, and it has no `position_m` or `velocity_m_s`.
+    pub(crate) turn_rad: Option<f64>,
     pub(crate) temperature_k: Option<f64>,
     /// A body moving in 3-D: velocity (m/s), then angular velocity (rad/s).
     pub(crate) motion: Option<[f64; 6]>,
@@ -101,6 +104,9 @@ impl RunTrace {
                 }
                 if let Some(v) = s.velocity_m_s {
                     parts.push(format!("\"velocity_m_s\":{v:.17e}"));
+                }
+                if let Some(v) = s.turn_rad {
+                    parts.push(format!("\"turn_rad\":{v:.17e}"));
                 }
                 if let Some(v) = s.temperature_k {
                     parts.push(format!("\"temperature_k\":{v:.17e}"));
@@ -201,6 +207,7 @@ impl RunTrace {
                             .map(|o| EntitySample {
                                 position_m: o.f64_field("position_m"),
                                 velocity_m_s: o.f64_field("velocity_m_s"),
+                                turn_rad: o.f64_field("turn_rad"),
                                 temperature_k: o.f64_field("temperature_k"),
                                 motion: motion_field(o),
                                 heat_rate_w: o.f64_field("heat_rate_w"),
@@ -305,6 +312,9 @@ fn entity_series(
                 let what = match (s.motion, label) {
                     (Some(_), "velocity_m_s") => {
                         "a 3-D velocity: probe `velocity-x`, `velocity-y` or `velocity-z`".into()
+                    }
+                    (_, "position_m" | "velocity_m_s") if s.turn_rad.is_some() => {
+                        "a turn about its joint's axis: probe `angle` (dims 0) [rad]".into()
                     }
                     _ => format!("no lowered `{label}`"),
                 };
@@ -544,6 +554,11 @@ pub(crate) fn evaluate_probes(
                             |s| s.velocity_m_s,
                             "velocity_m_s",
                         )?,
+                    ),
+                    ("angle", d) if d == Dims::NONE => (
+                        "field-quantity",
+                        "rad",
+                        entity_series(trace, names, *target, &p.name, |s| s.turn_rad, "turn_rad")?,
                     ),
                     ("temperature", d) if d == TEMPERATURE => (
                         "field-quantity",
