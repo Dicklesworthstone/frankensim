@@ -369,6 +369,12 @@ impl System {
             // Estimate natural row scale per internal unknown using a unit `jvp_z` probe
             // so left-diagonal scaling `D^{-1} F(X) = 0` normalizes mixed physical units
             // (e.g. 300 K thermal capacity beside 1 m/s mechanics) cleanly to O(1).
+            //
+            // With several unknowns the probe answers a row's sum of slopes, which can
+            // cancel, so a slope below one counts as one. With one unknown it is that
+            // row's own slope, and it is taken as it is: floored at one, the row of a
+            // 15 g pawl (I / dt 2e-4) passed the stop with a residual the polish below
+            // then turned into a velocity thousands of times its tolerance.
             cx.checkpoint().map_err(|_| SystemError::Cancelled)?;
             let ones = vec![1.0_f64; nz_node];
             let mut dr_probe = vec![0.0_f64; nz_node];
@@ -385,7 +391,13 @@ impl System {
             ) {
                 Ok(()) => {
                     for k in 0..nz_node {
-                        let s = (dr_probe[k].abs().max(1.0)) * x0[zr.start + k].abs().max(1.0);
+                        let slope = dr_probe[k].abs();
+                        let slope = if nz_node == 1 && slope > 0.0 {
+                            slope
+                        } else {
+                            slope.max(1.0)
+                        };
+                        let s = slope * x0[zr.start + k].abs().max(1.0);
                         if s.is_finite() && s > 0.0 {
                             row_scale[zr.start + k] = s;
                         }

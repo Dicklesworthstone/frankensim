@@ -18,6 +18,12 @@ monolithic policy both admit these owners, including wholly algebraic loops.
 Stationary analysis uses its configured monolithic solver after tier admission
 even when a loop mixes stateful and algebraic owners.
 
+Newton-Krylov judges a monolithic block's rows scaled to their own units. A
+stage row with one internal unknown is scaled by its own slope times the size
+of its unknown, however small the slope (a light body on a short step); a row
+of a stage with several unknowns counts a slope below one as one, since its
+probe sums the slopes of the row.
+
 A monolithic execution plan reports both the internal stage unknowns and the
 retained interface inputs in its solve dimension and variable names. The
 shared residual conformance check also covers zero-unknown owners: output

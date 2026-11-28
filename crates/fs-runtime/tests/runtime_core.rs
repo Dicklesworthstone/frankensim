@@ -669,3 +669,64 @@ fn a_revolute_childs_inertia_is_the_quadratic_form_of_its_unit_axis() {
         assert_eq!(lowered(axis)[1].to_bits(), unit.to_bits(), "{axis}");
     }
 }
+
+/// A 15 g pawl (0.04 x 0.004 x 0.011 82 m) on 0.05 N m/rad, whose stage slope
+/// I / dt is far below one, swings like the box above at 1 ms and at 0.1 ms.
+/// While the monolithic solve floored that slope at one, its audit refused step
+/// 33 at 1 ms and step 7 at 0.1 ms.
+#[test]
+fn a_pawl_sized_revolute_child_swings_on_a_soft_torsional_spring() {
+    let ([lx, ly, lz], half, w0, stiffness) = ([0.04, 0.004, 0.011_82], 0.3_f64, 10.0, 0.05);
+    let fsim = |dt: f64, rate: &str| {
+        let (c, s) = (half.cos(), half.sin());
+        format!(
+            r#"(assembly "pawl"
+  (version 1) (units "SI") (seed 0x23)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 1s :dt {dt:?}s :sample-rate {rate}Hz)
+  (part "pawl" :kind rigid-body :geometry (box {lx}m {ly}m {lz}m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped
+    :initial (:position (0m 0m 0m) :orientation ({c:?} {s:?} 0.0 0.0)
+      :linear-velocity (0m/s 0m/s 0m/s) :angular-velocity ({w0:?}rad/s 0.0rad/s 0.0rad/s)))
+  (probe "turn" :kind field-quantity :target "pawl"
+    :quantity "angle" :dims (0 0 0 0 0 0) :sample-rate {rate}Hz)
+  (joint "pin" :kind revolute :parent root :child "pawl" :axis (1.0 0.0 0.0)
+    :stiffness {stiffness:?}N*m/rad)
+)"#
+        )
+    };
+    let packs = PackCatalog::from_raw_bytes(&[STEEL_PACK]).unwrap();
+    for (dt, rate) in [(0.001, "1000"), (0.000_1, "10000")] {
+        let text = fsim(dt, rate);
+        let admitted = admit_assembly_source(text.as_bytes(), &packs).unwrap();
+        let lowered = cli_registry()
+            .lower(&admitted.draft, &admitted.card_store)
+            .unwrap();
+        let sources = &lowered.receipt.components[0].parameter_sources;
+        let rho = sources
+            .iter()
+            .find(|p| p.parameter == "density")
+            .unwrap()
+            .value;
+        let inertia = rho * (lx * ly * lz) * (ly * ly + lz * lz) / 12.0;
+        let omega = (stiffness / inertia).sqrt();
+        let (theta0, phi) = (2.0 * half, 2.0 * (omega * dt / 2.0).atan());
+        let mut rt = AssemblyRuntime::load(text.as_bytes(), &[STEEL_PACK], None).unwrap();
+        let mut buf = vec![0.0; rt.snapshot_len()];
+        let at = rt.probes().probes[0].offset;
+        for step in 1..=500_u32 {
+            let refusal = rt.step(dt).err();
+            assert!(refusal.is_none(), "{dt} {step}: {refusal:?}");
+            rt.read_probes(&mut buf).unwrap();
+            let k = f64::from(step);
+            let theta = theta0 + w0 / omega * (k * phi).sin();
+            let tol = 16.0 * f64::EPSILON * (theta0 + w0 / omega) * k;
+            assert!((buf[at] - theta).abs() <= tol, "{dt} {step}: {}", buf[at]);
+        }
+        assert!(rt.ledger().energy_residual_j().abs() < 1.0e-9, "{dt}");
+    }
+}
