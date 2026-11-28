@@ -57,6 +57,8 @@
 #![warn(missing_docs)]
 
 pub mod accelerator;
+#[cfg(feature = "plate-slices")]
+pub mod acoustic;
 mod adaptive;
 #[cfg(feature = "phs")]
 pub mod battery;

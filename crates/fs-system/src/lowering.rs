@@ -1646,6 +1646,8 @@ struct SealedLoweringGraph {
     entity_nodes: BTreeMap<EntityId, Vec<NodeId>>,
     entity_ports: BTreeMap<(EntityId, String), PortRef>,
     observers: BTreeMap<EntityId, Observer>,
+    #[cfg(feature = "plate-slices")]
+    radiating_surfaces: BTreeMap<EntityId, crate::acoustic::RadiatingModalSurface>,
 }
 
 /// Mutable graph construction surface passed to registered constructors.
@@ -1668,6 +1670,8 @@ pub struct LoweringGraph {
     initial_guesses: BTreeMap<PortRef, Vec<f64>>,
     deferred_signals: Vec<(EntityId, &'static str, EntityId, &'static str, String)>,
     observers: BTreeMap<EntityId, Observer>,
+    #[cfg(feature = "plate-slices")]
+    radiating_surfaces: BTreeMap<EntityId, crate::acoustic::RadiatingModalSurface>,
     consumed_sources: BTreeMap<usize, SourceLoweringReceipt>,
     /// Lowered masses [kg] with their part's geometry, and each child a
     /// prismatic joint has weighed, with its `g . n` [m/s^2].
@@ -1691,10 +1695,21 @@ impl LoweringGraph {
             initial_guesses: BTreeMap::new(),
             deferred_signals: Vec::new(),
             observers: BTreeMap::new(),
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces: BTreeMap::new(),
             consumed_sources: BTreeMap::new(),
             masses: BTreeMap::new(),
             weighed: BTreeMap::new(),
         }
+    }
+
+    #[cfg(feature = "plate-slices")]
+    pub(crate) fn register_radiating_surface(
+        &mut self,
+        entity: EntityId,
+        surface: crate::acoustic::RadiatingModalSurface,
+    ) {
+        self.radiating_surfaces.insert(entity, surface);
     }
 
     /// Record the translational mass [kg], density times volume, that a lumped
@@ -2067,6 +2082,8 @@ impl LoweringGraph {
             entity_nodes: self.entity_nodes,
             entity_ports: self.entity_ports,
             observers: self.observers,
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces: self.radiating_surfaces,
         })
     }
 }
@@ -2822,6 +2839,10 @@ pub struct LoweredSystem {
     /// `observers.get(&part).and_then(|read| read(system))`. A part with a node
     /// of its own has none.
     pub observers: BTreeMap<EntityId, Observer>,
+    /// Lowered radiating modal head metadata keyed by part [`EntityId`], for
+    /// baffled-pressure microphone observers.
+    #[cfg(feature = "plate-slices")]
+    pub radiating_surfaces: BTreeMap<EntityId, crate::acoustic::RadiatingModalSurface>,
 }
 
 /// One part's motion or temperature, read from its slot in its owner node.
@@ -3374,6 +3395,8 @@ impl LoweringRegistry {
             entity_nodes,
             entity_ports: part_ports,
             observers,
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces,
         } = graph.finalize_and_seal(ambient_temp_k)?;
         let probe_dt = match input.time_plan.step_policy {
             StepPolicy::Fixed { dt } => dt.value,
@@ -3381,6 +3404,7 @@ impl LoweringRegistry {
         };
         let plan = system.execution_plan_for_dt(probe_dt);
         let causalization_audit = system.causalization_audit();
+        let acoustic_members = Vec::new();
 
         // 7. Assemble and audit receipt completeness.
         let mut receipt = LoweringReceipt {
@@ -3395,7 +3419,7 @@ impl LoweringRegistry {
             joints: joint_receipts,
             gear_meshes: gear_mesh_receipts,
             sources: source_receipts,
-            acoustic_members: Vec::new(),
+            acoustic_members,
         };
         receipt.verify_completeness()?;
         receipt.finalize_hash();
@@ -3409,6 +3433,8 @@ impl LoweringRegistry {
             entity_nodes,
             part_ports,
             observers,
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces,
         })
     }
 
@@ -3479,6 +3505,8 @@ impl LoweringRegistry {
             entity_nodes,
             entity_ports: part_ports,
             observers,
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces,
         } = graph.finalize_and_seal(spec.ambient_temperature_k)?;
         let dt_s = 1.0 / f64::from(spec.sample_rate_hz);
         let plan = system.execution_plan_for_dt(dt_s);
@@ -3514,6 +3542,8 @@ impl LoweringRegistry {
             entity_nodes,
             part_ports,
             observers,
+            #[cfg(feature = "plate-slices")]
+            radiating_surfaces,
         })
     }
 

@@ -73,7 +73,8 @@ fn is_part_face_power_port(
         && ctx
             .cards
             .power_port_schema(schema)
-            .is_some_and(|c| c.description == "face")
+            // Matches fs-runtime's RUNTIME_INPUT_FAMILY live-input convention.
+            .is_some_and(|c| c.family == "runtime-input" && c.description == "face")
 }
 
 /// Distinct surface features of `part` touched by a `PistonFace` interface or a
@@ -507,7 +508,79 @@ fn lower_modal_plate(
     let t_amb = ctx.ambient_temperature_k();
     let sink = ambient_heat_sink(&it.item, t_amb)?;
     graph.add_heat_route(heat, vec![], Some(sink), RouteTemperature::Fixed(t_amb));
+    let surf = radiating_surface(ctx, &film, &modes, node, &it)?;
+    graph.register_radiating_surface(ctx.part.entity, surf);
     Ok(it.part(&ctx.part.name))
+}
+
+fn radiating_surface(
+    ctx: &PartLoweringContext<'_>,
+    film: &TensionedDisk,
+    modes: &[ModePair],
+    node: crate::NodeId,
+    it: &Scoped,
+) -> Result<crate::acoustic::RadiatingModalSurface, LoweringError> {
+    let inp = ctx.draft.input();
+    let idx = inp.parts.iter().position(|p| p.entity == ctx.part.entity);
+    let mut sign: Option<f64> = None;
+    for i in &inp.interfaces {
+        let DraftInterfaceKind::PistonFace { state } = &i.kind else {
+            continue;
+        };
+        if idx.is_none_or(|k| {
+            owning_part(inp, i.feature_a) != Some(k) && owning_part(inp, i.feature_b) != Some(k)
+        }) {
+            continue;
+        }
+        let s = if state
+            .iter()
+            .find(|(k, _)| k.name == "sign")
+            .map_or(1.0, |(_, q)| q.value)
+            < 0.0
+        {
+            -1.0
+        } else {
+            1.0
+        };
+        if sign.is_some_and(|p| (p - s).abs() > 0.0) {
+            return Err(it.invalid("conflicting piston-face signs on modal shell"));
+        }
+        sign = Some(s);
+    }
+    let outward_sign = sign.unwrap_or(1.0);
+    let mut nodal_area = vec![0.0; film.mesh.nodes.len()];
+    for tri in &film.mesh.tris {
+        let [a, b, c] = tri.map(|i| film.mesh.nodes[i]);
+        let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1));
+        if !(area.is_finite() && area > 0.0) {
+            return Err(it.invalid("disk mesh has non-positive facet"));
+        }
+        for &ni in tri {
+            nodal_area[ni] += area / 3.0;
+        }
+    }
+    let samples = film
+        .mesh
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(ni, &(x, y))| {
+            let dof = film.model.dof_map[3 * ni]?;
+            Some(crate::acoustic::RadiatingPatch {
+                xy_m: [x, y],
+                area_m2: nodal_area[ni],
+                shapes: modes.iter().map(|m| outward_sign * m.phi[dof]).collect(),
+            })
+        })
+        .collect();
+    let mode_omegas_rad_s = modes.iter().map(|m| m.lambda.sqrt()).collect();
+    Ok(crate::acoustic::RadiatingModalSurface {
+        node,
+        mode_count: modes.len(),
+        mode_omegas_rad_s,
+        outward_sign,
+        samples,
+    })
 }
 
 #[cfg(test)]
