@@ -624,8 +624,10 @@ fn slice_a_draft_lowers_to_exact_hand_built_graph_match() {
         .lower(&controlled, &cards)
         .err()
         .expect("feedback cannot silently disappear");
-    assert!(matches!(error, LoweringError::Invalid { ref item, .. }
-        if item == "controller:velocity_feedback"));
+    assert!(
+        matches!(error, LoweringError::MissingPort { ref item, ref port, .. }
+        if item == "controller:velocity_feedback" && port == "command")
+    );
 }
 
 #[test]
@@ -2271,6 +2273,131 @@ fn lumped_initial_state_propagates_and_refuses_off_axis() {
     ib.temperature = None;
     inp.parts[0].initial = Some(ib);
     assert!((tmp(&go(inp).unwrap(), "body.thermal") - 293.15).abs() <= 1e-12);
+}
+
+/// The PID position servo of the two tests below: kp [N/m], ki [N/(m s)], kd [N s/m] and the
+/// setpoint [m], sampled at 16 Hz, holding a free body against a constant push [N].
+const SERVO: [f64; 4] = [72.0, 36.0, 38.4, 0.05];
+const SERVO_PUSH_N: f64 = -12.0;
+
+/// A free 8 kg steel box (a 0.1 m cube at 8000 kg/m^3) under the servo [`SERVO`], with a
+/// thermal solid `warm` beside it; returns the warm solid's entity too.
+fn servo_draft() -> (CardStore, DraftAssemblyInput, EntityId) {
+    let ([kp, ki, kd, r], q) = (SERVO, QtyAny::new);
+    let (mut cards, mut cat) = (CardStore::new(), EntityCatalog::new());
+    let steel = cards.insert_material(steel_card());
+    let root = cat.declare(EntityDeclaration::assembly("servo")).unwrap();
+    let body = cat.declare(EntityDeclaration::part(root, "body")).unwrap();
+    let warm = cat.declare(EntityDeclaration::part(root, "warm")).unwrap();
+    let (mech, heat) = ([PhysicsDomain::Mechanics], [PhysicsDomain::Thermal]);
+    let parts = vec![
+        box_part("body", body, DraftPartKind::RigidBody, steel, &mech),
+        box_part("warm", warm, DraftPartKind::Solid, steel, &heat),
+    ];
+    let (push, still) = (q(SERVO_PUSH_N, FORCE), q(0.0, POWER));
+    let srcs = vec![
+        port_src("push", body, "mechanics", TimeHistory::Constant(push)),
+        port_src("q0", warm, "thermal", TimeHistory::Constant(still)),
+    ];
+    let mut inp = empty_draft("servo", root, cat, parts, srcs);
+    inp.controllers.push(ControllerDecl {
+        name: "servo".to_owned(),
+        sensor_ports: vec![(body, "position".to_owned())],
+        actuator_port: (body, "mechanics".to_owned()),
+        sample_rate: q(16.0, FREQUENCY),
+        law: ControllerLaw::Pid {
+            kp: q(kp, STIFFNESS),
+            ki: q(ki, Dims([0, 1, -3, 0, 0, 0])),
+            kd: q(kd, DAMPING),
+            setpoint: q(r, LENGTH),
+        },
+    });
+    (cards, inp, warm)
+}
+
+#[test]
+fn a_declared_pid_servo_holds_a_pushed_body_at_its_setpoint() {
+    let ([kp, ki, kd, r], (m, t, dt)) = (SERVO, (8.0, 1.0 / 16.0, 1.0 / 64.0));
+    let (cards, inp, _) = servo_draft();
+    let draft = DraftAssembly::admit(inp, &base_scenario("servo")).unwrap();
+    let mut lo = LoweringRegistry::with_kernel_defaults()
+        .lower(&draft, &cards)
+        .unwrap();
+    let rows = &lo.receipt.sources;
+    let row = rows.iter().find(|s| s.source_name == "controller:servo");
+    let nodes = row.map(|s| s.created_nodes.clone()).unwrap_or_default();
+    assert_eq!(nodes, ["controller.servo", "controller.servo.drive"]);
+
+    // The same discrete loop written out: at each sample the error, its sum and its last
+    // value give the command, held over four midpoint steps of the free body.
+    let (gate, node) = (CancelGate::new(), lo.node_map["body"]);
+    let (mut x, mut v, mut sum, mut e_prev, mut worst) = (0.0_f64, 0.0_f64, 0.0, 0.0, 0.0_f64);
+    for _ in 0..192 {
+        let e = r - x;
+        sum += e;
+        let u = kp * e + ki * t * sum + kd * (e - e_prev) / t;
+        e_prev = e;
+        for _ in 0..4 {
+            let v1 = v + (u + SERVO_PUSH_N) * dt / m;
+            x += 0.5 * (v + v1) * dt;
+            v = v1;
+            with_cx(&gate, |cx| lo.system.step(dt, cx).unwrap());
+            let got = *lo.system.state::<Motion>(node).unwrap();
+            worst = worst.max((got.position_m - x).abs().max((got.velocity_m_s - v).abs()));
+        }
+    }
+    assert!(worst <= 1e-12, "{worst:e}");
+    // 12 s on, the integral term holds the push: the body sits at its setpoint.
+    assert!((x - r).abs() <= 1e-4 && v.abs() <= 1e-4, "{x} {v}");
+}
+
+#[test]
+fn a_controller_that_cannot_lower_refuses_by_name() {
+    type Edit = fn(&mut DraftAssemblyInput);
+    let (cards, inp, warm) = servo_draft();
+    let (reg, scen) = (
+        LoweringRegistry::with_kernel_defaults(),
+        base_scenario("servo"),
+    );
+    let cases: [(&str, Edit); 5] = [
+        ("lookup-table", |i| {
+            let (a, b) = (QtyAny::new(0.0, LENGTH), QtyAny::new(1.0, LENGTH));
+            let (fa, fb) = (QtyAny::new(0.0, FORCE), QtyAny::new(1.0, FORCE));
+            let breakpoints = vec![(a, fa), (b, fb)];
+            i.controllers[0].law = ControllerLaw::LookupTable { breakpoints };
+        }),
+        ("card-backed", |i| {
+            let (law_card, params) = (hash_bytes(b"servo law"), vec![]);
+            i.controllers[0].law = ControllerLaw::CardBacked { law_card, params };
+        }),
+        ("one sensor, not 2", |i| {
+            let s = i.controllers[0].sensor_ports[0].clone();
+            i.controllers[0].sensor_ports.push(s);
+        }),
+        ("sensor 'temperature'", |i| {
+            i.controllers[0].sensor_ports[0].1 = "temperature".to_owned();
+        }),
+        ("kp has dimensions [0, 1, -1, 0, 0, 0]", |i| {
+            if let ControllerLaw::Pid { kp, .. } = &mut i.controllers[0].law {
+                kp.dims = DAMPING;
+            }
+        }),
+    ];
+    let mut heat = inp.clone();
+    heat.controllers[0].actuator_port = (warm, "thermal".to_owned());
+    let mut refusals = vec![("a heat port", heat)];
+    for (want, edit) in cases {
+        let mut i = inp.clone();
+        edit(&mut i);
+        refusals.push((want, i));
+    }
+    for (want, i) in refusals {
+        let draft = DraftAssembly::admit(i, &scen).unwrap();
+        let error = reg.lower(&draft, &cards).err();
+        let named = matches!(&error, Some(LoweringError::Invalid { item, detail })
+            if item == "controller:servo" && detail.contains(want));
+        assert!(named, "{want}: {error:?}");
+    }
 }
 
 #[test]

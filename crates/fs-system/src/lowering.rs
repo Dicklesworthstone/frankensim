@@ -59,6 +59,9 @@ use crate::{
 #[cfg(feature = "slices")]
 pub mod owners;
 
+/// Controllers from the description, lowered onto held sampled laws.
+mod control;
+
 /// Schema identifier for serialized [`LoweringReceipt`] payloads stored in
 /// `fs-ledger`.
 pub const LOWERING_RECEIPT_SCHEMA: &str = "frankensim.lowering_receipt.v1";
@@ -3044,12 +3047,6 @@ impl LoweringRegistry {
         cards: &CardStore,
     ) -> Result<LoweredSystem, LoweringError> {
         let input = draft.input();
-        if let Some(controller) = input.controllers.first() {
-            return Err(LoweringError::Invalid {
-                item: format!("controller:{}", controller.name),
-                detail: "controller lowering is not registered; construct and connect a signal-port controller explicitly instead of omitting its feedback law".to_owned(),
-            });
-        }
         let mut graph = LoweringGraph::new();
         let mut component_receipts = Vec::with_capacity(input.parts.len());
         let mut joint_receipts = Vec::with_capacity(input.joints.len());
@@ -3361,6 +3358,11 @@ impl LoweringRegistry {
             }
             let rec = lower_source(src, &input.catalog, &mut graph)?;
             source_receipts.push(rec);
+        }
+        // 5b. Lower declared controllers onto held sampled laws and commanded
+        //     sources; their receipt rows join the sources'.
+        for ctrl in &input.controllers {
+            source_receipts.push(control::lower_controller(ctrl, &input.catalog, &mut graph)?);
         }
 
         // 6. Seal graph (runs unit, port-pairing, and power-closure admission)
@@ -4185,10 +4187,12 @@ fn lower_lumped_rigid_body(
         };
 
     let init = lumped_initial_motion(ctx.part, &scope, port_name == "rotation", &mut recorder)?;
+    let component = control::publish_if_sensed(ctx, component);
     let node =
         graph.add_with_tangent_and_residual(&node_name, Some(ctx.part.entity), component, init)?;
     let p = graph.port(node, "p")?;
     graph.expose_port(ctx.part.entity, port_name, p);
+    control::expose_signals(graph, ctx.part.entity, node);
     if port_name == "rotation" {
         graph.expose_port(ctx.part.entity, "mechanics", p);
     }
@@ -4258,6 +4262,7 @@ fn lower_lumped_rigid_thermal_body(
         item: scope.clone(),
         source,
     })?;
+    let mass = control::publish_if_sensed(ctx, mass);
     let cap = HeatCapacity::new(capacity_j_k).map_err(|source| LoweringError::Element {
         item: scope,
         source,
@@ -4272,6 +4277,7 @@ fn lower_lumped_rigid_thermal_body(
     let therm_port = graph.port(therm_node, "heat")?;
     graph.expose_port(ctx.part.entity, "mechanics", mech_port);
     graph.expose_port(ctx.part.entity, "thermal", therm_port);
+    control::expose_signals(graph, ctx.part.entity, mech_node);
 
     let (property_receipts, parameter_sources) = recorder.finish();
     Ok(LoweredPartOutput {

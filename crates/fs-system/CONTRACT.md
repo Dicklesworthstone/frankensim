@@ -76,12 +76,20 @@ heat ports require temperature in kelvin or heat rate in watts. Scalar histories
 cannot broadcast into vector ports or mixed-unit material streams. Signal ports
 currently declare no physical dimensions, so only dimensionless scalar source
 histories are supported there. A source refusal names its declaration and target
-port. An assembly declaring a controller refuses by name until controller
-lowering exists; its feedback law is never silently dropped. These admission
-checks leave the existing kernel signal/controller components available to
-callers constructing their graphs explicitly. Regression coverage uses the
-lowering source tests and the real mechanical, thermal and electrical graphs in
-`tests/lowering_registry.rs`.
+port. A declared PID controller lowers onto a held `SampledController`. It
+reads the `position` or `velocity` that a lumped rigid body publishes once a
+controller names it, and commands a `ControlledSource` effort on the
+actuator's power port. At sample k of period t = 1 / sample_rate, with
+e[-1] = S[-1] = 0, e[k] = setpoint - y[k], S[k] = S[k-1] + e[k] and
+u[k] = kp e[k] + ki t S[k] + kd (e[k] - e[k-1]) / t. The first sample's
+derivative therefore sees the error rise from zero. The gains' dimensions
+must be the actuator's effort over the sensor's quantity, times s^-1 for ki
+and s for kd. Its receipt row joins the sources as `controller:<name>`. A
+lookup-table or card-backed law, more than one sensor, another sensor
+signal, a heat actuator and wrong gain units refuse by name; a feedback law
+is never silently dropped. Parts no controller reads lower as before.
+Regression coverage uses the lowering source tests and the real mechanical,
+thermal and electrical graphs in `tests/lowering_registry.rs`.
 
 A declared query-point key takes the axis spec that every claim bounding that
 axis gives it: a dimension-only spec when the dims match, or absolute

@@ -1,0 +1,20 @@
+(assembly "servo_mass"
+  (version 1) (units "SI") (seed 0x2b)
+  (versions (constellation "2026-07") (workspace "gallery-v1"))
+  (budget (wall 60s) (mem 64MiB))
+  (capability :cores 1cores :mem 64MiB :wall 60s :ops (assembly.*))
+  (reference-state unloaded) (environment earth-lab-air)
+  (time-plan :horizon 12s :dt 0.015625s :sample-rate 64Hz)
+  ; A free 7.8 kg steel cube, pushed by a constant -12 N and held at 0.05 m by a
+  ; PID position law sampled at 16 Hz (four steps a sample), its command held between
+  (part "mass" :kind rigid-body :geometry (box 0.1m 0.1m 0.1m)
+    :material "steel-music-wire-ligo-p1400229" :query-temp 293.15K
+    :physics (mechanics) :fidelity lumped)
+  (source "push" :part "mass" :port "mechanics" :history (constant -12N))
+  (controller "servo" :sensor ("mass" "position") :actuator ("mass" "mechanics")
+    :sample-rate 16Hz :law (pid :kp 72N/m :ki 36N/m/s :kd 38.4N*s/m :setpoint 0.05m))
+  (probe "mass_pos" :kind field-quantity :target "mass"
+    :quantity "position" :dims (1 0 0 0 0 0) :sample-rate 64Hz)
+  (probe "mass_vel" :kind field-quantity :target "mass"
+    :quantity "velocity" :dims (1 0 -1 0 0 0) :sample-rate 64Hz)
+)

@@ -9,11 +9,12 @@ use fs_evidence::uncertainty::RequirementRelation;
 use fs_matdb::{NormalizedInterfacePack, NormalizedMaterialCardPack, PackError};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::assembly::draft::{
-    DraftAssembly, DraftAssemblyInput, DraftEnvironment, DraftGeometrySource, DraftInitialState,
-    DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl, DraftPartKind, FidelityErrorBudget,
-    FidelityPolicy, FidelityRung, JointDecl, JointKind, MicrophonePattern, PhysicsDomain,
-    PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl, SourceTarget, StepPolicy,
-    TensionedDiskGenerator, ThirdBodyDecl, TimeHistory, TimePlan, TimeScheme, TimingEdge,
+    ControllerDecl, ControllerLaw, DraftAssembly, DraftAssemblyInput, DraftEnvironment,
+    DraftGeometrySource, DraftInitialState, DraftInterfaceDecl, DraftInterfaceKind, DraftPartDecl,
+    DraftPartKind, FidelityErrorBudget, FidelityPolicy, FidelityRung, JointDecl, JointKind,
+    MicrophonePattern, PhysicsDomain, PrimitiveShape, ProbeDecl, ProbeKind, SourceDecl,
+    SourceTarget, StepPolicy, TensionedDiskGenerator, ThirdBodyDecl, TimeHistory, TimePlan,
+    TimeScheme, TimingEdge,
 };
 use fs_scenario::assembly::{DimensionBound, MaterialRef, ParameterKey, ReferenceState};
 use fs_scenario::entity::ToleranceSource;
@@ -804,6 +805,61 @@ fn build_card_store(
     Ok(store)
 }
 
+/// `(controller "name" :sensor ("part" "signal") :actuator ("part" "port")
+/// :sample-rate <Hz> :law (pid :kp .. :ki .. :kd .. :setpoint ..))`. The gains'
+/// units are checked against the sensor and actuator when the assembly lowers.
+fn parse_controller(
+    items: &[Node],
+    parts: &BTreeMap<String, EntityId>,
+) -> Result<ControllerDecl, SolveRefusal> {
+    let name = as_str(
+        items.get(1).ok_or_else(|| err("controller missing name"))?,
+        "controller.name",
+    )?
+    .to_string();
+    let scope = format!("controller `{name}`");
+    let kw = kwargs(
+        &items[2..],
+        &["sensor", "actuator", "sample-rate", "law"],
+        &scope,
+    )?;
+    let port = |key: &str| -> Result<(EntityId, String), SolveRefusal> {
+        let [part, signal] = as_list(req(&kw, key, &scope)?, key)? else {
+            return Err(err(format!("{scope} :{key} is (\"part\" \"port\")")));
+        };
+        let part = as_str(part, key)?;
+        let entity = parts.get(part).copied();
+        let entity = entity.ok_or_else(|| err(format!("{scope} unknown part `{part}`")))?;
+        Ok((entity, as_str(signal, key)?.to_string()))
+    };
+    let law = as_list(req(&kw, "law", &scope)?, "law")?;
+    let law = match as_sym(&law[0], "law")? {
+        "pid" => {
+            let gains = kwargs(&law[1..], &["kp", "ki", "kd", "setpoint"], &scope)?;
+            let q = |k: &str| as_qty(req(&gains, k, &scope)?, k);
+            let (kp, ki, kd, setpoint) = (q("kp")?, q("ki")?, q("kd")?, q("setpoint")?);
+            ControllerLaw::Pid {
+                kp,
+                ki,
+                kd,
+                setpoint,
+            }
+        }
+        o => {
+            return Err(err(format!(
+                "{scope} law `{o}` does not parse; declare (pid ...)"
+            )));
+        }
+    };
+    Ok(ControllerDecl {
+        name,
+        sensor_ports: vec![port("sensor")?],
+        actuator_port: port("actuator")?,
+        sample_rate: as_qty_d(req(&kw, "sample-rate", &scope)?, FREQUENCY, "sample-rate")?,
+        law,
+    })
+}
+
 fn parse_probe(
     items: &[Node],
     parts: &BTreeMap<String, EntityId>,
@@ -1089,6 +1145,7 @@ pub fn admit_assembly_source(
     let mut entity_names = BTreeMap::from([(root, name.clone())]);
     let (mut by_name, mut families) = (BTreeMap::new(), BTreeMap::new());
     let mut by_interface = BTreeMap::new();
+    let mut controllers = Vec::new();
     let (mut parts, mut joints, mut interfaces, mut sources, mut probes, mut requirements) = (
         Vec::new(),
         Vec::new(),
@@ -1624,6 +1681,7 @@ pub fn admit_assembly_source(
                 });
             }
             "probe" => probes.push(parse_probe(items, &by_name)?),
+            "controller" => controllers.push(parse_controller(items, &by_name)?),
             "requirement" => {
                 let id = as_str(
                     items.get(1).ok_or_else(|| err("requirement missing id"))?,
@@ -1727,7 +1785,7 @@ pub fn admit_assembly_source(
             gear_meshes: Vec::new(),
             interfaces,
             sources,
-            controllers: Vec::new(),
+            controllers,
             probes,
         },
         &scenario,
@@ -2076,6 +2134,60 @@ mod tests {
                 why.contains(":max-work-units is a positive integer"),
                 "{bad}: {why}"
             );
+        }
+    }
+
+    #[test]
+    fn a_pid_controller_admits_round_trips_and_refuses_by_name() {
+        let law = "(pid :kp 72N/m :ki 36N/m/s :kd 38.4N*s/m :setpoint 0.05m)";
+        let form = |sensor: &str, law: &str| {
+            format!(
+                "(controller \"servo\" :sensor ({sensor}) :actuator (\"rotor\" \"mechanics\") \
+                 :sample-rate 16Hz :law {law})"
+            )
+        };
+        let a1 = with_cell(&form("\"rotor\" \"position\"", law), &[]).unwrap();
+        let input = a1.draft.input();
+        let rotor = input
+            .parts
+            .iter()
+            .find(|p| p.name == "rotor")
+            .unwrap()
+            .entity;
+        let q = QtyAny::new;
+        let expected = ControllerDecl {
+            name: "servo".to_owned(),
+            sensor_ports: vec![(rotor, "position".to_owned())],
+            actuator_port: (rotor, "mechanics".to_owned()),
+            sample_rate: q(16.0, FREQUENCY),
+            law: ControllerLaw::Pid {
+                kp: q(72.0, Dims([0, 1, -2, 0, 0, 0])),
+                ki: q(36.0, Dims([0, 1, -3, 0, 0, 0])),
+                kd: q(38.4, Dims([0, 1, -1, 0, 0, 0])),
+                setpoint: q(0.05, LENGTH),
+            },
+        };
+        assert_eq!(input.controllers, std::slice::from_ref(&expected));
+        let a2 = admit_assembly_source(&a1.canonical_source, &PackCatalog::default()).unwrap();
+        assert_eq!(a2.draft.input().controllers, [expected]);
+
+        let refused = |forms: &str| with_cell(forms, &[]).err().unwrap().what;
+        for (sensor, law, named) in [
+            (
+                "\"rotor\" \"position\"",
+                "(table)",
+                "law `table` does not parse",
+            ),
+            ("\"nowhere\" \"position\"", law, "unknown part `nowhere`"),
+            ("\"rotor\"", law, ":sensor is (\"part\" \"port\")"),
+            (
+                "\"rotor\" \"position\"",
+                "(pid :kp 72N/m :ki 36N/m/s :kd 38.4N*s/m)",
+                "missing `:setpoint`",
+            ),
+        ] {
+            let why = refused(&form(sensor, law));
+            assert!(why.contains(named), "{named}: {why}");
         }
     }
 

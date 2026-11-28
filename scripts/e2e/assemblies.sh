@@ -61,7 +61,8 @@ RUBBER_PACK="$ASM_DIR/packs/rouleau-2015-self-adhesive-rubber-shear.fsintpk"
 FILM_INPUTS=("$ASM_DIR/shear_film_pair.fsim" "$SENS_PACK" "$PG50_PACK" "$ASM_DIR/srm1453_slab.fsim" "$SRM_PACK"
   "$ASM_DIR/two_mass_chain.fsim" "$ASM_DIR/gas_piston.fsim" "$N2_PACK"
   "$ASM_DIR/block_on_belt.fsim" "$KATS_PACK"
-  "$ASM_DIR/rubber_mount_creep_288k.fsim" "$ASM_DIR/rubber_mount_creep_298k.fsim" "$RUBBER_PACK")
+  "$ASM_DIR/rubber_mount_creep_288k.fsim" "$ASM_DIR/rubber_mount_creep_298k.fsim" "$RUBBER_PACK"
+  "$ASM_DIR/servo_mass.fsim")
 for req in "$ASM_DIR/forced_oscillator.fsim" "$ASM_DIR/two_body_conduction.fsim" \
            "$ASM_DIR/thermo_mech_slider.fsim" "$STEEL_PACK" "$ALUM_PACK" "$ATKINS_PACK" "${FILM_INPUTS[@]}"; do
   [[ -f "$req" ]] || die "missing tracked input: $req"
@@ -139,6 +140,8 @@ run_case bob "$ASM_DIR/block_on_belt.fsim" --materials "$STEEL_PACK" --interface
 for t in 288k 298k; do
   run_case "rubber_$t" "$ASM_DIR/rubber_mount_creep_$t.fsim" --materials "$STEEL_PACK" --materials "$SENS_PACK" --interfaces "$RUBBER_PACK"
 done
+# A PID position servo lowered from the file (.11.15), against the same loop written out
+run_case servo "$ASM_DIR/servo_mass.fsim" --materials "$STEEL_PACK"
 
 # Determinism repeat + replay-audit on slider across two fresh ledgers
 sleep 0.05
@@ -462,6 +465,22 @@ for T in (288.15, 298.0):
   rb[tag] = {"a_t": float(rb_aT(T)), "vel_rel": err, "smallest_plant_rel": plant, "ledger_rel": led,
              "cell_heat_over_2ulp_floor": cell, "a_t_drift_rel": drift, "energy_residual_j": wres(e)}
 
+# 11. PID servo (7.8 kg steel cube, -12 N push, PID position law sampled at 16 Hz, held over four 1/64 s steps)
+sv_m, sv_T, sv_dt, sv_push = 7800.0 * 0.1**3, 1.0 / 16.0, 1.0 / 64.0, -12.0
+sv_kp, sv_ki, sv_kd, sv_r = 72.0, 36.0, 38.4, 0.05
+sv_x, sv_v, sv_s, sv_ep, sv_xs, sv_vs = 0.0, 0.0, 0.0, 0.0, [0.0], [0.0]
+for _ in range(192):
+  sv_e = sv_r - sv_x; sv_s += sv_e; sv_u = sv_kp * sv_e + sv_ki * sv_T * sv_s + sv_kd * (sv_e - sv_ep) / sv_T; sv_ep = sv_e
+  for _ in range(4):
+    sv_v1 = sv_v + (sv_u + sv_push) * sv_dt / sv_m; sv_x += 0.5 * (sv_v + sv_v1) * sv_dt; sv_v = sv_v1
+    sv_xs.append(sv_x); sv_vs.append(sv_v)
+e_sv = ld("servo.explain.json"); psv = probes(e_sv)
+sv_ex = max(abs(a - b) for a, b in zip(psv["mass_pos"], sv_xs)); sv_ev = max(abs(a - b) for a, b in zip(psv["mass_vel"], sv_vs))
+# The integral term holds the push: without it the body would settle at r + push/kp = -0.1167 m
+sv_off = abs(psv["mass_pos"][-1] - sv_r)
+assert len(psv["mass_pos"]) == len(sv_xs) == 769 and sv_ex <= 1e-12 and sv_ev <= 1e-12, (sv_ex, sv_ev, len(psv["mass_pos"]))
+assert sv_off <= 1e-4 and wres(e_sv) <= 1e-12, (sv_off, wres(e_sv))
+
 receipt = {
   "schema": "frankensim.e2e.assemblies-summary.v1",
   "authority": "Estimate-only",
@@ -493,6 +512,8 @@ receipt = {
       "errors": {"max_period_s": bob_T_err, "work_per_cycle_rel": bob_W_rel, "ambient_heat_rel": bob_amb_rel,
                  "peak_slip_speed_m_s": bob_vslip_pk, "energy_residual_j": wres(e_bob)}},
     "rubber_mount_creep": {"runs": {t: ld(f"rubber_{t}.run.json")["run"] for t in ("288k", "298k")}, "errors": rb},
+    "servo_mass": {"run": ld("servo.run.json")["run"],
+      "errors": {"pos_m": sv_ex, "vel_m_s": sv_ev, "final_offset_m": sv_off, "energy_residual_j": wres(e_sv)}},
   },
   "drills": {"replay_audit_clean": True, "resume_idempotent": True, "refusals": ["missing_card", "bad_analysis", "missing_area", "srm_transient", "srm_bad_dt", "srm_bad_lx", "bob_ood_n"]},
 }
